@@ -627,6 +627,10 @@ production worker composition边，并只允许PostgreSQL跨进程资格fixture�
 `protocol-fixtures` test feature。门禁继续拒绝未知crate、未列边、production subscriber、额外feature及SQL/HTTP/cloud SDK越界；本地扫描通过
 55个workspace package、578个resolved package。该修复只恢复CI架构门禁的当前性，不新增L4～L6证据。
 
+r369修复r368 GitHub CI继续暴露的Sandbox部署门禁可移植性：runner只安装Helm且没有`rg`，旧脚本在任何Helm渲染前即
+command-not-found。静态正负搜索改用GNU/macOS共同支持的`grep -E/-R`，禁止microVM/Firecracker/KVM/managed-stdio、deferred crate排除、
+三进程composition及Helm负向合同保持不变。本地正常PATH与隐藏`rg`的runner-equivalent PATH均通过；该修复不构成真实runsc或L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

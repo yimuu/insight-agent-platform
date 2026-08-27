@@ -9,7 +9,7 @@ trap 'rm -f "$rendered"' EXIT
 command -v helm >/dev/null
 command -v ruby >/dev/null
 
-if rg -n -i 'micro.?vm|firecracker|/dev/kvm|managed.?stdio' \
+if grep -R -n -i -E 'micro.?vm|firecracker|/dev/kvm|managed.?stdio' \
   "$chart" "$root/deploy/helm/insight-platform-security-egress/values.yaml" \
   "$root/Dockerfile" "$root/crates/platform-sandbox-attestor/src/main.rs" \
   "$root/crates/platform-sandbox-controller/src/main.rs" \
@@ -18,41 +18,41 @@ if rg -n -i 'micro.?vm|firecracker|/dev/kvm|managed.?stdio' \
   exit 1
 fi
 
-if rg -n 'platform-sandbox-microvm' "$root/Dockerfile"; then
+if grep -n -E 'platform-sandbox-microvm' "$root/Dockerfile"; then
   echo "sandbox deployment: deferred backend is present in the release build" >&2
   exit 1
 fi
-if ! rg -q '^    "crates/platform-sandbox-microvm",$' "$root/Cargo.toml"; then
+if ! grep -q -E '^    "crates/platform-sandbox-microvm",$' "$root/Cargo.toml"; then
   echo "sandbox deployment: deferred backend is not explicitly outside the release workspace" >&2
   exit 1
 fi
-if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
-   ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-controller/src/main.rs"; then
+if ! grep -q -E 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
+   ! grep -q -E 'process_observability_router' "$root/crates/platform-sandbox-controller/src/main.rs"; then
   echo "sandbox deployment: Controller shared observability composition is missing" >&2
   exit 1
 fi
-if ! rg -q 'insight-platform-runtime.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
-   ! rg -q 'SandboxOutcomeDriver::new' "$root/crates/platform-sandbox-controller/src/main.rs" ||
-   ! rg -q 'database_business_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
-   ! rg -q 'database_critical_control_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
-   ! rg -q 'OutcomeMergeCapacityObservation' "$root/crates/platform-sandbox-controller/src/main.rs"; then
+if ! grep -q -E 'insight-platform-runtime.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
+   ! grep -q -E 'SandboxOutcomeDriver::new' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! grep -q -E 'database_business_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! grep -q -E 'database_critical_control_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! grep -q -E 'OutcomeMergeCapacityObservation' "$root/crates/platform-sandbox-controller/src/main.rs"; then
   echo "sandbox deployment: Controller durable Capability outcome convergence is missing" >&2
   exit 1
 fi
-if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-executor/Cargo.toml" ||
-   ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-executor/src/main.rs"; then
+if ! grep -q -E 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-executor/Cargo.toml" ||
+   ! grep -q -E 'process_observability_router' "$root/crates/platform-sandbox-executor/src/main.rs"; then
   echo "sandbox deployment: Executor shared observability composition is missing" >&2
   exit 1
 fi
-if ! rg -q 'install_sandbox_executor_dependency_metrics' "$root/crates/platform-sandbox-executor/src/main.rs" ||
-   ! rg -q 'NatsSandboxControlListener::bind_with_observer' "$root/crates/platform-sandbox-executor/src/main.rs" ||
-   ! rg -q 'with_dependency_observations' "$root/crates/platform-sandbox-executor/src/main.rs" ||
-   ! rg -q 'SandboxNatsDependencyObserver' "$root/crates/platform-sandbox-rpc/src/control.rs"; then
+if ! grep -q -E 'install_sandbox_executor_dependency_metrics' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! grep -q -E 'NatsSandboxControlListener::bind_with_observer' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! grep -q -E 'with_dependency_observations' "$root/crates/platform-sandbox-executor/src/main.rs" ||
+   ! grep -q -E 'SandboxNatsDependencyObserver' "$root/crates/platform-sandbox-rpc/src/control.rs"; then
   echo "sandbox deployment: Executor NATS dependency observation is missing" >&2
   exit 1
 fi
-if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-attestor/Cargo.toml" ||
-   ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-attestor/src/main.rs"; then
+if ! grep -q -E 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-attestor/Cargo.toml" ||
+   ! grep -q -E 'process_observability_router' "$root/crates/platform-sandbox-attestor/src/main.rs"; then
   echo "sandbox deployment: process-attestor shared observability composition is missing" >&2
   exit 1
 fi

@@ -38,7 +38,13 @@
 > composition之前。修复把shared typed RPC trace登记为只依赖Contracts的第55个workspace role，并精确登记已评审的observability HTTP、
 > MCP Discovery/Resource、Sandbox Controller和production worker composition边；PostgreSQL跨进程fixture的Artifact/Egress边及trace collector保持
 > dev-only，Egress `protocol-fixtures`保持唯一允许的test-only feature。未知crate、额外normal/dev/build edge、production subscriber、额外feature与
-> SQL/HTTP/cloud SDK越界仍fail closed。本地边界扫描通过55个workspace package、578个resolved package；需由新commit的GitHub CI再次验证。
+> SQL/HTTP/cloud SDK越界仍fail closed。本地边界扫描通过55个workspace package、578个resolved package；GitHub CI run `33071422882`
+> 已通过该步骤，随后在Sandbox deployment script缺少runner工具时fail closed。
+
+> 2026-08-27 implementation evidence：r369修复真实GitHub runner上的Sandbox deployment门禁可移植性。CI只安装Helm，Ubuntu image不含`rg`，
+> 旧脚本因command-not-found在渲染前失败；仓库其余CI shell门禁没有该依赖。本批将这组静态正负搜索收敛为GNU/macOS均支持的
+> `grep -E/-R`，不改变禁止microVM/Firecracker/KVM/managed-stdio、deferred crate显式排除、Controller/Executor/attestor composition或Helm
+> 负向语义。本地正常PATH与显式隐藏`rg`的runner-equivalent PATH均通过完整Sandbox门禁；需由新commit的GitHub CI再次验证。
 
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。

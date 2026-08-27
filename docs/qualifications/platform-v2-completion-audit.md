@@ -51,6 +51,10 @@ Discovery→S3/KMS→scan→owner finalize多进程L3已闭合，仍缺外部San
 后续已评审production composition边、dev-only跨进程fixture边与唯一test-only Egress feature精确写入checker；未知crate、额外边/feature及
 SQL/HTTP/cloud SDK越界仍fail closed。本地扫描通过55个workspace package和578个resolved package；远端复验由r368 push后的CI拥有。
 
+r368的GitHub CI run `33071422882`已通过crate-boundary步骤，随后证明Sandbox deployment shell门禁错误依赖runner未安装的`rg`。r369把
+该脚本的静态正负搜索改为GNU/macOS共同支持的`grep -E/-R`，正常PATH及隐藏`rg`的runner-equivalent PATH均通过完整Helm合同；这只恢复
+CI可执行性，不提升真实runsc或L4～L6状态。
+
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
 owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；
