@@ -3440,6 +3440,23 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     ));
     scheduler.commit().await.unwrap();
 
+    // This long fixture leaves several same-tenant orchestration Jobs ready. The next phases
+    // intentionally recycle the exact Task resume Job; make that fixture ordering explicit
+    // instead of depending on WDRR cursor history from the preceding recovery cases.
+    let prioritized_resume = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET priority = 1, scheduled_at = clock_timestamp() - interval '1 minute'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&resolved.job.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(prioritized_resume.rows_affected(), 1);
+
     let losing_task_response = ResolveOrchestrationTask {
         audit: audit(TENANT_ID, PRINCIPAL_ID, "7d21", 'c', 'd'),
         task_id: task_id.clone(),
@@ -3505,11 +3522,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap();
     scheduler.commit().await.unwrap();
     assert_eq!(expiry_claimed.len(), 1);
+    assert_eq!(expiry_claimed[0].job.job_id, resolved.job.job_id);
     let expiry_node_id = expiry_claimed[0]
         .job
         .node_id
         .clone()
         .expect("claimed orchestration Job has a Node");
+    assert_eq!(expiry_node_id, selected_node_id);
     let expiry_start = StartOrchestrationJob {
         fence: JobFence {
             tenant_id: TENANT_ID.to_owned(),
