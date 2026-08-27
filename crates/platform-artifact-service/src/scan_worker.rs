@@ -83,7 +83,7 @@ impl ArtifactScanner for IntegrityArtifactScanner {
             .map_err(map_read_failure)?;
         let (verified_media_type, disposition, reason_class) =
             inspect_content(read.bytes(), read.declared_media_type());
-        let observed_at = Utc::now();
+        let observed_at = request.observed_at;
         let expires_at = observed_at
             .checked_add_signed(ChronoDuration::milliseconds(
                 i64::try_from(request.job.evidence_ttl_milliseconds)
@@ -294,7 +294,11 @@ async fn execute_claimed_scan(
             .map_err(|_| "Artifact scan lease generation is corrupt".to_owned())?,
         token_digest: token,
     };
-    let receipt_limit = Utc::now()
+    let receipt_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(repository.pool())
+        .await
+        .map_err(|_| "Artifact database clock unavailable".to_owned())?;
+    let receipt_limit = receipt_now
         .checked_add_signed(ChronoDuration::milliseconds(
             config.receipt_ttl_milliseconds,
         ))
@@ -321,8 +325,12 @@ async fn execute_claimed_scan(
     };
     let service =
         ArtifactWorkerService::new(scanner, UnavailableBlobBackend, (*repository).clone());
+    let execution_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(repository.pool())
+        .await
+        .map_err(|_| "Artifact database clock unavailable".to_owned())?;
     service
-        .execute_scan(execution, Utc::now())
+        .execute_scan(execution, execution_now)
         .await
         .map(|_| ())
         .map_err(|_| "Artifact scan did not commit".to_owned())

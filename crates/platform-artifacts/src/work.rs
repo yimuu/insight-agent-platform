@@ -1491,6 +1491,7 @@ pub struct ArtifactScanRequest {
     pub job_id: ResourceId,
     pub fence: JobFence,
     pub job: ArtifactScanJobSnapshot,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1729,6 +1730,7 @@ where
             job_id: execution.scan_job_id.clone(),
             fence: execution.fence.clone(),
             job: execution.scan.clone(),
+            observed_at: now,
         };
         let evidence = match self.scanner.scan(request).await {
             Ok(evidence) => evidence,
@@ -2698,6 +2700,7 @@ mod tests {
                 job_id: expected.scan_job_id.clone(),
                 fence: expected.fence.clone(),
                 job: fixture.job.clone(),
+                observed_at: fixture.now,
             })
         );
         assert_eq!(spy.scan_command.lock().unwrap().as_ref(), Some(&expected));

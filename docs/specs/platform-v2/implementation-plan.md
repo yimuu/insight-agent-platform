@@ -864,6 +864,12 @@
 > adapter的真实HTTPS S3/KMS L3切片，不代表production Artifact Data Worker进程、AWS云服务/workload identity、KMS rotation、restore、真实
 > production scrape或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r363修复production Artifact Data Worker把进程wall clock混入数据库裁决的问题。
+> `ArtifactWorkerService`把调用方提供的authority time显式传入`ArtifactScanRequest.observed_at`；Data Worker在stage provider I/O前后、scan
+> Receipt构造及scan execution前分别读取PostgreSQL `clock_timestamp()`，用数据库时间验证deadline、生成staged/scan evidence并执行fenced
+> commit。未来evidence校验未放宽，host/DB时钟偏差不再伪造StaleFence或使合法provider结果不可提交。Artifact domain/service目标测试与strict
+> Clippy通过。本批无fresh PostgreSQL provider进程链，仅关闭时间authority L1，不扩张r362的L3边界。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

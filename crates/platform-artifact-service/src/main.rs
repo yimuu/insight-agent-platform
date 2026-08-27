@@ -143,13 +143,18 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
             };
             return Ok(staged);
         };
+        let database_now: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(self.repository.pool())
+                .await
+                .map_err(|_| ArtifactWorkloadStageError::Unavailable)?;
         authorized
-            .validate_for(&request, chrono::Utc::now())
+            .validate_for(&request, database_now)
             .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
         if self.provider.storage_binding_digest() != &authorized.write_storage_binding_digest {
             return Err(ArtifactWorkloadStageError::Denied);
         }
-        let remaining = (authorized.deadline - chrono::Utc::now())
+        let remaining = (authorized.deadline - database_now)
             .to_std()
             .map_err(|_| ArtifactWorkloadStageError::StaleFence)?;
         let staged = tokio::time::timeout(
@@ -171,6 +176,11 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
         .await
         .map_err(|_| ArtifactWorkloadStageError::Unavailable)?
         .map_err(map_stage_provider_error)?;
+        let staged_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(self.repository.pool())
+                .await
+                .map_err(|_| ArtifactWorkloadStageError::Unavailable)?;
         let command = StageWorkloadArtifact {
             schema_version: 1,
             tenant_id: request.tenant_id,
@@ -190,7 +200,7 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
             key_id: staged.key_id,
             encryption_domain_id: authorized.encryption_domain_id,
             backend_evidence_digest: staged.backend_evidence_digest,
-            staged_at: chrono::Utc::now(),
+            staged_at,
         };
         match self
             .repository

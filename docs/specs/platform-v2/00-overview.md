@@ -583,6 +583,12 @@ wrong-tenant解封拒绝、exact generation head/read、wrong generation NotFoun
 该证据关闭AWS-compatible Artifact provider adapter的真实HTTPS S3/KMS L3切片；它不代表production Artifact Data Worker进程、AWS云服务/workload
 identity、KMS rotation、restore、真实生产scrape或L4～L6。
 
+r363修复production Artifact Data Worker把进程wall clock混入数据库裁决的问题。`ArtifactWorkerService`现在把调用方提供的authority time作为
+`ArtifactScanRequest.observed_at`传给scanner；Data Worker在stage provider I/O前后、scan Receipt构造及scan execution前分别读取PostgreSQL
+`clock_timestamp()`，用数据库时间验证deadline、生成staged/scan evidence并执行fenced commit。未来evidence校验没有放宽，host/DB时钟偏差不再
+伪造StaleFence或使合法provider结果不可提交。Artifact domain/service目标测试与strict Clippy通过；本批无fresh PostgreSQL provider进程链，故仅
+关闭时间authority L1，不扩张r362的L3边界。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
