@@ -7430,7 +7430,7 @@ impl PgRegistryTransaction {
     /// Creates one durable MCP Resource subscription using the shared Invocation/Job authority.
     pub async fn create_mcp_resource_subscription(
         &mut self,
-        command: insight_platform_mcp_host::CreateMcpResourceSubscription,
+        mut command: insight_platform_mcp_host::CreateMcpResourceSubscription,
     ) -> Result<CommandOutcome<McpSubscriptionRecord>, RepositoryError> {
         command
             .validate_at(Utc::now())
@@ -7440,6 +7440,7 @@ impl PgRegistryTransaction {
         command
             .validate_at(database_now)
             .map_err(invalid_mcp_subscription)?;
+        command.deadline = database_timestamp(command.deadline);
         if claim_command_receipt(
             &mut transaction,
             &command.audit,

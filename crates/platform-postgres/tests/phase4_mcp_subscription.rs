@@ -2257,6 +2257,9 @@ async fn seed(
     )
     .await;
 
+    let deadline =
+        DateTime::from_timestamp((now + Duration::hours(1)).timestamp(), 987_654_321).unwrap();
+    assert_ne!(deadline.timestamp_subsec_nanos() % 1_000, 0);
     Fixture {
         tenant_id,
         other_tenant_id,
@@ -2267,7 +2270,7 @@ async fn seed(
         snapshot,
         subscription_id: id(ResourceKind::McpOperation, 0x49),
         job_id: id(ResourceKind::Job, 0x4a),
-        deadline: now + Duration::hours(1),
+        deadline,
         mcp_endpoint,
         protocol_policy,
         network_policy,
