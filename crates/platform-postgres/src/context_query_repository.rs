@@ -1292,7 +1292,9 @@ async fn insert_context_job(
         .backend
         .kind()
     {
-        ContextBackendKind::NativeCatalog => JobKind::ContextQueryNative,
+        ContextBackendKind::NativeCatalog | ContextBackendKind::SqlCatalog => {
+            JobKind::ContextQueryNative
+        }
         ContextBackendKind::RemoteSearch => JobKind::ContextQueryRemote,
         _ => {
             return Err(RepositoryError::InvalidInput(
