@@ -55,6 +55,10 @@ r368的GitHub CI run `33071422882`已通过crate-boundary步骤，随后证明Sa
 该脚本的静态正负搜索改为GNU/macOS共同支持的`grep -E/-R`，正常PATH及隐藏`rg`的runner-equivalent PATH均通过完整Helm合同；这只恢复
 CI可执行性，不提升真实runsc或L4～L6状态。
 
+r369的GitHub CI run `33071817109`已通过crate-boundary与Sandbox deployment步骤，随后发现Security/Egress checker仍冻结在CR-192时的
+13项RPC集合，遗漏CR-198已评审且已实现的credential-free、object-locator-free `DiscoverMcpStreamableHttp`。r370把该既有method登记为
+exact第14项并继续拒绝任意第15项；未修改proto、authority或部署拓扑，远端复验由r370 push后的CI拥有，也不提升L4～L6状态。
+
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
 owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；

@@ -707,6 +707,10 @@ authority导出`due|expired_lease` count/lag，role-filtered durable Job dashboa
 runbook。observability checker以28条exact inventory、HTTPS runbook、高基数/Secret label负向约束fail closed。该证据关闭已接线durable queue
 role的仓库内dashboard/alert缺口，不替代production Prometheus scrape、alert delivery、L5 SLO/error budget或L4～L6。
 
+r370修复真实GitHub CI暴露的Security/Egress exact RPC inventory漂移。CR-198已评审的credential-free、object-locator-free
+`DiscoverMcpStreamableHttp`是MCP Discovery Worker唯一新增的远端discovery transport，但checker仍冻结在CR-192时的13项集合。当前closed
+inventory精确为14项，门禁继续以总数相等拒绝任意第15项；本批不改变proto、authority、credential/locator边界、部署拓扑或L4～L6状态。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。
@@ -716,7 +720,8 @@ registry、GitOps和目标环境验证尚未运行，故L6 gate仍为Pending。
 
 r289复核当前render closure并更正累计计数：subscription Context Worker与MCP Resource Host使15个role对应19个隔离pool，动态permit覆盖为
 9/19；r248～r267的17-pool数字保留为历史批次证据。Security/Egress deployment checker同时登记既有CR-192 `RefreshMcpResources` method，
-以exact 13-method集合继续拒绝任意额外RPC。该批仅修复门禁/审计漂移，不改变protocol或部署拓扑。
+以当时的exact 13-method集合继续拒绝任意额外RPC；后续CR-198增加仅用于discovery的第14项，当前清单以r370为准。该批仅修复门禁/审计漂移，
+不改变protocol或部署拓扑。
 
 r283为独立MCP OAuth PKCE Cleanup Worker接入shared process observability。readiness位于closed config、PostgreSQL/schema、mTLS Egress client
 和durable cleanup owner之后，HTTP listener提前退出会使process失败；Helm以HTTP probe、独立Service/ServiceMonitor及Prometheus-only ingress

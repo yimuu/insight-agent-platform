@@ -631,6 +631,10 @@ r369修复r368 GitHub CI继续暴露的Sandbox部署门禁可移植性：runner�
 command-not-found。静态正负搜索改用GNU/macOS共同支持的`grep -E/-R`，禁止microVM/Firecracker/KVM/managed-stdio、deferred crate排除、
 三进程composition及Helm负向合同保持不变。本地正常PATH与隐藏`rg`的runner-equivalent PATH均通过；该修复不构成真实runsc或L4～L6证据。
 
+r370修复r369 GitHub CI继续暴露的Security/Egress精确RPC清单漂移。CR-198已评审并实现credential-free、object-locator-free的
+`DiscoverMcpStreamableHttp`，但部署checker仍停留在CR-192时的13项集合。当前closed inventory精确为14项；checker登记该既有discovery
+method并继续以总数相等拒绝任意第15项。该批不改变proto、authority、credential/locator边界或部署拓扑，也不新增L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
@@ -640,8 +644,9 @@ Rust `validate-production-candidate`通过。该批实现可执行的signed cand
 
 r289最终静态复核确认subscription Context Worker与MCP Resource Host加入后，15个ComponentRole当前映射为19个隔离workload pool，
 其中9个LocalWorkerPools具备动态permit指标；早期r248～r267记录的17-pool是当时历史证据，不再代表当前拓扑。Security/Egress全局门禁同步
-纳入CR-192 `RefreshMcpResources` closed RPC，继续要求Egress只暴露13个reviewed remote-only method。全局render、observability、redaction和
-strict workspace Clippy通过；该更正不新增role、RPC或authority，也不替代live L4。
+纳入CR-192 `RefreshMcpResources` closed RPC，当时要求Egress只暴露13个reviewed remote-only method；后续CR-198增加仅用于discovery的
+第14项，当前exact inventory以r370为准。全局render、observability、redaction和strict workspace Clippy通过；该更正不新增role、RPC或
+authority，也不替代live L4。
 
 CR-170进一步确认public Artifact调用方只提交业务意图或opaque completion proof，Blob/Grant/Job/Task/Receipt/Event/Outbox、policy、quota、
 storage与audit closure全部由服务端拥有；upload target是唯一显式Secret-bearing响应例外。Public Gateway不取得storage authority，Artifact Gateway

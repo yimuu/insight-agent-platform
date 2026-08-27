@@ -46,6 +46,11 @@
 > `grep -E/-R`，不改变禁止microVM/Firecracker/KVM/managed-stdio、deferred crate显式排除、Controller/Executor/attestor composition或Helm
 > 负向语义。本地正常PATH与显式隐藏`rg`的runner-equivalent PATH均通过完整Sandbox门禁；需由新commit的GitHub CI再次验证。
 
+> 2026-08-27 implementation evidence：r370修复r369 GitHub CI继续暴露的Security/Egress exact RPC inventory漂移。CR-198已加入
+> credential-free、object-locator-free的`DiscoverMcpStreamableHttp` discovery transport method，但部署门禁仍冻结在CR-192时的13项集合。
+> checker现精确登记该既有第14项并继续以总数相等拒绝任意第15项；未改变proto、Egress authority、credential/locator边界或部署拓扑。
+> Security/Egress、Sandbox、crate-boundary、Platform v1 contract与clean-cut本地门禁通过；需由新commit的GitHub CI再次验证。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。
@@ -530,7 +535,8 @@
 
 > 2026-08-26 implementation evidence：r289最终render复核确认CR-192后当前闭包为15-role/19-pool，Context subscription pool使动态permit
 > coverage达到9/19；此前17-pool/8-pool描述只保留为历史批次证据。Security/Egress checker补入已实现的`RefreshMcpResources`并继续exact
-> 验证13个remote-only RPC。全局workload/observability/redaction/deployment checker与workspace strict Clippy通过；不改变L4～L6 Pending边界。
+> 验证当时的13个remote-only RPC。后续CR-198增加仅用于discovery的第14项，当前exact inventory以r370为准。全局
+> workload/observability/redaction/deployment checker与workspace strict Clippy通过；不改变L4～L6 Pending边界。
 
 > 2026-08-26 implementation evidence：r290完成CR-197 machine/runtime projection。公共HTTP严格校验W3C `traceparent`并生成或延续同一
 > `TraceIdentityV1`；Run、Invocation、Job、Task、Event与Outbox持久化同一trace ID，reclaim/restart从durable owner恢复而不换trace。首版实际

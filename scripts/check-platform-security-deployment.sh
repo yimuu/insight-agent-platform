@@ -109,6 +109,7 @@ required_egress_methods = {
     "rpc QueryRemoteContext(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc ExchangeMcpOAuthAuthorizationCode(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc DeleteMcpOAuthPkceSecret(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
+    "rpc DiscoverMcpStreamableHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc ExecuteMcpStreamableHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc RefreshMcpResources(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc CancelMcpRemoteTask(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
