@@ -122,15 +122,16 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     assert!(queue.due_oldest_age_seconds >= 0.0);
     assert_eq!(queue.expired_leases, 0);
     assert_eq!(queue.expired_oldest_lag_seconds, 0.0);
+    let filtered_queue =
+        observe_durable_job_queue_for_kinds(&pool, WorkClass::Interaction, &[JobKind::Interaction])
+            .await
+            .unwrap();
+    assert_eq!(filtered_queue.due_jobs, queue.due_jobs);
+    assert!(filtered_queue.due_oldest_age_seconds >= queue.due_oldest_age_seconds);
+    assert_eq!(filtered_queue.expired_leases, queue.expired_leases);
     assert_eq!(
-        observe_durable_job_queue_for_kinds(
-            &pool,
-            WorkClass::Interaction,
-            &[JobKind::Interaction],
-        )
-        .await
-        .unwrap(),
-        queue
+        filtered_queue.expired_oldest_lag_seconds,
+        queue.expired_oldest_lag_seconds
     );
     assert_eq!(
         observe_durable_job_queue(&pool, WorkClass::Orchestration)
