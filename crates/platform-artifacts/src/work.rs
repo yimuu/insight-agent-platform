@@ -134,9 +134,10 @@ pub fn decide_schedule_initial_scan(
     }
     let artifact_version = increment(artifact.version)?;
     let job = ArtifactScanJobSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         scan_kind: ArtifactScanKind::Initial,
         operation_id: command.operation_id.clone(),
+        producer_job_id: None,
         artifact_id: command.artifact_id.clone(),
         blob_id: command.blob_id.clone(),
         expected_artifact_version: artifact_version,
@@ -270,9 +271,10 @@ pub fn decide_schedule_artifact_rescan(
     operation.validate()?;
     let artifact_version = increment(artifact.version)?;
     let job = ArtifactScanJobSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         scan_kind: ArtifactScanKind::Rescan,
         operation_id: command.rescan_operation_id.clone(),
+        producer_job_id: None,
         artifact_id: artifact.artifact_id.clone(),
         blob_id: blob.blob_id.clone(),
         expected_artifact_version: artifact_version,
@@ -330,6 +332,7 @@ pub struct ArtifactScanJobSnapshot {
     pub schema_version: u32,
     pub scan_kind: ArtifactScanKind,
     pub operation_id: ResourceId,
+    pub producer_job_id: Option<ResourceId>,
     pub artifact_id: ResourceId,
     pub blob_id: ResourceId,
     pub expected_artifact_version: u64,
@@ -606,9 +609,10 @@ impl StageWorkloadArtifact {
         self.validate_for(awaiting, self.staged_at)?;
         let payload = ArtifactJobPayload::Scan {
             scan: ArtifactScanJobSnapshot {
-                schema_version: 1,
+                schema_version: 2,
                 scan_kind: ArtifactScanKind::Initial,
                 operation_id: self.verification_job_id.clone(),
+                producer_job_id: Some(self.producer_job_id.clone()),
                 artifact_id: self.artifact_id.clone(),
                 blob_id: self.blob_id.clone(),
                 expected_artifact_version: artifact_version,
@@ -658,8 +662,12 @@ impl ArtifactAwaitingStageSnapshot {
 
 impl ArtifactScanJobSnapshot {
     pub fn validate(&self) -> Result<(), ArtifactWorkError> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.operation_id.kind() != ResourceKind::Job
+            || self.producer_job_id.as_ref().is_some_and(|producer| {
+                producer.kind() != ResourceKind::Job || producer == &self.operation_id
+            })
+            || (self.scan_kind == ArtifactScanKind::Rescan && self.producer_job_id.is_some())
             || self.artifact_id.kind() != ResourceKind::Artifact
             || self.blob_id.kind() != ResourceKind::InternalBlob
             || self.expected_artifact_version == 0
@@ -2418,9 +2426,10 @@ mod tests {
         let scanner_contract_digest = digest("scanner-contract");
         let ruleset_digest = digest("ruleset");
         let job = ArtifactScanJobSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             scan_kind,
             operation_id: operation_id.clone(),
+            producer_job_id: None,
             artifact_id: artifact_id.clone(),
             blob_id: blob_id.clone(),
             expected_artifact_version: artifact.version,

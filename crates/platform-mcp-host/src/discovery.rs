@@ -3,16 +3,19 @@ use super::{
     McpExecutionContractResolutionError, McpHostError, McpTransportFailure, SafeMcpFailure,
 };
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
+use insight_platform_artifacts::{StageWorkloadArtifactRequest, StagedWorkloadArtifact};
 use insight_platform_contracts::{
-    ArtifactRef, CommandAudit, CommandOutcome, DataClassification, ExactDeploymentRef,
-    ExactVersionRef, JobState, McpDeploymentClosure, McpDiscoverySnapshot, McpExperimentalFeature,
-    McpNegotiatedCapabilities, McpProtocolPolicyDocument, McpServerExecutionContract,
-    McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
+    canonical_json, ArtifactRef, CommandAudit, CommandOutcome, DataClassification,
+    ExactDeploymentRef, ExactVersionRef, JobState, McpDeploymentClosure, McpDiscoverySnapshot,
+    McpExperimentalFeature, McpNegotiatedCapabilities, McpProtocolPolicyDocument,
+    McpServerExecutionContract, McpTransportKind, ResourceId, ResourceKind, Sha256Digest,
 };
 use insight_platform_jobs::JobFence;
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +77,7 @@ pub struct ResolvedMcpDiscoveryExecution {
     pub admission_digest: Sha256Digest,
     pub artifact_preallocation: McpDiscoveryArtifactPreallocation,
     pub artifact_policy: McpDiscoveryArtifactPolicyClosure,
+    pub pending_verification: Option<McpDiscoveryTransportEvidence>,
     pub attempt_limit: u32,
     pub contract: McpDiscoveryExecutionContract,
     pub request: McpDiscoveryRequest,
@@ -91,6 +95,18 @@ impl ResolvedMcpDiscoveryExecution {
             || self.request.physical_attempt > self.attempt_limit
             || self.artifact_preallocation.validate().is_err()
             || self.artifact_policy.validate_at(now).is_err()
+            || self.pending_verification.as_ref().is_some_and(|evidence| {
+                evidence.validate_shape().is_err()
+                    || digest_without_field(evidence, "canonical_digest")
+                        .ok()
+                        .as_ref()
+                        != Some(&evidence.canonical_digest)
+                    || evidence.verification_job_id
+                        != self.artifact_preallocation.verification_job_id
+                    || evidence.artifact_id != self.artifact_preallocation.artifact_id
+                    || evidence.blob_id != self.artifact_preallocation.blob_id
+                    || evidence.descriptor_size_bytes > self.artifact_policy.maximum_bytes
+            })
             || self.contract.validate_canonical_at(now).is_err()
             || self.request.validate_for(&self.contract, now).is_err()
             || self.request.operation_id != query.operation_id
@@ -132,17 +148,174 @@ impl fmt::Display for McpDiscoveryPersistenceError {
 
 impl Error for McpDiscoveryPersistenceError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpDiscoveryArtifactStageError {
+    InvalidOrStale,
+    Unavailable,
+    CommitUncertain,
+}
+
+impl fmt::Display for McpDiscoveryArtifactStageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidOrStale => "MCP discovery Artifact stage authority changed",
+            Self::Unavailable => "MCP discovery Artifact stage is unavailable",
+            Self::CommitUncertain => "MCP discovery Artifact stage commit is uncertain",
+        })
+    }
+}
+
+impl Error for McpDiscoveryArtifactStageError {}
+
+#[async_trait]
+pub trait McpDiscoveryArtifactStager: Send + Sync {
+    async fn stage_mcp_discovery_artifact(
+        &self,
+        request: StageWorkloadArtifactRequest,
+    ) -> Result<StagedWorkloadArtifact, McpDiscoveryArtifactStageError>;
+}
+
 #[async_trait]
 pub trait McpDiscoveryResultStore: Send + Sync {
-    async fn commit_mcp_discovery_result(
+    async fn park_mcp_discovery_for_verification(
         &self,
-        command: CommitMcpDiscovery,
+        command: ParkMcpDiscoveryVerification,
+    ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError>;
+
+    async fn finalize_mcp_discovery_after_verification(
+        &self,
+        command: FinalizeMcpDiscovery,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError>;
 
     async fn resolve_mcp_discovery_attempt_result(
         &self,
         command: ResolveMcpDiscoveryAttempt,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDiscoveryTransportEvidence {
+    pub schema_version: u32,
+    pub negotiated_version: String,
+    pub negotiated_capabilities: McpNegotiatedCapabilities,
+    pub descriptor_digest: Sha256Digest,
+    pub descriptor_size_bytes: u64,
+    pub descriptor_count: u32,
+    pub verification_job_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl McpDiscoveryTransportEvidence {
+    pub fn build(
+        candidate: &McpDiscoveryCandidate,
+        staged: &StagedWorkloadArtifact,
+        preallocation: &McpDiscoveryArtifactPreallocation,
+    ) -> Result<Self, McpHostError> {
+        candidate.validate_shape()?;
+        staged
+            .validate()
+            .map_err(|_| McpHostError::InvalidDiscovery)?;
+        preallocation.validate()?;
+        let mut evidence = Self {
+            schema_version: 1,
+            negotiated_version: candidate.negotiated_version.clone(),
+            negotiated_capabilities: candidate.negotiated_capabilities.clone(),
+            descriptor_digest: candidate.descriptor_digest.clone(),
+            descriptor_size_bytes: u64::try_from(candidate.descriptor_bytes.len())
+                .map_err(|_| McpHostError::InvalidDiscovery)?,
+            descriptor_count: candidate.descriptor_count,
+            verification_job_id: staged.verification_job_id.clone(),
+            artifact_id: staged.artifact_id.clone(),
+            blob_id: staged.blob_id.clone(),
+            observed_at: candidate.observed_at,
+            expires_at: candidate.expires_at,
+            canonical_digest: placeholder_digest()?,
+        };
+        evidence.canonical_digest = digest_without_field(&evidence, "canonical_digest")?;
+        evidence.validate_for(staged, preallocation)?;
+        Ok(evidence)
+    }
+
+    pub fn validate_for(
+        &self,
+        staged: &StagedWorkloadArtifact,
+        preallocation: &McpDiscoveryArtifactPreallocation,
+    ) -> Result<(), McpHostError> {
+        self.validate_shape()?;
+        staged
+            .validate()
+            .map_err(|_| McpHostError::InvalidDiscovery)?;
+        preallocation.validate()?;
+        if self.verification_job_id != staged.verification_job_id
+            || self.verification_job_id != preallocation.verification_job_id
+            || self.artifact_id != staged.artifact_id
+            || self.artifact_id != preallocation.artifact_id
+            || self.blob_id != staged.blob_id
+            || self.blob_id != preallocation.blob_id
+            || self.descriptor_digest != staged.content_digest
+            || self.descriptor_size_bytes != staged.size_bytes
+            || digest_without_field(self, "canonical_digest")? != self.canonical_digest
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), McpHostError> {
+        if self.schema_version != 1
+            || self.negotiated_version.is_empty()
+            || self.negotiated_version.len() > 64
+            || self.negotiated_version.chars().any(char::is_control)
+            || self.descriptor_size_bytes == 0
+            || self.verification_job_id.kind() != ResourceKind::Job
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.expires_at <= self.observed_at
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParkMcpDiscoveryVerification {
+    pub audit: McpWorkerAudit,
+    pub operation_id: ResourceId,
+    pub job_id: ResourceId,
+    pub fence: JobFence,
+    pub expected_operation_version: u64,
+    pub staged: StagedWorkloadArtifact,
+    pub evidence: McpDiscoveryTransportEvidence,
+}
+
+impl ParkMcpDiscoveryVerification {
+    pub fn validate_at(
+        &self,
+        preallocation: &McpDiscoveryArtifactPreallocation,
+        now: DateTime<Utc>,
+    ) -> Result<(), McpHostError> {
+        self.audit.validate_at(now)?;
+        self.staged
+            .validate()
+            .map_err(|_| McpHostError::InvalidDiscovery)?;
+        self.evidence.validate_for(&self.staged, preallocation)?;
+        if self.operation_id.kind() != ResourceKind::McpOperation
+            || self.job_id.kind() != ResourceKind::Job
+            || self.expected_operation_version == 0
+            || self.fence.expected_version == 0
+            || self.fence.lease_generation == 0
+            || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +344,7 @@ impl ExecuteMcpDiscoveryJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpDiscoveryWorkerResult {
+    VerificationPending(CommandOutcome<McpDiscoveryOperationRecord>),
     SnapshotCommitted(CommandOutcome<McpDiscoveryOperationRecord>),
     AttemptResolved(CommandOutcome<McpDiscoveryOperationRecord>),
 }
@@ -179,6 +353,7 @@ pub enum McpDiscoveryWorkerResult {
 pub enum McpDiscoveryWorkerError {
     InvalidCommand,
     Contract(McpExecutionContractResolutionError),
+    ArtifactStage(McpDiscoveryArtifactStageError),
     Persistence(McpDiscoveryPersistenceError),
 }
 
@@ -187,6 +362,7 @@ impl fmt::Display for McpDiscoveryWorkerError {
         match self {
             Self::InvalidCommand => formatter.write_str("MCP discovery worker command is invalid"),
             Self::Contract(failure) => write!(formatter, "{failure}"),
+            Self::ArtifactStage(failure) => write!(formatter, "{failure}"),
             Self::Persistence(failure) => write!(formatter, "{failure}"),
         }
     }
@@ -197,12 +373,14 @@ impl Error for McpDiscoveryWorkerError {}
 pub struct McpDiscoveryWorker {
     resolver: Arc<dyn McpDiscoveryExecutionContractResolver>,
     client: Arc<dyn McpDiscoveryClient>,
+    artifact_stager: Arc<dyn McpDiscoveryArtifactStager>,
     store: Arc<dyn McpDiscoveryResultStore>,
 }
 
 #[derive(Debug, Clone)]
 enum PreparedMcpDiscoveryCommand {
-    Commit(Box<CommitMcpDiscovery>),
+    Stage(Box<PreparedMcpDiscoveryStage>),
+    Finalize(Box<FinalizeMcpDiscovery>),
     Resolve(Box<ResolveMcpDiscoveryAttempt>),
 }
 
@@ -211,10 +389,23 @@ pub struct PreparedMcpDiscovery {
     command: PreparedMcpDiscoveryCommand,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedMcpDiscoveryStage {
+    audit: McpWorkerAudit,
+    operation_id: ResourceId,
+    job_id: ResourceId,
+    fence: JobFence,
+    expected_operation_version: u64,
+    preallocation: McpDiscoveryArtifactPreallocation,
+    artifact_policy: McpDiscoveryArtifactPolicyClosure,
+    candidate: McpDiscoveryCandidate,
+}
+
 impl PreparedMcpDiscovery {
     pub fn refresh_fence(&mut self, fence: JobFence) -> Result<(), McpDiscoveryWorkerError> {
         let current = match &self.command {
-            PreparedMcpDiscoveryCommand::Commit(command) => &command.fence,
+            PreparedMcpDiscoveryCommand::Stage(command) => &command.fence,
+            PreparedMcpDiscoveryCommand::Finalize(command) => &command.fence,
             PreparedMcpDiscoveryCommand::Resolve(command) => &command.fence,
         };
         if fence.expected_version <= current.expected_version
@@ -225,7 +416,8 @@ impl PreparedMcpDiscovery {
             return Err(McpDiscoveryWorkerError::InvalidCommand);
         }
         match &mut self.command {
-            PreparedMcpDiscoveryCommand::Commit(command) => command.fence = fence,
+            PreparedMcpDiscoveryCommand::Stage(command) => command.fence = fence,
+            PreparedMcpDiscoveryCommand::Finalize(command) => command.fence = fence,
             PreparedMcpDiscoveryCommand::Resolve(command) => command.fence = fence,
         }
         Ok(())
@@ -236,11 +428,13 @@ impl McpDiscoveryWorker {
     pub fn new(
         resolver: Arc<dyn McpDiscoveryExecutionContractResolver>,
         client: Arc<dyn McpDiscoveryClient>,
+        artifact_stager: Arc<dyn McpDiscoveryArtifactStager>,
         store: Arc<dyn McpDiscoveryResultStore>,
     ) -> Self {
         Self {
             resolver,
             client,
+            artifact_stager,
             store,
         }
     }
@@ -269,31 +463,38 @@ impl McpDiscoveryWorker {
         resolved
             .validate_for(&command.query, Utc::now())
             .map_err(McpDiscoveryWorkerError::Contract)?;
-        let outcome = self
-            .client
-            .discover(&resolved.contract, &resolved.request)
-            .await;
-        if let Ok(McpDiscoveryOutcome::Candidate(candidate)) = outcome {
-            if candidate.objects_artifact.artifact_id()
-                != &resolved.artifact_preallocation.artifact_id
-            {
-                return Err(McpDiscoveryWorkerError::InvalidCommand);
-            }
-            let snapshot = candidate
-                .into_snapshot(
-                    resolved.artifact_preallocation.snapshot_id.clone(),
-                    &resolved.contract,
-                )
-                .map_err(|_| McpDiscoveryWorkerError::InvalidCommand)?;
+        if resolved.pending_verification.is_some() {
             return Ok(PreparedMcpDiscovery {
-                command: PreparedMcpDiscoveryCommand::Commit(Box::new(CommitMcpDiscovery {
+                command: PreparedMcpDiscoveryCommand::Finalize(Box::new(FinalizeMcpDiscovery {
                     audit: command.audit,
                     operation_id: command.query.operation_id,
                     job_id: command.query.job_id,
                     fence: command.query.fence,
                     expected_operation_version: resolved.operation_version,
-                    artifact_link_id: resolved.artifact_preallocation.artifact_link_id.clone(),
-                    snapshot,
+                })),
+            });
+        }
+        let outcome = self
+            .client
+            .discover(&resolved.contract, &resolved.request)
+            .await;
+        if let Ok(McpDiscoveryOutcome::Candidate(candidate)) = outcome {
+            if u64::try_from(candidate.descriptor_bytes.len())
+                .ok()
+                .is_none_or(|length| length > resolved.artifact_policy.maximum_bytes)
+            {
+                return Err(McpDiscoveryWorkerError::InvalidCommand);
+            }
+            return Ok(PreparedMcpDiscovery {
+                command: PreparedMcpDiscoveryCommand::Stage(Box::new(PreparedMcpDiscoveryStage {
+                    audit: command.audit,
+                    operation_id: command.query.operation_id,
+                    job_id: command.query.job_id,
+                    fence: command.query.fence,
+                    expected_operation_version: resolved.operation_version,
+                    preallocation: resolved.artifact_preallocation,
+                    artifact_policy: resolved.artifact_policy,
+                    candidate,
                 })),
             });
         }
@@ -342,9 +543,51 @@ impl McpDiscoveryWorker {
         prepared: PreparedMcpDiscovery,
     ) -> Result<McpDiscoveryWorkerResult, McpDiscoveryWorkerError> {
         match prepared.command {
-            PreparedMcpDiscoveryCommand::Commit(command) => self
+            PreparedMcpDiscoveryCommand::Stage(command) => {
+                let command = *command;
+                let stage_request = StageWorkloadArtifactRequest {
+                    schema_version: 1,
+                    tenant_id: command.audit.tenant_id.clone(),
+                    producer_job_id: command.job_id.clone(),
+                    producer_fence: command.fence.clone(),
+                    verification_job_id: command.preallocation.verification_job_id.clone(),
+                    artifact_id: command.preallocation.artifact_id.clone(),
+                    blob_id: command.preallocation.blob_id.clone(),
+                    descriptor_bytes: command.candidate.descriptor_bytes.clone(),
+                    descriptor_digest: command.candidate.descriptor_digest.clone(),
+                    media_type: command.artifact_policy.declared_media_type.clone(),
+                };
+                stage_request
+                    .validate()
+                    .map_err(|_| McpDiscoveryWorkerError::InvalidCommand)?;
+                let staged = self
+                    .artifact_stager
+                    .stage_mcp_discovery_artifact(stage_request)
+                    .await
+                    .map_err(McpDiscoveryWorkerError::ArtifactStage)?;
+                let evidence = McpDiscoveryTransportEvidence::build(
+                    &command.candidate,
+                    &staged,
+                    &command.preallocation,
+                )
+                .map_err(|_| McpDiscoveryWorkerError::InvalidCommand)?;
+                self.store
+                    .park_mcp_discovery_for_verification(ParkMcpDiscoveryVerification {
+                        audit: command.audit,
+                        operation_id: command.operation_id,
+                        job_id: command.job_id,
+                        fence: command.fence,
+                        expected_operation_version: command.expected_operation_version,
+                        staged,
+                        evidence,
+                    })
+                    .await
+                    .map(McpDiscoveryWorkerResult::VerificationPending)
+                    .map_err(McpDiscoveryWorkerError::Persistence)
+            }
+            PreparedMcpDiscoveryCommand::Finalize(command) => self
                 .store
-                .commit_mcp_discovery_result(*command)
+                .finalize_mcp_discovery_after_verification(*command)
                 .await
                 .map(McpDiscoveryWorkerResult::SnapshotCommitted)
                 .map_err(McpDiscoveryWorkerError::Persistence),
@@ -459,10 +702,38 @@ pub struct McpDiscoveryCandidate {
     pub schema_version: u32,
     pub negotiated_version: String,
     pub negotiated_capabilities: McpNegotiatedCapabilities,
-    pub objects_artifact: ArtifactRef,
+    #[serde(with = "canonical_base64url_bytes")]
+    pub descriptor_bytes: Vec<u8>,
+    pub descriptor_digest: Sha256Digest,
+    pub descriptor_count: u32,
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub canonical_digest: Sha256Digest,
+}
+
+mod canonical_base64url_bytes {
+    use super::*;
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let decoded = URL_SAFE_NO_PAD.decode(&encoded).map_err(D::Error::custom)?;
+        if URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+            return Err(D::Error::custom(
+                "descriptor bytes are not canonical base64url",
+            ));
+        }
+        Ok(decoded)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,7 +761,8 @@ impl McpDiscoveryCandidate {
     pub fn build(
         negotiated_version: String,
         negotiated_capabilities: McpNegotiatedCapabilities,
-        objects_artifact: ArtifactRef,
+        descriptor_bytes: Vec<u8>,
+        descriptor_count: u32,
         observed_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
         contract: &McpDiscoveryExecutionContract,
@@ -499,7 +771,9 @@ impl McpDiscoveryCandidate {
             schema_version: 1,
             negotiated_version,
             negotiated_capabilities,
-            objects_artifact,
+            descriptor_digest: raw_descriptor_digest(&descriptor_bytes)?,
+            descriptor_bytes,
+            descriptor_count,
             observed_at,
             expires_at,
             canonical_digest: placeholder_digest()?,
@@ -524,12 +798,14 @@ impl McpDiscoveryCandidate {
         &self,
         contract: &McpDiscoveryExecutionContract,
     ) -> Result<(), McpHostError> {
-        if self.schema_version != 1
-            || !contract
-                .protocol_profile
-                .offered_versions
-                .contains(&self.negotiated_version)
-            || self.objects_artifact.validate().is_err()
+        self.validate_shape()?;
+        if !contract
+            .protocol_profile
+            .offered_versions
+            .contains(&self.negotiated_version)
+            || self.descriptor_bytes.len()
+                > usize::try_from(contract.server.limits.maximum_response_bytes)
+                    .unwrap_or(usize::MAX)
             || self.expires_at <= self.observed_at
             || self.expires_at > contract.authorization.expires_at
             || !candidate_capabilities_allowed(self, contract)
@@ -539,26 +815,63 @@ impl McpDiscoveryCandidate {
         Ok(())
     }
 
-    pub fn into_snapshot(
-        self,
-        snapshot_id: ResourceId,
-        contract: &McpDiscoveryExecutionContract,
-    ) -> Result<McpDiscoverySnapshot, McpHostError> {
-        self.validate_for(contract)?;
-        McpDiscoverySnapshot::build(
-            snapshot_id,
-            contract.deployment.clone(),
-            contract.server.revision.clone(),
-            contract.server.protocol_policy.clone(),
-            contract.authorization.canonical_digest.clone(),
-            self.negotiated_version,
-            self.negotiated_capabilities,
-            self.objects_artifact,
-            self.observed_at,
-            self.expires_at,
-        )
-        .map_err(|_| McpHostError::InvalidDiscovery)
+    fn validate_shape(&self) -> Result<(), McpHostError> {
+        let descriptor_count = descriptor_document_count(&self.descriptor_bytes)?;
+        if self.schema_version != 1
+            || self.negotiated_version.is_empty()
+            || self.negotiated_version.len() > 64
+            || self.negotiated_version.chars().any(char::is_control)
+            || self.descriptor_bytes.is_empty()
+            || raw_descriptor_digest(&self.descriptor_bytes)? != self.descriptor_digest
+            || serde_json::from_slice(&self.descriptor_bytes)
+                .ok()
+                .and_then(|value| canonical_json(&value).ok())
+                .as_deref()
+                != Some(self.descriptor_bytes.as_slice())
+            || self.descriptor_count != descriptor_count
+            || self.expires_at <= self.observed_at
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
     }
+}
+
+fn descriptor_document_count(bytes: &[u8]) -> Result<u32, McpHostError> {
+    let document: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| McpHostError::InvalidDiscovery)?;
+    let object = document.as_object().ok_or(McpHostError::InvalidDiscovery)?;
+    if object.len() != 4
+        || object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+    {
+        return Err(McpHostError::InvalidDiscovery);
+    }
+    ["tools", "resources", "prompts"]
+        .into_iter()
+        .try_fold(0_u32, |count, field| {
+            let length = object
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .ok_or(McpHostError::InvalidDiscovery)?
+                .len();
+            count
+                .checked_add(u32::try_from(length).map_err(|_| McpHostError::InvalidDiscovery)?)
+                .ok_or(McpHostError::InvalidDiscovery)
+        })
+}
+
+fn raw_descriptor_digest(bytes: &[u8]) -> Result<Sha256Digest, McpHostError> {
+    let digest = Sha256::digest(bytes);
+    let mut value = String::with_capacity(71);
+    value.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut value, "{byte:02x}").map_err(|_| McpHostError::InvalidDiscovery)?;
+    }
+    value.parse().map_err(|_| McpHostError::InvalidDiscovery)
 }
 
 #[async_trait]
@@ -774,14 +1087,28 @@ impl McpWorkerAudit {
 }
 
 #[derive(Debug, Clone)]
-pub struct CommitMcpDiscovery {
+pub struct FinalizeMcpDiscovery {
     pub audit: McpWorkerAudit,
     pub operation_id: ResourceId,
     pub job_id: ResourceId,
     pub fence: JobFence,
     pub expected_operation_version: u64,
-    pub artifact_link_id: ResourceId,
-    pub snapshot: McpDiscoverySnapshot,
+}
+
+impl FinalizeMcpDiscovery {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
+        self.audit.validate_at(now)?;
+        if self.operation_id.kind() != ResourceKind::McpOperation
+            || self.job_id.kind() != ResourceKind::Job
+            || self.expected_operation_version == 0
+            || self.fence.expected_version == 0
+            || self.fence.lease_generation == 0
+            || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
+        {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -967,25 +1294,6 @@ impl ResolveMcpDiscoveryAttempt {
         if self.operation_id.kind() != ResourceKind::McpOperation
             || self.job_id.kind() != ResourceKind::Job
             || self.expected_operation_version == 0
-            || self.fence.expected_version == 0
-            || self.fence.lease_generation == 0
-            || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
-        {
-            return Err(McpHostError::InvalidDiscovery);
-        }
-        Ok(())
-    }
-}
-
-impl CommitMcpDiscovery {
-    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), McpHostError> {
-        self.audit.validate_at(now)?;
-        if self.operation_id.kind() != ResourceKind::McpOperation
-            || self.job_id.kind() != ResourceKind::Job
-            || self.expected_operation_version == 0
-            || self.artifact_link_id.kind() != ResourceKind::ArtifactLink
-            || self.snapshot.validate().is_err()
-            || self.snapshot.expires_at <= now
             || self.fence.expected_version == 0
             || self.fence.lease_generation == 0
             || self.fence.worker_process_generation_id != self.audit.worker_process_generation_id
@@ -1261,6 +1569,7 @@ impl McpDiscoveryResultBinding {
 pub struct McpDiscoveryOperationPayload {
     pub schema_version: u32,
     pub admission: McpDiscoveryAdmission,
+    pub pending_verification: Option<McpDiscoveryTransportEvidence>,
     pub result: Option<McpDiscoveryResultBinding>,
     pub canonical_digest: Sha256Digest,
 }
@@ -1422,8 +1731,9 @@ impl McpDiscoveryJobPayload {
 impl McpDiscoveryOperationPayload {
     pub fn pending(admission: McpDiscoveryAdmission) -> Result<Self, McpHostError> {
         let mut payload = Self {
-            schema_version: 1,
+            schema_version: 2,
             admission,
+            pending_verification: None,
             result: None,
             canonical_digest: placeholder_digest()?,
         };
@@ -1432,13 +1742,33 @@ impl McpDiscoveryOperationPayload {
         Ok(payload)
     }
 
-    pub fn complete(&self, result: McpDiscoveryResultBinding) -> Result<Self, McpHostError> {
-        if self.result.is_some() {
+    pub fn park_for_verification(
+        &self,
+        evidence: McpDiscoveryTransportEvidence,
+    ) -> Result<Self, McpHostError> {
+        if self.pending_verification.is_some() || self.result.is_some() {
             return Err(McpHostError::InvalidDiscovery);
         }
         let mut next = Self {
-            schema_version: 1,
+            schema_version: 2,
             admission: self.admission.clone(),
+            pending_verification: Some(evidence),
+            result: None,
+            canonical_digest: placeholder_digest()?,
+        };
+        next.validate_shape()?;
+        next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
+        Ok(next)
+    }
+
+    pub fn complete(&self, result: McpDiscoveryResultBinding) -> Result<Self, McpHostError> {
+        if self.pending_verification.is_none() || self.result.is_some() {
+            return Err(McpHostError::InvalidDiscovery);
+        }
+        let mut next = Self {
+            schema_version: 2,
+            admission: self.admission.clone(),
+            pending_verification: None,
             result: Some(result),
             canonical_digest: placeholder_digest()?,
         };
@@ -1456,10 +1786,25 @@ impl McpDiscoveryOperationPayload {
     }
 
     fn validate_shape(&self) -> Result<(), McpHostError> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2
+            || (self.pending_verification.is_some() && self.result.is_some())
+        {
             return Err(McpHostError::InvalidDiscovery);
         }
         self.admission.validate()?;
+        if let Some(evidence) = &self.pending_verification {
+            evidence.validate_shape()?;
+            if evidence.verification_job_id
+                != self.admission.artifact_preallocation.verification_job_id
+                || evidence.artifact_id != self.admission.artifact_preallocation.artifact_id
+                || evidence.blob_id != self.admission.artifact_preallocation.blob_id
+                || evidence.descriptor_size_bytes > self.admission.artifact_policy.maximum_bytes
+                || evidence.expires_at > self.admission.deadline
+                || digest_without_field(evidence, "canonical_digest")? != evidence.canonical_digest
+            {
+                return Err(McpHostError::InvalidDiscovery);
+            }
+        }
         if let Some(result) = &self.result {
             result.validate()?;
             if result.snapshot_id != self.admission.artifact_preallocation.snapshot_id

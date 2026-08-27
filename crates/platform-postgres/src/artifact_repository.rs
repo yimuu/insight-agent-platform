@@ -60,6 +60,7 @@ use std::{collections::BTreeSet, str::FromStr};
 use crate::mcp_repository::{
     require_mcp_discovery_artifact_stage_authority,
     require_mcp_discovery_artifact_stage_request_authority,
+    wake_mcp_discovery_after_artifact_verification,
 };
 use crate::repository::ArtifactWorkerRole;
 
@@ -5132,6 +5133,21 @@ impl ArtifactTransaction for PgArtifactTransaction {
             self.limits,
         )
         .await?;
+        if let Some(producer_job_id) = &current.scan.producer_job_id {
+            wake_mcp_discovery_after_artifact_verification(
+                &mut transaction,
+                &command.audit.tenant_id,
+                producer_job_id,
+                &command.scan_job_id,
+                &command.artifact_id,
+                &command.blob_id,
+                &command.evidence.content_digest,
+                &command.evidence.canonical_digest,
+                command.evidence.disposition,
+                database_now,
+            )
+            .await?;
+        }
         let artifact_version = to_i64(decision.artifact_version, "Artifact version")?;
         let event_type = match decision.artifact_state {
             ArtifactState::Verified => "artifact.verified",

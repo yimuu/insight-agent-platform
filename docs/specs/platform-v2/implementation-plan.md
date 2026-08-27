@@ -805,6 +805,14 @@
 > envelope；wire DTO只携带bounded canonical descriptor bytes/digest、exact producer fence和预分配identity，明确排除object locator、storage binding、
 > encryption domain与backend evidence。服务端要求exact MCP Host SPIFFE identity及trace interceptor，client/server均重验canonical digest和closed Rust
 > DTO。Artifact RPC 8/8（含真实loopback mTLS，因sandbox禁止监听而在批准的外部执行环境验证）通过；进程侧object write adapter与RPC service注册仍Pending。
+>
+> 2026-08-27 implementation evidence：r346完成MCP discovery durable Artifact闭环的application/transaction clean cut。Egress candidate只携带
+> canonical base64url descriptor bytes，Host重算SHA-256、canonical JSON及Tool/Resource/Prompt count；Worker以heartbeat刷新后的exact fence执行
+> Data Worker stage，持久化无正文transport evidence后用shared Wake进入waiting。Artifact scan outcome通过producer Job correlation唤醒owner；恢复
+> attempt不再dispatch或restage，而在同一事务核对Artifact/Blob/verification Job、frozen dependencies、quota与Receipt，执行
+> `Verified -> Ready`、Evidence Link、immutable Snapshot及双方Job/配额结算。Rejected/Quarantined/Corrupt/expired evidence走closed failed终态并释放
+> reservation；旧`CommitMcpDiscovery`直写Snapshot路径已删除。Artifact 31/31、MCP Host 60/60、PostgreSQL lib 14/14、相关strict Clippy、workspace
+> all-target、contract/schema静态门禁通过；本轮无fresh PostgreSQL、真实S3或L2/L3 kill-window，独立discovery process composition与L4仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

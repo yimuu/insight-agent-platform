@@ -1,5 +1,6 @@
 use super::*;
 use chrono::Duration as ChronoDuration;
+use insight_platform_artifacts::{StageWorkloadArtifactRequest, StagedWorkloadArtifact};
 use insight_platform_context::{
     AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
     ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
@@ -1588,6 +1589,17 @@ fn discovery_authority_binds_operation_artifact_and_exact_admission() {
     let now = Utc::now();
     let operation_id = fixture.request.mcp_operation_id.clone();
     let artifact_link_id = id(ResourceKind::ArtifactLink, 41);
+    let preallocation = discovery_preallocation_for(
+        fixture
+            .contract
+            .discovery
+            .objects_artifact
+            .artifact_id()
+            .clone(),
+        artifact_link_id.clone(),
+        fixture.contract.discovery.snapshot_id.clone(),
+        50,
+    );
     let admission = McpDiscoveryAdmission::build(NewMcpDiscoveryAdmission {
         operation_id: operation_id.clone(),
         job_id: fixture.request.job_id.clone(),
@@ -1603,24 +1615,31 @@ fn discovery_authority_binds_operation_artifact_and_exact_admission() {
         authorization_generation: fixture.contract.authorization.generation,
         authorization_context_digest: fixture.contract.authorization.canonical_digest.clone(),
         principal_id: fixture.contract.authorization.principal_id.clone(),
-        artifact_preallocation: discovery_preallocation_for(
-            fixture
-                .contract
-                .discovery
-                .objects_artifact
-                .artifact_id()
-                .clone(),
-            artifact_link_id.clone(),
-            fixture.contract.discovery.snapshot_id.clone(),
-            50,
-        ),
+        artifact_preallocation: preallocation.clone(),
         artifact_policy: discovery_artifact_policy(100, now),
         requested_at: now - ChronoDuration::seconds(2),
         deadline: now + ChronoDuration::minutes(10),
     })
     .unwrap();
     let pending = McpDiscoveryOperationPayload::pending(admission).unwrap();
+    let mut evidence = McpDiscoveryTransportEvidence {
+        schema_version: 1,
+        negotiated_version: fixture.contract.discovery.negotiated_version.clone(),
+        negotiated_capabilities: fixture.contract.discovery.negotiated_capabilities.clone(),
+        descriptor_digest: fixture.contract.discovery.objects_digest.clone(),
+        descriptor_size_bytes: fixture.contract.discovery.objects_artifact.byte_length(),
+        descriptor_count: 0,
+        verification_job_id: preallocation.verification_job_id.clone(),
+        artifact_id: preallocation.artifact_id.clone(),
+        blob_id: preallocation.blob_id.clone(),
+        observed_at: now - ChronoDuration::seconds(1),
+        expires_at: now + ChronoDuration::minutes(5),
+        canonical_digest: sha('0'),
+    };
+    evidence.canonical_digest = digest_without_field(&evidence, "canonical_digest").unwrap();
     let completed = pending
+        .park_for_verification(evidence)
+        .unwrap()
         .complete(McpDiscoveryResultBinding {
             snapshot_id: fixture.contract.discovery.snapshot_id.clone(),
             snapshot_digest: fixture.contract.discovery.canonical_digest.clone(),
@@ -1712,6 +1731,8 @@ struct StaticDiscoveryTransport {
     candidate: McpDiscoveryCandidate,
 }
 
+struct ForbiddenDiscoveryTransport;
+
 struct FailingDiscoveryTransport {
     failure: McpTransportFailure,
 }
@@ -1731,22 +1752,33 @@ impl McpDiscoveryExecutionContractResolver for StaticDiscoveryResolver {
 }
 
 enum CapturedDiscoveryMutation {
-    Commit(Box<CommitMcpDiscovery>),
+    Finalize(Box<FinalizeMcpDiscovery>),
+    Park(Box<ParkMcpDiscoveryVerification>),
     Resolve(Box<ResolveMcpDiscoveryAttempt>),
 }
 
 #[derive(Default)]
 struct CapturingDiscoveryStore {
     mutation: Mutex<Option<CapturedDiscoveryMutation>>,
+    stage_request: Mutex<Option<StageWorkloadArtifactRequest>>,
 }
 
 #[async_trait]
 impl McpDiscoveryResultStore for CapturingDiscoveryStore {
-    async fn commit_mcp_discovery_result(
+    async fn park_mcp_discovery_for_verification(
         &self,
-        command: CommitMcpDiscovery,
+        command: ParkMcpDiscoveryVerification,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError> {
-        *self.mutation.lock().unwrap() = Some(CapturedDiscoveryMutation::Commit(Box::new(command)));
+        *self.mutation.lock().unwrap() = Some(CapturedDiscoveryMutation::Park(Box::new(command)));
+        Err(McpDiscoveryPersistenceError::AuthorityUnavailable)
+    }
+
+    async fn finalize_mcp_discovery_after_verification(
+        &self,
+        command: FinalizeMcpDiscovery,
+    ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError> {
+        *self.mutation.lock().unwrap() =
+            Some(CapturedDiscoveryMutation::Finalize(Box::new(command)));
         Err(McpDiscoveryPersistenceError::AuthorityUnavailable)
     }
 
@@ -1758,6 +1790,35 @@ impl McpDiscoveryResultStore for CapturingDiscoveryStore {
             Some(CapturedDiscoveryMutation::Resolve(Box::new(command)));
         Err(McpDiscoveryPersistenceError::AuthorityUnavailable)
     }
+}
+
+#[async_trait]
+impl McpDiscoveryArtifactStager for CapturingDiscoveryStore {
+    async fn stage_mcp_discovery_artifact(
+        &self,
+        request: StageWorkloadArtifactRequest,
+    ) -> Result<StagedWorkloadArtifact, McpDiscoveryArtifactStageError> {
+        request
+            .validate()
+            .map_err(|_| McpDiscoveryArtifactStageError::InvalidOrStale)?;
+        *self.stage_request.lock().unwrap() = Some(request.clone());
+        Ok(StagedWorkloadArtifact {
+            schema_version: 1,
+            artifact_id: request.artifact_id,
+            blob_id: request.blob_id,
+            verification_job_id: request.verification_job_id,
+            content_digest: request.descriptor_digest,
+            size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+            object_generation: "generation-1".to_owned(),
+            artifact_version: 2,
+            blob_version: 1,
+            verification_job_version: 2,
+        })
+    }
+}
+
+fn discovery_descriptor_bytes() -> Vec<u8> {
+    br#"{"prompts":[],"resources":[],"schema_version":1,"tools":[]}"#.to_vec()
 }
 
 #[async_trait]
@@ -1790,6 +1851,21 @@ impl McpDiscoveryTransport for StaticDiscoveryTransport {
     }
 }
 
+#[async_trait]
+impl McpDiscoveryTransport for ForbiddenDiscoveryTransport {
+    fn kind(&self) -> McpTransportKind {
+        McpTransportKind::StreamableHttp
+    }
+
+    async fn discover(
+        &self,
+        _contract: &McpDiscoveryExecutionContract,
+        _request: &McpDiscoveryRequest,
+    ) -> Result<McpDiscoveryCandidate, McpTransportFailure> {
+        panic!("resumed discovery must not redispatch transport")
+    }
+}
+
 #[tokio::test]
 async fn discovery_executes_without_a_preexisting_snapshot_and_freezes_candidate() {
     let fixture = fixture(false, Effect::ReadOnly, 1_000);
@@ -1805,7 +1881,8 @@ async fn discovery_executes_without_a_preexisting_snapshot_and_freezes_candidate
     let candidate = McpDiscoveryCandidate::build(
         MCP_PROTOCOL_BASELINE.to_owned(),
         fixture.contract.discovery.negotiated_capabilities.clone(),
-        fixture.contract.discovery.objects_artifact.clone(),
+        discovery_descriptor_bytes(),
+        0,
         now,
         now + ChronoDuration::minutes(10),
         &contract,
@@ -1830,13 +1907,22 @@ async fn discovery_executes_without_a_preexisting_snapshot_and_freezes_candidate
     else {
         panic!("fixture discovery must return a candidate");
     };
-    let snapshot = observed
-        .into_snapshot(id(ResourceKind::McpDiscoverySnapshot, 43), &contract)
-        .unwrap();
-    assert_eq!(snapshot.mcp_deployment, contract.deployment);
+    assert_eq!(observed.descriptor_count, 0);
+    assert_eq!(observed.descriptor_bytes, discovery_descriptor_bytes());
+    let wire = serde_json::to_value(&observed).unwrap();
+    assert!(wire["descriptor_bytes"].is_string());
+    assert!(wire.get("objects_artifact").is_none());
     assert_eq!(
-        snapshot.authorization_context_digest,
-        contract.authorization.canonical_digest
+        McpDiscoveryCandidate::build(
+            MCP_PROTOCOL_BASELINE.to_owned(),
+            fixture.contract.discovery.negotiated_capabilities.clone(),
+            discovery_descriptor_bytes(),
+            1,
+            now,
+            now + ChronoDuration::minutes(10),
+            &contract,
+        ),
+        Err(McpHostError::InvalidDiscovery)
     );
 
     let mut forbidden = candidate;
@@ -1926,6 +2012,7 @@ fn discovery_resolution_is_bound_to_the_exact_running_job_fence() {
         admission_digest: sha('8'),
         artifact_preallocation: discovery_preallocation(60),
         artifact_policy: discovery_artifact_policy(110, now),
+        pending_verification: None,
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,
@@ -1965,7 +2052,8 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
     let candidate = McpDiscoveryCandidate::build(
         MCP_PROTOCOL_BASELINE.to_owned(),
         fixture.contract.discovery.negotiated_capabilities.clone(),
-        fixture.contract.discovery.objects_artifact.clone(),
+        discovery_descriptor_bytes(),
+        0,
         now,
         now + ChronoDuration::minutes(10),
         &contract,
@@ -1999,6 +2087,7 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         admission_digest: sha('8'),
         artifact_preallocation: artifact_preallocation.clone(),
         artifact_policy: discovery_artifact_policy(120, now),
+        pending_verification: None,
         attempt_limit: 3,
         request: McpDiscoveryRequest {
             schema_version: 1,
@@ -2019,6 +2108,7 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         Arc::new(McpDiscoveryService::new(Arc::new(
             StaticDiscoveryTransport { candidate },
         ))),
+        store.clone(),
         store.clone(),
     );
     let mut prepared = worker
@@ -2053,23 +2143,135 @@ async fn discovery_worker_commits_only_a_fenced_validated_candidate() {
         failure,
         McpDiscoveryWorkerError::Persistence(McpDiscoveryPersistenceError::AuthorityUnavailable)
     );
-    let commit = match store.mutation.lock().unwrap().take().unwrap() {
-        CapturedDiscoveryMutation::Commit(commit) => *commit,
+    let park = match store.mutation.lock().unwrap().take().unwrap() {
+        CapturedDiscoveryMutation::Park(park) => *park,
+        CapturedDiscoveryMutation::Finalize(finalize) => panic!(
+            "candidate unexpectedly finalized operation {}",
+            finalize.operation_id
+        ),
         CapturedDiscoveryMutation::Resolve(resolve) => panic!(
             "candidate unexpectedly resolved operation {}",
             resolve.operation_id
         ),
     };
-    assert_eq!(commit.operation_id, query.operation_id);
-    assert_eq!(commit.fence, heartbeat_fence);
+    assert_eq!(park.operation_id, query.operation_id);
+    assert_eq!(park.fence, heartbeat_fence);
+    assert_eq!(park.staged.artifact_id, artifact_preallocation.artifact_id);
     assert_eq!(
-        commit.snapshot.snapshot_id,
-        artifact_preallocation.snapshot_id
+        park.staged.verification_job_id,
+        artifact_preallocation.verification_job_id
     );
+    assert_eq!(park.evidence.descriptor_count, 0);
+}
+
+#[tokio::test]
+async fn discovery_worker_resumes_verification_without_transport_or_restaging() {
+    let fixture = fixture(false, Effect::ReadOnly, 1_000);
+    let now = Utc::now();
+    let contract = McpDiscoveryExecutionContract::build(NewMcpDiscoveryExecutionContract {
+        deployment: fixture.contract.deployment.clone(),
+        deployment_closure: fixture.contract.deployment_closure.clone(),
+        server: fixture.contract.server.clone(),
+        protocol_profile: fixture.contract.protocol_profile.clone(),
+        authorization: fixture.contract.authorization.clone(),
+    })
+    .unwrap();
+    let query = McpDiscoveryContractQuery {
+        schema_version: 1,
+        tenant_id: fixture.request.tenant_id.clone(),
+        operation_id: fixture.request.mcp_operation_id.clone(),
+        job_id: fixture.request.job_id.clone(),
+        fence: JobFence {
+            expected_version: 7,
+            worker_process_generation_id: fixture.request.worker_process_generation_id.clone(),
+            lease_generation: fixture.request.lease_generation + 1,
+            token_digest: sha('7'),
+        },
+    };
+    let preallocation = discovery_preallocation(80);
+    let candidate = McpDiscoveryCandidate::build(
+        MCP_PROTOCOL_BASELINE.to_owned(),
+        fixture.contract.discovery.negotiated_capabilities.clone(),
+        discovery_descriptor_bytes(),
+        0,
+        now,
+        now + ChronoDuration::minutes(10),
+        &contract,
+    )
+    .unwrap();
+    let staged = StagedWorkloadArtifact {
+        schema_version: 1,
+        artifact_id: preallocation.artifact_id.clone(),
+        blob_id: preallocation.blob_id.clone(),
+        verification_job_id: preallocation.verification_job_id.clone(),
+        content_digest: candidate.descriptor_digest.clone(),
+        size_bytes: u64::try_from(candidate.descriptor_bytes.len()).unwrap(),
+        object_generation: "generation-resumed".to_owned(),
+        artifact_version: 2,
+        blob_version: 1,
+        verification_job_version: 2,
+    };
+    let evidence =
+        McpDiscoveryTransportEvidence::build(&candidate, &staged, &preallocation).unwrap();
+    let resolved = ResolvedMcpDiscoveryExecution {
+        operation_version: 4,
+        admission_digest: sha('8'),
+        artifact_preallocation: preallocation,
+        artifact_policy: discovery_artifact_policy(120, now),
+        pending_verification: Some(evidence),
+        attempt_limit: 3,
+        request: McpDiscoveryRequest {
+            schema_version: 1,
+            operation_id: query.operation_id.clone(),
+            tenant_id: query.tenant_id.clone(),
+            job_id: query.job_id.clone(),
+            worker_process_generation_id: query.fence.worker_process_generation_id.clone(),
+            lease_generation: query.fence.lease_generation,
+            physical_attempt: 2,
+            authorization_binding_id: contract.authorization.authorization_binding_id.clone(),
+            deadline: now + ChronoDuration::minutes(5),
+        },
+        contract,
+    };
+    let store = Arc::new(CapturingDiscoveryStore::default());
+    let worker = McpDiscoveryWorker::new(
+        Arc::new(StaticDiscoveryResolver { resolved }),
+        Arc::new(McpDiscoveryService::new(Arc::new(
+            ForbiddenDiscoveryTransport,
+        ))),
+        store.clone(),
+        store.clone(),
+    );
+    let prepared = worker
+        .prepare(ExecuteMcpDiscoveryJob {
+            query: query.clone(),
+            audit: McpWorkerAudit {
+                tenant_id: query.tenant_id.clone(),
+                worker_process_generation_id: query.fence.worker_process_generation_id.clone(),
+                receipt_id: id(ResourceKind::Receipt, 84),
+                event_id: id(ResourceKind::Event, 85),
+                outbox_id: id(ResourceKind::OutboxEvent, 86),
+                idempotency_key_digest: sha('4'),
+                request_digest: sha('3'),
+                receipt_expires_at: now + ChronoDuration::hours(1),
+            },
+            retry_at: now + ChronoDuration::seconds(30),
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        commit.artifact_link_id,
-        artifact_preallocation.artifact_link_id
+        worker.commit(prepared).await.unwrap_err(),
+        McpDiscoveryWorkerError::Persistence(McpDiscoveryPersistenceError::AuthorityUnavailable)
     );
+    assert!(store.stage_request.lock().unwrap().is_none());
+    let finalize = match store.mutation.lock().unwrap().take().unwrap() {
+        CapturedDiscoveryMutation::Finalize(command) => *command,
+        _ => panic!("resumed discovery must finalize the parked verification"),
+    };
+    assert_eq!(finalize.operation_id, query.operation_id);
+    assert_eq!(finalize.job_id, query.job_id);
+    assert_eq!(finalize.fence, query.fence);
+    assert_eq!(finalize.expected_operation_version, 4);
 }
 
 fn subscription_contract(now: DateTime<Utc>) -> McpHostExecutionContract {

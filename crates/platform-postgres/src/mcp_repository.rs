@@ -14,7 +14,8 @@ use crate::repository::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use insight_platform_artifacts::{
-    ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactReferenceSnapshot,
+    ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactMetadataSnapshot,
+    ArtifactReferenceSnapshot, ArtifactScanDisposition,
 };
 use insight_platform_artifacts::{StageWorkloadArtifact, StageWorkloadArtifactRequest};
 use insight_platform_context::{
@@ -35,16 +36,17 @@ use insight_platform_contracts::{
 use insight_platform_jobs::{
     decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
     decide_owner_terminal as decide_job_owner_terminal, decide_retry as decide_job_retry,
-    decide_start as decide_job_start, decide_terminal as decide_job_terminal, JobFence, JobLease,
-    JobOwnerRef, JobProjection, LeasePolicy,
+    decide_start as decide_job_start, decide_terminal as decide_job_terminal,
+    decide_wait as decide_job_wait, decide_wake as decide_job_wake, JobFence, JobLease,
+    JobOwnerRef, JobProjection, LeasePolicy, WakeContract, WakeKind, WakeSource,
 };
 use insight_platform_mcp_host::{
     AuthenticatedMcpOAuthState, AuthorizedMcpOAuthPkceCleanup, BeginMcpOAuthAuthorization,
-    CancelMcpDiscoveryOperation, CommitMcpDiscovery, CompleteMcpOAuthCallback,
-    CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
-    ContextSubscriptionRefreshResolver, CreateMcpAuthorizationBinding, CreateMcpDiscoveryOperation,
-    DriveExpiredMcpOAuthTasks, DueMcpSubscriptionReconcile, DueMcpSubscriptionRecovery,
-    ExpiredMcpDiscoveryJobObservation, McpAuthorizationBindingRecord, McpAuthorizationContext,
+    CancelMcpDiscoveryOperation, CompleteMcpOAuthCallback, CompleteMcpSubscriptionReconcile,
+    CompleteMcpSubscriptionRefresh, ContextSubscriptionRefreshResolver,
+    CreateMcpAuthorizationBinding, CreateMcpDiscoveryOperation, DriveExpiredMcpOAuthTasks,
+    DueMcpSubscriptionReconcile, DueMcpSubscriptionRecovery, ExpiredMcpDiscoveryJobObservation,
+    FinalizeMcpDiscovery, McpAuthorizationBindingRecord, McpAuthorizationContext,
     McpAuthorizationReplacement, McpDiscoveryAdmission, McpDiscoveryAttemptResolution,
     McpDiscoveryContractQuery, McpDiscoveryExecutionContract,
     McpDiscoveryExecutionContractResolver, McpDiscoveryJobPayload, McpDiscoveryOperationPayload,
@@ -68,10 +70,10 @@ use insight_platform_mcp_host::{
     McpSubscriptionState, McpSubscriptionTransportTerminationAuthority, McpSubscriptionWorkerAudit,
     NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoveryArtifactPolicyClosure,
     NewMcpDiscoveryExecutionContract, NewMcpDiscoverySnapshotRecord, NewMcpHostExecutionContract,
-    NewMcpResourceSubscriptionBinding, ReactivateMcpAuthorizationBinding,
-    RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob, ReportMcpSubscriptionSessionLoss,
-    ReportMcpSubscriptionTransportTermination, ResolveMcpDiscoveryAttempt,
-    ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
+    NewMcpResourceSubscriptionBinding, ParkMcpDiscoveryVerification,
+    ReactivateMcpAuthorizationBinding, RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob,
+    ReportMcpSubscriptionSessionLoss, ReportMcpSubscriptionTransportTermination,
+    ResolveMcpDiscoveryAttempt, ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
     ResolvedMcpOAuthAuthorizationStart, ResolvedMcpSubscriptionExecution,
     SaveMcpSubscriptionSession, TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile,
     MCP_OAUTH_PKCE_SECRET_PURPOSE,
@@ -1245,7 +1247,7 @@ impl PgRepository {
         .map_err(invalid_mcp_discovery)?;
         let operation_payload = McpDiscoveryOperationPayload::pending(admission.clone())
             .map_err(invalid_mcp_discovery)?;
-        let operation_typed = TypedPayload::from_versioned(1, &operation_payload, 1_048_576)?;
+        let operation_typed = TypedPayload::from_versioned(2, &operation_payload, 1_048_576)?;
         let job_payload =
             McpDiscoveryJobPayload::build(&admission).map_err(invalid_mcp_discovery)?;
         let job_typed =
@@ -1411,27 +1413,14 @@ impl PgRepository {
         Ok(CommandOutcome::Applied(record))
     }
 
-    pub async fn commit_mcp_discovery(
+    pub async fn park_mcp_discovery_for_verification(
         &self,
-        command: CommitMcpDiscovery,
+        command: ParkMcpDiscoveryVerification,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, RepositoryError> {
-        command
-            .validate_at(Utc::now())
-            .map_err(invalid_mcp_discovery)?;
         let mut transaction = self.pool().begin().await?;
         let database_now = database_now(&mut transaction).await?;
-        command
-            .validate_at(database_now)
-            .map_err(invalid_mcp_discovery)?;
-        let receipt_payload = mcp_discovery_worker_receipt_payload(&command)?;
-        if claim_mcp_worker_receipt(
-            &mut transaction,
-            &command,
-            "mcp.discovery.commit",
-            &receipt_payload,
-        )
-        .await?
-        {
+        let receipt_payload = mcp_discovery_park_receipt_payload(&command)?;
+        if claim_mcp_discovery_park_receipt(&mut transaction, &command, &receipt_payload).await? {
             let record = load_mcp_discovery_operation(
                 &mut transaction,
                 &command.audit.tenant_id,
@@ -1439,8 +1428,19 @@ impl PgRepository {
                 false,
             )
             .await?;
-            if record.state != McpDiscoveryOperationState::Succeeded {
-                return Err(RepositoryError::Conflict("MCP discovery replay state"));
+            if record
+                .payload
+                .pending_verification
+                .as_ref()
+                .map(|evidence| (&evidence.canonical_digest, &evidence.artifact_id))
+                != Some((
+                    &command.evidence.canonical_digest,
+                    &command.staged.artifact_id,
+                ))
+            {
+                return Err(RepositoryError::Conflict(
+                    "MCP discovery verification park replay",
+                ));
             }
             transaction.commit().await?;
             return Ok(CommandOutcome::Replayed(record));
@@ -1452,14 +1452,22 @@ impl PgRepository {
             true,
         )
         .await?;
+        command
+            .validate_at(
+                &current.payload.admission.artifact_preallocation,
+                database_now,
+            )
+            .map_err(invalid_mcp_discovery)?;
         if current.job_id != command.job_id
             || current.version != command.expected_operation_version
-            || !matches!(
-                current.state,
-                McpDiscoveryOperationState::Pending | McpDiscoveryOperationState::Running
-            )
+            || current.state != McpDiscoveryOperationState::Running
+            || current.payload.pending_verification.is_some()
+            || current.payload.result.is_some()
+            || command.evidence.expires_at > current.deadline
         {
-            return Err(RepositoryError::Conflict("MCP discovery operation CAS"));
+            return Err(RepositoryError::Conflict(
+                "MCP discovery verification park CAS",
+            ));
         }
         let job = load_mcp_discovery_job(
             &mut transaction,
@@ -1468,52 +1476,50 @@ impl PgRepository {
             true,
         )
         .await?;
-        require_mcp_discovery_job_fence(&job, &current, &command, database_now)?;
-        validate_completed_discovery_snapshot(&mut transaction, &current, &command, database_now)
-            .await?;
-
-        let result = McpDiscoveryResultBinding {
-            snapshot_id: command.snapshot.snapshot_id.clone(),
-            snapshot_digest: command.snapshot.canonical_digest.clone(),
-            objects_artifact: command.snapshot.objects_artifact.clone(),
-            artifact_link_id: command.artifact_link_id.clone(),
+        require_exact_mcp_discovery_job_fence(&job, &current, &command.fence, database_now)?;
+        let current_job = mcp_discovery_job_projection(
+            &job,
+            &command.audit.tenant_id,
+            &command.job_id,
+            &command.operation_id,
+        )?;
+        let wake = WakeContract {
+            kind: WakeKind::RemoteInvocation,
+            generation: command.fence.lease_generation,
+            accepted_sources: vec![WakeSource::Signal, WakeSource::Timeout],
+            expected_response_schema_digest: None,
+            opaque_state_digest: Some(command.evidence.canonical_digest.clone()),
+            next_poll_at: None,
+            poll_count: 0,
+            poll_limit: 0,
+            callback_binding_digest: None,
+            deadline: current.deadline.min(command.evidence.expires_at),
         };
+        let next_job = decide_job_wait(&current_job, &command.fence, database_now, wake.clone())?;
         let next_payload = current
             .payload
-            .complete(result)
+            .park_for_verification(command.evidence.clone())
             .map_err(invalid_mcp_discovery)?;
-        let snapshot_record = McpDiscoverySnapshotRecord::build(NewMcpDiscoverySnapshotRecord {
-            tenant_id: command.audit.tenant_id.clone(),
-            source_operation_id: command.operation_id.clone(),
-            artifact_link_id: command.artifact_link_id.clone(),
-            snapshot: command.snapshot.clone(),
-            completed_at: database_now,
-        })
-        .map_err(invalid_mcp_discovery)?;
-        insert_mcp_discovery_snapshot(
-            &mut transaction,
-            &snapshot_record,
-            &current.payload.admission.principal_id,
-            database_now,
-        )
-        .await?;
-        let next_version = current.version.checked_add(1).ok_or_else(|| {
+        let next_operation_version = current.version.checked_add(1).ok_or_else(|| {
             RepositoryError::InvalidInput("MCP operation version overflow".to_owned())
         })?;
-        let next_typed = TypedPayload::from_versioned(1, &next_payload, 1_048_576)?;
-        let affected = sqlx::query(
+        let next_typed = TypedPayload::from_versioned(2, &next_payload, 1_048_576)?;
+        let operation_affected = sqlx::query(
             r#"
             UPDATE insight_platform.invocations
-            SET state = 'succeeded', version = $4, payload_schema_version = $5,
-                payload = $6, payload_digest = $7, terminal_at = $8, updated_at = $8
+            SET version = $4, payload_schema_version = $5, payload = $6,
+                payload_digest = $7, updated_at = $8
             WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
-              AND invocation_kind = 'mcp_discovery' AND state IN ('pending', 'running')
+              AND invocation_kind = 'mcp_discovery' AND state = 'running'
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
         .bind(command.operation_id.to_string())
         .bind(as_i64(current.version, "MCP discovery operation version")?)
-        .bind(as_i64(next_version, "MCP discovery operation version")?)
+        .bind(as_i64(
+            next_operation_version,
+            "MCP discovery operation version",
+        )?)
         .bind(next_typed.schema_version)
         .bind(&next_typed.value)
         .bind(&next_typed.digest)
@@ -1521,44 +1527,64 @@ impl PgRepository {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        if affected != 1 {
-            return Err(RepositoryError::Conflict("MCP discovery operation CAS"));
+        if operation_affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery verification park CAS",
+            ));
         }
-        complete_mcp_discovery_job(
-            &mut transaction,
-            &command,
-            &command.snapshot.canonical_digest,
-            database_now,
+        let job_affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.jobs
+            SET state = 'waiting', version = $4, worker_id = NULL,
+                lease_token_digest = NULL, lease_expires_at = NULL, heartbeat_at = NULL,
+                retry_at = NULL, wake_kind = $5, wake_state = 'pending',
+                wake_generation = $6, started_at = NULL, updated_at = $7
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+              AND owner_kind = 'mcp_operation' AND state = 'running'
+            "#,
         )
-        .await?;
-        append_scheduler_event(
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.job_id.to_string())
+        .bind(as_i64(job.version, "MCP discovery Job version")?)
+        .bind(as_i64(next_job.version, "MCP discovery Job version")?)
+        .bind(wake.kind.as_str())
+        .bind(as_i64(wake.generation, "MCP discovery wake generation")?)
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if job_affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery verification park Job CAS",
+            ));
+        }
+        let tenant_id = command.audit.tenant_id.to_string();
+        let operation_id = command.operation_id.to_string();
+        append_scheduler_event_with_trace(
             &mut transaction,
-            &command.audit.tenant_id.to_string(),
+            job.trace,
+            &tenant_id,
             &command.audit.event_id,
             &command.audit.outbox_id,
             "mcp_operation",
-            &command.operation_id.to_string(),
-            as_i64(next_version, "MCP discovery operation version")?,
+            &operation_id,
+            as_i64(next_operation_version, "MCP discovery operation version")?,
             None,
-            "mcp.discovery_succeeded",
+            "mcp.discovery_verification_pending",
             &TypedPayload::new(
                 1,
                 &serde_json::json!({
-                    "artifact_id": command.snapshot.objects_artifact.artifact_id(),
+                    "artifact_id": command.staged.artifact_id,
+                    "descriptor_count": command.evidence.descriptor_count,
+                    "descriptor_digest": command.evidence.descriptor_digest,
                     "job_id": command.job_id,
-                    "snapshot_digest": command.snapshot.canonical_digest,
-                    "snapshot_id": command.snapshot.snapshot_id,
+                    "verification_job_id": command.staged.verification_job_id,
                 }),
             )?,
         )
         .await?;
-        terminalize_mcp_worker_receipt(
-            &mut transaction,
-            &command,
-            "succeeded",
-            &command.snapshot.snapshot_id,
-        )
-        .await?;
+        terminalize_mcp_discovery_park_receipt(&mut transaction, &command).await?;
         let record = load_mcp_discovery_operation(
             &mut transaction,
             &command.audit.tenant_id,
@@ -1715,6 +1741,469 @@ impl PgRepository {
             &mut transaction,
             &command,
             command.resolution.operation_state().as_str(),
+        )
+        .await?;
+        let record = load_mcp_discovery_operation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.operation_id,
+            false,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(record))
+    }
+
+    pub async fn finalize_mcp_discovery_after_verification(
+        &self,
+        command: FinalizeMcpDiscovery,
+    ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, RepositoryError> {
+        command
+            .validate_at(Utc::now())
+            .map_err(invalid_mcp_discovery)?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command
+            .validate_at(database_now)
+            .map_err(invalid_mcp_discovery)?;
+        let receipt_payload = mcp_discovery_finalize_receipt_payload(&command)?;
+        if claim_mcp_discovery_finalize_receipt(&mut transaction, &command, &receipt_payload)
+            .await?
+        {
+            let record = load_mcp_discovery_operation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.operation_id,
+                false,
+            )
+            .await?;
+            if !matches!(
+                record.state,
+                McpDiscoveryOperationState::Succeeded | McpDiscoveryOperationState::Failed
+            ) {
+                return Err(RepositoryError::Conflict(
+                    "MCP discovery finalize replay state",
+                ));
+            }
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(record));
+        }
+        let current = load_mcp_discovery_operation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.operation_id,
+            true,
+        )
+        .await?;
+        let pending = current
+            .payload
+            .pending_verification
+            .as_ref()
+            .ok_or(RepositoryError::Conflict("MCP discovery finalize evidence"))?;
+        if current.job_id != command.job_id
+            || current.version != command.expected_operation_version
+            || current.state != McpDiscoveryOperationState::Running
+            || current.payload.result.is_some()
+        {
+            return Err(RepositoryError::Conflict("MCP discovery finalize CAS"));
+        }
+        let job = load_mcp_discovery_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            true,
+        )
+        .await?;
+        require_exact_mcp_discovery_job_fence(&job, &current, &command.fence, database_now)?;
+        let verified = sqlx::query(
+            r#"
+            SELECT artifact.blob_id, artifact.purpose, artifact.classification,
+                   artifact.expected_size_bytes, artifact.expected_digest,
+                   artifact.declared_media_type, artifact.verified_media_type,
+                   artifact.state AS artifact_state, artifact.version AS artifact_version,
+                   artifact.metadata_schema_version, artifact.metadata,
+                   artifact.metadata_digest, artifact.retain_until,
+                   blob.content_digest, blob.size_bytes, blob.state AS blob_state,
+                   blob.version AS blob_version,
+                   verification.state AS verification_state,
+                   verification.version AS verification_version,
+                   verification.result_digest AS verification_result_digest
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            JOIN insight_platform.jobs AS verification
+              ON verification.tenant_id = artifact.tenant_id
+             AND verification.job_id = $3
+             AND verification.owner_id = artifact.artifact_id
+            WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
+              AND verification.work_class = 'artifact'
+              AND verification.job_kind = 'artifact_scan'
+              AND verification.owner_kind = 'artifact'
+            FOR UPDATE OF artifact, blob, verification
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(pending.artifact_id.to_string())
+        .bind(pending.verification_job_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("verified MCP discovery Artifact"))?;
+        let metadata_payload = TypedPayload {
+            schema_version: verified.try_get("metadata_schema_version")?,
+            value: verified.try_get("metadata")?,
+            digest: verified.try_get("metadata_digest")?,
+        };
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata_payload, "MCP discovery Artifact metadata")?;
+        metadata
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let verification =
+            metadata
+                .current_verification
+                .as_ref()
+                .ok_or(RepositoryError::Conflict(
+                    "MCP discovery verification evidence",
+                ))?;
+        let content_digest = verified
+            .try_get::<Option<String>, _>("content_digest")?
+            .ok_or(RepositoryError::Conflict("MCP discovery content digest"))?
+            .parse::<Sha256Digest>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let size_bytes = u64::try_from(
+            verified
+                .try_get::<Option<i64>, _>("size_bytes")?
+                .ok_or(RepositoryError::Conflict("MCP discovery Artifact size"))?,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("negative Artifact size".to_owned()))?;
+        let verified_media_type = verified
+            .try_get::<Option<String>, _>("verified_media_type")?
+            .ok_or(RepositoryError::Conflict(
+                "MCP discovery verified media type",
+            ))?;
+        let artifact_state = verified.try_get::<String, _>("artifact_state")?;
+        let blob_state = verified.try_get::<String, _>("blob_state")?;
+        let verification_state = verified.try_get::<String, _>("verification_state")?;
+        let verification_result_digest =
+            verified.try_get::<Option<String>, _>("verification_result_digest")?;
+        if verified.try_get::<String, _>("purpose")? != ArtifactPurpose::McpResource.as_str()
+            || verified.try_get::<String, _>("classification")?
+                != current
+                    .payload
+                    .admission
+                    .artifact_policy
+                    .classification
+                    .as_str()
+            || verified.try_get::<i64, _>("expected_size_bytes")?
+                != i64::try_from(pending.descriptor_size_bytes).unwrap_or(i64::MAX)
+            || verified.try_get::<Option<String>, _>("expected_digest")?
+                != Some(pending.descriptor_digest.to_string())
+            || verified.try_get::<Option<String>, _>("declared_media_type")?
+                != Some(
+                    current
+                        .payload
+                        .admission
+                        .artifact_policy
+                        .declared_media_type
+                        .clone(),
+                )
+            || content_digest != pending.descriptor_digest
+            || size_bytes != pending.descriptor_size_bytes
+            || verified_media_type
+                != current
+                    .payload
+                    .admission
+                    .artifact_policy
+                    .declared_media_type
+            || verification.scan_job_id != pending.verification_job_id
+            || verification.content_digest != pending.descriptor_digest
+            || verification.size_bytes != pending.descriptor_size_bytes
+            || verification.verified_media_type != verified_media_type
+            || verified.try_get::<DateTime<Utc>, _>("retain_until")? < current.deadline
+        {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery verification evidence drift",
+            ));
+        }
+        let expected_artifact_state = match verification.disposition {
+            ArtifactScanDisposition::Verified => "verified",
+            ArtifactScanDisposition::Quarantined | ArtifactScanDisposition::Corrupt => {
+                "quarantined"
+            }
+            ArtifactScanDisposition::Rejected => "rejected",
+        };
+        let expected_verification_terminal = match verification.disposition {
+            ArtifactScanDisposition::Rejected => Some("failed"),
+            ArtifactScanDisposition::Verified
+            | ArtifactScanDisposition::Quarantined
+            | ArtifactScanDisposition::Corrupt => None,
+        };
+        if artifact_state != expected_artifact_state
+            || blob_state != "verified"
+            || expected_verification_terminal.is_some_and(|state| verification_state != state)
+            || expected_verification_terminal.is_none() && verification_state != "waiting"
+            || expected_verification_terminal.is_some()
+                != verification_result_digest
+                    .as_deref()
+                    .is_some_and(|digest| digest == verification.evidence_digest.to_string())
+        {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery verification terminal drift",
+            ));
+        }
+        if verification.disposition != ArtifactScanDisposition::Verified
+            || verification.expires_at <= database_now
+            || pending.expires_at <= database_now
+        {
+            let failure_code = if verification.expires_at <= database_now
+                || pending.expires_at <= database_now
+            {
+                "mcp_discovery_verification_expired"
+            } else {
+                match verification.disposition {
+                    ArtifactScanDisposition::Quarantined => "mcp_discovery_artifact_quarantined",
+                    ArtifactScanDisposition::Rejected => "mcp_discovery_artifact_rejected",
+                    ArtifactScanDisposition::Corrupt => "mcp_discovery_artifact_corrupt",
+                    ArtifactScanDisposition::Verified => unreachable!("handled by expiry"),
+                }
+            };
+            settle_mcp_discovery_artifact_quota(
+                &mut transaction,
+                &current,
+                &command,
+                pending.descriptor_size_bytes,
+                database_now,
+            )
+            .await?;
+            fail_mcp_discovery_after_verification(
+                &mut transaction,
+                &current,
+                &command,
+                &job,
+                &verified,
+                verification_state.as_str(),
+                &verification.evidence_digest,
+                failure_code,
+                database_now,
+            )
+            .await?;
+            let record = load_mcp_discovery_operation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.operation_id,
+                false,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Applied(record));
+        }
+        validate_mcp_discovery_frozen_dependencies(&mut transaction, &current, database_now)
+            .await?;
+        let artifact = insight_platform_contracts::ArtifactRef::new(
+            pending.artifact_id.clone(),
+            content_digest,
+            size_bytes,
+            verified_media_type,
+            current.payload.admission.artifact_policy.classification,
+            metadata.display_name.clone(),
+        )
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let snapshot = insight_platform_contracts::McpDiscoverySnapshot::build(
+            current
+                .payload
+                .admission
+                .artifact_preallocation
+                .snapshot_id
+                .clone(),
+            current.payload.admission.mcp_deployment.clone(),
+            current.payload.admission.server_revision.clone(),
+            current.payload.admission.protocol_profile.clone(),
+            current
+                .payload
+                .admission
+                .authorization_context_digest
+                .clone(),
+            pending.negotiated_version.clone(),
+            pending.negotiated_capabilities.clone(),
+            artifact,
+            pending.observed_at,
+            pending.expires_at,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        settle_mcp_discovery_artifact_quota(
+            &mut transaction,
+            &current,
+            &command,
+            pending.descriptor_size_bytes,
+            database_now,
+        )
+        .await?;
+        let artifact_version = u64::try_from(verified.try_get::<i64, _>("artifact_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Artifact version".to_owned()))?;
+        let artifact_affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.artifacts
+            SET state = 'ready', version = $4, updated_at = $5
+            WHERE tenant_id = $1 AND artifact_id = $2 AND version = $3
+              AND state = 'verified'
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(pending.artifact_id.to_string())
+        .bind(as_i64(artifact_version, "MCP discovery Artifact version")?)
+        .bind(as_i64(
+            artifact_version
+                .checked_add(1)
+                .ok_or(RepositoryError::Conflict("MCP discovery Artifact version"))?,
+            "MCP discovery Artifact version",
+        )?)
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if artifact_affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery Artifact ready CAS",
+            ));
+        }
+        let verification_version =
+            u64::try_from(verified.try_get::<i64, _>("verification_version")?).map_err(|_| {
+                RepositoryError::CorruptRow("negative verification Job version".to_owned())
+            })?;
+        let verification_affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.jobs
+            SET state = 'succeeded', version = $4, result_digest = $5,
+                terminal_at = $6, updated_at = $6
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND work_class = 'artifact' AND job_kind = 'artifact_scan'
+              AND owner_kind = 'artifact' AND state = 'waiting'
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(pending.verification_job_id.to_string())
+        .bind(as_i64(
+            verification_version,
+            "Artifact verification Job version",
+        )?)
+        .bind(as_i64(
+            verification_version
+                .checked_add(1)
+                .ok_or(RepositoryError::Conflict(
+                    "Artifact verification Job version",
+                ))?,
+            "Artifact verification Job version",
+        )?)
+        .bind(verification.evidence_digest.to_string())
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if verification_affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "Artifact verification Job finalize CAS",
+            ));
+        }
+        let snapshot_record = McpDiscoverySnapshotRecord::build(NewMcpDiscoverySnapshotRecord {
+            tenant_id: command.audit.tenant_id.clone(),
+            source_operation_id: command.operation_id.clone(),
+            artifact_link_id: current
+                .payload
+                .admission
+                .artifact_preallocation
+                .artifact_link_id
+                .clone(),
+            snapshot: snapshot.clone(),
+            completed_at: database_now,
+        })
+        .map_err(invalid_mcp_discovery)?;
+        insert_mcp_discovery_snapshot(
+            &mut transaction,
+            &snapshot_record,
+            &current.payload.admission.principal_id,
+            database_now,
+        )
+        .await?;
+        let result = McpDiscoveryResultBinding {
+            snapshot_id: snapshot.snapshot_id.clone(),
+            snapshot_digest: snapshot.canonical_digest.clone(),
+            objects_artifact: snapshot.objects_artifact.clone(),
+            artifact_link_id: current
+                .payload
+                .admission
+                .artifact_preallocation
+                .artifact_link_id
+                .clone(),
+        };
+        let next_payload = current
+            .payload
+            .complete(result)
+            .map_err(invalid_mcp_discovery)?;
+        let next_operation_version = current.version.checked_add(1).ok_or_else(|| {
+            RepositoryError::InvalidInput("MCP operation version overflow".to_owned())
+        })?;
+        let next_typed = TypedPayload::from_versioned(2, &next_payload, 1_048_576)?;
+        let operation_affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.invocations
+            SET state = 'succeeded', version = $4, payload_schema_version = $5,
+                payload = $6, payload_digest = $7, terminal_at = $8, updated_at = $8
+            WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
+              AND invocation_kind = 'mcp_discovery' AND state = 'running'
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(command.operation_id.to_string())
+        .bind(as_i64(current.version, "MCP discovery operation version")?)
+        .bind(as_i64(
+            next_operation_version,
+            "MCP discovery operation version",
+        )?)
+        .bind(next_typed.schema_version)
+        .bind(&next_typed.value)
+        .bind(&next_typed.digest)
+        .bind(database_now)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if operation_affected != 1 {
+            return Err(RepositoryError::Conflict("MCP discovery finalize CAS"));
+        }
+        finalize_mcp_discovery_owner_job(
+            &mut transaction,
+            &command,
+            &snapshot.canonical_digest,
+            database_now,
+        )
+        .await?;
+        append_scheduler_event_with_trace(
+            &mut transaction,
+            job.trace,
+            &command.audit.tenant_id.to_string(),
+            &command.audit.event_id,
+            &command.audit.outbox_id,
+            "mcp_operation",
+            &command.operation_id.to_string(),
+            as_i64(next_operation_version, "MCP discovery operation version")?,
+            None,
+            "mcp.discovery_succeeded",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "artifact_id": pending.artifact_id,
+                    "job_id": command.job_id,
+                    "snapshot_digest": snapshot.canonical_digest,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "verification_evidence_digest": verification.evidence_digest,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_mcp_discovery_finalize_receipt(
+            &mut transaction,
+            &command,
+            "succeeded",
+            &snapshot.snapshot_id,
         )
         .await?;
         let record = load_mcp_discovery_operation(
@@ -4268,11 +4757,20 @@ fn map_mcp_oauth_commit_error(error: RepositoryError) -> McpOAuthCallbackAuthori
 
 #[async_trait]
 impl McpDiscoveryResultStore for PgRepository {
-    async fn commit_mcp_discovery_result(
+    async fn park_mcp_discovery_for_verification(
         &self,
-        command: CommitMcpDiscovery,
+        command: ParkMcpDiscoveryVerification,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError> {
-        self.commit_mcp_discovery(command)
+        PgRepository::park_mcp_discovery_for_verification(self, command)
+            .await
+            .map_err(map_mcp_discovery_persistence_error)
+    }
+
+    async fn finalize_mcp_discovery_after_verification(
+        &self,
+        command: FinalizeMcpDiscovery,
+    ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, McpDiscoveryPersistenceError> {
+        PgRepository::finalize_mcp_discovery_after_verification(self, command)
             .await
             .map_err(map_mcp_discovery_persistence_error)
     }
@@ -4383,6 +4881,7 @@ impl McpDiscoveryExecutionContractResolver for PgRepository {
             admission_digest: admission.canonical_digest.clone(),
             artifact_preallocation: admission.artifact_preallocation.clone(),
             artifact_policy: admission.artifact_policy.clone(),
+            pending_verification: operation.payload.pending_verification.clone(),
             attempt_limit: job.attempt_limit,
             contract,
             request: McpDiscoveryRequest {
@@ -4795,6 +5294,9 @@ struct LockedMcpDiscoveryJob {
     lease_expires_at: Option<DateTime<Utc>>,
     scheduled_at: DateTime<Utc>,
     retry_at: Option<DateTime<Utc>>,
+    wake_kind: Option<String>,
+    wake_state: Option<String>,
+    wake_generation: u64,
     deadline: DateTime<Utc>,
     owner_id: String,
     invocation_id: Option<String>,
@@ -4863,6 +5365,11 @@ async fn load_mcp_discovery_job(
         lease_expires_at: row.try_get("lease_expires_at")?,
         scheduled_at: row.try_get("scheduled_at")?,
         retry_at: row.try_get("retry_at")?,
+        wake_kind: row.try_get("wake_kind")?,
+        wake_state: row.try_get("wake_state")?,
+        wake_generation: u64::try_from(row.try_get::<i64, _>("wake_generation")?).map_err(
+            |_| RepositoryError::CorruptRow("negative MCP Job wake generation".to_owned()),
+        )?,
         deadline: row.try_get("deadline")?,
         owner_id: row.try_get("owner_id")?,
         invocation_id: row.try_get("invocation_id")?,
@@ -4907,6 +5414,175 @@ pub(crate) async fn require_mcp_discovery_artifact_stage_request_authority(
         &request.artifact_id,
         &request.blob_id,
         database_now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn wake_mcp_discovery_after_artifact_verification(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    producer_job_id: &ResourceId,
+    verification_job_id: &ResourceId,
+    artifact_id: &ResourceId,
+    blob_id: &ResourceId,
+    content_digest: &Sha256Digest,
+    verification_evidence_digest: &Sha256Digest,
+    disposition: ArtifactScanDisposition,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let job = load_mcp_discovery_job(transaction, tenant_id, producer_job_id, true).await?;
+    let operation_id = job
+        .owner_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let operation =
+        load_mcp_discovery_operation(transaction, tenant_id, &operation_id, true).await?;
+    let evidence =
+        operation
+            .payload
+            .pending_verification
+            .as_ref()
+            .ok_or(RepositoryError::Conflict(
+                "MCP discovery verification wake evidence",
+            ))?;
+    if operation.state != McpDiscoveryOperationState::Running
+        || operation.job_id != *producer_job_id
+        || evidence.verification_job_id != *verification_job_id
+        || evidence.artifact_id != *artifact_id
+        || evidence.blob_id != *blob_id
+        || evidence.descriptor_digest != *content_digest
+        || job.state != JobState::Waiting
+        || job.worker_id.is_some()
+        || job.lease_token_digest.is_some()
+        || job.lease_expires_at.is_some()
+        || job.heartbeat_at.is_some()
+        || job.wake_kind.as_deref() != Some(WakeKind::RemoteInvocation.as_str())
+        || job.wake_state.as_deref() != Some("pending")
+        || job.wake_generation == 0
+    {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery verification wake authority",
+        ));
+    }
+    let wake = WakeContract {
+        kind: WakeKind::RemoteInvocation,
+        generation: job.wake_generation,
+        accepted_sources: vec![WakeSource::Signal, WakeSource::Timeout],
+        expected_response_schema_digest: None,
+        opaque_state_digest: Some(evidence.canonical_digest.clone()),
+        next_poll_at: None,
+        poll_count: 0,
+        poll_limit: 0,
+        callback_binding_digest: None,
+        deadline: operation.deadline.min(evidence.expires_at),
+    };
+    let current = JobProjection {
+        trace: job.trace,
+        tenant_id: tenant_id.clone(),
+        job_id: producer_job_id.clone(),
+        work_class: WorkClass::Mcp,
+        owner: JobOwnerRef {
+            owner_id: operation_id.clone(),
+            owner_kind: ResourceKind::McpOperation,
+        },
+        state: job.state,
+        version: job.version,
+        attempt_count: job.physical_attempt,
+        attempt_limit: job.attempt_limit,
+        lease_generation: job.lease_generation,
+        lease: None,
+        scheduled_at: job.scheduled_at,
+        retry_at: job.retry_at,
+        wake: Some(wake),
+        deadline: job.deadline,
+    };
+    let next = decide_job_wake(
+        &current,
+        job.wake_generation,
+        WakeSource::Signal,
+        database_now,
+    )?;
+    let next_operation_version = operation.version.checked_add(1).ok_or_else(|| {
+        RepositoryError::InvalidInput("MCP discovery operation version overflow".to_owned())
+    })?;
+    let operation_affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.invocations
+        SET version = $4, updated_at = $5
+        WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
+          AND invocation_kind = 'mcp_discovery' AND state = 'running'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(operation_id.to_string())
+    .bind(as_i64(
+        operation.version,
+        "MCP discovery operation version",
+    )?)
+    .bind(as_i64(
+        next_operation_version,
+        "MCP discovery operation version",
+    )?)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if operation_affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery verification wake operation CAS",
+        ));
+    }
+    let job_affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'ready', version = $4, scheduled_at = $5,
+            wake_kind = NULL, wake_state = NULL, wake_generation = 0,
+            updated_at = $5
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation' AND state = 'waiting'
+          AND wake_kind = 'remote_invocation' AND wake_state = 'pending'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(producer_job_id.to_string())
+    .bind(as_i64(job.version, "MCP discovery Job version")?)
+    .bind(as_i64(next.version, "MCP discovery Job version")?)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if job_affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery verification wake Job CAS",
+        ));
+    }
+    let event_id = ResourceId::from_uuid_v7(ResourceKind::Event, Uuid::now_v7())
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let outbox_id = ResourceId::from_uuid_v7(ResourceKind::OutboxEvent, Uuid::now_v7())
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    append_scheduler_event_with_trace(
+        transaction,
+        job.trace,
+        &tenant_id.to_string(),
+        &event_id,
+        &outbox_id,
+        "mcp_operation",
+        &operation_id.to_string(),
+        as_i64(next_operation_version, "MCP discovery operation version")?,
+        None,
+        "mcp.discovery_verification_woken",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "artifact_id": artifact_id,
+                "disposition": disposition,
+                "job_id": producer_job_id,
+                "verification_evidence_digest": verification_evidence_digest,
+                "verification_job_id": verification_job_id,
+            }),
+        )?,
     )
     .await
 }
@@ -5008,18 +5684,6 @@ fn mcp_discovery_job_projection(
     Ok(projection)
 }
 
-fn require_mcp_discovery_job_fence(
-    job: &LockedMcpDiscoveryJob,
-    operation: &McpDiscoveryOperationRecord,
-    command: &CommitMcpDiscovery,
-    database_now: DateTime<Utc>,
-) -> Result<(), RepositoryError> {
-    if command.audit.worker_process_generation_id != command.fence.worker_process_generation_id {
-        return Err(RepositoryError::StaleFence);
-    }
-    require_exact_mcp_discovery_job_fence(job, operation, &command.fence, database_now)
-}
-
 fn require_exact_mcp_discovery_job_fence(
     job: &LockedMcpDiscoveryJob,
     operation: &McpDiscoveryOperationRecord,
@@ -5036,6 +5700,9 @@ fn require_exact_mcp_discovery_job_fence(
         || job
             .lease_expires_at
             .is_none_or(|expiry| expiry <= database_now)
+        || job.wake_kind.is_some()
+        || job.wake_state.is_some()
+        || job.wake_generation != 0
         || job.owner_id != operation.operation_id.to_string()
         || job.invocation_id != Some(operation.operation_id.to_string())
         || job.payload.operation_id != operation.operation_id
@@ -5046,23 +5713,12 @@ fn require_exact_mcp_discovery_job_fence(
     Ok(())
 }
 
-async fn validate_completed_discovery_snapshot(
+async fn validate_mcp_discovery_frozen_dependencies(
     transaction: &mut Transaction<'_, Postgres>,
     operation: &McpDiscoveryOperationRecord,
-    command: &CommitMcpDiscovery,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
     let admission = &operation.payload.admission;
-    if command.snapshot.mcp_deployment != admission.mcp_deployment
-        || command.snapshot.server_revision != admission.server_revision
-        || command.snapshot.protocol_profile != admission.protocol_profile
-        || command.snapshot.authorization_context_digest != admission.authorization_context_digest
-        || command.snapshot.observed_at < admission.requested_at
-        || command.snapshot.observed_at > database_now
-        || command.snapshot.expires_at <= database_now
-    {
-        return Err(RepositoryError::Conflict("MCP Discovery Snapshot evidence"));
-    }
     let authorization_record = load_mcp_authorization_binding(
         transaction,
         &operation.tenant_id,
@@ -5097,11 +5753,340 @@ async fn validate_completed_discovery_snapshot(
         &authorization.audience_identity_digest,
         &authorization.token_secret_binding,
     )
+    .await
+}
+
+async fn settle_mcp_discovery_artifact_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    operation: &McpDiscoveryOperationRecord,
+    command: &FinalizeMcpDiscovery,
+    amount: u64,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let admission = &operation.payload.admission;
+    let quota_account_id = &admission.artifact_policy.quota_account_id;
+    let amount = i64::try_from(amount).map_err(|_| {
+        RepositoryError::InvalidInput("MCP discovery quota amount exceeds bigint".to_owned())
+    })?;
+    let account = sqlx::query(
+        r#"
+        SELECT scope_kind, scope_id, work_class, metric, reserved_value, version
+        FROM insight_platform.quota_accounts
+        WHERE tenant_id = $1 AND quota_account_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound(
+        "MCP discovery Artifact quota account",
+    ))?;
+    if account.try_get::<String, _>("scope_kind")? != "tenant"
+        || account.try_get::<String, _>("scope_id")? != command.audit.tenant_id.to_string()
+        || account.try_get::<String, _>("work_class")? != "artifact"
+        || account.try_get::<String, _>("metric")? != "artifact.staging_bytes"
+        || account.try_get::<i64, _>("reserved_value")? < amount
+    {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery Artifact quota authority",
+        ));
+    }
+    let reserved: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT reserved_amount
+        FROM insight_platform.quota_ledger
+        WHERE tenant_id = $1 AND quota_entry_id = $2 AND quota_account_id = $3
+          AND correlation_id = $4 AND entry_kind = 'reserve'
+        FOR SHARE
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(admission.artifact_preallocation.quota_entry_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(admission.artifact_preallocation.artifact_id.to_string())
+    .fetch_optional(&mut **transaction)
     .await?;
-    require_ready_run_artifact(
+    if reserved != Some(amount) {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery Artifact quota reservation",
+        ));
+    }
+    let account_version: i64 = account.try_get("version")?;
+    let next_version: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE insight_platform.quota_accounts
+        SET reserved_value = reserved_value - $4, version = version + 1,
+            updated_at = $5
+        WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+          AND reserved_value >= $4
+        RETURNING version
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(account_version)
+    .bind(amount)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "MCP discovery Artifact quota account",
+    ))?;
+    let settlement_id = ResourceId::from_uuid_v7(ResourceKind::QuotaLedgerEntry, Uuid::now_v7())
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_ledger (
+            tenant_id, quota_entry_id, quota_account_id, correlation_id,
+            entry_kind, reserved_amount, used_amount, account_version, request_digest
+        ) VALUES ($1, $2, $3, $4, 'settle', $5, 0, $6, $7)
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(settlement_id.to_string())
+    .bind(quota_account_id.to_string())
+    .bind(admission.artifact_preallocation.artifact_id.to_string())
+    .bind(amount)
+    .bind(next_version)
+    .bind(command.audit.request_digest.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn finalize_mcp_discovery_owner_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &FinalizeMcpDiscovery,
+    result_digest: &Sha256Digest,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'succeeded', version = version + 1, result_digest = $7,
+            worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
+            heartbeat_at = NULL, terminal_at = $8, updated_at = $8
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation'
+          AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
+          AND lease_token_digest = $6
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.job_id.to_string())
+    .bind(as_i64(
+        command.fence.expected_version,
+        "MCP discovery Job version",
+    )?)
+    .bind(command.fence.worker_process_generation_id.to_string())
+    .bind(as_i64(
+        command.fence.lease_generation,
+        "MCP discovery Job lease generation",
+    )?)
+    .bind(command.fence.token_digest.to_string())
+    .bind(result_digest.to_string())
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("MCP discovery Job finalize CAS"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fail_mcp_discovery_after_verification(
+    transaction: &mut Transaction<'_, Postgres>,
+    operation: &McpDiscoveryOperationRecord,
+    command: &FinalizeMcpDiscovery,
+    owner_job: &LockedMcpDiscoveryJob,
+    verification_row: &sqlx::postgres::PgRow,
+    verification_state: &str,
+    evidence_digest: &Sha256Digest,
+    failure_code: &str,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let pending = operation
+        .payload
+        .pending_verification
+        .as_ref()
+        .ok_or(RepositoryError::Conflict("MCP discovery failure evidence"))?;
+    if verification_state == "waiting" {
+        let verification_version = u64::try_from(
+            verification_row.try_get::<i64, _>("verification_version")?,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("negative verification Job version".to_owned()))?;
+        let affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.jobs
+            SET state = 'failed', version = $4, result_digest = $5,
+                terminal_at = $6, updated_at = $6
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+              AND work_class = 'artifact' AND job_kind = 'artifact_scan'
+              AND owner_kind = 'artifact' AND state = 'waiting'
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(pending.verification_job_id.to_string())
+        .bind(as_i64(
+            verification_version,
+            "Artifact verification Job version",
+        )?)
+        .bind(as_i64(
+            verification_version
+                .checked_add(1)
+                .ok_or(RepositoryError::Conflict(
+                    "Artifact verification Job version",
+                ))?,
+            "Artifact verification Job version",
+        )?)
+        .bind(evidence_digest.to_string())
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "Artifact verification Job failure CAS",
+            ));
+        }
+    } else if verification_state != "failed" {
+        return Err(RepositoryError::Conflict(
+            "Artifact verification Job failure state",
+        ));
+    }
+
+    if verification_row.try_get::<String, _>("artifact_state")? == "verified" {
+        let artifact_version =
+            u64::try_from(verification_row.try_get::<i64, _>("artifact_version")?)
+                .map_err(|_| RepositoryError::CorruptRow("negative Artifact version".to_owned()))?;
+        let affected = sqlx::query(
+            r#"
+            UPDATE insight_platform.artifacts
+            SET state = 'quarantined', version = $4, updated_at = $5
+            WHERE tenant_id = $1 AND artifact_id = $2 AND version = $3
+              AND state = 'verified'
+            "#,
+        )
+        .bind(command.audit.tenant_id.to_string())
+        .bind(pending.artifact_id.to_string())
+        .bind(as_i64(artifact_version, "MCP discovery Artifact version")?)
+        .bind(as_i64(
+            artifact_version
+                .checked_add(1)
+                .ok_or(RepositoryError::Conflict("MCP discovery Artifact version"))?,
+            "MCP discovery Artifact version",
+        )?)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(RepositoryError::Conflict(
+                "MCP discovery expired Artifact quarantine CAS",
+            ));
+        }
+    }
+
+    let next_operation_version = operation.version.checked_add(1).ok_or_else(|| {
+        RepositoryError::InvalidInput("MCP operation version overflow".to_owned())
+    })?;
+    let operation_affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.invocations
+        SET state = 'failed', version = $4, terminal_at = $5, updated_at = $5
+        WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
+          AND invocation_kind = 'mcp_discovery' AND state = 'running'
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.operation_id.to_string())
+    .bind(as_i64(
+        operation.version,
+        "MCP discovery operation version",
+    )?)
+    .bind(as_i64(
+        next_operation_version,
+        "MCP discovery operation version",
+    )?)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if operation_affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery verification failure CAS",
+        ));
+    }
+
+    let owner_affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'failed', version = version + 1, result_digest = $7,
+            worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
+            heartbeat_at = NULL, terminal_at = $8, updated_at = $8
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
+          AND owner_kind = 'mcp_operation'
+          AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
+          AND lease_token_digest = $6
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.job_id.to_string())
+    .bind(as_i64(
+        command.fence.expected_version,
+        "MCP discovery Job version",
+    )?)
+    .bind(command.fence.worker_process_generation_id.to_string())
+    .bind(as_i64(
+        command.fence.lease_generation,
+        "MCP discovery Job lease generation",
+    )?)
+    .bind(command.fence.token_digest.to_string())
+    .bind(evidence_digest.to_string())
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if owner_affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery Job verification failure CAS",
+        ));
+    }
+
+    append_scheduler_event_with_trace(
         transaction,
-        &operation.tenant_id,
-        &command.snapshot.objects_artifact,
+        owner_job.trace,
+        &command.audit.tenant_id.to_string(),
+        &command.audit.event_id,
+        &command.audit.outbox_id,
+        "mcp_operation",
+        &command.operation_id.to_string(),
+        as_i64(next_operation_version, "MCP discovery operation version")?,
+        None,
+        "mcp.discovery_failed",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "artifact_id": pending.artifact_id,
+                "failure_code": failure_code,
+                "job_id": command.job_id,
+                "verification_evidence_digest": evidence_digest,
+                "verification_job_id": pending.verification_job_id,
+            }),
+        )?,
+    )
+    .await?;
+    terminalize_mcp_discovery_finalize_receipt(
+        transaction,
+        command,
+        failure_code,
+        &pending.artifact_id,
     )
     .await
 }
@@ -5166,48 +6151,6 @@ async fn insert_mcp_discovery_snapshot(
     .bind(database_now)
     .execute(&mut **transaction)
     .await?;
-    Ok(())
-}
-
-async fn complete_mcp_discovery_job(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &CommitMcpDiscovery,
-    result_digest: &insight_platform_contracts::Sha256Digest,
-    database_now: DateTime<Utc>,
-) -> Result<(), RepositoryError> {
-    let affected = sqlx::query(
-        r#"
-        UPDATE insight_platform.jobs
-        SET state = 'succeeded', version = version + 1, result_digest = $7,
-            worker_id = NULL, lease_token_digest = NULL, lease_expires_at = NULL,
-            heartbeat_at = NULL, terminal_at = $8, updated_at = $8
-        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
-          AND work_class = 'mcp' AND job_kind = 'mcp_discovery'
-          AND owner_kind = 'mcp_operation'
-          AND state = 'running' AND worker_id = $4 AND lease_epoch = $5
-          AND lease_token_digest = $6
-        "#,
-    )
-    .bind(command.audit.tenant_id.to_string())
-    .bind(command.job_id.to_string())
-    .bind(as_i64(
-        command.fence.expected_version,
-        "MCP discovery Job version",
-    )?)
-    .bind(command.fence.worker_process_generation_id.to_string())
-    .bind(as_i64(
-        command.fence.lease_generation,
-        "MCP discovery Job lease generation",
-    )?)
-    .bind(command.fence.token_digest.to_string())
-    .bind(result_digest.to_string())
-    .bind(database_now)
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if affected != 1 {
-        return Err(RepositoryError::StaleFence);
-    }
     Ok(())
 }
 
@@ -5468,13 +6411,15 @@ async fn terminalize_mcp_resolution_receipt(
     Ok(())
 }
 
-fn mcp_discovery_worker_receipt_payload(
-    command: &CommitMcpDiscovery,
+fn mcp_discovery_park_receipt_payload(
+    command: &ParkMcpDiscoveryVerification,
 ) -> Result<TypedPayload, RepositoryError> {
     TypedPayload::with_limit(
         1,
         &serde_json::json!({
-            "artifact_link_id": command.artifact_link_id,
+            "artifact_id": command.staged.artifact_id,
+            "descriptor_digest": command.evidence.descriptor_digest,
+            "evidence_digest": command.evidence.canonical_digest,
             "fence": {
                 "expected_version": command.fence.expected_version,
                 "lease_generation": command.fence.lease_generation,
@@ -5483,19 +6428,18 @@ fn mcp_discovery_worker_receipt_payload(
             },
             "job_id": command.job_id,
             "operation_id": command.operation_id,
-            "snapshot_digest": command.snapshot.canonical_digest,
-            "snapshot_id": command.snapshot.snapshot_id,
+            "verification_job_id": command.staged.verification_job_id,
         }),
         65_536,
     )
 }
 
-async fn claim_mcp_worker_receipt(
+async fn claim_mcp_discovery_park_receipt(
     transaction: &mut Transaction<'_, Postgres>,
-    command: &CommitMcpDiscovery,
-    operation: &str,
+    command: &ParkMcpDiscoveryVerification,
     payload: &TypedPayload,
 ) -> Result<bool, RepositoryError> {
+    let operation = "mcp.discovery.park_verification";
     let inserted = sqlx::query(
         r#"
         INSERT INTO insight_platform.receipts (
@@ -5550,22 +6494,134 @@ async fn claim_mcp_worker_receipt(
         return Err(RepositoryError::IdempotencyConflict);
     }
     if existing.try_get::<String, _>("state")? != "succeeded" {
-        return Err(RepositoryError::Conflict("MCP worker receipt"));
+        return Err(RepositoryError::Conflict("MCP discovery park receipt"));
     }
     Ok(true)
 }
 
-async fn terminalize_mcp_worker_receipt(
+async fn terminalize_mcp_discovery_park_receipt(
     transaction: &mut Transaction<'_, Postgres>,
-    command: &CommitMcpDiscovery,
+    command: &ParkMcpDiscoveryVerification,
+) -> Result<(), RepositoryError> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = 'verification_pending',
+            response_reference_id = $4, completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND scope_id = $5 AND state = 'processing'
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.audit.receipt_id.to_string())
+    .bind(command.audit.request_digest.to_string())
+    .bind(command.staged.artifact_id.to_string())
+    .bind(command.job_id.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("MCP discovery park receipt"));
+    }
+    Ok(())
+}
+
+fn mcp_discovery_finalize_receipt_payload(
+    command: &FinalizeMcpDiscovery,
+) -> Result<TypedPayload, RepositoryError> {
+    TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "fence": {
+                "expected_version": command.fence.expected_version,
+                "lease_generation": command.fence.lease_generation,
+                "lease_token_digest": command.fence.token_digest,
+                "worker_process_generation_id": command.fence.worker_process_generation_id,
+            },
+            "job_id": command.job_id,
+            "operation_id": command.operation_id,
+            "operation_version": command.expected_operation_version,
+        }),
+        65_536,
+    )
+}
+
+async fn claim_mcp_discovery_finalize_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &FinalizeMcpDiscovery,
+    payload: &TypedPayload,
+) -> Result<bool, RepositoryError> {
+    let operation = "mcp.discovery.finalize_verified";
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest,
+            state, payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'job_commit', 'job', $3, $4, $5, $6, $7,
+                  'processing', $8, $9, $10, $11)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.audit.receipt_id.to_string())
+    .bind(command.job_id.to_string())
+    .bind(command.audit.worker_process_generation_id.to_string())
+    .bind(operation)
+    .bind(command.audit.idempotency_key_digest.to_string())
+    .bind(command.audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(command.audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let existing = sqlx::query(
+        r#"
+        SELECT request_digest, payload_digest, state
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = $4 AND idempotency_key_digest = $5
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.audit.tenant_id.to_string())
+    .bind(command.job_id.to_string())
+    .bind(command.audit.worker_process_generation_id.to_string())
+    .bind(operation)
+    .bind(command.audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if existing.try_get::<String, _>("request_digest")? != command.audit.request_digest.to_string()
+        || existing.try_get::<String, _>("payload_digest")? != payload.digest
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if existing.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("MCP discovery finalize receipt"));
+    }
+    Ok(true)
+}
+
+async fn terminalize_mcp_discovery_finalize_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &FinalizeMcpDiscovery,
     disposition: &str,
     response_reference_id: &ResourceId,
 ) -> Result<(), RepositoryError> {
     let affected = sqlx::query(
         r#"
         UPDATE insight_platform.receipts
-        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
-            completed_at = clock_timestamp()
+        SET state = 'succeeded', disposition = $4,
+            response_reference_id = $5, completed_at = clock_timestamp()
         WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
           AND scope_id = $6 AND state = 'processing'
         "#,
@@ -5580,7 +6636,7 @@ async fn terminalize_mcp_worker_receipt(
     .await?
     .rows_affected();
     if affected != 1 {
-        return Err(RepositoryError::Conflict("MCP worker receipt"));
+        return Err(RepositoryError::Conflict("MCP discovery finalize receipt"));
     }
     Ok(())
 }
