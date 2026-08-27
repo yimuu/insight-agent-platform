@@ -894,6 +894,15 @@
 > 当作竞争吞掉。MCP service all-target、MCP Host 62/62及该fresh PostgreSQL L3目标测试通过。Egress后的connector仍是类型化测试实现，并非真实
 > 外部Streamable HTTP/SSE server，因此本批只关闭logical subscription Worker process/RPC/crash recovery L3，不声明外部SSE或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r357在r356基础上关闭logical subscription真实Streamable HTTP/SSE protocol L3。fresh PostgreSQL 16
+> fixture同时启动真实`platform-mcp-subscription-worker`与独立Egress OS fixture process；后者组合production
+> `ReqwestMcpStreamableHttpSubscriptionConnector`、mTLS Egress RPC、late Secret解析、DNS pinning、TLS trust和subscription bridge，并连接独立
+> TLS MCP fake server。第一次外部`initialize`已经到达server且Ready尚未提交时同时终止Egress与Worker，推进exact running Job租约过期后重启两
+> 个进程；第二次physical attempt完成`initialize`、`notifications/initialized`、`resources/subscribe`和带session header的SSE GET，最终唯一
+> 恢复为`active/ready`且不重复Ready Event。协议日志精确断言两次initialize及其余方法各一次。loopback仅由`protocol-fixtures` feature开放，
+> production binary仍维持public-destination-only SSRF guard。目标fresh PostgreSQL L3测试通过；该证据关闭logical subscription外部协议与进程
+> crash-recovery component L3，不替代真实第三方MCP服务、容量饱和、production telemetry scrape或L4～L6门禁。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

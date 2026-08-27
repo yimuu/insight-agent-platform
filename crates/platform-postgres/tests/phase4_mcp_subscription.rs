@@ -37,11 +37,13 @@ use insight_platform_contracts::{
     WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress::{
-    AeadMcpRemoteTaskStateCodec, DnsResolutionError, EgressDnsResolver,
-    InstalledMcpStreamableHttpEndpoint, InstalledMcpStreamableHttpEndpointCatalog,
-    McpRemoteTaskStateKey, McpStreamableHttpEgressLimits, ReqwestMcpStreamableHttpConnector,
-    ResolvedSecretMaterial, SecretMaterialResolutionError, SecretMaterialResolver,
-    SensitiveMcpRemoteTaskStateKey,
+    AeadMcpRemoteTaskStateCodec, AeadMcpSubscriptionStateCodec, DnsResolutionError,
+    EgressDnsResolver, InstalledMcpStreamableHttpEndpoint,
+    InstalledMcpStreamableHttpEndpointCatalog, McpRemoteTaskStateKey,
+    McpStreamableHttpEgressLimits, McpSubscriptionStateKey, ReqwestMcpStreamableHttpConnector,
+    ReqwestMcpStreamableHttpSubscriptionConnector, ResolvedSecretMaterial,
+    SecretMaterialResolutionError, SecretMaterialResolver, SensitiveMcpRemoteTaskStateKey,
+    SensitiveMcpSubscriptionStateKey,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -58,13 +60,12 @@ use insight_platform_mcp_host::{
     McpDiscoveryTransportEvidence, McpExecutionContractQuery, McpNotificationApplyDisposition,
     McpNotificationAudit, McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
     McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
-    McpStreamableHttpSubscriptionConnector, McpStreamableHttpSubscriptionRequest,
-    McpSubscriptionActivation, McpSubscriptionContractQuery, McpSubscriptionExecutionResolver,
-    McpSubscriptionReconcileScan, McpSubscriptionRecord, McpSubscriptionRecoveryCause,
-    McpSubscriptionRecoveryScan, McpSubscriptionWorkerAudit, McpTransportFailure,
-    NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord,
-    PreparedMcpSubscription, RecoverDueMcpSubscription, ReportMcpSubscriptionTransportTermination,
-    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
+    McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
+    McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
+    McpSubscriptionWorkerAudit, McpTransportFailure, NewMcpAuthorizationBinding,
+    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, RecoverDueMcpSubscription,
+    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
+    WakeMcpSubscriptionReconcile,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -389,49 +390,6 @@ impl McpResourceRefreshConnector for ProcessRefreshConnector {
     }
 }
 
-struct ProcessSubscriptionConnector {
-    calls: AtomicUsize,
-    first_started: Notify,
-}
-
-struct ProcessSubscriptionActivation;
-
-#[async_trait]
-impl McpSubscriptionActivation for ProcessSubscriptionActivation {
-    async fn activate(self: Box<Self>) {}
-}
-
-#[async_trait]
-impl McpStreamableHttpSubscriptionConnector for ProcessSubscriptionConnector {
-    async fn establish_subscription(
-        &self,
-        request: McpStreamableHttpSubscriptionRequest,
-    ) -> Result<PreparedMcpSubscription, McpTransportFailure> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            self.first_started.notify_one();
-            tokio::time::sleep(StdDuration::from_secs(30)).await;
-        }
-        Ok(PreparedMcpSubscription::new(
-            insight_platform_mcp_host::EstablishedMcpSubscription {
-                transport_kind: insight_platform_contracts::McpTransportKind::StreamableHttp,
-                binding_digest: request.binding_digest,
-                encrypted_opaque_session: EncryptedMcpState {
-                    scheme: "aes-256-gcm".to_owned(),
-                    ciphertext: vec![7; 32],
-                    key_id: "process-subscription-key".to_owned(),
-                    key_reference_digest: named_digest("process-subscription-key-reference"),
-                    plaintext_digest: named_digest("process-subscription-state"),
-                },
-                established_at: Utc::now(),
-                expires_at: request.deadline,
-                evidence_digest: named_digest(&format!("process-subscription-established-{call}")),
-            },
-            Box::new(ProcessSubscriptionActivation),
-        ))
-    }
-}
-
 const PROTOCOL_EGRESS_CONFIG_ENV: &str = "PLATFORM_SUBSCRIPTION_EGRESS_FIXTURE_CONFIG";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -447,6 +405,7 @@ struct ProtocolEgressFixtureConfig {
     endpoint: InstalledMcpStreamableHttpEndpoint,
     control_prefix: String,
     resource_uri: String,
+    pause_second_initialize: bool,
 }
 
 struct ProtocolFixtureDns(SocketAddr);
@@ -488,7 +447,7 @@ fn protocol_control_path(prefix: &str, name: &str) -> PathBuf {
 
 async fn read_http_request(
     stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) -> Option<(String, serde_json::Value)> {
+) -> Option<(String, String, Option<serde_json::Value>)> {
     let mut request = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 1_024];
@@ -506,11 +465,16 @@ async fn read_http_request(
     };
     let headers = String::from_utf8(request[..header_end].to_vec()).ok()?;
     let lower = headers.to_ascii_lowercase();
-    if !headers.starts_with("POST /mcp HTTP/1.1\r\n")
+    let request_method = headers.split_whitespace().next()?.to_owned();
+    if !matches!(request_method.as_str(), "GET" | "POST")
+        || !headers.starts_with(&format!("{request_method} /mcp HTTP/1.1\r\n"))
         || !lower.contains("host: mcp.example.test:")
         || !lower.contains("authorization: bearer subscription-protocol-token")
     {
         return None;
+    }
+    if request_method == "GET" {
+        return Some((request_method, headers, None));
     }
     let content_length = lower
         .lines()
@@ -526,7 +490,7 @@ async fn read_http_request(
         request.extend_from_slice(&chunk[..read]);
     }
     let body = serde_json::from_slice(&request[header_end..header_end + content_length]).ok()?;
-    Some((headers, body))
+    Some((request_method, headers, Some(body)))
 }
 
 async fn serve_protocol_request(
@@ -539,7 +503,37 @@ async fn serve_protocol_request(
     let Ok(mut stream) = TlsAcceptor::from(tls).accept(stream).await else {
         return;
     };
-    let Some((_headers, body)) = read_http_request(&mut stream).await else {
+    let Some((request_method, headers, body)) = read_http_request(&mut stream).await else {
+        return;
+    };
+    if request_method == "GET" {
+        let lower = headers.to_ascii_lowercase();
+        if !lower.contains("accept: text/event-stream")
+            || !lower.contains("mcp-session-id: protocol-session-")
+        {
+            return;
+        }
+        {
+            let _guard = log_lock.lock().await;
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(protocol_control_path(&config.control_prefix, "methods.log"))
+                .unwrap();
+            writeln!(log, "sse/get").unwrap();
+        }
+        std::fs::write(
+            protocol_control_path(&config.control_prefix, "sse.started"),
+            b"started",
+        )
+        .unwrap();
+        let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n";
+        if stream.write_all(response.as_bytes()).await.is_ok() {
+            tokio::time::sleep(StdDuration::from_secs(30)).await;
+        }
+        return;
+    }
+    let Some(body) = body else {
         return;
     };
     let Some(method) = body.get("method").and_then(serde_json::Value::as_str) else {
@@ -566,7 +560,7 @@ async fn serve_protocol_request(
         .unwrap();
         if attempt == 1 {
             tokio::time::sleep(StdDuration::from_secs(30)).await;
-        } else if attempt == 2 {
+        } else if attempt == 2 && config.pause_second_initialize {
             let release = protocol_control_path(&config.control_prefix, "attempt-2.release");
             while !release.exists() {
                 tokio::time::sleep(StdDuration::from_millis(10)).await;
@@ -593,6 +587,16 @@ async fn serve_protocol_request(
             .unwrap(),
         ),
         "notifications/initialized" => ("202 Accepted", None, Vec::new()),
+        "resources/subscribe" => (
+            "200 OK",
+            None,
+            serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "jsonrpc": "2.0",
+                "result": {}
+            }))
+            .unwrap(),
+        ),
         "resources/list" => (
             "200 OK",
             None,
@@ -692,6 +696,40 @@ async fn run_protocol_egress_fixture(config: ProtocolEgressFixtureConfig) {
         .allow_loopback_for_protocol_fixture(),
     );
     let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let bridge = Arc::new(
+        EgressMcpSubscriptionBridge::new(
+            limits,
+            EgressMcpSubscriptionBridgeLimits {
+                maximum_pending: 4,
+                maximum_active: 4,
+                event_buffer_capacity: 8,
+            },
+        )
+        .unwrap(),
+    );
+    let subscription_sessions = Arc::new(
+        AeadMcpSubscriptionStateCodec::new(
+            "protocol-subscription-key".to_owned(),
+            vec![McpSubscriptionStateKey {
+                key_id: "protocol-subscription-key".to_owned(),
+                key_reference_digest: named_digest("protocol-subscription-key"),
+                key_material: SensitiveMcpSubscriptionStateKey::new(vec![11; 32]).unwrap(),
+            }],
+        )
+        .unwrap(),
+    );
+    let subscription_connector = Arc::new(
+        ReqwestMcpStreamableHttpSubscriptionConnector::new(
+            InstalledMcpStreamableHttpEndpointCatalog::new(vec![config.endpoint.clone()]).unwrap(),
+            Arc::new(ProtocolFixtureSecrets),
+            Arc::new(ProtocolFixtureDns(config.mcp_address)),
+            subscription_sessions,
+            bridge.sink(),
+            McpStreamableHttpEgressLimits::default(),
+        )
+        .unwrap()
+        .allow_loopback_for_protocol_fixture(),
+    );
     let service = EgressBrokerServiceServer::new(
         EgressBrokerGrpcService::new(
             Arc::new(EmptyModel),
@@ -699,7 +737,8 @@ async fn run_protocol_egress_fixture(config: ProtocolEgressFixtureConfig) {
             Arc::new(EmptyGrpc),
             limits,
         )
-        .with_mcp_resource_refresh(connector),
+        .with_mcp_resource_refresh(connector)
+        .with_mcp_streamable_http_subscription(subscription_connector, bridge),
     );
     let service =
         tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
@@ -2874,57 +2913,56 @@ async fn wait_for_subscription_session_state(
 async fn run_logical_subscription_worker_process_l3(
     pool: &PgPool,
     fixture: &Fixture,
+    active_subscription: &McpSubscriptionRecord,
     database_url: &str,
     subscription_worker_binary: &str,
 ) {
     let tls = process_tls_fixture();
     let files = ProcessFixtureFiles::new(&tls);
-    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let egress_address = incoming.local_addr().unwrap();
-    let connector = Arc::new(ProcessSubscriptionConnector {
-        calls: AtomicUsize::new(0),
-        first_started: Notify::new(),
-    });
-    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
-    let bridge = Arc::new(
-        EgressMcpSubscriptionBridge::new(
-            limits,
-            EgressMcpSubscriptionBridgeLimits {
-                maximum_pending: 4,
-                maximum_active: 4,
-                event_buffer_capacity: 8,
-            },
-        )
-        .unwrap(),
-    );
-    let service = EgressBrokerServiceServer::new(
-        EgressBrokerGrpcService::new(
-            Arc::new(EmptyModel),
-            Arc::new(EmptyHttp),
-            Arc::new(EmptyGrpc),
-            limits,
-        )
-        .with_mcp_streamable_http_subscription(connector.clone(), bridge),
-    );
-    let service =
-        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
-    let (egress_shutdown, egress_shutdown_rx) = tokio::sync::oneshot::channel();
-    let egress_server = tokio::spawn(
-        Server::builder()
-            .tls_config(
-                ServerTlsConfig::new()
-                    .identity(Identity::from_pem(
-                        &tls.egress_server_cert,
-                        &tls.egress_server_key,
-                    ))
-                    .client_ca_root(Certificate::from_pem(tls.ca.clone())),
-            )
-            .unwrap()
-            .add_service(service)
-            .serve_with_incoming_shutdown(incoming, async move {
-                let _ = egress_shutdown_rx.await;
-            }),
-    );
+    let egress_address = available_address();
+    let mcp_address = SocketAddr::from(([127, 0, 0, 1], fixture.mcp_endpoint.port));
+    let control_prefix = format!("{}-logical-protocol", files.prefix);
+    for name in [
+        "methods.log",
+        "attempt-1.started",
+        "attempt-2.started",
+        "sse.started",
+    ] {
+        let _ = std::fs::remove_file(protocol_control_path(&control_prefix, name));
+    }
+    let protocol_config = ProtocolEgressFixtureConfig {
+        egress_address,
+        mcp_address,
+        ca_pem: tls.ca.clone(),
+        egress_server_cert: tls.egress_server_cert.clone(),
+        egress_server_key: tls.egress_server_key.clone(),
+        mcp_server_cert: tls.mcp_server_cert.clone(),
+        mcp_server_key: tls.mcp_server_key.clone(),
+        endpoint: InstalledMcpStreamableHttpEndpoint {
+            schema_version: 1,
+            deployment: fixture.mcp_deployment.clone(),
+            endpoint: fixture.mcp_endpoint.clone(),
+            endpoint_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+            server_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+            protocol_policy: fixture.protocol_policy.clone(),
+            network_policy: fixture.network_policy.clone(),
+            tls_policy: fixture.tls_policy.clone(),
+            trust_policy: fixture.trust_policy.clone(),
+            auth_policy: fixture.auth_policy.clone(),
+            token_credential_purpose: fixture.token_purpose.clone(),
+            trusted_root_pem: tls.ca.clone(),
+        },
+        control_prefix: control_prefix.clone(),
+        resource_uri: active_subscription.payload.binding.resource_uri.clone(),
+        pause_second_initialize: false,
+    };
+    let protocol_config_path =
+        PathBuf::from(format!("{}-logical-protocol-egress.json", files.prefix));
+    std::fs::write(
+        &protocol_config_path,
+        serde_json::to_vec(&protocol_config).unwrap(),
+    )
+    .unwrap();
     let config = serde_json::json!({
         "schema_version": 1,
         "observability_listen_address": available_address().to_string(),
@@ -2968,23 +3006,39 @@ async fn run_logical_subscription_worker_process_l3(
         })
     };
 
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, first_egress_stderr) =
+        monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("subscription protocol Egress fixture started"),
+        "{startup}"
+    );
     let mut first_worker = spawn_worker();
     let (startup, first_stderr) = monitor_process_stderr(first_worker.stderr.take().unwrap()).await;
     assert!(
         startup.contains("platform-mcp-subscription-worker started"),
         "{startup}"
     );
-    tokio::time::timeout(
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "attempt-1.started"),
         StdDuration::from_secs(10),
-        connector.first_started.notified(),
     )
-    .await
-    .unwrap();
+    .await;
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    first_egress_stderr.await.unwrap();
     first_worker.kill().unwrap();
     first_worker.wait().unwrap();
     first_stderr.await.unwrap();
     expire_running_context_job(pool, fixture, &fixture.job_id).await;
 
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, second_egress_stderr) =
+        monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("subscription protocol Egress fixture started"),
+        "{startup}"
+    );
     let mut second_worker = spawn_worker();
     let (startup, second_stderr) =
         monitor_process_stderr(second_worker.stderr.take().unwrap()).await;
@@ -3000,7 +3054,23 @@ async fn run_logical_subscription_worker_process_l3(
         StdDuration::from_secs(15),
     )
     .await;
-    assert_eq!(connector.calls.load(Ordering::SeqCst), 2);
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "sse.started"),
+        StdDuration::from_secs(10),
+    )
+    .await;
+    let methods =
+        std::fs::read_to_string(protocol_control_path(&control_prefix, "methods.log")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec![
+            "initialize",
+            "initialize",
+            "notifications/initialized",
+            "resources/subscribe",
+            "sse/get"
+        ]
+    );
     let ready_events: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*) FROM insight_platform.events
@@ -3018,8 +3088,9 @@ async fn run_logical_subscription_worker_process_l3(
     second_worker.kill().unwrap();
     second_worker.wait().unwrap();
     second_stderr.await.unwrap();
-    let _ = egress_shutdown.send(());
-    egress_server.await.unwrap().unwrap();
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    second_egress_stderr.await.unwrap();
 }
 
 async fn wait_for_control_file(path: &std::path::Path, timeout: StdDuration) {
@@ -3100,6 +3171,7 @@ async fn run_subscription_protocol_process_l3(
         endpoint,
         control_prefix: control_prefix.clone(),
         resource_uri: active_subscription.payload.binding.resource_uri.clone(),
+        pause_second_initialize: true,
     };
     let protocol_config_path = PathBuf::from(format!("{}-protocol-egress.json", files.prefix));
     std::fs::write(
@@ -4297,6 +4369,7 @@ async fn mcp_subscription_fixture() {
         run_logical_subscription_worker_process_l3(
             &pool,
             &fixture,
+            &recovered,
             &database_url,
             &subscription_worker_binary,
         )

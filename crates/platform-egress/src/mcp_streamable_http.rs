@@ -3227,6 +3227,8 @@ pub struct ReqwestMcpStreamableHttpSubscriptionConnector {
     sink: Arc<dyn McpStreamableHttpSubscriptionSink>,
     limits: McpStreamableHttpEgressLimits,
     permits: Arc<Semaphore>,
+    #[cfg(any(test, feature = "protocol-fixtures"))]
+    allow_loopback_for_protocol_fixture: bool,
 }
 
 impl ReqwestMcpStreamableHttpSubscriptionConnector {
@@ -3268,7 +3270,28 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
             sink,
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
+            #[cfg(any(test, feature = "protocol-fixtures"))]
+            allow_loopback_for_protocol_fixture: false,
         })
+    }
+
+    /// Enables loopback only in explicit protocol-fixture builds. Production binaries do not
+    /// enable this feature and retain the public-destination-only guard.
+    #[cfg(any(test, feature = "protocol-fixtures"))]
+    pub fn allow_loopback_for_protocol_fixture(mut self) -> Self {
+        self.allow_loopback_for_protocol_fixture = true;
+        self
+    }
+
+    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+        if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        #[cfg(any(test, feature = "protocol-fixtures"))]
+        if self.allow_loopback_for_protocol_fixture && address.ip().is_loopback() {
+            return true;
+        }
+        false
     }
 
     pub fn capacity_snapshot(&self) -> super::EgressCapacitySnapshot {
@@ -3310,7 +3333,7 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != endpoint.port || !self.destination_allowed(address)
             })
         {
             return Err(rejected("mcp_egress_subscription_destination_denied"));

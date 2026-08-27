@@ -543,6 +543,13 @@ physical attempt唯一恢复到`active/ready`，Ready Event没有重复。该门
 all-target、MCP Host 62/62与fresh PostgreSQL目标测试通过。Egress后的connector仍是类型化测试实现，不是真实外部Streamable HTTP/SSE server，
 所以仅关闭Worker process/RPC/crash-recovery L3切片，外部SSE及L4～L6仍Pending。
 
+r357把上述typed connector替换为独立Egress OS fixture process中的production `ReqwestMcpStreamableHttpSubscriptionConnector`，并接入独立
+TLS MCP fake server。fresh PostgreSQL 16门禁在首个外部`initialize`到达、Ready未提交的窗口同时强杀Egress与production subscription Worker，
+只推进exact running Job租约过期，再启动第二组进程；恢复attempt依次完成`initialize`、`notifications/initialized`、
+`resources/subscribe`与带session header的SSE GET，最终保持唯一`active/ready`与唯一新增Ready Event。方法日志精确证明两次initialize和其余
+协议动作各一次；test-only loopback开关不进入production默认构建，SSRF destination guard保持fail closed。logical subscription真实外部
+Streamable HTTP/SSE protocol/crash component L3由此闭合；真实第三方服务、容量饱和、production telemetry scrape与L4～L6仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
