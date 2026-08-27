@@ -840,6 +840,12 @@
 > 门禁通过。本批没有fresh PostgreSQL，也尚未接入subscription claim/heartbeat/execute/recovery production driver，因此只关闭该driver的
 > claim前置L1缺口，不新增L2/L3或L4～L6证据。
 
+> 2026-08-27 implementation evidence：r350把logical subscription唯一长远端I/O窗口改为显式lease协调边界。Worker完成
+> `connecting/initializing` owner写后才进入协调窗口；driver可在该窗口内串行heartbeat，退出时返回同worker、同lease generation、同token且
+> 单调不减的latest fence，Worker随后才执行Ready/terminal owner CAS。旧token、旧version或身份漂移在业务提交前fail closed；无协调器的
+> library调用保留固定fence封装。MCP Host 61/61及strict Clippy、format/diff门禁通过。本批只关闭production driver heartbeat接线的domain L1
+> 前置，不宣称driver进程、fresh PostgreSQL竞争或subscription protocol L3已经完成。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

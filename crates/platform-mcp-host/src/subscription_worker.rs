@@ -1112,6 +1112,7 @@ pub enum McpSubscriptionWorkerResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpSubscriptionWorkerError {
     InvalidCommand,
+    LeaseCoordination,
     Contract(McpExecutionContractResolutionError),
     Transport(McpTransportFailure),
     Invalidation(McpSubscriptionInvalidationError),
@@ -1124,6 +1125,9 @@ impl fmt::Display for McpSubscriptionWorkerError {
             Self::InvalidCommand => {
                 formatter.write_str("MCP subscription worker command is invalid")
             }
+            Self::LeaseCoordination => {
+                formatter.write_str("MCP subscription lease coordination failed")
+            }
             Self::Contract(failure) => write!(formatter, "{failure}"),
             Self::Transport(_) => formatter.write_str("MCP subscription transport failed"),
             Self::Invalidation(failure) => write!(formatter, "{failure}"),
@@ -1133,6 +1137,29 @@ impl fmt::Display for McpSubscriptionWorkerError {
 }
 
 impl Error for McpSubscriptionWorkerError {}
+
+/// Coordinates the only long remote-I/O window with the durable Job lease owner. Implementations
+/// must serialize the enter/exit handshake with heartbeat writes and return the latest exact
+/// fence. This keeps subscription owner transitions and heartbeat CAS from racing each other.
+#[async_trait]
+pub trait McpSubscriptionRemoteIoLease: Send + Sync {
+    async fn enter_remote_io(&self, fence: &JobFence) -> Result<JobFence, ()>;
+
+    async fn exit_remote_io(&self, fence: &JobFence) -> Result<JobFence, ()>;
+}
+
+struct FixedMcpSubscriptionRemoteIoLease;
+
+#[async_trait]
+impl McpSubscriptionRemoteIoLease for FixedMcpSubscriptionRemoteIoLease {
+    async fn enter_remote_io(&self, fence: &JobFence) -> Result<JobFence, ()> {
+        Ok(fence.clone())
+    }
+
+    async fn exit_remote_io(&self, fence: &JobFence) -> Result<JobFence, ()> {
+        Ok(fence.clone())
+    }
+}
 
 pub struct McpSubscriptionWorker {
     resolver: Arc<dyn McpSubscriptionExecutionResolver>,
@@ -1159,6 +1186,15 @@ impl McpSubscriptionWorker {
     pub async fn execute(
         &self,
         command: ExecuteMcpSubscriptionJob,
+    ) -> Result<McpSubscriptionWorkerResult, McpSubscriptionWorkerError> {
+        self.execute_with_remote_io_lease(command, Arc::new(FixedMcpSubscriptionRemoteIoLease))
+            .await
+    }
+
+    pub async fn execute_with_remote_io_lease(
+        &self,
+        command: ExecuteMcpSubscriptionJob,
+        remote_io_lease: Arc<dyn McpSubscriptionRemoteIoLease>,
     ) -> Result<McpSubscriptionWorkerResult, McpSubscriptionWorkerError> {
         let started_at = Utc::now();
         command
@@ -1189,13 +1225,14 @@ impl McpSubscriptionWorker {
         {
             return self.reconcile(command, resolved).await;
         }
-        self.establish(command, resolved).await
+        self.establish(command, resolved, remote_io_lease).await
     }
 
     async fn establish(
         &self,
         command: ExecuteMcpSubscriptionJob,
         resolved: ResolvedMcpSubscriptionExecution,
+        remote_io_lease: Arc<dyn McpSubscriptionRemoteIoLease>,
     ) -> Result<McpSubscriptionWorkerResult, McpSubscriptionWorkerError> {
         let mut record = resolved.record;
         let mut fence = command.query.fence;
@@ -1244,6 +1281,13 @@ impl McpSubscriptionWorker {
             _ => return Err(McpSubscriptionWorkerError::InvalidCommand),
         }
 
+        fence = refreshed_subscription_fence(
+            &fence,
+            remote_io_lease
+                .enter_remote_io(&fence)
+                .await
+                .map_err(|()| McpSubscriptionWorkerError::LeaseCoordination)?,
+        )?;
         let now = Utc::now();
         let remaining = u64::try_from((record.deadline - now).num_milliseconds())
             .map_err(|_| McpSubscriptionWorkerError::InvalidCommand)?;
@@ -1257,23 +1301,31 @@ impl McpSubscriptionWorker {
             record.deadline,
         ))
         .catch_unwind();
-        let prepared =
-            match tokio::time::timeout(Duration::from_millis(timeout_milliseconds), future).await {
-                Ok(Ok(Ok(prepared))) => prepared,
-                Ok(Ok(Err(failure))) => {
-                    return self
-                        .handle_establish_failure(record, fence, command.audits.terminal, failure)
-                        .await;
-                }
-                Ok(Err(_)) => {
-                    let failure = retryable_failure("mcp_subscription_transport_panic");
-                    return Err(McpSubscriptionWorkerError::Transport(failure));
-                }
-                Err(_) => {
-                    let failure = retryable_failure("mcp_subscription_transport_timeout");
-                    return Err(McpSubscriptionWorkerError::Transport(failure));
-                }
-            };
+        let transport_outcome =
+            tokio::time::timeout(Duration::from_millis(timeout_milliseconds), future).await;
+        fence = refreshed_subscription_fence(
+            &fence,
+            remote_io_lease
+                .exit_remote_io(&fence)
+                .await
+                .map_err(|()| McpSubscriptionWorkerError::LeaseCoordination)?,
+        )?;
+        let prepared = match transport_outcome {
+            Ok(Ok(Ok(prepared))) => prepared,
+            Ok(Ok(Err(failure))) => {
+                return self
+                    .handle_establish_failure(record, fence, command.audits.terminal, failure)
+                    .await;
+            }
+            Ok(Err(_)) => {
+                let failure = retryable_failure("mcp_subscription_transport_panic");
+                return Err(McpSubscriptionWorkerError::Transport(failure));
+            }
+            Err(_) => {
+                let failure = retryable_failure("mcp_subscription_transport_timeout");
+                return Err(McpSubscriptionWorkerError::Transport(failure));
+            }
+        };
         prepared
             .established
             .validate_for(&record.payload.binding, &resolved.contract, Utc::now())
@@ -1493,6 +1545,20 @@ impl McpSubscriptionWorker {
     }
 }
 
+fn refreshed_subscription_fence(
+    current: &JobFence,
+    candidate: JobFence,
+) -> Result<JobFence, McpSubscriptionWorkerError> {
+    if candidate.worker_process_generation_id != current.worker_process_generation_id
+        || candidate.lease_generation != current.lease_generation
+        || candidate.token_digest != current.token_digest
+        || candidate.expected_version < current.expected_version
+    {
+        return Err(McpSubscriptionWorkerError::LeaseCoordination);
+    }
+    Ok(candidate)
+}
+
 fn next_fence(current: &JobFence) -> Result<JobFence, McpSubscriptionWorkerError> {
     Ok(JobFence {
         expected_version: current
@@ -1517,4 +1583,57 @@ fn retryable_failure(code: &str) -> McpTransportFailure {
         safe_message: "MCP subscription completion could not be observed".to_owned(),
         evidence_digest: static_digest(code),
     })
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    fn fence(version: u64, token: char) -> JobFence {
+        JobFence {
+            expected_version: version,
+            worker_process_generation_id: ResourceId::from_uuid_v7(
+                ResourceKind::WorkerProcessGeneration,
+                Uuid::now_v7(),
+            )
+            .unwrap(),
+            lease_generation: 3,
+            token_digest: format!("sha256:{}", token.to_string().repeat(64))
+                .parse()
+                .unwrap(),
+        }
+    }
+
+    #[test]
+    fn remote_io_lease_accepts_only_a_monotonic_exact_fence() {
+        let current = fence(5, 'a');
+        let newer = JobFence {
+            expected_version: 8,
+            ..current.clone()
+        };
+        assert_eq!(
+            refreshed_subscription_fence(&current, newer.clone()).unwrap(),
+            newer
+        );
+        assert!(matches!(
+            refreshed_subscription_fence(
+                &current,
+                JobFence {
+                    expected_version: 4,
+                    ..current.clone()
+                }
+            ),
+            Err(McpSubscriptionWorkerError::LeaseCoordination)
+        ));
+        assert!(matches!(
+            refreshed_subscription_fence(
+                &current,
+                JobFence {
+                    token_digest: fence(5, 'b').token_digest,
+                    ..current.clone()
+                }
+            ),
+            Err(McpSubscriptionWorkerError::LeaseCoordination)
+        ));
+    }
 }
