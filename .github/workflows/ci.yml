@@ -140,9 +140,10 @@ jobs:
         run: bash scripts/provision-platform-postgres.sh
       - name: Provision isolated Model conformance baseline
         env:
+          PGPASSWORD: insight
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
         run: |
-          createdb --host localhost --username insight insight_agent_platform_model
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_model
           bash scripts/provision-platform-postgres.sh
       - name: Provision Security Authority least-privilege role
         env:
