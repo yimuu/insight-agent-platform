@@ -1,0 +1,125 @@
+{{- if .Values.subscriptionPool.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "insight-platform-mcp-host.subscriptionName" . }}, namespace: {{ .Values.namespace }}}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "insight-platform-mcp-host.subscriptionName" . }}
+  namespace: {{ .Values.namespace }}
+  labels: {{ include "insight-platform-mcp-host.subscriptionLabels" . | nindent 4 }}
+spec:
+  selector: {{ include "insight-platform-mcp-host.subscriptionLabels" . | nindent 4 }}
+  ports:
+    - {name: observability, protocol: TCP, port: {{ int .Values.subscriptionPool.observability.port }}, targetPort: observability}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "insight-platform-mcp-host.subscriptionName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: {{ int .Values.subscriptionPool.replicas }}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.subscriptionLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "insight-platform-mcp-host.subscriptionLabels" . | nindent 8 }}
+        insight.platform/workload-role: mcp-subscription-worker
+        insight.platform/component-role: mcp_host
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
+    spec:
+      serviceAccountName: {{ include "insight-platform-mcp-host.subscriptionName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp-subscription-worker
+          image: {{ include "insight-platform-mcp-host.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/platform-mcp-subscription-worker"]
+          ports:
+            - {name: observability, containerPort: {{ int .Values.subscriptionPool.observability.port }}, protocol: TCP}
+          env:
+            - {name: PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG, value: /etc/insight/config/mcp-subscription-worker.json}
+            - {name: PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG_DIGEST, value: {{ .Values.subscriptionPool.config.digest | quote }} }
+            - name: PLATFORM_MCP_SUBSCRIPTION_WORKER_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.subscriptionPool.database.existingSecret }}, key: {{ .Values.subscriptionPool.database.urlKey }}}}
+            - {name: PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_CERT_PATH, value: /etc/insight/client-tls/client.pem}
+            - {name: PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_KEY_PATH, value: /etc/insight/client-tls/client-key.pem}
+            - {name: PLATFORM_MCP_SUBSCRIPTION_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
+          startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
+          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          resources: {{ toYaml .Values.subscriptionPool.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config, readOnly: true}
+            - {name: client-tls, mountPath: /etc/insight/client-tls, readOnly: true}
+            - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.subscriptionPool.config.existingConfigMap }}
+            items: [{key: {{ .Values.subscriptionPool.config.fileKey }}, path: mcp-subscription-worker.json}]
+        - name: client-tls
+          secret:
+            secretName: {{ .Values.subscriptionPool.clientTls.existingSecret }}
+            items:
+              - {key: {{ .Values.subscriptionPool.clientTls.keys.certificate }}, path: client.pem}
+              - {key: {{ .Values.subscriptionPool.clientTls.keys.privateKey }}, path: client-key.pem}
+        - name: egress-tls
+          secret:
+            secretName: {{ .Values.subscriptionPool.egressTls.existingSecret }}
+            items: [{key: {{ .Values.subscriptionPool.egressTls.caKey }}, path: ca.pem}]
+        - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
+{{- if .Values.subscriptionPool.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ include "insight-platform-mcp-host.subscriptionName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  minAvailable: {{ int .Values.subscriptionPool.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "insight-platform-mcp-host.subscriptionLabels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.subscriptionPool.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: {{ include "insight-platform-mcp-host.subscriptionName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-mcp-host.subscriptionName" . }}}
+  minReplicas: {{ int .Values.subscriptionPool.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.subscriptionPool.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.subscriptionPool.autoscaling.targetCPUUtilizationPercentage }}}}
+{{- end }}
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: {{ include "insight-platform-mcp-host.subscriptionName" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-mcp-host.subscriptionLabels" . | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+{{- end }}
+{{- end }}

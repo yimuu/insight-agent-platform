@@ -9,6 +9,19 @@
 {{- if lt (int .Values.autoscaling.minReplicas) 2 -}}{{- fail "HPA requires at least two replicas" -}}{{- end -}}
 {{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}{{- fail "HPA maximum must be at least minimum" -}}{{- end -}}
 {{- end -}}
+{{- if .Values.subscriptionPool.enabled -}}
+{{- if lt (int .Values.subscriptionPool.replicas) 2 -}}{{- fail "MCP Subscription Worker requires at least two replicas" -}}{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.subscriptionPool.config.digest) -}}{{- fail "subscriptionPool config.digest must be exact sha256" -}}{{- end -}}
+{{- if or (empty .Values.subscriptionPool.config.existingConfigMap) (empty .Values.subscriptionPool.database.existingSecret) (empty .Values.subscriptionPool.clientTls.existingSecret) (empty .Values.subscriptionPool.egressTls.existingSecret) -}}{{- fail "MCP Subscription Worker config, database and exact Egress TLS identity are required" -}}{{- end -}}
+{{- if empty .Values.subscriptionPool.postgresCidrs -}}{{- fail "MCP Subscription Worker exact PostgreSQL CIDRs are required" -}}{{- end -}}
+{{- if or (lt (int .Values.subscriptionPool.observability.port) 1) (gt (int .Values.subscriptionPool.observability.port) 65535) -}}{{- fail "MCP Subscription Worker observability port must be in 1..65535" -}}{{- end -}}
+{{- if eq .Values.subscriptionPool.database.existingSecret .Values.discoveryPool.database.existingSecret -}}{{- fail "MCP Subscription Worker must use an independently provisioned database credential" -}}{{- end -}}
+{{- if eq .Values.subscriptionPool.database.existingSecret .Values.resourcePool.database.existingSecret -}}{{- fail "MCP Subscription Worker must not share the Resource Host database credential" -}}{{- end -}}
+{{- if .Values.subscriptionPool.autoscaling.enabled -}}
+{{- if lt (int .Values.subscriptionPool.autoscaling.minReplicas) 2 -}}{{- fail "MCP Subscription Worker HPA requires at least two replicas" -}}{{- end -}}
+{{- if lt (int .Values.subscriptionPool.autoscaling.maxReplicas) (int .Values.subscriptionPool.autoscaling.minReplicas) -}}{{- fail "MCP Subscription Worker HPA maximum must be at least minimum" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.resourcePool.enabled -}}
 {{- if lt (int .Values.resourcePool.replicas) 2 -}}{{- fail "MCP Resource Host requires at least two replicas" -}}{{- end -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.resourcePool.config.digest) -}}{{- fail "resourcePool config.digest must be exact sha256" -}}{{- end -}}

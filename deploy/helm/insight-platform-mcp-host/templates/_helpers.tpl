@@ -10,6 +10,12 @@ app.kubernetes.io/name: {{ include "insight-platform-mcp-host.discoveryName" . }
 app.kubernetes.io/component: mcp-discovery-worker
 app.kubernetes.io/part-of: insight-platform
 {{- end }}
+{{- define "insight-platform-mcp-host.subscriptionName" -}}insight-platform-mcp-subscription-worker{{- end }}
+{{- define "insight-platform-mcp-host.subscriptionLabels" -}}
+app.kubernetes.io/name: {{ include "insight-platform-mcp-host.subscriptionName" . }}
+app.kubernetes.io/component: mcp-subscription-worker
+app.kubernetes.io/part-of: insight-platform
+{{- end }}
 {{- define "insight-platform-mcp-host.image" -}}{{ printf "%s@%s" .Values.image.repository .Values.image.digest }}{{- end }}
 {{- define "insight-platform-mcp-host.resourceName" -}}insight-platform-mcp-resource-host{{- end }}
 {{- define "insight-platform-mcp-host.resourceLabels" -}}

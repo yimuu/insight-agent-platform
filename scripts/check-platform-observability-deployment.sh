@@ -59,6 +59,8 @@ expected = %w[
   InsightPlatformExpiredOutboxClaimLagHigh
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformMcpSubscriptionDurableJobLagHigh
+  InsightPlatformMcpSubscriptionExpiredLeaseRecoveryLagHigh
   InsightPlatformModelDurableJobLagHigh
   InsightPlatformModelExpiredLeaseRecoveryLagHigh
   InsightPlatformOperationalCapacityExhausted
@@ -104,7 +106,9 @@ production_egress_clients = %w[
   crates/platform-context-worker/src/remote_main.rs
   crates/platform-mcp-cleanup-worker/src/main.rs
   crates/platform-mcp-service/src/main.rs
+  crates/platform-mcp-service/src/discovery_main.rs
   crates/platform-mcp-service/src/resource_main.rs
+  crates/platform-mcp-service/src/subscription_main.rs
   crates/platform-model-worker/src/main.rs
 ]
 production_egress_clients.each do |relative|
@@ -137,6 +141,10 @@ dependency_owner_contracts = {
   "crates/platform-context-worker/src/subscription_main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "JobKind::ContextSubscriptionRefresh"],
   "crates/platform-mcp-service/src/main.rs" => ["install_mcp_dependency_metrics(false)", "new_with_observer", "with_dependency_observations"],
   "crates/platform-mcp-service/src/resource_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],
+  "crates/platform-mcp-service/src/discovery_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "run_discovery_queue_sampler"],
+  "crates/platform-mcp-service/src/discovery_queue_observer.rs" => ["observe_durable_job_queue_for_kinds", "JobKind::McpDiscovery"],
+  "crates/platform-mcp-service/src/subscription_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "run_subscription_queue_sampler"],
+  "crates/platform-mcp-service/src/subscription_queue_observer.rs" => ["observe_durable_job_queue_for_kinds", "JobKind::McpSubscription"],
   "crates/platform-mcp-cleanup-worker/src/main.rs" => %w[install_cleanup_dependency_metrics new_with_observer run_postgres_health_sampler],
   "crates/platform-sandbox-controller/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler with_durable_job_queue WorkClass::Sandbox DurableJobOwnerKind::SandboxExecution],
   "crates/platform-sandbox-executor/src/main.rs" => %w[install_sandbox_executor_dependency_metrics bind_with_observer with_dependency_observations],

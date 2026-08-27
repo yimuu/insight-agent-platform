@@ -72,6 +72,8 @@ pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
 pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
 pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-discovery-worker";
+pub const MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/mcp-subscription-worker";
 pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
@@ -540,6 +542,7 @@ pub enum EgressCallerRole {
     CapabilityWorker,
     ContextWorker,
     McpDiscoveryWorker,
+    McpSubscriptionWorker,
     McpHost,
 }
 
@@ -550,6 +553,7 @@ impl EgressCallerRole {
             CAPABILITY_WORKER_WORKLOAD_IDENTITY => Some(Self::CapabilityWorker),
             CONTEXT_WORKER_WORKLOAD_IDENTITY => Some(Self::ContextWorker),
             MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY => Some(Self::McpDiscoveryWorker),
+            MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY => Some(Self::McpSubscriptionWorker),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
             _ => None,
         }
@@ -2078,7 +2082,7 @@ where
         &self,
         request: Request<tonic::Streaming<ClosedEgressEnvelope>>,
     ) -> Result<Response<Self::StreamMcpStreamableHttpSubscriptionStream>, Status> {
-        require_role(&request, EgressCallerRole::McpHost)?;
+        require_role(&request, EgressCallerRole::McpSubscriptionWorker)?;
         let trace = trace_context(&request)?;
         let connector = self
             .mcp_streamable_http_subscription
@@ -3231,6 +3235,8 @@ mod tests {
         mcp_key_pem: String,
         discovery_certificate_pem: String,
         discovery_key_pem: String,
+        subscription_certificate_pem: String,
+        subscription_key_pem: String,
         context_certificate_pem: String,
         context_key_pem: String,
         unknown_certificate_pem: String,
@@ -3271,6 +3277,8 @@ mod tests {
         let (mcp_certificate_pem, mcp_key_pem) = client(MCP_HOST_WORKLOAD_IDENTITY);
         let (discovery_certificate_pem, discovery_key_pem) =
             client(MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY);
+        let (subscription_certificate_pem, subscription_key_pem) =
+            client(MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY);
         let (context_certificate_pem, context_key_pem) = client(CONTEXT_WORKER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
@@ -3286,6 +3294,8 @@ mod tests {
             mcp_key_pem,
             discovery_certificate_pem,
             discovery_key_pem,
+            subscription_certificate_pem,
+            subscription_key_pem,
             context_certificate_pem,
             context_key_pem,
             unknown_certificate_pem,
@@ -3644,11 +3654,28 @@ mod tests {
         );
         assert_eq!(
             mcp.stream_mcp_streamable_http_subscription(traced_request(stream::iter(vec![
-                subscription_envelope,
+                subscription_envelope.clone(),
             ])))
             .await
             .unwrap_err()
             .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut subscription = connect(
+            address,
+            &fixture,
+            &fixture.subscription_certificate_pem,
+            &fixture.subscription_key_pem,
+        )
+        .await;
+        assert_eq!(
+            subscription
+                .stream_mcp_streamable_http_subscription(traced_request(stream::iter(vec![
+                    subscription_envelope,
+                ])))
+                .await
+                .unwrap_err()
+                .code(),
             tonic::Code::Unavailable
         );
 

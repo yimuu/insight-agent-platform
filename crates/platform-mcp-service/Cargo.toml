@@ -18,6 +18,10 @@ path = "src/resource_main.rs"
 name = "platform-mcp-discovery-worker"
 path = "src/discovery_main.rs"
 
+[[bin]]
+name = "platform-mcp-subscription-worker"
+path = "src/subscription_main.rs"
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true

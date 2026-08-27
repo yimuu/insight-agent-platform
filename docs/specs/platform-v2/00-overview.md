@@ -520,6 +520,13 @@ physical attempt digest排除可变expected version。恢复循环依据typed at
 不足一个backoff时等待数据库时间推进后再timeout；进程取消使用bounded drain。driver tests 2/2与service all-target strict Clippy通过；尚未接入
 production binary和真实Egress discovery/Artifact端口，因此不新增fresh PostgreSQL L2或process/protocol L3证据。
 
+r354在r347 discovery pool之后继续补齐logical subscription production pool。独立Worker只领取`McpSubscription`，并把global expired
+lease/session recovery、periodic reconcile、真实Egress stream、notification digest ingress及Context durable invalidation组合到同一受监督process；
+普通MCP Host不再获准调用subscription stream。独立SPIFFE/数据库凭据/NetworkPolicy、permit/queue/dependency metrics、ServiceMonitor与两条
+backlog/recovery告警均已接线。当前15个ComponentRole映射为21个隔离workload pool，17个pool具备动态capacity；r289的19-pool和后续
+13/19、15/19数字是当时历史证据。仓库内L1门禁通过，但无fresh PostgreSQL、真实外部SSE或logical subscription进程kill-window，L2/L3及
+L4～L6仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

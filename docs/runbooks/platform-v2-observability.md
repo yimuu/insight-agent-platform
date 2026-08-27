@@ -137,6 +137,20 @@ and subscription work must preserve their frozen request/execution identity; nev
 I/O or clear leases manually. Let the Context owner transaction choose safe retry, recovery or
 terminal settlement.
 
+## InsightPlatformMcpSubscriptionDurableJobLagHigh
+
+Compare the exact logical-subscription due count and age with the worker's subscription permit,
+PostgreSQL health and Egress dependency outcomes. Check whether recovery or periodic reconcile is
+repeatedly making the Job ready without a successful claim. Do not let the ordinary MCP Host claim
+this lane or edit JobKind/state; restore the dedicated worker path or use qualified GitOps scaling.
+
+## InsightPlatformMcpSubscriptionExpiredLeaseRecoveryLagHigh
+
+Check subscription-worker restarts, database time, heartbeat/fence failures and Egress stream
+termination. Preserve the durable session generation, notification event generation and exact Job
+lease. Never clear the lease or activate an uncommitted stream manually; the bounded recovery scan
+must rebuild the session and require a full Context reconcile through owner transactions.
+
 ## InsightPlatformDurableObservationFailureRatioHigh
 
 Confirm the affected fixed `component_role`, then correlate PostgreSQL transport health and pool

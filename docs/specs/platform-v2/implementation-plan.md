@@ -865,6 +865,17 @@
 > 上限，数据库不可用走bounded backoff，其他authority错误使进程fail closed。MCP service 5/5、全部binary target tests及strict Clippy、format/
 > diff门禁通过。本批仍未接production binary/Helm，且无fresh PostgreSQL global scanner竞争，因此只关闭driver critical-control L1组合。
 
+> 2026-08-27 implementation evidence：r354把logical MCP subscription接入独立production workload。新增
+> `platform-mcp-subscription-worker`组合exact claim/recovery/reconcile driver、PostgreSQL resolver/owner、真实Egress subscription stream、
+> bounded notification parser/rate limiter/digest-only commit及Context durable invalidation target；进程监督driver、PostgreSQL health、exact
+> `McpSubscription` queue sampler与observability HTTP，导出`subscription_jobs`实际permit。Egress新增唯一subscription-worker SPIFFE role，
+> `stream_mcp_streamable_http_subscription`不再接受普通MCP Host，真实loopback mTLS证明confused deputy拒绝。Docker/Helm加入独立
+> ServiceAccount、Deployment、Service、PDB/HPA/ServiceMonitor、数据库凭据、TLS与仅Egress/PostgreSQL/DNS的NetworkPolicy；Security/Egress
+> caller allowlist、两条symptom-first backlog/recovery alert和runbook同步。当前15-role拓扑为21个隔离workload pool，动态capacity coverage为
+> 17/21；历史19-pool记录仍表示当时证据。MCP service全target、Egress RPC 6/6（真实mTLS需沙箱外loopback）、双crate strict Clippy、MCP/
+> observability/redaction/Helm/format/diff门禁通过。本轮无fresh PostgreSQL、真实外部SSE或进程kill-window，因此只关闭production composition
+> L1，不新增logical subscription L2/L3或L4～L6证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

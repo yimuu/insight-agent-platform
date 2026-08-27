@@ -100,3 +100,30 @@ discoveryPool:
   artifactNamespace: platform-artifacts
   artifactPodSelector: {app.kubernetes.io/component: artifact-data-worker}
   artifactPort: 8443
+subscriptionPool:
+  enabled: true
+  replicas: 2
+  observability: {port: 9390}
+  config:
+    existingConfigMap: insight-platform-mcp-subscription-worker-candidate
+    fileKey: mcp-subscription-worker.json
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  database:
+    existingSecret: insight-platform-mcp-subscription-worker-database
+    urlKey: database-url
+  clientTls:
+    existingSecret: insight-platform-mcp-subscription-worker-client-tls
+    keys: {certificate: client.pem, privateKey: client-key.pem}
+  egressTls:
+    existingSecret: insight-platform-mcp-subscription-worker-egress-ca
+    caKey: ca.pem
+  resources:
+    requests: {cpu: 250m, memory: 256Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "2", memory: 1Gi, ephemeral-storage: 1Gi}
+  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 16
+    targetCPUUtilizationPercentage: 70
+  postgresCidrs: [10.10.0.0/24]

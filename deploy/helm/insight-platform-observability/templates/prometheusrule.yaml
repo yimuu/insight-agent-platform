@@ -165,6 +165,22 @@ spec:
             summary: Expired Context leases remain unrecovered
             description: Expired Context Job leases have exceeded the bounded recovery-lag threshold.
             runbook_url: {{ printf "%s#insightplatformcontextexpiredleaserecoverylaghigh" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformMcpSubscriptionDurableJobLagHigh
+          expr: max by (component_role) (insight_platform_durable_job_lag_seconds{component_role="mcp-subscription-worker",queue="due"}) > {{ .Values.alerts.maximumDueJobLagSeconds }} and max by (component_role) (insight_platform_durable_jobs{component_role="mcp-subscription-worker",queue="due"}) > 0
+          for: {{ .Values.alerts.durableLagFor }}
+          labels: {severity: warning, owner: platform-runtime}
+          annotations:
+            summary: Durable MCP subscription work remains due
+            description: Due logical MCP subscription Jobs have exceeded the bounded scheduling-lag threshold.
+            runbook_url: {{ printf "%s#insightplatformmcpsubscriptiondurablejoblaghigh" .Values.alerts.runbookBaseUrl | quote }}
+        - alert: InsightPlatformMcpSubscriptionExpiredLeaseRecoveryLagHigh
+          expr: max by (component_role) (insight_platform_durable_job_lag_seconds{component_role="mcp-subscription-worker",queue="expired_lease"}) > {{ .Values.alerts.maximumExpiredLeaseLagSeconds }} and max by (component_role) (insight_platform_durable_jobs{component_role="mcp-subscription-worker",queue="expired_lease"}) > 0
+          for: {{ .Values.alerts.durableLagFor }}
+          labels: {severity: critical, owner: platform-runtime}
+          annotations:
+            summary: Expired MCP subscription leases remain unrecovered
+            description: Expired logical MCP subscription Job leases have exceeded the bounded recovery-lag threshold.
+            runbook_url: {{ printf "%s#insightplatformmcpsubscriptionexpiredleaserecoverylaghigh" .Values.alerts.runbookBaseUrl | quote }}
         - alert: InsightPlatformDurableObservationFailureRatioHigh
           expr: (sum by (component_role) (increase(insight_platform_durable_observations_total{outcome="failure"}[{{ .Values.alerts.evaluationWindow }}])) / clamp_min(sum by (component_role) (increase(insight_platform_durable_observations_total[{{ .Values.alerts.evaluationWindow }}])), 1)) > {{ .Values.alerts.maximumDurableObservationFailureRatio }} and sum by (component_role) (increase(insight_platform_durable_observations_total[{{ .Values.alerts.evaluationWindow }}])) >= {{ .Values.alerts.minimumDurableObservations }}
           for: {{ .Values.alerts.dependencyFailureFor }}

@@ -79,6 +79,8 @@ networkPolicy:
       podSelector: {insight.platform/workload-role: mcp-host}
     - namespaceSelector: {insight.platform/workload-namespace: mcp-host}
       podSelector: {insight.platform/workload-role: mcp-discovery-worker}
+    - namespaceSelector: {insight.platform/workload-namespace: mcp-host}
+      podSelector: {insight.platform/workload-role: mcp-subscription-worker}
     - namespaceSelector: {insight.platform/workload-namespace: callback-api}
       podSelector: {insight.platform/workload-role: mcp-callback-api}
     - namespaceSelector: {insight.platform/workload-namespace: mcp-cleanup-worker}
