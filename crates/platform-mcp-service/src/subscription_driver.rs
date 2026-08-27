@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ResourceId, ResourceKind, Sha256Digest, WorkClass,
+    canonical_digest, ResourceId, ResourceKind, Sha256Digest, TraceFlags, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_mcp_host::{
@@ -15,6 +15,7 @@ use insight_platform_postgres::repository::{
     ClaimJobs, HeartbeatJob, JobFence as RepositoryJobFence, JobRecord, PgRepository,
     RepositoryError,
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use serde_json::{json, Value};
 use std::{error::Error, fmt, sync::Arc, time::Duration};
 use tokio::{
@@ -223,12 +224,14 @@ impl McpSubscriptionDriver {
         }
         let count = claims.len();
         for (claim, permit) in claims.into_iter().zip(reservations.drain(..)) {
+            let trace = RpcTraceContext::start(claim.trace, TraceFlags::NotSampled)
+                .map_err(|_| McpSubscriptionDriverError::CorruptClaim)?;
             let repository = Arc::clone(&self.repository);
             let worker = Arc::clone(&self.worker);
             let config = self.config;
             active.spawn(async move {
                 let _permit = permit;
-                match execute_claim(repository, worker, config, claim).await {
+                match scope_trace(trace, execute_claim(repository, worker, config, claim)).await {
                     Ok(()) => true,
                     Err(failure) => {
                         eprintln!(

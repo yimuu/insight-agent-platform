@@ -884,6 +884,16 @@
 > fresh PostgreSQL 16的phase3 Invocation与phase4 Subscription目标测试、workspace all-target、workspace strict Clippy、format/diff均通过；
 > Native/Remote Capability进程恢复仍因未配置binary而明确跳过，真实外部SSE、production kill-window及L4～L6仍Pending。
 
+> 2026-08-27 implementation evidence：r356补齐logical subscription Worker的production process L3切片。fresh PostgreSQL 16 fixture
+> 启动真实`platform-mcp-subscription-worker`，通过独立subscription-worker证书和mTLS Egress stream到达测试进程内的typed connector；首个
+> Worker在远端establish已经开始、Ready尚未提交时被强杀，fixture仅将其exact running Job租约推进为过期，再启动第二个production Worker。
+> 新owner通过global recovery重置disconnected session、领取下一physical attempt并恢复到`active/ready`，两次远端establish最终只新增一个
+> Ready Event。该门禁同时发现并修复discovery/subscription durable Driver未把Job trace安装进RPC task-local scope的问题；缺失的
+> `traceparent`此前会使Egress client interceptor在dispatch前失败。Worker日志现在只附带contract定义的safe transport code，不暴露endpoint、
+> identity、payload或Secret。fixture为原有四次L2 attempt与两次process recovery attempt显式冻结六次预算；exhausted claim仍fail closed，不被
+> 当作竞争吞掉。MCP service all-target、MCP Host 62/62及该fresh PostgreSQL L3目标测试通过。Egress后的connector仍是类型化测试实现，并非真实
+> 外部Streamable HTTP/SSE server，因此本批只关闭logical subscription Worker process/RPC/crash recovery L3，不声明外部SSE或L4～L6完成。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

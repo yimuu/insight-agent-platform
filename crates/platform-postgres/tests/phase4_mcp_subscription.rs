@@ -45,7 +45,9 @@ use insight_platform_egress::{
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
-    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, MCP_HOST_WORKLOAD_IDENTITY,
+    EgressCallerWorkloadIdentity, EgressInternalRpcLimits, EgressMcpSubscriptionBridge,
+    EgressMcpSubscriptionBridgeLimits, MCP_HOST_WORKLOAD_IDENTITY,
+    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
 use insight_platform_mcp_host::{
@@ -56,12 +58,13 @@ use insight_platform_mcp_host::{
     McpDiscoveryTransportEvidence, McpExecutionContractQuery, McpNotificationApplyDisposition,
     McpNotificationAudit, McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
     McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
-    McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
-    McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
-    McpSubscriptionWorkerAudit, McpTransportFailure, NewMcpAuthorizationBinding,
-    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, RecoverDueMcpSubscription,
-    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
-    WakeMcpSubscriptionReconcile,
+    McpStreamableHttpSubscriptionConnector, McpStreamableHttpSubscriptionRequest,
+    McpSubscriptionActivation, McpSubscriptionContractQuery, McpSubscriptionExecutionResolver,
+    McpSubscriptionReconcileScan, McpSubscriptionRecord, McpSubscriptionRecoveryCause,
+    McpSubscriptionRecoveryScan, McpSubscriptionWorkerAudit, McpTransportFailure,
+    NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord,
+    PreparedMcpSubscription, RecoverDueMcpSubscription, ReportMcpSubscriptionTransportTermination,
+    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -386,6 +389,49 @@ impl McpResourceRefreshConnector for ProcessRefreshConnector {
     }
 }
 
+struct ProcessSubscriptionConnector {
+    calls: AtomicUsize,
+    first_started: Notify,
+}
+
+struct ProcessSubscriptionActivation;
+
+#[async_trait]
+impl McpSubscriptionActivation for ProcessSubscriptionActivation {
+    async fn activate(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl McpStreamableHttpSubscriptionConnector for ProcessSubscriptionConnector {
+    async fn establish_subscription(
+        &self,
+        request: McpStreamableHttpSubscriptionRequest,
+    ) -> Result<PreparedMcpSubscription, McpTransportFailure> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_started.notify_one();
+            tokio::time::sleep(StdDuration::from_secs(30)).await;
+        }
+        Ok(PreparedMcpSubscription::new(
+            insight_platform_mcp_host::EstablishedMcpSubscription {
+                transport_kind: insight_platform_contracts::McpTransportKind::StreamableHttp,
+                binding_digest: request.binding_digest,
+                encrypted_opaque_session: EncryptedMcpState {
+                    scheme: "aes-256-gcm".to_owned(),
+                    ciphertext: vec![7; 32],
+                    key_id: "process-subscription-key".to_owned(),
+                    key_reference_digest: named_digest("process-subscription-key-reference"),
+                    plaintext_digest: named_digest("process-subscription-state"),
+                },
+                established_at: Utc::now(),
+                expires_at: request.deadline,
+                evidence_digest: named_digest(&format!("process-subscription-established-{call}")),
+            },
+            Box::new(ProcessSubscriptionActivation),
+        ))
+    }
+}
+
 const PROTOCOL_EGRESS_CONFIG_ENV: &str = "PLATFORM_SUBSCRIPTION_EGRESS_FIXTURE_CONFIG";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -700,6 +746,8 @@ struct ProcessTlsFixture {
     resource_host_client_key: String,
     context_worker_client_cert: String,
     context_worker_client_key: String,
+    subscription_worker_client_cert: String,
+    subscription_worker_client_key: String,
     mcp_server_cert: String,
     mcp_server_key: String,
 }
@@ -742,6 +790,14 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         )],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
+    let (subscription_worker_client_cert, subscription_worker_client_key) = issue(
+        vec![SanType::URI(
+            MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY
+                .try_into()
+                .unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
     let (mcp_server_cert, mcp_server_key) = issue(
         vec![SanType::DnsName("mcp.example.test".try_into().unwrap())],
         ExtendedKeyUsagePurpose::ServerAuth,
@@ -756,6 +812,8 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         resource_host_client_key,
         context_worker_client_cert,
         context_worker_client_key,
+        subscription_worker_client_cert,
+        subscription_worker_client_key,
         mcp_server_cert,
         mcp_server_key,
     }
@@ -1978,7 +2036,9 @@ fn create_command(fixture: &Fixture, now: DateTime<Utc>) -> CreateMcpResourceSub
         },
         context_deployment: fixture.context_deployment.clone(),
         resource_uri: "mcp://catalog.example.test/items/42".to_owned(),
-        attempt_limit: 4,
+        // The fixture proves four in-process attempts before exercising a production Worker
+        // crash/recovery pair, which requires two further physical attempts.
+        attempt_limit: 6,
         deadline: fixture.deadline,
     };
     command.audit.request_digest = command.request_digest().unwrap();
@@ -2259,6 +2319,8 @@ struct ProcessFixtureFiles {
     resource_host_client_key: PathBuf,
     context_worker_client_cert: PathBuf,
     context_worker_client_key: PathBuf,
+    subscription_worker_client_cert: PathBuf,
+    subscription_worker_client_key: PathBuf,
     mcp_server_cert: PathBuf,
     mcp_server_key: PathBuf,
 }
@@ -2279,6 +2341,8 @@ impl ProcessFixtureFiles {
             resource_host_client_key: path("resource-host-client-key.pem"),
             context_worker_client_cert: path("context-worker-client.pem"),
             context_worker_client_key: path("context-worker-client-key.pem"),
+            subscription_worker_client_cert: path("subscription-worker-client.pem"),
+            subscription_worker_client_key: path("subscription-worker-client-key.pem"),
             mcp_server_cert: path("mcp-server.pem"),
             mcp_server_key: path("mcp-server-key.pem"),
         };
@@ -2307,6 +2371,14 @@ impl ProcessFixtureFiles {
             (
                 &files.context_worker_client_key,
                 &tls.context_worker_client_key,
+            ),
+            (
+                &files.subscription_worker_client_cert,
+                &tls.subscription_worker_client_cert,
+            ),
+            (
+                &files.subscription_worker_client_key,
+                &tls.subscription_worker_client_key,
             ),
             (&files.mcp_server_cert, &tls.mcp_server_cert),
             (&files.mcp_server_key, &tls.mcp_server_key),
@@ -2402,6 +2474,43 @@ fn spawn_subscription_context_worker(input: ContextWorkerSpawn<'_>) -> Child {
         .env(
             "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_KEY_PATH",
             &input.files.context_worker_client_key,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+struct SubscriptionWorkerSpawn<'a> {
+    binary: &'a str,
+    database_url: &'a str,
+    files: &'a ProcessFixtureFiles,
+    config_path: &'a PathBuf,
+    config_digest: &'a str,
+}
+
+fn spawn_mcp_subscription_worker(input: SubscriptionWorkerSpawn<'_>) -> Child {
+    std::process::Command::new(input.binary)
+        .env("PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG_DIGEST",
+            input.config_digest,
+        )
+        .env(
+            "PLATFORM_MCP_SUBSCRIPTION_WORKER_DATABASE_URL",
+            input.database_url,
+        )
+        .env(
+            "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_CERT_PATH",
+            &input.files.subscription_worker_client_cert,
+        )
+        .env(
+            "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_KEY_PATH",
+            &input.files.subscription_worker_client_key,
+        )
+        .env(
+            "PLATFORM_MCP_SUBSCRIPTION_WORKER_EGRESS_CA_PATH",
+            &input.files.ca,
         )
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2721,6 +2830,194 @@ async fn run_subscription_process_l3(
     host.kill().unwrap();
     host.wait().unwrap();
     second_host_stderr.await.unwrap();
+    let _ = egress_shutdown.send(());
+    egress_server.await.unwrap().unwrap();
+}
+
+async fn wait_for_subscription_session_state(
+    pool: &PgPool,
+    fixture: &Fixture,
+    expected_subscription_state: &str,
+    expected_session_state: &str,
+    timeout: StdDuration,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let row = sqlx::query(
+            r#"
+            SELECT state, payload -> 'session' ->> 'state' AS session_state
+            FROM insight_platform.invocations
+            WHERE tenant_id = $1 AND invocation_id = $2
+              AND invocation_kind = 'mcp_subscription'
+            "#,
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(fixture.subscription_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let subscription_state = row.try_get::<String, _>("state").unwrap();
+        let session_state = row.try_get::<String, _>("session_state").unwrap();
+        if subscription_state == expected_subscription_state
+            && session_state == expected_session_state
+        {
+            return;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "subscription did not reach {expected_subscription_state}/{expected_session_state}; current={subscription_state}/{session_state}"
+        );
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+}
+
+async fn run_logical_subscription_worker_process_l3(
+    pool: &PgPool,
+    fixture: &Fixture,
+    database_url: &str,
+    subscription_worker_binary: &str,
+) {
+    let tls = process_tls_fixture();
+    let files = ProcessFixtureFiles::new(&tls);
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let egress_address = incoming.local_addr().unwrap();
+    let connector = Arc::new(ProcessSubscriptionConnector {
+        calls: AtomicUsize::new(0),
+        first_started: Notify::new(),
+    });
+    let limits = EgressInternalRpcLimits::new(65_536, 1_048_576).unwrap();
+    let bridge = Arc::new(
+        EgressMcpSubscriptionBridge::new(
+            limits,
+            EgressMcpSubscriptionBridgeLimits {
+                maximum_pending: 4,
+                maximum_active: 4,
+                event_buffer_capacity: 8,
+            },
+        )
+        .unwrap(),
+    );
+    let service = EgressBrokerServiceServer::new(
+        EgressBrokerGrpcService::new(
+            Arc::new(EmptyModel),
+            Arc::new(EmptyHttp),
+            Arc::new(EmptyGrpc),
+            limits,
+        )
+        .with_mcp_streamable_http_subscription(connector.clone(), bridge),
+    );
+    let service =
+        tonic::service::interceptor::InterceptedService::new(service, EgressCallerWorkloadIdentity);
+    let (egress_shutdown, egress_shutdown_rx) = tokio::sync::oneshot::channel();
+    let egress_server = tokio::spawn(
+        Server::builder()
+            .tls_config(
+                ServerTlsConfig::new()
+                    .identity(Identity::from_pem(
+                        &tls.egress_server_cert,
+                        &tls.egress_server_key,
+                    ))
+                    .client_ca_root(Certificate::from_pem(tls.ca.clone())),
+            )
+            .unwrap()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = egress_shutdown_rx.await;
+            }),
+    );
+    let config = serde_json::json!({
+        "schema_version": 1,
+        "observability_listen_address": available_address().to_string(),
+        "database_max_connections": 8,
+        "database_acquire_timeout_milliseconds": 5000,
+        "claim_batch_size": 1,
+        "recovery_batch_size": 4,
+        "reconcile_batch_size": 4,
+        "reconcile_minimum_idle_milliseconds": 60000,
+        "maximum_concurrency": 1,
+        "lease_milliseconds": 30000,
+        "scan_interval_milliseconds": 500,
+        "failure_backoff_milliseconds": 20,
+        "heartbeat_interval_milliseconds": 5000,
+        "receipt_ttl_milliseconds": 60000,
+        "drain_grace_milliseconds": 1000,
+        "notification": {
+            "maximum_in_flight": 4,
+            "maximum_wire_bytes": 65536,
+            "maximum_tracked_bindings": 64,
+            "maximum_events_per_window": 64,
+            "window_milliseconds": 60000
+        },
+        "egress": {
+            "endpoint": format!("https://{egress_address}/"),
+            "tls_server_name": "egress.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_metadata_bytes": 65536,
+            "maximum_rpc_payload_bytes": 1048576
+        }
+    });
+    let (config_path, config_digest) = files.write_config("subscription-worker", &config);
+    let spawn_worker = || {
+        spawn_mcp_subscription_worker(SubscriptionWorkerSpawn {
+            binary: subscription_worker_binary,
+            database_url,
+            files: &files,
+            config_path: &config_path,
+            config_digest: &config_digest,
+        })
+    };
+
+    let mut first_worker = spawn_worker();
+    let (startup, first_stderr) = monitor_process_stderr(first_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-mcp-subscription-worker started"),
+        "{startup}"
+    );
+    tokio::time::timeout(
+        StdDuration::from_secs(10),
+        connector.first_started.notified(),
+    )
+    .await
+    .unwrap();
+    first_worker.kill().unwrap();
+    first_worker.wait().unwrap();
+    first_stderr.await.unwrap();
+    expire_running_context_job(pool, fixture, &fixture.job_id).await;
+
+    let mut second_worker = spawn_worker();
+    let (startup, second_stderr) =
+        monitor_process_stderr(second_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-mcp-subscription-worker started"),
+        "{startup}"
+    );
+    wait_for_subscription_session_state(
+        pool,
+        fixture,
+        "active",
+        "ready",
+        StdDuration::from_secs(15),
+    )
+    .await;
+    assert_eq!(connector.calls.load(Ordering::SeqCst), 2);
+    let ready_events: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM insight_platform.events
+        WHERE tenant_id = $1 AND aggregate_id = $2
+          AND event_type = 'mcp.subscription_session_changed'
+          AND payload ->> 'session_state' = 'ready'
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.subscription_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(ready_events, 2);
+    second_worker.kill().unwrap();
+    second_worker.wait().unwrap();
+    second_stderr.await.unwrap();
     let _ = egress_shutdown.send(());
     egress_server.await.unwrap().unwrap();
 }
@@ -3996,4 +4293,15 @@ async fn mcp_subscription_fixture() {
     assert!(!durable_projection.contains("opaque-session-key-canary"));
     assert!(!durable_projection.contains("opaque-session-ciphertext-canary"));
     assert!(!durable_projection.contains("mcp://catalog.example.test/items/42"));
+    if let Ok(subscription_worker_binary) = std::env::var("PLATFORM_MCP_SUBSCRIPTION_WORKER_BIN") {
+        run_logical_subscription_worker_process_l3(
+            &pool,
+            &fixture,
+            &database_url,
+            &subscription_worker_binary,
+        )
+        .await;
+    } else {
+        eprintln!("subscription Worker binary is unset; logical subscription process L3 skipped");
+    }
 }

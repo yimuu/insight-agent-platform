@@ -35,6 +35,7 @@ insight-platform-jobs.workspace = true
 insight-platform-mcp-rpc.workspace = true
 insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
+insight-platform-rpc-trace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -50,5 +51,4 @@ chrono.workspace = true
 futures.workspace = true
 insight-platform-capability-adapters.workspace = true
 insight-platform-model-adapters.workspace = true
-insight-platform-rpc-trace.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }

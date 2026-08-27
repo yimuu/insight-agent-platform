@@ -534,6 +534,15 @@ PostgreSQL INSERT列映射错误也在同一真实事务测试中修复。phase3
 format/diff通过；测试输出明确标记未配置的Resource Refresh、Native/Remote Capability process fixture为跳过，因此本批不声明logical
 subscription L3、真实外部SSE或L4～L6完成。
 
+r356在fresh PostgreSQL 16上补齐logical subscription production Worker的process L3切片：真实
+`platform-mcp-subscription-worker`以独立SPIFFE client certificate通过mTLS Egress subscription stream调用测试进程内typed connector；第一
+进程在远端establish开始、Ready提交前被强杀，旧running Job租约过期后由第二进程经global recovery接管，重建disconnected session并在下一
+physical attempt唯一恢复到`active/ready`，Ready Event没有重复。该门禁发现production discovery/subscription Driver没有把durable Job trace
+安装到RPC task-local scope，导致必需`traceparent`在client interceptor处缺失；两个Driver现均以exact Job trace包围执行future，传输失败日志只
+附带安全错误码。fixture明确把原有四次L2与两次process recovery attempt冻结为六次预算，attempt exhausted继续fail closed。MCP service
+all-target、MCP Host 62/62与fresh PostgreSQL目标测试通过。Egress后的connector仍是类型化测试实现，不是真实外部Streamable HTTP/SSE server，
+所以仅关闭Worker process/RPC/crash-recovery L3切片，外部SSE及L4～L6仍Pending。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

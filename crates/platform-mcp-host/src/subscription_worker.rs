@@ -1129,7 +1129,11 @@ impl fmt::Display for McpSubscriptionWorkerError {
                 formatter.write_str("MCP subscription lease coordination failed")
             }
             Self::Contract(failure) => write!(formatter, "{failure}"),
-            Self::Transport(_) => formatter.write_str("MCP subscription transport failed"),
+            Self::Transport(failure) => write!(
+                formatter,
+                "MCP subscription transport failed: {}",
+                transport_failure_code(failure)
+            ),
             Self::Invalidation(failure) => write!(formatter, "{failure}"),
             Self::Persistence(failure) => write!(formatter, "{failure}"),
         }
@@ -1137,6 +1141,16 @@ impl fmt::Display for McpSubscriptionWorkerError {
 }
 
 impl Error for McpSubscriptionWorkerError {}
+
+fn transport_failure_code(failure: &McpTransportFailure) -> &str {
+    match failure {
+        McpTransportFailure::RejectedBeforeDispatch(failure)
+        | McpTransportFailure::RetryableBeforeDispatch(failure)
+        | McpTransportFailure::Permanent(failure)
+        | McpTransportFailure::PostDispatchUncertain { failure, .. } => &failure.safe_code,
+        McpTransportFailure::ReauthorizationRequired { .. } => "mcp_reauthorization_required",
+    }
+}
 
 /// Coordinates the only long remote-I/O window with the durable Job lease owner. Implementations
 /// must serialize the enter/exit handshake with heartbeat writes and return the latest exact
@@ -1588,6 +1602,21 @@ fn retryable_failure(code: &str) -> McpTransportFailure {
 #[cfg(test)]
 mod lease_tests {
     use super::*;
+
+    #[test]
+    fn transport_failure_display_exposes_only_the_safe_code() {
+        let error = McpSubscriptionWorkerError::Transport(
+            McpTransportFailure::RejectedBeforeDispatch(SafeMcpFailure {
+                safe_code: "mcp_fixture_rejected".to_owned(),
+                safe_message: "transport-message-canary".to_owned(),
+                evidence_digest: static_digest("transport-evidence-canary"),
+            }),
+        );
+        assert_eq!(
+            error.to_string(),
+            "MCP subscription transport failed: mcp_fixture_rejected"
+        );
+    }
 
     fn fence(version: u64, token: char) -> JobFence {
         JobFence {
