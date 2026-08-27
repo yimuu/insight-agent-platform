@@ -834,6 +834,12 @@
 > all-target、workspace strict Clippy、Sandbox deployment与observability门禁通过。本轮无fresh PostgreSQL、真实WASI/gVisor Executor kill-window或runsc cluster，因此只关闭
 > Sandbox-backed Capability production composition/L1，L2/L3及Phase 2/3 exit gate仍Pending。
 
+> 2026-08-27 implementation evidence：r349为logical MCP subscription补齐独立typed claim authority；它只在同一
+> `FOR UPDATE SKIP LOCKED` lease事务中领取`McpSubscription + Mcp`，不会暂领同work class、同`mcp_operation` owner的
+> `McpDiscovery` Job，并在任何数据库I/O前拒绝错误WorkClass。PostgreSQL lib 15/15、strict Clippy、baseline静态门禁与format/diff
+> 门禁通过。本批没有fresh PostgreSQL，也尚未接入subscription claim/heartbeat/execute/recovery production driver，因此只关闭该driver的
+> claim前置L1缺口，不新增L2/L3或L4～L6证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

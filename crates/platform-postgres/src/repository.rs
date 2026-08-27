@@ -4506,6 +4506,22 @@ impl PgRepository {
             .await
     }
 
+    /// Claims only durable logical MCP subscription work. Discovery Jobs share the MCP work
+    /// class and owner kind, so the Job-kind predicate must participate in the locking query.
+    pub async fn claim_mcp_subscription_jobs(
+        &self,
+        command: ClaimJobs,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        if command.work_class != WorkClass::Mcp.as_str() {
+            return Err(RepositoryError::InvalidInput(
+                "MCP subscription claim requires the MCP work class".to_owned(),
+            ));
+        }
+        self.claim_jobs_filtered(command, Some(&["mcp_subscription"]))
+            .await
+    }
+
     async fn claim_jobs_filtered(
         &self,
         command: ClaimJobs,
@@ -35942,6 +35958,29 @@ mod tests {
             ArtifactWorkerRole::Maintenance.job_kinds(),
             &["artifact_delete", "artifact_blob_cleanup"]
         );
+    }
+
+    #[tokio::test]
+    async fn dedicated_mcp_claims_reject_the_wrong_work_class_before_database_io() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let repository = PgRepository::new(pool);
+        let command = ClaimJobs {
+            work_class: WorkClass::Context.as_str().to_owned(),
+            worker_id: "wrk_0198f1c3-8f49-7c3e-b1f3-773c28367b94".parse().unwrap(),
+            limit: 1,
+            lease_milliseconds: 1_000,
+            lease_token_digests: vec![format!("sha256:{}", "b".repeat(64)).parse().unwrap()],
+        };
+        assert!(matches!(
+            repository.claim_mcp_discovery_jobs(command.clone()).await,
+            Err(RepositoryError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            repository.claim_mcp_subscription_jobs(command).await,
+            Err(RepositoryError::InvalidInput(_))
+        ));
     }
 
     #[test]
