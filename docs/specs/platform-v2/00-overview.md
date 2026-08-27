@@ -640,6 +640,21 @@ r371修复GitHub CI实时RustSec数据库发现的依赖漏洞，不采用adviso
 10/10、workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny及55-package/583-dependency boundary本地门禁
 通过；该批不新增backend、权限或L4～L6证据。
 
+r372～r381继续修复完整GitHub CI首次串行执行暴露的资格夹具与持久化边界。r372让隔离Model conformance数据库的`createdb`显式使用
+`PGPASSWORD`、`--no-password`和`postgres` maintenance DB，消除非交互runner等待密码；r373把实时Job queue age断言改为数量精确且age
+单调，避免两次`clock_timestamp()`之间的合法增长被误判。r374把Phase 2 Task恢复夹具绑定到其创建的exact root orchestration Job，所有claim
+均断言同一Job ID，不再从同tenant共享队列任取工作。r375在Child Run admission前把deadline规范化为PostgreSQL微秒精度，并以显式纳秒输入
+证明JSON closure、typed column与回读projection保持一致。r376把首发`SqlCatalog` Context backend路由到隔离的
+`ContextQueryNative` durable Worker lane；fresh PostgreSQL 16端到端覆盖query claim/fence、Observation提交及Text2SQL只读Capability准入。
+r377又把terminal-only Artifact staging catch-up夹具的101条数据冻结到未来`available_at`，只由显式更晚authority time的drain领取，消除
+production后台pump合法抢先处理部分行的竞态并保持跨两个bounded batch的证明。上述修复强化L2/L3证据的确定性与真实数据库可移植性，
+r378把Capability `InputRequired` deadline也在outcome Receipt/decision之前规范化为PostgreSQL微秒精度，显式纳秒fixture证明Job/Invocation JSON与
+Task typed column回读保持exact binding。r379同样在MCP OAuth start事务的Receipt与Task写入前规范化external-authorization deadline，避免首次提交
+后的replay因`timestamptz`微秒截断误判`not_found`。r380规范化MCP Discovery operation deadline；r381对MCP Resource Subscription先验证
+包含原始deadline的客户端`request_digest`，再在Receipt claim前规范化已验证deadline，使JSON binding与typed列回读一致且不改写外部幂等意图。
+fresh PostgreSQL 16完整OAuth文件8/8、Subscription文件3/3通过；GitHub CI run `33102457010`的Test、文档、Lint/format/strict Clippy、依赖策略
+和TypeScript/Go MCP SDK互操作四个Job全部成功。仓库资格门禁由此闭合；上述修复不产生production-equivalent L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

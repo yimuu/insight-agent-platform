@@ -716,6 +716,17 @@ frame；首发restricted WASI exact runtime升级为`wasmtime 46.0.2`，覆盖�
 workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny与crate-boundary本地通过；该依赖安全修复不改变
 两种首发backend、Sandbox authority或L4～L6状态。
 
+r372～r381使L1～L3 qualification runner与PostgreSQL evidence在真实CI时序下保持fail closed且可重现。隔离Model baseline现在非交互认证；
+实时queue age按数据库时间的单调关系比较；Task恢复只claim fixture自己的exact root Job；Child Run deadline在写入JSON closure与
+`timestamptz`前统一为PostgreSQL微秒精度；`SqlCatalog`则作为首发native Context adapter进入`ContextQueryNative` durable lane。fresh
+PostgreSQL 16精确测试已覆盖Phase 2恢复与Phase 3 SQL Catalog→Observation→Text2SQL read-only admission，目标format/strict Clippy通过。
+terminal-only Artifact staging catch-up也以未来`available_at`隔离production后台pump，确定性证明101行跨两个bounded batch清空。Capability
+input Task与MCP OAuth external-authorization Task的deadline均在Receipt前统一为PostgreSQL微秒，避免typed列与JSON snapshot产生伪binding
+drift或replay `not_found`。MCP Discovery与Resource Subscription的operation deadline也已统一；Subscription在规范化前验证客户端原始
+`request_digest`，随后才claim Receipt，因而外部幂等意图与内部JSON/typed-column权威同时闭合。fresh PG16完整Subscription 3/3及GitHub CI
+run `33102457010`四个Job全部成功。这些结果关闭仓库qualification的确定性缺口与首发Context lane映射；真实multi-node rollout、runsc、
+Prometheus scrape、mixed load、soak、restore与signed promotion仍须L4～L6外部执行。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

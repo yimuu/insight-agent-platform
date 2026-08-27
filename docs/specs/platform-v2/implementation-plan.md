@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-200 Artifact storage authority closure authorized; external L4～L6 pending |
-| 日期 | 2026-08-27 |
+| 状态 | In Progress / repository qualification green; external L4～L6 pending |
+| 日期 | 2026-08-28 |
 | 合同输入 | 00～18、cross-review CR-200、ADR-0001、ADR-0002、AGENTS.md |
 
 > CR-200 implementation order：先把ArtifactIo Policy升级v3并更新registry/fixtures；再把exact write storage binding digest与encryption domain
@@ -56,6 +56,21 @@
 > 13项Wasmtime安全公告（包含aarch64/Winch sandbox escape与跨Engine type index混淆），同步冻结runtime version和全依赖feature baseline，
 > 不增加backend或执行权限。WASI全部10项bounded execution/abort/fuel/import/memory测试、RustSec audit、cargo-deny四类策略及55-package/
 > 583-dependency crate-boundary、workspace all-target/all-feature tests、format与strict Clippy门禁通过；需由新commit的GitHub CI复验。
+
+> 2026-08-28 implementation evidence：r372～r381修复同一完整CI链继续暴露的非交互数据库与时间/队列确定性问题。r372为隔离Model
+> conformance baseline的`createdb`提供显式密码、禁止prompt并固定maintenance DB；r373保留queue数量精确断言，但只要求两次数据库采样间
+> 的live age单调。r374把Task恢复夹具的每次claim固定到其预建exact root Job，排除同tenant其他ready Job；r375把Child Run deadline在
+> admission边界规范化为PostgreSQL微秒，纳秒输入的JSON/typed-column回读不再形成伪CorruptRow。r376按12的首发Text2SQL合同把
+> `SqlCatalog`映射到`ContextQueryNative` durable lane；fresh PostgreSQL 16精确测试已贯通SQL Catalog Context Observation与只读
+> `database.query.readonly` Capability admission。r377让terminal-only staging catch-up的101条fixture只在显式未来authority time到期，
+> production后台pump不再与手工drain竞争，同时继续证明两个bounded batch。r378把Capability `InputRequired` deadline在outcome
+> Receipt/decision前规范化为PostgreSQL微秒，显式纳秒fixture证明Job/Invocation JSON与Task列精确一致。r379把同一规范化边界扩展到MCP
+> OAuth start的external-authorization Task，使首次提交后的Receipt replay不会因`timestamptz`截断误判`not_found`。r380把同一边界扩展到
+> MCP Discovery operation，显式纳秒deadline在JSON admission、Job/Invocation列及Artifact等待payload间保持一致。CI run `33100627292`
+> 越过Discovery后，在Subscription Receipt replay暴露同类`IdempotencyConflict`；r381先按应用/数据库时间验证包含原始deadline的客户端
+> `request_digest`，再在Receipt claim前把已验证deadline规范化，兼顾外部幂等摘要与内部持久化精度。fresh PG16 OAuth 8/8、Subscription 3/3、
+> format及strict Clippy通过；GitHub CI run `33102457010`的workspace all-target/all-feature tests、doc tests、Lint/format/strict Clippy、
+> RustSec/cargo-deny依赖策略及TypeScript/Go MCP SDK互操作全部成功。仓库资格门禁由此闭合，但不推进外部L4～L6。
 
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。

@@ -1,8 +1,8 @@
 # Platform v2 spec00～18 完成度审计
 
-状态：In Progress / repository and production gaps remain
+状态：In Progress / repository qualification green; external production gaps remain
 
-日期：2026-08-27
+日期：2026-08-28
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
@@ -63,6 +63,23 @@ r370的GitHub CI run `33072344788`已通过完整部署门禁链并成功完成M
 `wasmtime 42.0.0`共14项漏洞。r371没有增加ignore：锁定`h2 0.4.16`和覆盖全部已报Wasmtime修复下限的`46.0.2`，同步WASI runtime
 evidence与依赖feature baseline；WASI 10/10、workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny及
 55-package/583-dependency boundary本地通过。该批仍需远端CI复验，且不提升production-equivalent L4～L6状态。
+
+r371之后的完整CI依次暴露并由r372～r381关闭十个仓库资格缺口：隔离Model baseline的非交互`createdb`认证；实时queue age的数据库时间
+单调断言；Task恢复夹具对exact root orchestration Job的确定性claim；Child Run deadline在JSON closure与PostgreSQL `timestamptz`之间的
+微秒精度规范化；以及首发`SqlCatalog`缺少`ContextQueryNative` durable Worker映射。最后一项已在全新PostgreSQL 16 baseline上贯通Context
+claim/fence、Observation提交与Text2SQL只读Capability准入。CI run `33090901418`的MCP、Dependency与Lint Job成功，Test继续揭示
+terminal-only staging夹具与production后台pump的合法竞争：101行中1行被提前处理。r377把这些fixture行冻结到未来`available_at`并只由显式
+更晚authority time的drain领取。下一run `33092861052`的MCP、Dependency与Lint也成功并越过该测试，随后Phase 3 Capability暴露
+`InputRequired`纳秒deadline在Task `timestamptz`回读时被截断。r378在outcome Receipt/decision前规范化该deadline，显式纳秒fresh PG16
+fixture通过。run `33094547518`的MCP、Dependency与Lint成功且越过该Phase 3测试，随后Phase 4 MCP OAuth Receipt replay暴露相同的
+external-authorization deadline精度漂移并返回`mcp_oauth_start_not_found`。r379在OAuth start事务入口、Receipt之前规范化deadline；fresh PG16
+精确回归及完整OAuth文件8/8通过。run `33096691405`越过OAuth后在MCP Discovery operation回读暴露JSON deadline与`timestamptz`精度
+漂移；r380在Discovery admission前规范化deadline，显式纳秒回归和Subscription文件3/3通过。run `33100627292`越过Discovery后又在MCP
+Resource Subscription Receipt replay暴露同类`IdempotencyConflict`；r381先按应用/数据库时间验证包含原始deadline的客户端
+`request_digest`，再在Receipt claim前规范化已验证deadline，使外部幂等摘要不被改写且内部JSON binding/typed列精确一致。fresh PG16
+Subscription文件3/3、format及strict Clippy通过。最终GitHub CI run `33102457010`的workspace all-target/all-feature Test与doc tests、
+Lint/format/strict Clippy、RustSec/cargo-deny依赖策略及TypeScript/Go MCP SDK互操作四个Job全部成功，仓库资格门禁闭合；该结果不改变
+L4～L6外部门禁状态。
 
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
@@ -352,6 +369,11 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    environment repository输入及人工promotion证据。
 
 ### 外部门禁
+
+2026-08-28只读复核仍返回：GitHub Environment `platform-production-candidate`不存在或当前token不可见，candidate workflow没有历史run，
+当前owner可见仓库中没有可识别的GitOps environment repository；本机Kubernetes context为单节点OrbStack，且
+`RuntimeClass/runsc`不存在。缺少exact GitOps repository/commit/path、environment read token和production-equivalent多节点runsc环境时，
+不得伪造candidate输入、以本机Docker替代L4～L6或执行clean cut。
 
 - production-equivalent多节点Kubernetes、独立WASI/gVisor node pool、exact runsc与支持范围内kubectl/server版本；
 - L4 RBAC/mTLS/NetworkPolicy/admission与真实协议/故障矩阵；
