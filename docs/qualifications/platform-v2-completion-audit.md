@@ -11,8 +11,9 @@
 
 00～18均已完成CR-197 cross-review（历史CR-173～196结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
 实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
-Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链及Callback/token exchange多进程L3已闭合，仍缺外部Sandbox/Artifact资格。Phase 4 public API和15-role/21-pool静态部署闭包已完成，
-完整observability及production-equivalent L4～L6仍未交付。
+Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链、Callback/token exchange及production Artifact
+Discovery→S3/KMS→scan→owner finalize多进程L3已闭合，仍缺外部Sandbox资格与Artifact故障/轮换/恢复矩阵。Phase 4 public API和
+15-role/21-pool静态部署闭包已完成，仓库内业务队列与依赖观测闭包也已接线；production-equivalent L4～L6仍未交付。
 
 因此：
 
@@ -36,7 +37,7 @@ Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链及Callback
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、21个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、MCP Tool/Resource/Discovery/Subscription、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部21个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency；真实TCP fixture验证Prometheus text scrape和metric canary为零 | process wiring与component real-socket scrape闭合，不代表Prometheus deployment scrape或完整业务observability |
 | Dashboard/alerts | 独立chart提供role-filtered process/HTTP、capacity、Orchestration及Outbox业务dashboard、13条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
-| Worker/queue telemetry | 9个LocalWorkerPools、Sandbox Controller、Artifact三role、MCP Tool/Resource/Discovery/Subscription与Egress 11个隔舱均从实际semaphore导出capacity；Management/Runtime API与Security Authority从各自SQLx pool导出PostgreSQL connection capacity；Orchestration另有claim/recovery和PostgreSQL Job/Outbox backlog/lag | Orchestration Job/shared Outbox及21/21 pool动态capacity L1 telemetry闭合；production scrape、完整dependency health与L5 saturation profile仍待外部证据 |
+| Worker/queue telemetry | 全部21个workload pool从实际semaphore或SQLx owner导出capacity；Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从共享Job authority采样各自due/expired lease backlog与lag；共享Outbox及六类外部依赖另有低基数观测 | 仓库内动态capacity、domain queue与dependency owner接线闭合；production scrape和L5 mixed-load/saturation profile仍待外部证据 |
 | Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security mTLS/UDS hop保持同一trace ID/new span；fixed public/internal spans的动态采集验证parent trace、per-hop span与context outcome，reclaim恢复原trace，provider与guest/storage边界不转发header | CR-197 machine/runtime、component L3连续性与动态correlation采集闭合；不替代production telemetry backend验证 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；真实TCP metrics与真实loopback provider tracing动态注入payload/identity/token/query、`tracestate`及`baggage` canary，采集结果均为零且允许的bounded metadata存在 | source-level与component L3 dynamic metric/log/trace负向合同闭合；不替代RBAC/retention或production backend验证 |
 | gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
@@ -216,7 +217,9 @@ kind/work-class/owner mapping、generated registry及Python checker。contracts�
 
 本节较长的逐项记录保留早期实现轨迹；以下后续证据覆盖其中“仍待”表述：r199闭合Timer/Signal/HumanTask/ChildAgent，r208闭合Native
 Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243闭合Native/Remote Context与Orchestration resume，r233/r244
-闭合Model provider及tool-result整链。它们均为各自声明范围的L3，不自动提升为L4～L6。
+闭合Model provider及tool-result整链，r359～r361闭合MCP Discovery owner/recovery/saturation，r362闭合S3/KMS provider roundtrip，r363统一
+Artifact authority time，r364闭合production Discovery→Artifact Data Worker→S3/KMS→scan→owner finalize。它们均为各自声明范围的L3，
+不自动提升为L4～L6。
 
 1. 独立Orchestration Worker binary、process config、startup/readiness/drain、restricted Helm Deployment和critical-control safety composition已闭合。
    fresh PostgreSQL 16 r199已完成Timer→Signal→HumanTask→ChildAgent→Return五进程kill/recovery，parent/child终态、typed child output及唯一finish Node均通过。
@@ -225,11 +228,12 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
    sibling-cancellation槽，并在失败owner transaction重验expression evidence。Inline Return/Raise terminal、ChildAgent和HumanTask已接入该store；
    Timer/Signal durable wait与Model/Capability/Context dispatch均已接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
-   authority现已接入，但Orchestration Worker/Artifact Data Worker的production-equivalent RPC kill/restart仍待L3验证，且Model/Capability/Context下游role尚未全部闭合；
+   authority现已接入，但Orchestration Worker/Artifact Data Worker的production-equivalent RPC kill/restart仍待L3验证；Model/Capability/Context
+   下游role已由r208、r217、r221、r233、r240～r244的独立production process链闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
-   Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验，但其余external leaf
-   及完整Subagent terminal lifecycle的production handler仍未实现。
+   Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验；全部external leaf及
+   Subagent terminal lifecycle已有对应production process证据，剩余边界是上述Artifact Scheduler RPC故障窗口与L4滚动/网络故障。
    closed expression owner、纯确定性evaluator、Plan节点与HardLimitProfile v5消费现已落地，production driver API也不接受外部
    observation；ChildAgent deferral现要求exact Plan v4、冻结slot Selection Policy和candidate evidence，并在同一SERIALIZABLE owner
    transaction中按当前Scope重解析input/可选route RunValue、锁定Policy/Revision当前gate且不依赖active head、重跑共享evaluator；fresh PostgreSQL
@@ -254,8 +258,8 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    rollover及active-remainder cancellation槽；fresh PostgreSQL覆盖Quorum cancel集合与已提交Join facts。手工注入
    `ControllerObservation`仍不计production证据。fresh PostgreSQL runtime fixture现已把真实claim/start、lease heartbeat/handoff/recovery、
    exact Typed Plan authority读取与canonical materialization、数据库派生Start facts及fenced Start→Return activation串成同一条
-   coordinator链；独立Orchestration Worker binary与wait-node/Subagent多进程crash/restart证据已在r199闭合，但Model/Capability/Context下游进程仍待接入。
-   CR-177的L1/L2 owner规则已实现，L3完整process boundary仍待完成。
+   coordinator链；独立Orchestration Worker binary与wait-node/Subagent多进程crash/restart证据已在r199闭合，Model/Capability/Context下游进程
+   已在r208、r217、r221、r233、r240～r244接入。CR-177的L1/L2 owner规则及相应production component L3已闭合。
    CR-178的Plan version 2、exact Map item port owner validation、version 1/wrong producer L1负向、每item RunValue/MapItem Scope原子写及
    L2 batch/replay fixture已实现；process crash/restart的L3 fixture仍待production handler闭合后完成。
    CR-179的exact pair producer/schema/region L1与两轮rollover/Scope复用/不串值/false-exit L2已实现，并证明所有iteration Scope保持
@@ -288,9 +292,10 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
    initialize/list/read与三轮kill/recovery已由r281闭合component L3；OAuth Cleanup Worker与独立Egress的mTLS Secret delete/lease reclaim已由r284闭合。
    r286又以真实独立CA HTTPS token endpoint、mTLS Egress RPC和Callback owner关闭token-store后/commit前双进程强杀恢复，并证明one-time code不重发；
    Context/MCP/Egress lane saturation、bundle/config rollout和live cluster identity仍归L4～L5。
-2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL、Artifact和各外部依赖仍须按
-   production qualification matrix取得适用的真实协议、故障与隔舱证据。
-3. S3/KMS/Secret Manager只有adapter/fixture和deployment contract，没有production-equivalent fault/rotation/restore证据。
+2. Context Native/Remote和Capability Native/Remote production composition已闭合；Dataset build/Text2SQL及各外部依赖仍须按
+   production qualification matrix取得适用的真实协议、故障与隔舱证据。r364已证明production Artifact Discovery正向链，不替代这些矩阵。
+3. r362以production AWS provider闭合真实HTTPS S3 versioned object及KMS Encrypt/Decrypt roundtrip；r364进一步由production Artifact Data Worker
+   消费同一provider closure并完成stage/read/scan。Secret Manager及S3/KMS fault、rotation、backup/restore仍无production-equivalent证据。
 4. gVisor没有真实`RuntimeClass=runsc`多节点执行、escape/cleanup/process-kill/watch-restart/node-loss证据。
 5. 单lane saturation对其他lane与critical-control的production profile SLO影响尚未测量。
 
@@ -313,10 +318,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 1. 15个ComponentRole已由21个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
 2. 全部21个ComponentRole workload pool及Sandbox process attestor已有shared process metrics与动态capacity；Orchestration、Model、Capability Native/Remote、
-   Context Native/Remote/Subscription、Sandbox WASI/gVisor、MCP Discovery/Subscription均从实际permit或连接池owner导出，Orchestration另有claim/recovery指标，production tracing/log字段已有
-   静态脱敏门禁；Orchestration现另有PostgreSQL authority的due/expired-lease Job及due/expired-claim/dead Outbox backlog/lag与observation health；六类
-   external dependency的仓库内L1 owner接线已闭合，仍缺其余role domain backlog/recovery series、production Prometheus scrape及L5 mixed-load/saturation
-   profile证据。
+   Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从实际permit、连接池或共享Job authority
+   导出domain backlog/recovery观测；共享Outbox及六类external dependency的仓库内owner接线也已闭合。仍缺production Prometheus scrape及L5
+   mixed-load/saturation profile证据。
 3. 全部21个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
    runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及通用dependency failure ratio；其他role
    domain backlog/recovery与saturation对应的panel/alert仍待指标owner接线后补齐。
@@ -337,10 +341,9 @@ Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补其他role domain backlog/recovery/permit业务指标；
-2. 为新增业务series补dashboard、symptom-first alerts及逐alert runbook；
-3. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
-4. 外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. 补Orchestration Worker↔Artifact Data Worker的Typed Plan/Artifact-backed RunValue production process RPC kill/restart；
+2. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
+3. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。
