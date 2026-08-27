@@ -1082,8 +1082,9 @@ impl PgRepository {
 
     pub async fn create_mcp_discovery_operation(
         &self,
-        command: CreateMcpDiscoveryOperation,
+        mut command: CreateMcpDiscoveryOperation,
     ) -> Result<CommandOutcome<McpDiscoveryOperationRecord>, RepositoryError> {
+        command.deadline = database_timestamp(command.deadline);
         command
             .validate_at(Utc::now())
             .map_err(invalid_mcp_discovery)?;

@@ -4426,6 +4426,9 @@ async fn mcp_subscription_fixture() {
     let mut discovery_audit = command_audit(&fixture.tenant_id, &fixture.principal_id, 0x600, now);
     discovery_audit.idempotency_key_digest = named_digest("public-discovery-key");
     discovery_audit.request_digest = named_digest("public-discovery-request");
+    let discovery_deadline =
+        DateTime::from_timestamp((now + Duration::minutes(30)).timestamp(), 123_456_789).unwrap();
+    assert_ne!(discovery_deadline.timestamp_subsec_nanos() % 1_000, 0);
     let first_discovery = CreateMcpDiscoveryOperation {
         audit: discovery_audit,
         operation_id: id(ResourceKind::McpOperation, 0x610),
@@ -4435,7 +4438,7 @@ async fn mcp_subscription_fixture() {
         authorization_binding_id: fixture.authorization.authorization_binding_id.clone(),
         artifact_preallocation: discovery_preallocation(0x630),
         attempt_limit: 3,
-        deadline: now + Duration::minutes(30),
+        deadline: discovery_deadline,
     };
     let original = match repository
         .create_mcp_discovery_operation(first_discovery.clone())
