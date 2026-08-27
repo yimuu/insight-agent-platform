@@ -5,6 +5,7 @@
 
 use insight_platform_artifact_broker::{
     ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
+    AwsArtifactUploadError, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
     BrokeredArtifactScannerReader, BrokeredSandboxArtifactBroker, BrokeredSchedulerRunValueReader,
     BrokeredSchedulerSkillPackageReader, BrokeredSchedulerTypedPlanReader,
 };
@@ -20,13 +21,15 @@ use durable_queue_observer::run_artifact_queue_sampler;
 use guest_identity::GvisorGuestIdentityConfig;
 use insight_platform_artifact_rpc::{
     proto::{
+        artifact_data_worker_service_server::ArtifactDataWorkerServiceServer,
         artifact_gvisor_guest_service_server::ArtifactGvisorGuestServiceServer,
         artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer,
         artifact_scheduler_service_server::ArtifactSchedulerServiceServer,
     },
-    ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcService,
-    ArtifactSchedulerGrpcService, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
-    SandboxControllerWorkloadIdentity, SchedulerRunValueResponseBroker,
+    ArtifactDataWorkerGrpcService, ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits,
+    ArtifactSandboxBrokerGrpcService, ArtifactSchedulerGrpcService, ArtifactWorkloadStageAuthority,
+    ArtifactWorkloadStageError, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
+    McpHostWorkloadIdentity, SandboxControllerWorkloadIdentity, SchedulerRunValueResponseBroker,
     SchedulerSkillPackageResponseBroker, SchedulerTypedPlanResponseBroker,
     SchedulerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
     WasiArtifactResponseBroker,
@@ -34,17 +37,21 @@ use insight_platform_artifact_rpc::{
 use insight_platform_artifacts::{
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
     SchedulerSkillPackageReadRequest, SchedulerTypedPlanReadError, SchedulerTypedPlanReadRequest,
+    StageWorkloadArtifact, StageWorkloadArtifactRequest, StagedWorkloadArtifact,
+    WorkloadArtifactStagePreflight,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JobKind, JsonLimits,
-    Sha256Digest,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, ArtifactWorkloadAudience,
+    CommandOutcome, JobKind, JsonLimits, Sha256Digest,
 };
 use insight_platform_observability::{
     process_observability_router, DurableJobQueueMetrics, ProcessHttpMetrics,
     PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
-    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+    dependency_health::run_postgres_health_sampler,
+    repository::{PgRepository, RepositoryError},
+    verify_schema,
 };
 use insight_platform_sandbox::{
     AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapAuthority, GvisorGuestBootstrapError,
@@ -112,6 +119,117 @@ impl SchedulerRpcArtifactBroker {
 struct GvisorGuestMaterializer {
     authority: Arc<PgRepository>,
     broker: Arc<SandboxRpcArtifactBroker>,
+}
+
+struct PostgresWorkloadArtifactStageAuthority {
+    repository: Arc<PgRepository>,
+    provider: AwsArtifactUploadProvider,
+}
+
+#[async_trait::async_trait]
+impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
+    async fn stage_workload_artifact(
+        &self,
+        request: StageWorkloadArtifactRequest,
+    ) -> Result<StagedWorkloadArtifact, ArtifactWorkloadStageError> {
+        let preflight = self
+            .repository
+            .authorize_workload_artifact_stage(&request)
+            .await
+            .map_err(map_stage_repository_error)?;
+        let WorkloadArtifactStagePreflight::Authorized(authorized) = preflight else {
+            let WorkloadArtifactStagePreflight::Replayed(staged) = preflight else {
+                unreachable!("closed preflight has two variants");
+            };
+            return Ok(staged);
+        };
+        authorized
+            .validate_for(&request, chrono::Utc::now())
+            .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+        if self.provider.storage_binding_digest() != &authorized.write_storage_binding_digest {
+            return Err(ArtifactWorkloadStageError::Denied);
+        }
+        let remaining = (authorized.deadline - chrono::Utc::now())
+            .to_std()
+            .map_err(|_| ArtifactWorkloadStageError::StaleFence)?;
+        let staged = tokio::time::timeout(
+            remaining,
+            self.provider.stage_bytes(
+                AwsArtifactUploadRequest {
+                    tenant_id: &authorized.tenant_id,
+                    artifact_id: &authorized.artifact_id,
+                    blob_id: &authorized.blob_id,
+                    encryption_domain_id: &authorized.encryption_domain_id,
+                    expected_size_bytes: authorized.size_bytes,
+                    declared_media_type: Some(&authorized.media_type),
+                    expires_in: Duration::from_secs(1),
+                },
+                &authorized.descriptor_digest,
+                request.descriptor_bytes,
+            ),
+        )
+        .await
+        .map_err(|_| ArtifactWorkloadStageError::Unavailable)?
+        .map_err(map_stage_provider_error)?;
+        let command = StageWorkloadArtifact {
+            schema_version: 1,
+            tenant_id: request.tenant_id,
+            caller: ArtifactWorkloadAudience::McpHost,
+            producer_job_id: request.producer_job_id,
+            producer_fence: request.producer_fence,
+            verification_job_id: request.verification_job_id,
+            artifact_id: request.artifact_id,
+            blob_id: request.blob_id,
+            content_digest: request.descriptor_digest,
+            size_bytes: staged.observed_size_bytes,
+            media_type: request.media_type,
+            storage_backend: staged.storage_backend,
+            storage_binding_digest: staged.storage_binding_digest,
+            object_reference_ciphertext: staged.object_reference_ciphertext,
+            object_generation: staged.object_generation,
+            key_id: staged.key_id,
+            encryption_domain_id: authorized.encryption_domain_id,
+            backend_evidence_digest: staged.backend_evidence_digest,
+            staged_at: chrono::Utc::now(),
+        };
+        match self
+            .repository
+            .stage_workload_artifact(command)
+            .await
+            .map_err(map_stage_repository_error)?
+        {
+            CommandOutcome::Applied(staged) | CommandOutcome::Replayed(staged) => Ok(staged),
+        }
+    }
+}
+
+fn map_stage_repository_error(error: RepositoryError) -> ArtifactWorkloadStageError {
+    match error {
+        RepositoryError::PermissionDenied | RepositoryError::QuotaExceeded => {
+            ArtifactWorkloadStageError::Denied
+        }
+        RepositoryError::StaleFence | RepositoryError::LeaseExpired => {
+            ArtifactWorkloadStageError::StaleFence
+        }
+        RepositoryError::Conflict(_) | RepositoryError::IdempotencyConflict => {
+            ArtifactWorkloadStageError::Conflict
+        }
+        RepositoryError::Database(_) => ArtifactWorkloadStageError::Unavailable,
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::NotFound(_)
+        | RepositoryError::CorruptRow(_) => ArtifactWorkloadStageError::Integrity,
+    }
+}
+
+fn map_stage_provider_error(error: AwsArtifactUploadError) -> ArtifactWorkloadStageError {
+    match error {
+        AwsArtifactUploadError::StorageUnavailable | AwsArtifactUploadError::KmsUnavailable => {
+            ArtifactWorkloadStageError::Unavailable
+        }
+        AwsArtifactUploadError::InvalidRequest
+        | AwsArtifactUploadError::TooLarge
+        | AwsArtifactUploadError::InvalidEvidence => ArtifactWorkloadStageError::Integrity,
+    }
 }
 
 #[async_trait::async_trait]
@@ -225,6 +343,7 @@ struct BrokerLimitsConfig {
 #[serde(deny_unknown_fields)]
 struct RpcLimitsConfig {
     maximum_request_bytes: usize,
+    maximum_write_request_bytes: usize,
     maximum_chunk_bytes: usize,
 }
 
@@ -339,8 +458,12 @@ impl ArtifactBrokerProcessConfig {
     }
 
     fn rpc_limits(&self) -> Result<ArtifactInternalRpcLimits, ProcessError> {
-        ArtifactInternalRpcLimits::new(self.rpc.maximum_request_bytes, self.rpc.maximum_chunk_bytes)
-            .map_err(|_| ProcessError::InvalidConfiguration)
+        ArtifactInternalRpcLimits::with_write_limit(
+            self.rpc.maximum_request_bytes,
+            self.rpc.maximum_chunk_bytes,
+            self.rpc.maximum_write_request_bytes,
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)
     }
 }
 
@@ -390,7 +513,7 @@ async fn run() -> Result<(), ProcessError> {
         .check_readiness()
         .await
         .map_err(|_| ProcessError::ProviderUnavailable)?;
-    let (unsealer, stores) = providers.into_components();
+    let (upload_provider, unsealer, stores) = providers.into_gateway_components();
     let broker_limits = config.broker_limits()?;
     let scan_reader = Arc::new(
         BrokeredArtifactScannerReader::new(
@@ -433,6 +556,10 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let sandbox_broker = Arc::new(SandboxRpcArtifactBroker { broker });
+    let workload_stage_authority = Arc::new(PostgresWorkloadArtifactStageAuthority {
+        repository: Arc::clone(&work_repository),
+        provider: upload_provider,
+    });
     let rpc_limits = config.rpc_limits()?;
     let maximum = rpc_limits.maximum_message_bytes();
     let sandbox_service = {
@@ -454,6 +581,15 @@ async fn run() -> Result<(), ProcessError> {
         .max_encoding_message_size(maximum)
         .max_decoding_message_size(maximum);
         tonic::service::interceptor::InterceptedService::new(service, SchedulerWorkloadIdentity)
+    };
+    let workload_stage_service = {
+        let service = ArtifactDataWorkerServiceServer::new(ArtifactDataWorkerGrpcService::new(
+            workload_stage_authority,
+            rpc_limits,
+        ))
+        .max_encoding_message_size(maximum)
+        .max_decoding_message_size(maximum);
+        tonic::service::interceptor::InterceptedService::new(service, McpHostWorkloadIdentity)
     };
     let guest_materializer = Arc::new(GvisorGuestMaterializer {
         authority: Arc::clone(&read_repository),
@@ -514,6 +650,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(|_| ProcessError::InvalidTls)?
         .add_service(sandbox_service)
         .add_service(scheduler_service)
+        .add_service(workload_stage_service)
         .serve_with_shutdown(controller_address, async {
             let _ = controller_shutdown_receiver.await;
         });
@@ -800,6 +937,7 @@ mod tests {
             },
             "rpc": {
                 "maximum_request_bytes": 1048576,
+                "maximum_write_request_bytes": 100663296,
                 "maximum_chunk_bytes": 262144
             },
             "scan_worker": {
@@ -842,5 +980,10 @@ mod tests {
         let mut invalid_chunk = valid;
         invalid_chunk.rpc.maximum_chunk_bytes = 0;
         assert!(invalid_chunk.validate().is_err());
+
+        let mut invalid_write = valid_config();
+        invalid_write.rpc.maximum_write_request_bytes =
+            insight_platform_artifact_rpc::MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD + 1;
+        assert!(invalid_write.validate().is_err());
     }
 }

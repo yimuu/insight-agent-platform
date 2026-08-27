@@ -63,6 +63,7 @@ pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
 pub const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
+pub const MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD: usize = 96 * 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
 const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
 const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
@@ -82,6 +83,7 @@ const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactInternalRpcLimits {
     maximum_request_bytes: usize,
+    maximum_write_request_bytes: usize,
     maximum_chunk_bytes: usize,
 }
 
@@ -97,8 +99,22 @@ impl ArtifactInternalRpcLimits {
         }
         Ok(Self {
             maximum_request_bytes,
+            maximum_write_request_bytes: maximum_request_bytes,
             maximum_chunk_bytes,
         })
+    }
+
+    pub fn with_write_limit(
+        maximum_request_bytes: usize,
+        maximum_chunk_bytes: usize,
+        maximum_write_request_bytes: usize,
+    ) -> Result<Self, ArtifactRpcError> {
+        let mut limits = Self::new(maximum_request_bytes, maximum_chunk_bytes)?;
+        if !(1..=MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD).contains(&maximum_write_request_bytes) {
+            return Err(ArtifactRpcError::InvalidConfiguration);
+        }
+        limits.maximum_write_request_bytes = maximum_write_request_bytes;
+        Ok(limits)
     }
 
     pub const fn maximum_request_bytes(self) -> usize {
@@ -109,12 +125,22 @@ impl ArtifactInternalRpcLimits {
         self.maximum_chunk_bytes
     }
 
+    pub const fn maximum_write_request_bytes(self) -> usize {
+        self.maximum_write_request_bytes
+    }
+
     pub const fn maximum_message_bytes(self) -> usize {
-        if self.maximum_request_bytes > self.maximum_chunk_bytes {
-            self.maximum_request_bytes + RPC_MESSAGE_OVERHEAD_BYTES
+        let maximum = if self.maximum_request_bytes > self.maximum_chunk_bytes {
+            self.maximum_request_bytes
         } else {
-            self.maximum_chunk_bytes + RPC_MESSAGE_OVERHEAD_BYTES
-        }
+            self.maximum_chunk_bytes
+        };
+        let maximum = if maximum > self.maximum_write_request_bytes {
+            maximum
+        } else {
+            self.maximum_write_request_bytes
+        };
+        maximum + RPC_MESSAGE_OVERHEAD_BYTES
     }
 }
 
@@ -122,6 +148,7 @@ impl Default for ArtifactInternalRpcLimits {
     fn default() -> Self {
         Self {
             maximum_request_bytes: MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD,
+            maximum_write_request_bytes: MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD,
             maximum_chunk_bytes: MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD,
         }
     }
@@ -1379,12 +1406,18 @@ fn encode_write_request<T: Serialize>(
     value: &T,
     limits: ArtifactInternalRpcLimits,
 ) -> Result<ClosedArtifactWriteRequest, ArtifactRpcError> {
-    let encoded = encode_request(operation, value, limits)?;
+    let canonical_request_json =
+        serde_jcs::to_vec(value).map_err(|_| ArtifactRpcError::InvalidEnvelope)?;
+    if canonical_request_json.is_empty()
+        || canonical_request_json.len() > limits.maximum_write_request_bytes()
+    {
+        return Err(ArtifactRpcError::InvalidEnvelope);
+    }
     Ok(ClosedArtifactWriteRequest {
-        schema_version: encoded.schema_version,
-        operation: encoded.operation,
-        canonical_request_json: encoded.canonical_request_json,
-        request_digest: encoded.request_digest,
+        schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
+        operation: operation.to_owned(),
+        request_digest: digest_bytes(&canonical_request_json).to_string(),
+        canonical_request_json,
     })
 }
 
@@ -1393,15 +1426,14 @@ fn decode_write_request<T: DeserializeOwned>(
     expected_operation: &str,
     limits: ArtifactInternalRpcLimits,
 ) -> Result<T, ArtifactRpcError> {
-    decode_request(
-        ClosedArtifactReadRequest {
-            schema_version: envelope.schema_version,
-            operation: envelope.operation,
-            canonical_request_json: envelope.canonical_request_json,
-            request_digest: envelope.request_digest,
-        },
+    decode_request_with_bounds(
+        envelope.schema_version,
+        envelope.operation,
+        envelope.canonical_request_json,
+        envelope.request_digest,
         expected_operation,
-        limits,
+        limits.maximum_write_request_bytes(),
+        limits.maximum_write_request_bytes(),
     )
 }
 
@@ -1447,27 +1479,47 @@ fn decode_request<T: DeserializeOwned>(
     expected_operation: &str,
     limits: ArtifactInternalRpcLimits,
 ) -> Result<T, ArtifactRpcError> {
-    if envelope.schema_version != ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION
-        || envelope.operation != expected_operation
-        || envelope.canonical_request_json.is_empty()
-        || envelope.canonical_request_json.len() > limits.maximum_request_bytes()
-        || envelope.request_digest != digest_bytes(&envelope.canonical_request_json).to_string()
+    decode_request_with_bounds(
+        envelope.schema_version,
+        envelope.operation,
+        envelope.canonical_request_json,
+        envelope.request_digest,
+        expected_operation,
+        limits.maximum_request_bytes(),
+        16_384,
+    )
+}
+
+fn decode_request_with_bounds<T: DeserializeOwned>(
+    schema_version: u32,
+    operation: String,
+    canonical_request_json: Vec<u8>,
+    request_digest: String,
+    expected_operation: &str,
+    maximum_request_bytes: usize,
+    maximum_string_bytes: usize,
+) -> Result<T, ArtifactRpcError> {
+    if schema_version != ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION
+        || operation != expected_operation
+        || canonical_request_json.is_empty()
+        || canonical_request_json.len() > maximum_request_bytes
+        || request_digest != digest_bytes(&canonical_request_json).to_string()
     {
         return Err(ArtifactRpcError::InvalidEnvelope);
     }
     let value = parse_strict_json(
-        &envelope.canonical_request_json,
+        &canonical_request_json,
         JsonLimits {
-            max_bytes: limits.maximum_request_bytes(),
+            max_bytes: maximum_request_bytes,
             max_depth: 24,
             max_items_per_array: 64,
             max_properties_per_object: 64,
-            max_string_bytes: 16_384,
+            max_string_bytes: maximum_string_bytes,
         },
     )
     .map_err(|_| ArtifactRpcError::InvalidEnvelope)?;
     if serde_jcs::to_vec(&value).map_err(|_| ArtifactRpcError::InvalidEnvelope)?
-        != envelope.canonical_request_json
+        != canonical_request_json
     {
         return Err(ArtifactRpcError::InvalidEnvelope);
     }
@@ -1976,6 +2028,35 @@ mod tests {
         sandbox: Arc<Semaphore>,
     }
 
+    struct RecordingStageAuthority {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ArtifactWorkloadStageAuthority for RecordingStageAuthority {
+        async fn stage_workload_artifact(
+            &self,
+            request: StageWorkloadArtifactRequest,
+        ) -> Result<StagedWorkloadArtifact, ArtifactWorkloadStageError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            request
+                .validate()
+                .map_err(|_| ArtifactWorkloadStageError::Integrity)?;
+            Ok(StagedWorkloadArtifact {
+                schema_version: 1,
+                artifact_id: request.artifact_id,
+                blob_id: request.blob_id,
+                verification_job_id: request.verification_job_id,
+                content_digest: request.descriptor_digest,
+                size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+                object_generation: "generation-1".to_owned(),
+                artifact_version: 2,
+                blob_version: 1,
+                verification_job_version: 2,
+            })
+        }
+    }
+
     #[async_trait]
     impl WasiArtifactResponseBroker for AudienceCapacityBroker {
         async fn read_wasi_for_response(
@@ -1999,6 +2080,8 @@ mod tests {
         sandbox_controller_key_pem: String,
         scheduler_certificate_pem: String,
         scheduler_key_pem: String,
+        mcp_host_certificate_pem: String,
+        mcp_host_key_pem: String,
     }
 
     fn mtls_fixture() -> MtlsFixture {
@@ -2041,6 +2124,10 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (mcp_host_certificate_pem, mcp_host_key_pem) = issue(
+            vec![SanType::URI(MCP_HOST_WORKLOAD_IDENTITY.try_into().unwrap())],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         MtlsFixture {
             ca_pem: ca.pem(),
             server_certificate_pem,
@@ -2051,6 +2138,8 @@ mod tests {
             sandbox_controller_key_pem,
             scheduler_certificate_pem,
             scheduler_key_pem,
+            mcp_host_certificate_pem,
+            mcp_host_key_pem,
         }
     }
 
@@ -2149,13 +2238,43 @@ mod tests {
         request.validate().unwrap();
         let envelope =
             encode_write_request(WORKLOAD_ARTIFACT_STAGE_OPERATION, &request, limits).unwrap();
+        let canonical_wire: serde_json::Value =
+            serde_json::from_slice(&envelope.canonical_request_json).unwrap();
+        assert_eq!(
+            canonical_wire["descriptor_bytes"],
+            serde_json::Value::String("eyJvYmplY3RzIjpbXX0".to_owned())
+        );
         let decoded: StageWorkloadArtifactRequest =
-            decode_write_request(envelope, WORKLOAD_ARTIFACT_STAGE_OPERATION, limits).unwrap();
+            decode_write_request(envelope.clone(), WORKLOAD_ARTIFACT_STAGE_OPERATION, limits)
+                .unwrap();
         assert_eq!(decoded, request);
         let encoded = serde_json::to_value(&decoded).unwrap();
         assert!(encoded.get("object_reference_ciphertext").is_none());
         assert!(encoded.get("storage_binding_digest").is_none());
         assert!(encoded.get("encryption_domain_id").is_none());
+
+        let small_write_limits =
+            ArtifactInternalRpcLimits::with_write_limit(65_536, 4_096, 128).unwrap();
+        assert!(encode_write_request(
+            WORKLOAD_ARTIFACT_STAGE_OPERATION,
+            &request,
+            small_write_limits,
+        )
+        .is_err());
+        let adequate_write_limits =
+            ArtifactInternalRpcLimits::with_write_limit(65_536, 4_096, 4_096).unwrap();
+        assert!(encode_write_request(
+            WORKLOAD_ARTIFACT_STAGE_OPERATION,
+            &request,
+            adequate_write_limits,
+        )
+        .is_ok());
+
+        let mut padded_wire: serde_json::Value =
+            serde_json::from_slice(&envelope.canonical_request_json).unwrap();
+        padded_wire["descriptor_bytes"] =
+            serde_json::Value::String("eyJvYmplY3RzIjpbXX0=".to_owned());
+        assert!(serde_json::from_value::<StageWorkloadArtifactRequest>(padded_wire).is_err());
 
         let staged = StagedWorkloadArtifact {
             schema_version: 1,
@@ -2423,6 +2542,104 @@ mod tests {
         drop(client);
         drop(missing_trace_client);
         drop(wrong_client);
+        shutdown_sender.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workload_stage_mtls_accepts_only_mcp_host_before_authority() {
+        let fixture = mtls_fixture();
+        let authority = Arc::new(RecordingStageAuthority {
+            calls: AtomicUsize::new(0),
+        });
+        let rpc_limits = ArtifactInternalRpcLimits::default();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = incoming.local_addr().unwrap();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+        let service =
+            proto::artifact_data_worker_service_server::ArtifactDataWorkerServiceServer::new(
+                ArtifactDataWorkerGrpcService::new(Arc::clone(&authority), rpc_limits),
+            )
+            .max_encoding_message_size(rpc_limits.maximum_message_bytes())
+            .max_decoding_message_size(rpc_limits.maximum_message_bytes());
+        let service =
+            tonic::service::interceptor::InterceptedService::new(service, McpHostWorkloadIdentity);
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                &fixture.server_certificate_pem,
+                &fixture.server_key_pem,
+            ))
+            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls)
+                .unwrap()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_receiver.await;
+                })
+                .await
+                .unwrap();
+        });
+        let endpoint = format!("https://localhost:{}", address.port());
+        let descriptor_bytes = br#"{"objects":[]}"#.to_vec();
+        let request = StageWorkloadArtifactRequest {
+            schema_version: 1,
+            tenant_id: id(ResourceKind::Tenant),
+            producer_job_id: id(ResourceKind::Job),
+            producer_fence: insight_platform_jobs::JobFence {
+                expected_version: 3,
+                worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+                lease_generation: 2,
+                token_digest: digest('1'),
+            },
+            verification_job_id: id(ResourceKind::Job),
+            artifact_id: id(ResourceKind::Artifact),
+            blob_id: id(ResourceKind::InternalBlob),
+            descriptor_digest: digest_bytes(&descriptor_bytes),
+            descriptor_bytes,
+            media_type: "application/vnd.insight.mcp-discovery+json".to_owned(),
+        };
+
+        let accepted_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.mcp_host_certificate_pem,
+            &fixture.mcp_host_key_pem,
+        )
+        .await;
+        let client = ArtifactDataWorkerGrpcClient::new(accepted_channel, rpc_limits);
+        let trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+        let staged = scope_trace(trace, client.stage_workload_artifact(request.clone()))
+            .await
+            .unwrap();
+        assert_eq!(staged.artifact_id, request.artifact_id);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 1);
+
+        let wrong_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.scheduler_certificate_pem,
+            &fixture.scheduler_key_pem,
+        )
+        .await;
+        let mut wrong = ArtifactDataWorkerServiceClient::new(wrong_channel);
+        let rejected = wrong
+            .stage_workload_artifact(
+                encode_write_request(WORKLOAD_ARTIFACT_STAGE_OPERATION, &request, rpc_limits)
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 1);
+
+        drop(client);
+        drop(wrong);
         shutdown_sender.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await

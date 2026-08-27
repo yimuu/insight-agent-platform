@@ -13,10 +13,10 @@ use crate::repository::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use insight_platform_artifacts::StageWorkloadArtifact;
 use insight_platform_artifacts::{
     ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactReferenceSnapshot,
 };
+use insight_platform_artifacts::{StageWorkloadArtifact, StageWorkloadArtifactRequest};
 use insight_platform_context::{
     AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
     ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
@@ -4880,13 +4880,49 @@ pub(crate) async fn require_mcp_discovery_artifact_stage_authority(
     command: &StageWorkloadArtifact,
     database_now: DateTime<Utc>,
 ) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
-    let job = load_mcp_discovery_job(
+    require_mcp_discovery_artifact_stage_authority_for(
         transaction,
         &command.tenant_id,
         &command.producer_job_id,
-        true,
+        &command.producer_fence,
+        &command.verification_job_id,
+        &command.artifact_id,
+        &command.blob_id,
+        database_now,
     )
-    .await?;
+    .await
+}
+
+pub(crate) async fn require_mcp_discovery_artifact_stage_request_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &StageWorkloadArtifactRequest,
+    database_now: DateTime<Utc>,
+) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
+    require_mcp_discovery_artifact_stage_authority_for(
+        transaction,
+        &request.tenant_id,
+        &request.producer_job_id,
+        &request.producer_fence,
+        &request.verification_job_id,
+        &request.artifact_id,
+        &request.blob_id,
+        database_now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn require_mcp_discovery_artifact_stage_authority_for(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    producer_job_id: &ResourceId,
+    producer_fence: &JobFence,
+    verification_job_id: &ResourceId,
+    artifact_id: &ResourceId,
+    blob_id: &ResourceId,
+    database_now: DateTime<Utc>,
+) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
+    let job = load_mcp_discovery_job(transaction, tenant_id, producer_job_id, true).await?;
     let operation_id = job
         .owner_id
         .parse::<ResourceId>()
@@ -4897,14 +4933,14 @@ pub(crate) async fn require_mcp_discovery_artifact_stage_authority(
         ));
     }
     let operation =
-        load_mcp_discovery_operation(transaction, &command.tenant_id, &operation_id, true).await?;
-    require_exact_mcp_discovery_job_fence(&job, &operation, &command.producer_fence, database_now)?;
+        load_mcp_discovery_operation(transaction, tenant_id, &operation_id, true).await?;
+    require_exact_mcp_discovery_job_fence(&job, &operation, producer_fence, database_now)?;
     let preallocation = &operation.payload.admission.artifact_preallocation;
     if operation.state != McpDiscoveryOperationState::Running
-        || operation.job_id != command.producer_job_id
-        || preallocation.verification_job_id != command.verification_job_id
-        || preallocation.artifact_id != command.artifact_id
-        || preallocation.blob_id != command.blob_id
+        || operation.job_id != *producer_job_id
+        || preallocation.verification_job_id != *verification_job_id
+        || preallocation.artifact_id != *artifact_id
+        || preallocation.blob_id != *blob_id
     {
         return Err(RepositoryError::StaleFence);
     }

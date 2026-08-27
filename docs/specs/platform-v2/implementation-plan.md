@@ -21,6 +21,14 @@
 > 的backend evidence。Artifact Broker 8/8与strict Clippy通过；该primitive尚未注册RPC，必须先完成producer fence/waiting Job preflight以证明错fence时
 > KMS/S3 zero-I/O。
 
+> 2026-08-27 implementation evidence：r345实现workload stage preflight与Data Worker组合。preflight按MCP Job/operation→Artifact verification Job
+> 固定锁序验证current producer lease、预分配identity、AwaitingStage closure和exact ArtifactIo revision；已stage的Scan payload直接核对Artifact/Blob
+> facts并重放，不触发provider。首次调用仅在preflight Authorized后执行deadline-bounded provider write，随后PostgreSQL再次re-fence并原子
+> `waiting -> ready`；S3使用deterministic key、`If-None-Match:*`与digest metadata恢复write-before-commit窗口。专用RPC已注册到Data Worker并要求
+> exact MCP Host SPIFFE+trace；descriptor bytes使用单一canonical base64url-no-pad JSON string，读请求仍限1 MiB，专用写请求按64 MiB MCP
+> response上限加wire余量独立限96 MiB。Artifact RPC 9/9真实loopback mTLS、Artifact 31/31、PostgreSQL lib 14/14及相关strict Clippy通过。
+> 本轮无fresh PostgreSQL，跨事务kill-window与真实S3/KMS条件重放仍不宣称L2/L3完成。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。

@@ -428,6 +428,7 @@ impl AwsArtifactUploadProvider {
     pub async fn stage_bytes(
         &self,
         request: AwsArtifactUploadRequest<'_>,
+        expected_content_digest: &Sha256Digest,
         bytes: Vec<u8>,
     ) -> Result<StagedAwsArtifactObject, AwsArtifactUploadError> {
         if request.tenant_id.kind() != ResourceKind::Tenant
@@ -437,6 +438,7 @@ impl AwsArtifactUploadProvider {
             || request.expected_size_bytes == 0
             || request.expected_size_bytes > self.maximum_object_bytes
             || usize::try_from(request.expected_size_bytes).ok() != Some(bytes.len())
+            || crate::sha256(&bytes) != *expected_content_digest
             || request.declared_media_type.is_some_and(|value| {
                 value.is_empty()
                     || value.len() > 255
@@ -500,22 +502,55 @@ impl AwsArtifactUploadProvider {
             .bucket(&*self.bucket)
             .key(&object_key)
             .content_length(content_length)
+            .if_none_match("*")
+            .metadata(
+                "insight-content-digest",
+                expected_content_digest.to_string(),
+            )
             .body(ByteStream::from(bytes));
         if let Some(media_type) = request.declared_media_type {
             put = put.content_type(media_type);
         }
         let stored = put.send().await;
-        observe_external(
-            &self.observer,
-            ArtifactExternalDependency::S3,
-            stored.is_ok(),
-        );
-        let stored = stored.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
-        let object_generation = stored
-            .version_id()
-            .filter(|generation| valid_object_generation(generation))
-            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
-            .to_owned();
+        let object_generation = match stored {
+            Ok(stored) => {
+                observe_external(&self.observer, ArtifactExternalDependency::S3, true);
+                stored
+                    .version_id()
+                    .filter(|generation| valid_object_generation(generation))
+                    .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+                    .to_owned()
+            }
+            Err(_) => {
+                let existing = self
+                    .s3
+                    .head_object()
+                    .bucket(&*self.bucket)
+                    .key(&object_key)
+                    .send()
+                    .await;
+                observe_external(
+                    &self.observer,
+                    ArtifactExternalDependency::S3,
+                    existing.is_ok(),
+                );
+                let existing = existing.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+                if existing.content_length() != Some(content_length)
+                    || existing
+                        .metadata()
+                        .and_then(|metadata| metadata.get("insight-content-digest"))
+                        .map(String::as_str)
+                        != Some(expected_content_digest.as_str())
+                {
+                    return Err(AwsArtifactUploadError::InvalidEvidence);
+                }
+                existing
+                    .version_id()
+                    .filter(|generation| valid_object_generation(generation))
+                    .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+                    .to_owned()
+            }
+        };
         let backend_evidence_digest = canonical_digest(&serde_json::json!({
             "artifact_id": request.artifact_id,
             "blob_id": request.blob_id,

@@ -2528,6 +2528,7 @@ name = "insight-platform-artifacts"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "insight-platform-contracts",
  "insight-platform-jobs",

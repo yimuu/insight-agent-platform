@@ -26,18 +26,19 @@ use insight_platform_artifacts::{
     ArtifactScanExecution, ArtifactScanKind, ArtifactScanObjectReadAuthority, ArtifactScanRequest,
     ArtifactScanWorkRecord, ArtifactStore, ArtifactTransaction, ArtifactWorkAuthority,
     ArtifactWorkError, ArtifactWorkerAudit, ArtifactWorkerOperationRecord,
-    AuthorizedArtifactDeleteObject, AuthorizedArtifactScanObjectRead, CommitArtifactAttemptFailure,
-    CommitArtifactBlobCleanup, CommitArtifactScanOutcome, CompleteArtifactDeletion,
-    CompleteArtifactUpload, CompletedArtifactBlobCleanup, CompletedArtifactDeletion,
-    CompletedArtifactUpload, CreateArtifactProvenance, DeleteArtifactBlobGeneration,
-    EncryptedArtifactObjectReference, FinalizeArtifact, FinalizedArtifact,
-    GatewayArtifactReadRequest, MarkArtifactDeletion, MarkedArtifactDeletion, PlaceArtifactHold,
-    PrepareArtifact, PreparedArtifact, ReleaseArtifactHold, ReleaseArtifactReference,
-    ScheduleArtifactRescan, ScheduleInitialArtifactScan, SchedulerRunValueLease,
-    SchedulerRunValueReadRequest, SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
-    SchedulerSkillPackageReadRequest, SchedulerSkillPackageRequestResolver,
-    SchedulerTypedPlanLease, SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
-    StageWorkloadArtifact, StagedWorkloadArtifact, UploadGrantSnapshot,
+    AuthorizedArtifactDeleteObject, AuthorizedArtifactScanObjectRead,
+    AuthorizedWorkloadArtifactStage, CommitArtifactAttemptFailure, CommitArtifactBlobCleanup,
+    CommitArtifactScanOutcome, CompleteArtifactDeletion, CompleteArtifactUpload,
+    CompletedArtifactBlobCleanup, CompletedArtifactDeletion, CompletedArtifactUpload,
+    CreateArtifactProvenance, DeleteArtifactBlobGeneration, EncryptedArtifactObjectReference,
+    FinalizeArtifact, FinalizedArtifact, GatewayArtifactReadRequest, MarkArtifactDeletion,
+    MarkedArtifactDeletion, PlaceArtifactHold, PrepareArtifact, PreparedArtifact,
+    ReleaseArtifactHold, ReleaseArtifactReference, ScheduleArtifactRescan,
+    ScheduleInitialArtifactScan, SchedulerRunValueLease, SchedulerRunValueReadRequest,
+    SchedulerRunValueRequestResolver, SchedulerSkillPackageLease, SchedulerSkillPackageReadRequest,
+    SchedulerSkillPackageRequestResolver, SchedulerTypedPlanLease, SchedulerTypedPlanReadRequest,
+    SchedulerTypedPlanRequestResolver, StageWorkloadArtifact, StageWorkloadArtifactRequest,
+    StagedWorkloadArtifact, UploadGrantSnapshot, WorkloadArtifactStagePreflight,
 };
 use insight_platform_contracts::{
     ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
@@ -56,7 +57,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
 
-use crate::mcp_repository::require_mcp_discovery_artifact_stage_authority;
+use crate::mcp_repository::{
+    require_mcp_discovery_artifact_stage_authority,
+    require_mcp_discovery_artifact_stage_request_authority,
+};
 use crate::repository::ArtifactWorkerRole;
 
 pub struct PgArtifactTransaction {
@@ -645,6 +649,67 @@ async fn load_staged_workload_artifact(
         content_digest: command.content_digest.clone(),
         size_bytes,
         object_generation: command.object_generation.clone(),
+        artifact_version: u64::try_from(row.try_get::<i64, _>("artifact_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Artifact version".to_owned()))?,
+        blob_version: u64::try_from(row.try_get::<i64, _>("blob_version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Blob version".to_owned()))?,
+        verification_job_version,
+    };
+    staged.validate()?;
+    Ok(staged)
+}
+
+async fn load_staged_workload_artifact_for_request(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &StageWorkloadArtifactRequest,
+    verification_job_version: u64,
+    object_generation: &str,
+) -> Result<StagedWorkloadArtifact, RepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT artifact.expected_size_bytes, artifact.expected_digest,
+               artifact.declared_media_type, artifact.version AS artifact_version,
+               blob.content_digest, blob.size_bytes, blob.object_generation,
+               blob.version AS blob_version
+        FROM insight_platform.artifacts AS artifact
+        JOIN insight_platform.artifact_blobs AS blob
+          ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+        WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2 AND blob.blob_id = $3
+        FOR UPDATE OF artifact, blob
+        "#,
+    )
+    .bind(request.tenant_id.to_string())
+    .bind(request.artifact_id.to_string())
+    .bind(request.blob_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict(
+        "staged Artifact replay is incomplete",
+    ))?;
+    let size_bytes = u64::try_from(row.try_get::<i64, _>("size_bytes")?)
+        .map_err(|_| RepositoryError::CorruptRow("negative staged Blob size".to_owned()))?;
+    if size_bytes != u64::try_from(request.descriptor_bytes.len()).unwrap_or(u64::MAX)
+        || row.try_get::<i64, _>("expected_size_bytes")?
+            != i64::try_from(size_bytes).unwrap_or(i64::MAX)
+        || row.try_get::<Option<String>, _>("expected_digest")?
+            != Some(request.descriptor_digest.to_string())
+        || row.try_get::<Option<String>, _>("declared_media_type")?
+            != Some(request.media_type.clone())
+        || row.try_get::<Option<String>, _>("content_digest")?
+            != Some(request.descriptor_digest.to_string())
+        || row.try_get::<Option<String>, _>("object_generation")?
+            != Some(object_generation.to_owned())
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    let staged = StagedWorkloadArtifact {
+        schema_version: 1,
+        artifact_id: request.artifact_id.clone(),
+        blob_id: request.blob_id.clone(),
+        verification_job_id: request.verification_job_id.clone(),
+        content_digest: request.descriptor_digest.clone(),
+        size_bytes,
+        object_generation: object_generation.to_owned(),
         artifact_version: u64::try_from(row.try_get::<i64, _>("artifact_version")?)
             .map_err(|_| RepositoryError::CorruptRow("negative Artifact version".to_owned()))?,
         blob_version: u64::try_from(row.try_get::<i64, _>("blob_version")?)
@@ -1994,6 +2059,115 @@ pub struct RecoveredArtifactJob {
 }
 
 impl PgRepository {
+    pub async fn authorize_workload_artifact_stage(
+        &self,
+        request: &StageWorkloadArtifactRequest,
+    ) -> Result<WorkloadArtifactStagePreflight, RepositoryError> {
+        request.validate()?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        require_mcp_discovery_artifact_stage_request_authority(
+            &mut transaction,
+            request,
+            database_now,
+        )
+        .await?;
+        let row = sqlx::query(
+            r#"
+            SELECT state, version, worker_id, lease_token_digest, lease_expires_at,
+                   payload_schema_version, payload, payload_digest
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2 AND job_kind = 'artifact_scan'
+              AND work_class = 'artifact' AND owner_kind = 'artifact' AND owner_id = $3
+            FOR UPDATE
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(request.verification_job_id.to_string())
+        .bind(request.artifact_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound(
+            "preallocated Artifact verification Job",
+        ))?;
+        let version = u64::try_from(row.try_get::<i64, _>("version")?)
+            .map_err(|_| RepositoryError::CorruptRow("negative Artifact Job version".to_owned()))?;
+        let typed = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+        let payload: ArtifactJobPayload = decode_typed_payload(&typed, "Artifact Job")?;
+        payload
+            .validate_for_owner(&request.artifact_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let outcome = match payload {
+            ArtifactJobPayload::AwaitingStage { stage } => {
+                request.validate_for(&stage, database_now)?;
+                if row.try_get::<String, _>("state")? != "waiting"
+                    || version != 1
+                    || row.try_get::<Option<String>, _>("worker_id")?.is_some()
+                    || row
+                        .try_get::<Option<String>, _>("lease_token_digest")?
+                        .is_some()
+                    || row
+                        .try_get::<Option<DateTime<Utc>>, _>("lease_expires_at")?
+                        .is_some()
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Artifact verification Job cannot be staged",
+                    ));
+                }
+                require_exact_artifact_scan_policy(
+                    &mut transaction,
+                    &request.tenant_id,
+                    &stage.artifact_io_policy_revision,
+                )
+                .await?;
+                let authorized = AuthorizedWorkloadArtifactStage {
+                    tenant_id: request.tenant_id.clone(),
+                    producer_job_id: request.producer_job_id.clone(),
+                    verification_job_id: request.verification_job_id.clone(),
+                    artifact_id: request.artifact_id.clone(),
+                    blob_id: request.blob_id.clone(),
+                    descriptor_digest: request.descriptor_digest.clone(),
+                    size_bytes: u64::try_from(request.descriptor_bytes.len()).map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "workload Artifact length exceeds u64".to_owned(),
+                        )
+                    })?,
+                    media_type: request.media_type.clone(),
+                    write_storage_binding_digest: stage.write_storage_binding_digest,
+                    encryption_domain_id: stage.encryption_domain_id,
+                    deadline: stage.deadline,
+                };
+                authorized.validate_for(request, database_now)?;
+                WorkloadArtifactStagePreflight::Authorized(authorized)
+            }
+            ArtifactJobPayload::Scan { scan } => {
+                if scan.operation_id != request.verification_job_id
+                    || scan.artifact_id != request.artifact_id
+                    || scan.blob_id != request.blob_id
+                {
+                    return Err(RepositoryError::IdempotencyConflict);
+                }
+                let replay = load_staged_workload_artifact_for_request(
+                    &mut transaction,
+                    request,
+                    version,
+                    &scan.object_generation,
+                )
+                .await?;
+                WorkloadArtifactStagePreflight::Replayed(replay)
+            }
+            _ => {
+                return Err(RepositoryError::Conflict(
+                    "Artifact verification Job is not a stage candidate",
+                ))
+            }
+        };
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
     pub async fn stage_workload_artifact(
         &self,
         command: StageWorkloadArtifact,

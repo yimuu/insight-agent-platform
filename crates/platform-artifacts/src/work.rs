@@ -5,17 +5,18 @@ use crate::{
     CompleteArtifactDeletion, CompletedArtifactDeletion, MAX_ARTIFACT_RETRY_BACKOFF_MILLISECONDS,
     MAX_BACKEND_BYTES, MAX_KEY_ID_BYTES, MAX_OBJECT_REFERENCE_BYTES,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactPurpose, ArtifactState, BlobIntegrityState, CommandAudit,
     CommandOutcome, DataClassification, ExactVersionRef, JobState, ResourceId, ResourceKind,
-    Sha256Digest,
+    Sha256Digest, MAX_MCP_RESPONSE_BYTES,
 };
 use insight_platform_jobs::{
     decide_expired_lease, decide_reconciliation, decide_retry, decide_terminal, JobFence,
     JobProjection,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt, fmt::Write as _};
 
@@ -23,7 +24,32 @@ const MAX_ARTIFACT_REASON_BYTES: usize = 64;
 const MAX_ARTIFACT_OBJECT_GENERATION_BYTES: usize = 255;
 const MAX_ARTIFACT_BACKEND_FAILURE_BYTES: usize = 1_024;
 const MAX_ARTIFACT_EVIDENCE_TTL_MILLISECONDS: u64 = 7 * 24 * 60 * 60 * 1_000;
-pub const MAX_WORKLOAD_ARTIFACT_STAGE_BYTES: usize = 1_048_576;
+pub const MAX_WORKLOAD_ARTIFACT_STAGE_BYTES: usize = MAX_MCP_RESPONSE_BYTES as usize;
+
+mod canonical_base64url_bytes {
+    use super::*;
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let decoded = URL_SAFE_NO_PAD.decode(&encoded).map_err(D::Error::custom)?;
+        if URL_SAFE_NO_PAD.encode(&decoded) != encoded {
+            return Err(D::Error::custom(
+                "descriptor bytes are not canonical base64url",
+            ));
+        }
+        Ok(decoded)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ScheduleInitialArtifactScan {
@@ -381,6 +407,7 @@ pub struct StageWorkloadArtifactRequest {
     pub verification_job_id: ResourceId,
     pub artifact_id: ResourceId,
     pub blob_id: ResourceId,
+    #[serde(with = "canonical_base64url_bytes")]
     pub descriptor_bytes: Vec<u8>,
     pub descriptor_digest: Sha256Digest,
     pub media_type: String,
@@ -410,6 +437,72 @@ impl StageWorkloadArtifactRequest {
         }
         Ok(())
     }
+
+    pub fn validate_for(
+        &self,
+        awaiting: &ArtifactAwaitingStageSnapshot,
+        now: DateTime<Utc>,
+    ) -> Result<(), ArtifactWorkError> {
+        self.validate()?;
+        awaiting.validate()?;
+        if self.producer_job_id != awaiting.producer_job_id
+            || self.artifact_id != awaiting.artifact_id
+            || self.blob_id != awaiting.blob_id
+            || u64::try_from(self.descriptor_bytes.len())
+                .ok()
+                .is_none_or(|length| length > awaiting.maximum_bytes)
+            || self.media_type != awaiting.declared_media_type
+            || now > awaiting.deadline
+        {
+            return Err(ArtifactWorkError::InvalidCommand);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedWorkloadArtifactStage {
+    pub tenant_id: ResourceId,
+    pub producer_job_id: ResourceId,
+    pub verification_job_id: ResourceId,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub descriptor_digest: Sha256Digest,
+    pub size_bytes: u64,
+    pub media_type: String,
+    pub write_storage_binding_digest: Sha256Digest,
+    pub encryption_domain_id: ResourceId,
+    pub deadline: DateTime<Utc>,
+}
+
+impl AuthorizedWorkloadArtifactStage {
+    pub fn validate_for(
+        &self,
+        request: &StageWorkloadArtifactRequest,
+        now: DateTime<Utc>,
+    ) -> Result<(), ArtifactWorkError> {
+        request.validate()?;
+        if self.tenant_id != request.tenant_id
+            || self.producer_job_id != request.producer_job_id
+            || self.verification_job_id != request.verification_job_id
+            || self.artifact_id != request.artifact_id
+            || self.blob_id != request.blob_id
+            || self.descriptor_digest != request.descriptor_digest
+            || self.size_bytes != u64::try_from(request.descriptor_bytes.len()).unwrap_or(u64::MAX)
+            || self.media_type != request.media_type
+            || self.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || now > self.deadline
+        {
+            return Err(ArtifactWorkError::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkloadArtifactStagePreflight {
+    Authorized(AuthorizedWorkloadArtifactStage),
+    Replayed(StagedWorkloadArtifact),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2235,6 +2328,27 @@ mod tests {
             media_type: stage.declared_media_type.clone(),
         };
         assert!(request.validate().is_ok());
+        assert!(request.validate_for(&stage, now).is_ok());
+        let authorized = AuthorizedWorkloadArtifactStage {
+            tenant_id: request.tenant_id.clone(),
+            producer_job_id: request.producer_job_id.clone(),
+            verification_job_id: request.verification_job_id.clone(),
+            artifact_id: request.artifact_id.clone(),
+            blob_id: request.blob_id.clone(),
+            descriptor_digest: request.descriptor_digest.clone(),
+            size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+            media_type: request.media_type.clone(),
+            write_storage_binding_digest: stage.write_storage_binding_digest.clone(),
+            encryption_domain_id: stage.encryption_domain_id.clone(),
+            deadline: stage.deadline,
+        };
+        assert!(authorized.validate_for(&request, now).is_ok());
+        let mut swapped_authorization = authorized;
+        swapped_authorization.artifact_id = id(ResourceKind::Artifact, 0x825);
+        assert_eq!(
+            swapped_authorization.validate_for(&request, now),
+            Err(ArtifactWorkError::InvalidEvidence)
+        );
         request.descriptor_bytes.push(b' ');
         assert_eq!(request.validate(), Err(ArtifactWorkError::InvalidCommand));
     }
