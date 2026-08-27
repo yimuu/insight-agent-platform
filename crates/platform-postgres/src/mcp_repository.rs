@@ -3,7 +3,7 @@ use crate::artifact_repository::{
 };
 use crate::repository::{
     append_command_event, append_scheduler_event, append_scheduler_event_with_trace,
-    claim_command_receipt, decode_deployment_closure, decode_typed_payload,
+    claim_command_receipt, database_timestamp, decode_deployment_closure, decode_typed_payload,
     decode_versioned_payload, job_from_row, job_projection, load_deployment,
     load_job_for_update_by_text, load_resource, load_resource_for_update, load_task_for_update,
     payload_from_row, require_ready_run_artifact, require_tenant_permission, task_projection,
@@ -496,8 +496,9 @@ impl PgRegistryTransaction {
 
     pub async fn begin_mcp_oauth_authorization(
         &mut self,
-        command: BeginMcpOAuthAuthorization,
+        mut command: BeginMcpOAuthAuthorization,
     ) -> Result<CommandOutcome<TaskRecord>, RepositoryError> {
+        command.deadline = database_timestamp(command.deadline);
         command
             .validate_at(Utc::now())
             .map_err(invalid_authorization)?;
