@@ -43,7 +43,7 @@ use wasmtime::{
     ValType, WasmFeatures,
 };
 
-pub const WASI_ABI_V1_RUNTIME_VERSION: &str = "wasmtime-42.0.0";
+pub const WASI_ABI_V1_RUNTIME_VERSION: &str = "wasmtime-46.0.2";
 pub const WASI_ABI_V1_ENTRYPOINT: &str = "run";
 pub const WASI_ABI_V1_ALLOCATOR: &str = "insight_alloc";
 pub const WASI_ABI_V1_MEMORY: &str = "memory";

@@ -711,6 +711,11 @@ r370修复真实GitHub CI暴露的Security/Egress exact RPC inventory漂移。CR
 `DiscoverMcpStreamableHttp`是MCP Discovery Worker唯一新增的远端discovery transport，但checker仍冻结在CR-192时的13项集合。当前closed
 inventory精确为14项，门禁继续以总数相等拒绝任意第15项；本批不改变proto、authority、credential/locator边界、部署拓扑或L4～L6状态。
 
+r371修复GitHub CI实时RustSec门禁报告的`h2 0.4.15`与`wasmtime 42.0.0`漏洞，不增加ignore。`h2 0.4.16`关闭unbounded empty DATA
+frame；首发restricted WASI exact runtime升级为`wasmtime 46.0.2`，覆盖该run报告的13项Wasmtime公告并同步feature baseline。WASI 10/10、
+workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny与crate-boundary本地通过；该依赖安全修复不改变
+两种首发backend、Sandbox authority或L4～L6状态。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

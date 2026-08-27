@@ -124,7 +124,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 x509-parser = { version = "0.18.1", default-features = false }
 url = "2"
-wasmtime = { version = "=42.0.0", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "=46.0.2", default-features = false, features = ["cranelift", "runtime", "std"] }
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
 

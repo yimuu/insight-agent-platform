@@ -51,6 +51,12 @@
 > checker现精确登记该既有第14项并继续以总数相等拒绝任意第15项；未改变proto、Egress authority、credential/locator边界或部署拓扑。
 > Security/Egress、Sandbox、crate-boundary、Platform v1 contract与clean-cut本地门禁通过；需由新commit的GitHub CI再次验证。
 
+> 2026-08-27 implementation evidence：r371响应GitHub CI run `33072344788`的实时RustSec门禁。`h2 0.4.15`升级到修复
+> unbounded empty DATA frame问题的`0.4.16`；首发restricted WASI runtime从`wasmtime 42.0.0` clean-cut升级到`46.0.2`，覆盖该run报告的
+> 13项Wasmtime安全公告（包含aarch64/Winch sandbox escape与跨Engine type index混淆），同步冻结runtime version和全依赖feature baseline，
+> 不增加backend或执行权限。WASI全部10项bounded execution/abort/fuel/import/memory测试、RustSec audit、cargo-deny四类策略及55-package/
+> 583-dependency crate-boundary、workspace all-target/all-feature tests、format与strict Clippy门禁通过；需由新commit的GitHub CI复验。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。

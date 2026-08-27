@@ -335,7 +335,7 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
         dependency_versions: vec![],
         policy_versions: vec![],
         runtime_family: SandboxRuntimeFamily::WasmWasi,
-        runtime_version: "wasmtime-42.0.0".to_owned(),
+        runtime_version: "wasmtime-46.0.2".to_owned(),
         image_or_module_digest: sha('3'),
         supported_isolation: vec![SandboxIsolationClass::Wasm],
         abi: SandboxAbiVersion::V1,

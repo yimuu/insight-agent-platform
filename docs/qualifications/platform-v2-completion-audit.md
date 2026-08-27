@@ -59,6 +59,11 @@ r369的GitHub CI run `33071817109`已通过crate-boundary与Sandbox deployment�
 13项RPC集合，遗漏CR-198已评审且已实现的credential-free、object-locator-free `DiscoverMcpStreamableHttp`。r370把该既有method登记为
 exact第14项并继续拒绝任意第15项；未修改proto、authority或部署拓扑，远端复验由r370 push后的CI拥有，也不提升L4～L6状态。
 
+r370的GitHub CI run `33072344788`已通过完整部署门禁链并成功完成MCP外部SDK互操作，但实时RustSec审计发现`h2 0.4.15`及
+`wasmtime 42.0.0`共14项漏洞。r371没有增加ignore：锁定`h2 0.4.16`和覆盖全部已报Wasmtime修复下限的`46.0.2`，同步WASI runtime
+evidence与依赖feature baseline；WASI 10/10、workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny及
+55-package/583-dependency boundary本地通过。该批仍需远端CI复验，且不提升production-equivalent L4～L6状态。
+
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
 owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；

@@ -635,6 +635,11 @@ r370修复r369 GitHub CI继续暴露的Security/Egress精确RPC清单漂移。CR
 `DiscoverMcpStreamableHttp`，但部署checker仍停留在CR-192时的13项集合。当前closed inventory精确为14项；checker登记该既有discovery
 method并继续以总数相等拒绝任意第15项。该批不改变proto、authority、credential/locator边界或部署拓扑，也不新增L4～L6证据。
 
+r371修复GitHub CI实时RustSec数据库发现的依赖漏洞，不采用advisory ignore。`h2`升级到`0.4.16`；restricted WASI唯一runtime从
+`wasmtime 42.0.0`升级到`46.0.2`，覆盖该run报告的全部13项Wasmtime公告，并同步exact runtime evidence和依赖feature baseline。WASI
+10/10、workspace all-target/all-feature tests、format、strict Clippy、RustSec audit、cargo-deny及55-package/583-dependency boundary本地门禁
+通过；该批不新增backend、权限或L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
