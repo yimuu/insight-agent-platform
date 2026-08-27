@@ -876,6 +876,14 @@
 > observability/redaction/Helm/format/diff门禁通过。本轮无fresh PostgreSQL、真实外部SSE或进程kill-window，因此只关闭production composition
 > L1，不新增logical subscription L2/L3或L4～L6证据。
 
+> 2026-08-27 implementation evidence：r355在唯一baseline的fresh PostgreSQL 16上重跑logical MCP subscription完整L2事务，覆盖
+> durable claim、lease/fence、notification coalescing、tenant isolation与Context invalidation owner；测试明确因未配置Resource Refresh进程
+> binary而跳过其L3，不把该结果扩张为production subscription process证据。该批同时把subscription与Capability remote fixture迁移到CR-198
+> discovery `pending -> awaiting_artifact_verification -> succeeded` schema v2，并补齐TenantConfig exact Retention/ArtifactIo Deployment及
+> `artifact.staging_bytes` quota authority；另修复Capability Input Task INSERT列映射，使首次`awaiting_input`可在真实PostgreSQL事务中提交。
+> fresh PostgreSQL 16的phase3 Invocation与phase4 Subscription目标测试、workspace all-target、workspace strict Clippy、format/diff均通过；
+> Native/Remote Capability进程恢复仍因未配置binary而明确跳过，真实外部SSE、production kill-window及L4～L6仍Pending。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

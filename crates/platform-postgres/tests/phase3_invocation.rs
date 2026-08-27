@@ -55,10 +55,10 @@ use insight_platform_invocations::{
 use insight_platform_jobs::{JobFence, WakeSource};
 use insight_platform_mcp_host::{
     McpAuthorizationBindingRecord, McpDiscoveryAdmission, McpDiscoveryOperationPayload,
-    McpDiscoveryResultBinding, McpDiscoverySnapshotRecord, McpOperationOutcome,
-    McpRemoteTaskCancelOutcome, McpStreamableHttpConnector, McpStreamableHttpRequest,
-    McpTransportFailure, NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission,
-    NewMcpDiscoverySnapshotRecord,
+    McpDiscoveryResultBinding, McpDiscoverySnapshotRecord, McpDiscoveryTransportEvidence,
+    McpOperationOutcome, McpRemoteTaskCancelOutcome, McpStreamableHttpConnector,
+    McpStreamableHttpRequest, McpTransportFailure, NewMcpAuthorizationBinding,
+    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -2716,7 +2716,31 @@ async fn seed_remote_mcp_facts(
         deadline: now + Duration::hours(2),
     })
     .unwrap();
+    let preallocation = admission.artifact_preallocation.clone();
+    let mut transport_evidence = McpDiscoveryTransportEvidence {
+        schema_version: 1,
+        negotiated_version: snapshot.negotiated_version.clone(),
+        negotiated_capabilities: snapshot.negotiated_capabilities.clone(),
+        descriptor_digest: package.artifact.content_digest().clone(),
+        descriptor_size_bytes: package.artifact.byte_length(),
+        descriptor_count: 1,
+        verification_job_id: preallocation.verification_job_id,
+        artifact_id: preallocation.artifact_id,
+        blob_id: preallocation.blob_id,
+        observed_at: now - Duration::seconds(2),
+        expires_at: now + Duration::hours(1),
+        canonical_digest: digest('0'),
+    };
+    let mut evidence_value = serde_json::to_value(&transport_evidence).unwrap();
+    evidence_value
+        .as_object_mut()
+        .unwrap()
+        .remove("canonical_digest");
+    transport_evidence.canonical_digest =
+        canonical_digest(&evidence_value).unwrap().parse().unwrap();
     let operation_payload = McpDiscoveryOperationPayload::pending(admission)
+        .unwrap()
+        .park_for_verification(transport_evidence)
         .unwrap()
         .complete(McpDiscoveryResultBinding {
             snapshot_id: snapshot_id.clone(),
@@ -2725,7 +2749,12 @@ async fn seed_remote_mcp_facts(
             artifact_link_id: artifact_link_id.clone(),
         })
         .unwrap();
-    let operation_payload = TypedPayload::from_versioned(1, &operation_payload, 1_048_576).unwrap();
+    let operation_payload = TypedPayload::from_versioned(
+        i32::try_from(operation_payload.schema_version).unwrap(),
+        &operation_payload,
+        1_048_576,
+    )
+    .unwrap();
     sqlx::query(
         "INSERT INTO insight_platform.invocations (tenant_id, invocation_id, invocation_kind, owner_kind, owner_id, logical_key, deployment_id, state, payload_schema_version, payload, payload_digest, deadline, terminal_at, created_at, updated_at, trace_id) VALUES ($1, $2, 'mcp_discovery', 'mcp_operation', $2, 'remote-mcp-process-discovery', $3, 'succeeded', $4, $5, $6, $7, $8, $8, $8, $9)",
     )

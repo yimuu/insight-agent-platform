@@ -15,8 +15,8 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
-    ArtifactReferenceKind, AuthoringPackage, CapabilityEndpointScheme, CodeTrustClass,
-    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
+    ArtifactReferenceKind, ArtifactRetentionPolicy, AuthoringPackage, CapabilityEndpointScheme,
+    CodeTrustClass, CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
     ContextBackendKind, ContextBackendLimits, ContextCitationContract, ContextCitationStrength,
     ContextConsistencyMode, ContextDataPolicyContract, ContextDeploymentClosure,
     ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
@@ -26,8 +26,8 @@ use insight_platform_contracts::{
     McpClientCapabilities, McpDiscoverySnapshot, McpMetadataPolicy, McpMethodLimits,
     McpNegotiatedCapabilities, McpOAuthClientAuthenticationKind, McpOAuthEndpoint,
     McpProtocolPolicyDocument, McpServerLimits, McpServerResourceSpec, McpSessionState,
-    McpTransportBinding, McpTransportFeatures, Permission, PermissionSet, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
+    McpTransportBinding, McpTransportFeatures, Permission, PermissionSet, PolicyDeploymentClosure,
+    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
     PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
     ResourceKind, SandboxArtifactIoPolicyDocument, SandboxIsolationClass,
     SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument,
@@ -53,8 +53,8 @@ use insight_platform_mcp_host::{
     ContextSubscriptionRefreshResolver, CreateMcpDiscoveryOperation, CreateMcpResourceSubscription,
     EncryptedMcpState, McpAuthorizationBindingRecord, McpDiscoveryAdmission,
     McpDiscoveryOperationPayload, McpDiscoveryResultBinding, McpDiscoverySnapshotRecord,
-    McpExecutionContractQuery, McpNotificationApplyDisposition, McpNotificationAudit,
-    McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
+    McpDiscoveryTransportEvidence, McpExecutionContractQuery, McpNotificationApplyDisposition,
+    McpNotificationAudit, McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
     McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
     McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
     McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
@@ -164,6 +164,12 @@ fn named_digest(name: &str) -> Sha256Digest {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+fn digest_without_field<T: Serialize>(value: &T, field: &str) -> Sha256Digest {
+    let mut value = serde_json::to_value(value).unwrap();
+    value.as_object_mut().unwrap().remove(field);
+    canonical_digest(&value).unwrap().parse().unwrap()
 }
 
 fn exact(kind: ResourceKind, suffix: u16, name: &str) -> ExactVersionRef {
@@ -1002,6 +1008,28 @@ async fn insert_deployment(
     ExactDeploymentRef::new(deployment_id.clone(), payload.digest.parse().unwrap()).unwrap()
 }
 
+async fn activate_deployment(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    resource_id: &ResourceId,
+    deployment_id: &ResourceId,
+) {
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.resources
+        SET active_version_id = NULL, active_deployment_id = $3,
+            version = version + 1, updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND resource_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(resource_id.to_string())
+    .bind(deployment_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn insert_ready_artifact(
     pool: &PgPool,
     tenant_id: &ResourceId,
@@ -1142,11 +1170,15 @@ async fn seed(
     }
 
     let policy_resource = id(ResourceKind::Policy, 0x10);
+    let retention_policy_resource = id(ResourceKind::Policy, 0x14);
+    let artifact_io_policy_resource = id(ResourceKind::Policy, 0x15);
     let server_resource = id(ResourceKind::McpServer, 0x11);
     let context_interface_resource = id(ResourceKind::ContextSourceInterface, 0x12);
     let context_implementation_resource = id(ResourceKind::ContextSourceImplementation, 0x13);
     for (resource, kind) in [
         (&policy_resource, RegistryResourceKind::Policy),
+        (&retention_policy_resource, RegistryResourceKind::Policy),
+        (&artifact_io_policy_resource, RegistryResourceKind::Policy),
         (&server_resource, RegistryResourceKind::McpServer),
         (
             &context_interface_resource,
@@ -1205,6 +1237,27 @@ async fn seed(
     let data_policy = exact(ResourceKind::PolicyRevision, 0x28, "data");
     let cache_policy = exact(ResourceKind::PolicyRevision, 0x29, "cache");
     let chunker_policy = exact(ResourceKind::PolicyRevision, 0x2a, "chunker");
+    let retention = ArtifactRetentionPolicy {
+        version: 1,
+        minimum_retention_seconds: 3_600,
+        gc_grace_seconds: 3_600,
+        tombstone_retention_seconds: 86_400,
+        retain_provenance_sources: true,
+        delete_requires_approval: false,
+    };
+    let retention_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x2b),
+        retention.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    let artifact_io =
+        sandbox_policy_closure("fixture.policy.secret".parse::<SecretPurpose>().unwrap())
+            .artifact_io;
+    let artifact_io_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x2c),
+        artifact_io.canonical_digest().unwrap(),
+    )
+    .unwrap();
     let policy_documents = vec![
         (
             protocol_policy.clone(),
@@ -1299,6 +1352,149 @@ async fn seed(
         )
         .await;
     }
+    insert_version(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &retention_policy_resource,
+        &retention_policy,
+        1,
+        ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+            authoring_package: authoring(0x8b, "retention-policy"),
+            contract_digest: named_digest("retention-policy-contract"),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            policy_kind: PolicyKind::Retention,
+            rules_digest: retention.canonical_digest().unwrap(),
+            selection: None,
+            scheduling: None,
+            retention: Some(retention),
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            sandbox_secret_resolution: None,
+        })),
+    )
+    .await;
+    insert_version(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &artifact_io_policy_resource,
+        &artifact_io_policy,
+        1,
+        ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+            authoring_package: authoring(0x8c, "artifact-io-policy"),
+            contract_digest: named_digest("artifact-io-policy-contract"),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            policy_kind: PolicyKind::ArtifactIo,
+            rules_digest: artifact_io.canonical_digest().unwrap(),
+            selection: None,
+            scheduling: None,
+            retention: None,
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: Some(artifact_io),
+            sandbox_secret_resolution: None,
+        })),
+    )
+    .await;
+
+    let retention_deployment_id = id(ResourceKind::PolicyDeployment, 0x4b);
+    let retention_deployment = insert_deployment(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &retention_deployment_id,
+        &retention_policy_resource,
+        &retention_policy.revision_id,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: retention_policy.clone(),
+            applicability_digest: named_digest("retention-applicability"),
+            qualification_evidence: artifact(0x10b, "retention-qualification"),
+        }),
+    )
+    .await;
+    activate_deployment(
+        pool,
+        &tenant_id,
+        &retention_policy_resource,
+        &retention_deployment_id,
+    )
+    .await;
+    let artifact_io_deployment_id = id(ResourceKind::PolicyDeployment, 0x4c);
+    let artifact_io_deployment = insert_deployment(
+        pool,
+        &tenant_id,
+        &principal_id,
+        &artifact_io_deployment_id,
+        &artifact_io_policy_resource,
+        &artifact_io_policy.revision_id,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: artifact_io_policy.clone(),
+            applicability_digest: named_digest("artifact-io-applicability"),
+            qualification_evidence: artifact(0x10c, "artifact-io-qualification"),
+        }),
+    )
+    .await;
+    activate_deployment(
+        pool,
+        &tenant_id,
+        &artifact_io_policy_resource,
+        &artifact_io_deployment_id,
+    )
+    .await;
+    let tenant_config = TypedPayload::new(
+        1,
+        &TenantConfig {
+            scheduling_policy: None,
+            artifact_retention_policy: Some(retention_deployment),
+            artifact_io_policy: Some(artifact_io_deployment),
+        },
+    )
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.tenants
+        SET config_schema_version = $2, config = $3, config_digest = $4,
+            version = version + 1, updated_at = clock_timestamp()
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(tenant_config.schema_version)
+    .bind(tenant_config.value)
+    .bind(tenant_config.digest)
+    .execute(pool)
+    .await
+    .unwrap();
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: tenant_id.to_string(),
+            quota_account_id: id(ResourceKind::QuotaAccount, 0x4d).to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: tenant_id.to_string(),
+            work_class: WorkClass::Artifact.as_str().to_owned(),
+            metric: "artifact.staging_bytes".to_owned(),
+            limit_value: 4_194_304,
+            payload: TypedPayload::new(1, &serde_json::json!({"fixture": "mcp-discovery"}))
+                .unwrap(),
+        })
+        .await
+        .unwrap();
 
     let server_revision = exact(ResourceKind::McpServerRevision, 0x30, "server");
     let token_purpose = "mcp.oauth.token".parse::<SecretPurpose>().unwrap();
@@ -1577,7 +1773,26 @@ async fn seed(
         deadline: now + Duration::hours(2),
     })
     .unwrap();
+    let preallocation = admission.artifact_preallocation.clone();
+    let mut transport_evidence = McpDiscoveryTransportEvidence {
+        schema_version: 1,
+        negotiated_version: snapshot.negotiated_version.clone(),
+        negotiated_capabilities: snapshot.negotiated_capabilities.clone(),
+        descriptor_digest: objects.content_digest().clone(),
+        descriptor_size_bytes: objects.byte_length(),
+        descriptor_count: 1,
+        verification_job_id: preallocation.verification_job_id,
+        artifact_id: preallocation.artifact_id,
+        blob_id: preallocation.blob_id,
+        observed_at: now - Duration::seconds(2),
+        expires_at: now + Duration::hours(1),
+        canonical_digest: named_digest("pending-discovery-transport-evidence"),
+    };
+    transport_evidence.canonical_digest =
+        digest_without_field(&transport_evidence, "canonical_digest");
     let operation_payload = McpDiscoveryOperationPayload::pending(admission)
+        .unwrap()
+        .park_for_verification(transport_evidence)
         .unwrap()
         .complete(McpDiscoveryResultBinding {
             snapshot_id: snapshot_id.clone(),
@@ -1586,7 +1801,12 @@ async fn seed(
             artifact_link_id: artifact_link_id.clone(),
         })
         .unwrap();
-    let operation_payload = TypedPayload::from_versioned(1, &operation_payload, 1_048_576).unwrap();
+    let operation_payload = TypedPayload::from_versioned(
+        i32::try_from(operation_payload.schema_version).unwrap(),
+        &operation_payload,
+        1_048_576,
+    )
+    .unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.invocations (

@@ -527,6 +527,13 @@ backlog/recovery告警均已接线。当前15个ComponentRole映射为21个隔�
 13/19、15/19数字是当时历史证据。仓库内L1门禁通过，但无fresh PostgreSQL、真实外部SSE或logical subscription进程kill-window，L2/L3及
 L4～L6仍Pending。
 
+r355在唯一baseline的fresh PostgreSQL 16上补齐logical subscription L2证据：exact Job claim/lease/fence、notification coalescing、tenant
+isolation与Context invalidation owner均通过真实事务。subscription与Capability remote discovery fixtures同步采用CR-198的Artifact verification
+中间态schema v2，并为subscription fixture安装TenantConfig exact Retention/ArtifactIo Deployment和staging quota；Capability Input Task的
+PostgreSQL INSERT列映射错误也在同一真实事务测试中修复。phase3 Invocation、phase4 Subscription、workspace all-target、strict Clippy与
+format/diff通过；测试输出明确标记未配置的Resource Refresh、Native/Remote Capability process fixture为跳过，因此本批不声明logical
+subscription L3、真实外部SSE或L4～L6完成。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
