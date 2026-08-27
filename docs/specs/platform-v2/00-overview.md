@@ -571,6 +571,12 @@ discovery Invocation/Artifact/verification Job均成功、owner `attempt_no=3`�
 `initialize`及其余方法各一次。fixture使用S3-shaped测试证据且scan仍在测试进程内，因此该证据不扩张为真实S3/KMS、Artifact Data Worker进程L3、
 第三方endpoint、容量饱和、production scrape或L4～L6。
 
+r361在同一fresh PostgreSQL 16 production discovery进程夹具中补齐动态容量surface的饱和点L3观测。唯一`maximum_concurrency=1` permit被一个已
+发送到外部TLS endpoint、尚未获得响应的真实discovery attempt持有时，Worker真实HTTP `/readyz`保持200，`/metrics`精确导出固定低基数
+`discovery_jobs available=0/used=1`；随后的Egress/Worker强杀、lease recovery与owner finalize仍通过，证明观测读取不改变业务fence。该证据只
+关闭单进程真实permit authority到HTTP surface的动态接线，不代表第二lane隔离、approved CapacityProfile、production Prometheus scrape、SLO/soak
+或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

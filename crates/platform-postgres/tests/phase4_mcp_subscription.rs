@@ -3399,6 +3399,20 @@ async fn wait_for_control_file(path: &std::path::Path, timeout: StdDuration) {
     }
 }
 
+async fn read_process_http(address: SocketAddr, path: &str) -> String {
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: process.test\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    String::from_utf8(response).unwrap()
+}
+
 fn spawn_protocol_egress_process(config_path: &std::path::Path) -> Child {
     std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
@@ -3493,9 +3507,10 @@ async fn run_discovery_worker_process_l3(
         serde_json::to_vec(&artifact_config).unwrap(),
     )
     .unwrap();
+    let observability_address = available_address();
     let worker_config = serde_json::json!({
         "schema_version": 1,
-        "observability_listen_address": available_address().to_string(),
+        "observability_listen_address": observability_address.to_string(),
         "database_max_connections": 8,
         "database_acquire_timeout_milliseconds": 5000,
         "claim_batch_size": 1,
@@ -3563,6 +3578,16 @@ async fn run_discovery_worker_process_l3(
         StdDuration::from_secs(10),
     )
     .await;
+    let ready = read_process_http(observability_address, "/readyz").await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK"), "{ready}");
+    let metrics = read_process_http(observability_address, "/metrics").await;
+    assert!(metrics.starts_with("HTTP/1.1 200 OK"), "{metrics}");
+    assert!(metrics.contains(
+        "insight_platform_capacity_units{component_role=\"mcp-discovery-worker\",resource=\"discovery_jobs\",state=\"available\"} 0"
+    ));
+    assert!(metrics.contains(
+        "insight_platform_capacity_units{component_role=\"mcp-discovery-worker\",resource=\"discovery_jobs\",state=\"used\"} 1"
+    ));
     egress.kill().unwrap();
     egress.wait().unwrap();
     first_egress_stderr.await.unwrap();

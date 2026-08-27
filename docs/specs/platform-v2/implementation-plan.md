@@ -851,6 +851,12 @@
 > S3-shaped测试证据且scan仍在测试进程内，因此本轮不代表真实S3/KMS、Artifact Data Worker进程L3、第三方endpoint、容量饱和、production scrape
 > 或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r361在同一fresh PostgreSQL 16 production discovery进程夹具中补齐动态容量surface的饱和点L3观测。
+> 唯一`maximum_concurrency=1` permit被一个已发送到外部TLS endpoint、尚未获得响应的真实discovery attempt持有时，Worker真实HTTP
+> `/readyz`保持200，`/metrics`精确导出固定低基数`discovery_jobs available=0/used=1`；随后既有Egress/Worker强杀、lease recovery与owner
+> finalize仍通过，证明观测读取不改变业务fence。fresh PostgreSQL目标测试通过。该证据只关闭单进程真实permit authority到HTTP surface的动态
+> 接线，不代表第二lane隔离、approved CapacityProfile、production Prometheus scrape、SLO/soak或L4～L6完成。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，
