@@ -35981,6 +35981,18 @@ mod tests {
             repository.claim_mcp_subscription_jobs(command).await,
             Err(RepositoryError::InvalidInput(_))
         ));
+        assert!(matches!(
+            repository
+                .list_due_mcp_subscription_reconciliations_global(0, 60_000)
+                .await,
+            Err(RepositoryError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            repository
+                .list_due_mcp_subscription_recoveries_global(0)
+                .await,
+            Err(RepositoryError::InvalidInput(_))
+        ));
     }
 
     #[test]

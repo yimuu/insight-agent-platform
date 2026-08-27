@@ -853,6 +853,12 @@
 > closed。取消使用bounded drain。MCP service 5/5、全部binary target tests及strict Clippy、format/diff门禁通过。本批尚未接global due
 > recovery/reconcile scanner与production binary，因此只关闭claim/execute/heartbeat库级L1，不新增fresh PostgreSQL或L3证据。
 
+> 2026-08-27 implementation evidence：r352为logical subscription critical-control补齐bounded global candidate discovery，同时保留
+> tenant-scoped mutation authority。global reconcile/recovery首先以exact `McpSubscription + Mcp + mcp_operation`、closed state/wake/expiry
+> predicates选择有限tenant集合，再逐tenant复用既有typed scan重建候选；limit在任何数据库I/O前fail closed。两个Due candidate现携带并验证
+> durable invocation `TraceIdentityV1`，后续恢复不生成新的trace root。MCP Host 61/61、PostgreSQL lib 15/15、双crate strict Clippy、baseline、
+> format/diff门禁通过。本轮没有fresh PostgreSQL，global scan竞争/公平性及production scanner接线仍不计L2/L3证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

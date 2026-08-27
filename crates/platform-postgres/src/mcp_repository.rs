@@ -76,7 +76,8 @@ use insight_platform_mcp_host::{
     ResolveMcpDiscoveryAttempt, ResolvedContextSubscriptionRefresh, ResolvedMcpDiscoveryExecution,
     ResolvedMcpOAuthAuthorizationStart, ResolvedMcpSubscriptionExecution,
     SaveMcpSubscriptionSession, TransitionMcpAuthorizationBinding, WakeMcpSubscriptionReconcile,
-    MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN, MCP_OAUTH_PKCE_SECRET_PURPOSE,
+    MIN_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS,
 };
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
@@ -9347,6 +9348,89 @@ impl PgRepository {
         Ok(CommandOutcome::Applied(next))
     }
 
+    /// Bounded production scan across tenant partitions. The first query selects only tenants
+    /// that currently own exact due logical-subscription Jobs; tenant-scoped authority methods
+    /// then reconstruct and validate each candidate under the existing closed contract.
+    pub async fn list_due_mcp_subscription_reconciliations_global(
+        &self,
+        limit: u16,
+        minimum_idle_milliseconds: u64,
+    ) -> Result<Vec<DueMcpSubscriptionReconcile>, RepositoryError> {
+        if limit == 0
+            || limit > MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN
+            || minimum_idle_milliseconds < MIN_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS
+        {
+            return Err(RepositoryError::InvalidInput(
+                "global MCP subscription reconcile scan is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let observed_at = database_now(&mut transaction).await?;
+        let idle_milliseconds = i64::try_from(minimum_idle_milliseconds).map_err(|_| {
+            RepositoryError::InvalidInput(
+                "MCP subscription reconcile interval is invalid".to_owned(),
+            )
+        })?;
+        let not_updated_after = observed_at - chrono::Duration::milliseconds(idle_milliseconds);
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT subscription.tenant_id
+            FROM insight_platform.invocations AS subscription
+            JOIN insight_platform.jobs AS job
+              ON job.tenant_id = subscription.tenant_id
+             AND job.invocation_id = subscription.invocation_id
+            WHERE subscription.invocation_kind = 'mcp_subscription'
+              AND subscription.owner_kind = 'mcp_operation'
+              AND subscription.owner_id = subscription.invocation_id
+              AND subscription.state = 'active'
+              AND subscription.updated_at <= $1
+              AND subscription.deadline > $2
+              AND subscription.payload -> 'pending_invalidation' = 'null'::jsonb
+              AND subscription.payload #>> '{session,state}' IN ('ready', 'degraded')
+              AND (subscription.payload #>> '{session,expires_at}')::timestamptz > $2
+              AND job.work_class = 'mcp'
+              AND job.job_kind = 'mcp_subscription'
+              AND job.owner_kind = 'mcp_operation'
+              AND job.owner_id = subscription.invocation_id
+              AND job.state = 'waiting'
+              AND job.wake_kind = 'remote_invocation'
+              AND job.wake_state = 'pending'
+            ORDER BY subscription.tenant_id
+            LIMIT $3
+            "#,
+        )
+        .bind(not_updated_after)
+        .bind(observed_at)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let tenants = rows
+            .into_iter()
+            .map(|row| parse_resource_id_column(&row, "tenant_id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        let mut candidates = Vec::new();
+        for tenant_id in tenants {
+            let remaining = usize::from(limit).saturating_sub(candidates.len());
+            if remaining == 0 {
+                break;
+            }
+            let mut tenant_candidates = self
+                .list_due_mcp_subscription_reconciliations(McpSubscriptionReconcileScan {
+                    tenant_id,
+                    limit: u16::try_from(remaining).map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "global MCP subscription reconcile limit overflow".to_owned(),
+                        )
+                    })?,
+                    minimum_idle_milliseconds,
+                })
+                .await?;
+            candidates.append(&mut tenant_candidates);
+        }
+        Ok(candidates)
+    }
+
     pub async fn list_due_mcp_subscription_reconciliations(
         &self,
         scan: McpSubscriptionReconcileScan,
@@ -9363,6 +9447,7 @@ impl PgRepository {
         let rows = sqlx::query(
             r#"
             SELECT subscription.invocation_id, subscription.version AS subscription_version,
+                   subscription.trace_id,
                    subscription.payload_schema_version, subscription.payload,
                    subscription.payload_digest, job.job_id, job.version AS job_version
             FROM insight_platform.invocations AS subscription
@@ -9403,6 +9488,11 @@ impl PgRepository {
             let payload: McpSubscriptionPayload =
                 decode_versioned_payload(&typed, "MCP subscription")?;
             let candidate = DueMcpSubscriptionReconcile {
+                trace: insight_platform_contracts::TraceIdentityV1::new(
+                    row.try_get::<String, _>("trace_id")?
+                        .parse::<insight_platform_contracts::TraceId>()
+                        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                ),
                 tenant_id: scan.tenant_id.clone(),
                 subscription_id: parse_resource_id_column(&row, "invocation_id")?,
                 job_id: parse_resource_id_column(&row, "job_id")?,
@@ -9537,6 +9627,76 @@ impl PgRepository {
         Ok(CommandOutcome::Applied(current))
     }
 
+    pub async fn list_due_mcp_subscription_recoveries_global(
+        &self,
+        limit: u16,
+    ) -> Result<Vec<DueMcpSubscriptionRecovery>, RepositoryError> {
+        if limit == 0 || limit > MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN {
+            return Err(RepositoryError::InvalidInput(
+                "global MCP subscription recovery scan is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let observed_at = database_now(&mut transaction).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT subscription.tenant_id
+            FROM insight_platform.invocations AS subscription
+            JOIN insight_platform.jobs AS job
+              ON job.tenant_id = subscription.tenant_id
+             AND job.job_id = subscription.payload #>> '{binding,job_id}'
+            WHERE subscription.invocation_kind = 'mcp_subscription'
+              AND subscription.owner_kind = 'mcp_operation'
+              AND subscription.owner_id = subscription.invocation_id
+              AND subscription.state IN ('pending', 'active')
+              AND subscription.terminal_at IS NULL
+              AND subscription.deadline > $1
+              AND job.work_class = 'mcp'
+              AND job.job_kind = 'mcp_subscription'
+              AND job.owner_kind = 'mcp_operation'
+              AND job.owner_id = subscription.invocation_id
+              AND job.terminal_at IS NULL
+              AND (
+                    (job.state IN ('leased', 'running') AND job.lease_expires_at <= $1)
+                 OR (job.state = 'waiting'
+                     AND subscription.state = 'active'
+                     AND subscription.payload #>> '{session,state}' IN ('ready', 'degraded')
+                     AND (subscription.payload #>> '{session,expires_at}')::timestamptz <= $1)
+              )
+            ORDER BY subscription.tenant_id
+            LIMIT $2
+            "#,
+        )
+        .bind(observed_at)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let tenants = rows
+            .into_iter()
+            .map(|row| parse_resource_id_column(&row, "tenant_id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        let mut candidates = Vec::new();
+        for tenant_id in tenants {
+            let remaining = usize::from(limit).saturating_sub(candidates.len());
+            if remaining == 0 {
+                break;
+            }
+            let mut tenant_candidates = self
+                .list_due_mcp_subscription_recoveries(McpSubscriptionRecoveryScan {
+                    tenant_id,
+                    limit: u16::try_from(remaining).map_err(|_| {
+                        RepositoryError::InvalidInput(
+                            "global MCP subscription recovery limit overflow".to_owned(),
+                        )
+                    })?,
+                })
+                .await?;
+            candidates.append(&mut tenant_candidates);
+        }
+        Ok(candidates)
+    }
+
     pub async fn list_due_mcp_subscription_recoveries(
         &self,
         scan: McpSubscriptionRecoveryScan,
@@ -9610,6 +9770,11 @@ impl PgRepository {
             )
             .map_err(|_| RepositoryError::CorruptRow("negative MCP lease generation".to_owned()))?;
             let candidate = DueMcpSubscriptionRecovery {
+                trace: insight_platform_contracts::TraceIdentityV1::new(
+                    row.try_get::<String, _>("trace_id")?
+                        .parse::<insight_platform_contracts::TraceId>()
+                        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?,
+                ),
                 tenant_id: parse_resource_id_column(&row, "tenant_id")?,
                 subscription_id: parse_resource_id_column(&row, "invocation_id")?,
                 job_id: parse_resource_id_column(&row, "recovery_job_id")?,

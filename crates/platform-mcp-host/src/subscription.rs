@@ -1293,6 +1293,7 @@ impl McpSubscriptionReconcileScan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueMcpSubscriptionReconcile {
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub subscription_id: ResourceId,
     pub job_id: ResourceId,
@@ -1305,7 +1306,8 @@ pub struct DueMcpSubscriptionReconcile {
 
 impl DueMcpSubscriptionReconcile {
     pub fn validate(&self) -> Result<(), McpHostError> {
-        if self.tenant_id.kind() != ResourceKind::Tenant
+        if self.trace.validate().is_err()
+            || self.tenant_id.kind() != ResourceKind::Tenant
             || self.subscription_id.kind() != ResourceKind::McpOperation
             || self.job_id.kind() != ResourceKind::Job
             || self.subscription_version == 0
@@ -1353,6 +1355,7 @@ impl McpSubscriptionRecoveryScan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DueMcpSubscriptionRecovery {
+    pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
     pub subscription_id: ResourceId,
     pub job_id: ResourceId,
@@ -1370,7 +1373,8 @@ pub struct DueMcpSubscriptionRecovery {
 
 impl DueMcpSubscriptionRecovery {
     pub fn validate(&self) -> Result<(), McpHostError> {
-        let common_invalid = self.tenant_id.kind() != ResourceKind::Tenant
+        let common_invalid = self.trace.validate().is_err()
+            || self.tenant_id.kind() != ResourceKind::Tenant
             || self.subscription_id.kind() != ResourceKind::McpOperation
             || self.job_id.kind() != ResourceKind::Job
             || self.subscription_version == 0

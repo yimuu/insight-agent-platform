@@ -13,7 +13,8 @@ use insight_platform_contracts::{
     McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
     McpOAuthClientAuthenticationKind, McpOAuthEndpoint, McpOAuthTaskBinding, McpServerLimits,
     McpSessionState, McpTransportBinding, McpTransportFeatures, Permission, PermissionSet,
-    PrincipalSnapshot, SecretPurpose, SecretResolutionPolicy, MCP_PROTOCOL_BASELINE,
+    PrincipalSnapshot, SecretPurpose, SecretResolutionPolicy, TraceIdentityV1,
+    MCP_PROTOCOL_BASELINE,
 };
 use insight_platform_jobs::JobFence;
 use std::{
@@ -3211,6 +3212,7 @@ async fn subscription_reconcile_driver_is_bounded_and_treats_races_as_stale() {
         .into_iter()
         .enumerate()
         .map(|(index, job_version)| DueMcpSubscriptionReconcile {
+            trace: TraceIdentityV1::generate(),
             tenant_id: record.tenant_id.clone(),
             subscription_id: if index == 0 {
                 record.subscription_id.clone()
@@ -3299,6 +3301,7 @@ async fn subscription_recovery_driver_is_bounded_and_treats_races_as_stale() {
     let record = ready_subscription_record(&contract, now);
     let candidates = vec![
         DueMcpSubscriptionRecovery {
+            trace: TraceIdentityV1::generate(),
             tenant_id: record.tenant_id.clone(),
             subscription_id: record.subscription_id.clone(),
             job_id: record.job_id.clone(),
@@ -3314,6 +3317,7 @@ async fn subscription_recovery_driver_is_bounded_and_treats_races_as_stale() {
             observed_at: now,
         },
         DueMcpSubscriptionRecovery {
+            trace: TraceIdentityV1::generate(),
             tenant_id: record.tenant_id.clone(),
             subscription_id: id(ResourceKind::McpOperation, 0x5b0),
             job_id: id(ResourceKind::Job, 0x5b1),
