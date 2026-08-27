@@ -3131,10 +3131,27 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     );
 
         macro_rules! task_first_winner_fixture {
-            ($fixture_repository:ident, $fixture_pool:ident, $fixture_bindings:ident) => {{
+            ($fixture_repository:ident, $fixture_pool:ident, $fixture_bindings:ident, $fixture_job_id:ident) => {{
                 let repository: PgRepository = $fixture_repository;
                 let pool: PgPool = $fixture_pool;
                 let bindings: RunBindingsSnapshot = $fixture_bindings;
+    // The surrounding fixture deliberately leaves several same-tenant orchestration Jobs ready.
+    // This scenario belongs to the root Run admitted as `recovery_command`; pin that exact Job
+    // before the first claim so WDRR history cannot turn an unrelated descendant Run into the
+    // Task/Child parent used below.
+    let prioritized_fixture_job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET priority = 1, scheduled_at = clock_timestamp() - interval '1 minute'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(&$fixture_job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(prioritized_fixture_job.rows_affected(), 1);
     let reserved_before_task: i64 = sqlx::query_scalar(
         "SELECT reserved_value FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND quota_account_id = $2",
     )
@@ -3156,6 +3173,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap();
     scheduler.commit().await.unwrap();
     assert_eq!(task_claimed.len(), 1);
+    assert_eq!(task_claimed[0].job.job_id, $fixture_job_id);
     let selected_node_id = task_claimed[0]
         .job
         .node_id
@@ -9692,13 +9710,15 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             repository: PgRepository,
             pool: PgPool,
             bindings: RunBindingsSnapshot,
+            fixture_job_id: String,
         ) {
-            task_first_winner_fixture!(repository, pool, bindings);
+            task_first_winner_fixture!(repository, pool, bindings, fixture_job_id);
         }
         Box::pin(run_task_first_winner_fixture(
             repository.clone(),
             pool.clone(),
             bindings.clone(),
+            recovery_command.orchestration_job_id.to_string(),
         ))
         .await;
         })
