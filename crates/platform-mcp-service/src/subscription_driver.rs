@@ -7,7 +7,9 @@ use insight_platform_jobs::JobFence;
 use insight_platform_mcp_host::{
     ExecuteMcpSubscriptionJob, McpJobPayload, McpSubscriptionContractQuery,
     McpSubscriptionRemoteIoLease, McpSubscriptionWorker, McpSubscriptionWorkerAudit,
-    McpSubscriptionWorkerAudits, McpSubscriptionWorkerError,
+    McpSubscriptionWorkerAudits, McpSubscriptionWorkerError, RecoverDueMcpSubscription,
+    WakeMcpSubscriptionReconcile, MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN,
+    MIN_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS,
 };
 use insight_platform_postgres::repository::{
     ClaimJobs, HeartbeatJob, JobFence as RepositoryJobFence, JobRecord, PgRepository,
@@ -37,6 +39,9 @@ pub struct McpSubscriptionDriverTiming {
 #[derive(Debug, Clone, Copy)]
 pub struct McpSubscriptionDriverConfig {
     pub claim_batch_size: u16,
+    pub recovery_batch_size: u16,
+    pub reconcile_batch_size: u16,
+    pub reconcile_minimum_idle_milliseconds: u64,
     pub maximum_concurrency: usize,
     pub lease_milliseconds: u64,
     pub timing: McpSubscriptionDriverTiming,
@@ -46,6 +51,12 @@ impl McpSubscriptionDriverConfig {
     pub fn validate(self) -> Result<(), McpSubscriptionDriverError> {
         if self.claim_batch_size == 0
             || self.claim_batch_size > MCP_SUBSCRIPTION_MAX_BATCH
+            || self.recovery_batch_size == 0
+            || self.recovery_batch_size > MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN
+            || self.reconcile_batch_size == 0
+            || self.reconcile_batch_size > MAX_MCP_SUBSCRIPTION_RECONCILE_SCAN
+            || self.reconcile_minimum_idle_milliseconds
+                < MIN_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS
             || self.maximum_concurrency == 0
             || self.maximum_concurrency > usize::from(MCP_SUBSCRIPTION_MAX_BATCH)
             || self.lease_milliseconds < 3
@@ -119,6 +130,8 @@ impl From<McpSubscriptionWorkerError> for McpSubscriptionDriverError {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct McpSubscriptionDriverReport {
     pub claimed: u64,
+    pub recovered: u64,
+    pub reconciled: u64,
     pub settled: u64,
     pub abandoned: u64,
 }
@@ -229,6 +242,83 @@ impl McpSubscriptionDriver {
         Ok(count)
     }
 
+    pub async fn recover_once(&self) -> Result<usize, McpSubscriptionDriverError> {
+        let candidates = self
+            .repository
+            .list_due_mcp_subscription_recoveries_global(self.config.recovery_batch_size)
+            .await?;
+        let mut recovered = 0usize;
+        for candidate in candidates {
+            let mut command = RecoverDueMcpSubscription {
+                audit: control_audit(
+                    &candidate.tenant_id,
+                    &self.worker_process_generation_id,
+                    candidate.trace,
+                    "mcp.subscription.recovery",
+                    &candidate,
+                    self.config.timing.receipt_ttl,
+                )?,
+                candidate,
+            };
+            command.audit.request_digest = command
+                .request_digest()
+                .map_err(|_| McpSubscriptionDriverError::CorruptClaim)?;
+            match self.repository.recover_due_mcp_subscription(command).await {
+                Ok(_) => recovered = recovered.saturating_add(1),
+                Err(
+                    RepositoryError::Conflict(_)
+                    | RepositoryError::StaleFence
+                    | RepositoryError::LeaseExpired
+                    | RepositoryError::NotFound(_),
+                ) => {}
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        Ok(recovered)
+    }
+
+    pub async fn reconcile_once(&self) -> Result<usize, McpSubscriptionDriverError> {
+        let candidates = self
+            .repository
+            .list_due_mcp_subscription_reconciliations_global(
+                self.config.reconcile_batch_size,
+                self.config.reconcile_minimum_idle_milliseconds,
+            )
+            .await?;
+        let mut reconciled = 0usize;
+        for candidate in candidates {
+            let mut command = WakeMcpSubscriptionReconcile {
+                audit: control_audit(
+                    &candidate.tenant_id,
+                    &self.worker_process_generation_id,
+                    candidate.trace,
+                    "mcp.subscription.reconcile",
+                    &candidate,
+                    self.config.timing.receipt_ttl,
+                )?,
+                candidate,
+            };
+            command.audit.request_digest = command
+                .request_digest()
+                .map_err(|_| McpSubscriptionDriverError::CorruptClaim)?;
+            match self
+                .repository
+                .wake_mcp_subscription_reconcile(command)
+                .await
+            {
+                Ok(_) => reconciled = reconciled.saturating_add(1),
+                Err(
+                    RepositoryError::Conflict(_)
+                    | RepositoryError::StaleFence
+                    | RepositoryError::LeaseExpired
+                    | RepositoryError::NotFound(_),
+                ) => {}
+                Err(failure) => return Err(failure.into()),
+            }
+        }
+        Ok(reconciled)
+    }
+
     pub async fn run(
         self,
         cancellation: CancellationToken,
@@ -242,8 +332,19 @@ impl McpSubscriptionDriver {
                 biased;
                 _ = cancellation.cancelled() => break,
                 joined = active.join_next(), if !active.is_empty() => observe_join(joined, &mut report),
-                _ = scan.tick() => match self.drive_once(&mut active).await {
-                    Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
+                _ = scan.tick() => {
+                    let control = async {
+                        let recovered = self.recover_once().await?;
+                        let reconciled = self.reconcile_once().await?;
+                        let claimed = self.drive_once(&mut active).await?;
+                        Ok::<_, McpSubscriptionDriverError>((recovered, reconciled, claimed))
+                    }.await;
+                    match control {
+                    Ok((recovered, reconciled, claimed)) => {
+                        report.recovered = report.recovered.saturating_add(recovered as u64);
+                        report.reconciled = report.reconciled.saturating_add(reconciled as u64);
+                        report.claimed = report.claimed.saturating_add(claimed as u64);
+                    }
                     Err(McpSubscriptionDriverError::Repository(RepositoryError::Database(_))) => {
                         tokio::select! {
                             _ = cancellation.cancelled() => break,
@@ -251,6 +352,7 @@ impl McpSubscriptionDriver {
                         }
                     }
                     Err(failure) => return Err(failure),
+                    }
                 }
             }
         }
@@ -552,6 +654,41 @@ fn worker_audits(
     })
 }
 
+fn control_audit<T: serde::Serialize>(
+    tenant_id: &ResourceId,
+    worker_id: &ResourceId,
+    trace: insight_platform_contracts::TraceIdentityV1,
+    operation: &str,
+    candidate: &T,
+    receipt_ttl: Duration,
+) -> Result<McpSubscriptionWorkerAudit, McpSubscriptionDriverError> {
+    let now = Utc::now();
+    let idempotency_key_digest: Sha256Digest = canonical_digest(&json!({
+        "schema_version": 1,
+        "operation": operation,
+        "candidate": candidate,
+    }))
+    .map_err(|_| McpSubscriptionDriverError::InvalidGeneratedIdentity)?
+    .parse()
+    .map_err(|_| McpSubscriptionDriverError::InvalidGeneratedIdentity)?;
+    Ok(McpSubscriptionWorkerAudit {
+        trace,
+        tenant_id: tenant_id.clone(),
+        worker_process_generation_id: worker_id.clone(),
+        receipt_id: new_id(ResourceKind::Receipt)?,
+        event_id: new_id(ResourceKind::Event)?,
+        outbox_id: new_id(ResourceKind::OutboxEvent)?,
+        idempotency_key_digest: idempotency_key_digest.clone(),
+        request_digest: idempotency_key_digest,
+        receipt_expires_at: now
+            .checked_add_signed(
+                ChronoDuration::from_std(receipt_ttl)
+                    .map_err(|_| McpSubscriptionDriverError::InvalidConfiguration)?,
+            )
+            .ok_or(McpSubscriptionDriverError::InvalidGeneratedIdentity)?,
+    })
+}
+
 fn subscription_payload(
     claim: &JobRecord,
 ) -> Result<insight_platform_mcp_host::McpSubscriptionJobPayload, McpSubscriptionDriverError> {
@@ -625,6 +762,9 @@ mod tests {
     fn driver_config_rejects_heartbeat_that_can_overtake_the_lease() {
         let config = McpSubscriptionDriverConfig {
             claim_batch_size: 1,
+            recovery_batch_size: 1,
+            reconcile_batch_size: 1,
+            reconcile_minimum_idle_milliseconds: 60_000,
             maximum_concurrency: 1,
             lease_milliseconds: 300,
             timing: McpSubscriptionDriverTiming {

@@ -859,6 +859,12 @@
 > durable invocation `TraceIdentityV1`，后续恢复不生成新的trace root。MCP Host 61/61、PostgreSQL lib 15/15、双crate strict Clippy、baseline、
 > format/diff门禁通过。本轮没有fresh PostgreSQL，global scan竞争/公平性及production scanner接线仍不计L2/L3证据。
 
+> 2026-08-27 implementation evidence：r353把global logical subscription critical-control接入durable driver主循环。每轮先按
+> database-time candidate恢复expired lease/session，再唤醒due full reconcile，最后领取ready Job；recovery/reconcile命令以候选完整version/
+> generation/cause closure构造稳定幂等scope，复用candidate durable trace，并把CAS first-winner竞争计为stale。batch与minimum idle均使用closed
+> 上限，数据库不可用走bounded backoff，其他authority错误使进程fail closed。MCP service 5/5、全部binary target tests及strict Clippy、format/
+> diff门禁通过。本批仍未接production binary/Helm，且无fresh PostgreSQL global scanner竞争，因此只关闭driver critical-control L1组合。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

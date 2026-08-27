@@ -1291,7 +1291,7 @@ impl McpSubscriptionReconcileScan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DueMcpSubscriptionReconcile {
     pub trace: TraceIdentityV1,
     pub tenant_id: ResourceId,
