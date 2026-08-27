@@ -6,7 +6,7 @@ use crate::{
         validate_capability_value_against_schema, PgInvocationTransaction,
     },
     repository::{
-        append_command_event, append_scheduler_event, claim_command_receipt,
+        append_command_event, append_scheduler_event, claim_command_receipt, database_timestamp,
         decode_versioned_payload, job_from_row, job_projection, load_deployment, load_resource,
         load_run_for_update, load_task_for_update, require_ready_run_artifact,
         require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page, task_projection,
@@ -737,8 +737,11 @@ impl PgInvocationTransaction {
 
     pub async fn commit_capability_outcome(
         &mut self,
-        command: CommitCapabilityOutcome,
+        mut command: CommitCapabilityOutcome,
     ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        if let DispatchOutcome::InputRequired(request) = &mut command.outcome {
+            request.deadline = database_timestamp(request.deadline);
+        }
         command.validate_at(Utc::now())?;
         let mut transaction = self.transaction.begin().await?;
         let database_now = database_now(&mut transaction).await?;

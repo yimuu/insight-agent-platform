@@ -97,7 +97,7 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
-fn database_timestamp(value: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn database_timestamp(value: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(value.timestamp_micros())
         .expect("a valid DateTime always has a representable microsecond timestamp")
 }

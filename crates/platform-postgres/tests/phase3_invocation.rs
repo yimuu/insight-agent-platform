@@ -1776,7 +1776,11 @@ async fn run_capability_phase3_fixture() {
                 opaque_state_digest: remote_state.plaintext_digest.clone(),
                 encrypted_state: remote_state.clone(),
                 external_identity_digest: digest('a'),
-                deadline: Utc::now() + Duration::minutes(10),
+                deadline: DateTime::from_timestamp(
+                    (Utc::now() + Duration::minutes(10)).timestamp(),
+                    987_654_321,
+                )
+                .unwrap(),
             }),
             resume_mutations: None,
             failure_mutations: None,
