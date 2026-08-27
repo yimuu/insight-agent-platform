@@ -607,6 +607,15 @@ Model→Capability→Model→Return链及Run均`succeeded`、fence清空。该�
 构造Artifact时间的问题。证据关闭Typed Plan production Scheduler RPC双进程kill/restart L3；Artifact-backed RunValue的同类故障窗口、AWS云
 workload identity及L4～L6仍未由此证明。
 
+r366在同一production进程链中新增独立`Start -> Return(RunInput)` Agent/Run，输入不是Inline，而是由production AWS provider写入
+versioned S3并以KMS envelope保护locator的35-byte Artifact-backed RunValue。测试先通过正式Run admission冻结exact Agent/Plan/
+ExecutionProfile与principal授权，再锁定PostgreSQL `run_values` authority，使Orchestration Worker发出的Scheduler RunValue mTLS RPC在
+Artifact Data Worker内确定处于进行中；随后同时强杀两个进程、释放锁并过期attempt 1 lease。按readiness顺序重启后，attempt 2重新claim，
+Data Worker重验Job/Run/value/artifact/fence authority、KMS解封并按exact S3 generation读取正文，最终Run与source Job均`succeeded`、
+`active_work_count=0`、fence清空，且`output_value_id`精确等于Artifact-backed `input_value_id`。证据关闭Artifact-backed RunValue production
+Scheduler RPC双进程kill/restart L3，并与r365共同闭合Phase 2 terminal materialization的仓库内production进程窗口；LocalStack仍不代表AWS云
+workload identity、网络滚动故障或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

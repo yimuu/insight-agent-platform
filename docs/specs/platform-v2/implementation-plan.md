@@ -886,6 +886,14 @@
 > exact-generation S3读取成功，整条链与Run终态`succeeded`且fence/active work归零。旧夹具错误的Policy-kind encryption-domain和host-clock
 > Artifact时间也已修正。该证据关闭Typed Plan production Scheduler RPC双进程kill/restart L3；Artifact-backed RunValue同类窗口与L4～L6仍Pending。
 
+> 2026-08-27 implementation evidence：r366在同一production Artifact Data Worker/Orchestration Worker链中新增独立
+> `Start -> Return(RunInput)` Agent/Run。35-byte RunInput由production AWS provider写入versioned S3，数据库仅保存KMS保护的exact locator；正式
+> Run admission冻结exact Plan、ExecutionProfile和principal授权。测试锁定PostgreSQL `run_values` authority，待source Job进入`running`且
+> Scheduler RunValue mTLS RPC在Data Worker内进行时同时强杀两个进程；释放锁、过期attempt 1 lease并按readiness顺序重启后，attempt 2重新claim，
+> 重验Job/Run/value/artifact/fence、KMS解封并exact-generation读取成功。Run/Job终态`succeeded`，active work与fence归零，output value精确等于
+> Artifact-backed input value。该证据与r365共同关闭Phase 2 terminal materialization的仓库内production process L3窗口；AWS云workload
+> identity、滚动网络故障及L4～L6仍Pending。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

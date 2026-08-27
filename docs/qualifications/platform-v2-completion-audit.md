@@ -219,7 +219,8 @@ kind/work-class/owner mapping、generated registry及Python checker。contracts�
 Capability，r217/r221闭合Remote HTTP/gRPC/MCP ToolsCall，r240/r241/r242/r243闭合Native/Remote Context与Orchestration resume，r233/r244
 闭合Model provider及tool-result整链，r359～r361闭合MCP Discovery owner/recovery/saturation，r362闭合S3/KMS provider roundtrip，r363统一
 Artifact authority time，r364闭合production Discovery→Artifact Data Worker→S3/KMS→scan→owner finalize，r365闭合production
-Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart。它们均为各自声明范围的L3，
+Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart，r366闭合Artifact-backed RunValue同一production RPC窗口。
+它们均为各自声明范围的L3，
 不自动提升为L4～L6。
 
 1. 独立Orchestration Worker binary、process config、startup/readiness/drain、restricted Helm Deployment和critical-control safety composition已闭合。
@@ -229,13 +230,13 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    规划、通用或derived fenced commit与retry handoff；FailNode现在也从locked facts推导ErrorBoundary/structured-exit/wake/
    sibling-cancellation槽，并在失败owner transaction重验expression evidence。Inline Return/Raise terminal、ChildAgent和HumanTask已接入该store；
    Timer/Signal durable wait与Model/Capability/Context dispatch均已接入；Artifact-backed RunValue的Scheduler侧Data RPC materializer、exact leased resolver、Broker reader与读前/读后
-   authority现已接入；r365已关闭Typed Plan的Orchestration Worker/Artifact Data Worker production RPC双进程kill/restart，Artifact-backed
-   RunValue的同类窗口仍待验证；Model/Capability/Context
+   authority现已接入；r365已关闭Typed Plan的Orchestration Worker/Artifact Data Worker production RPC双进程kill/restart，r366以正式
+   `Start -> Return(RunInput)` admission、真实HTTPS S3/KMS和同一双进程kill/restart关闭Artifact-backed RunValue窗口；Model/Capability/Context
    下游role已由r208、r217、r221、r233、r240～r244的独立production process链闭合；
    exact typed-plan Artifact的Scheduler专用Data RPC已闭合canonical envelope、
    exact workload identity、Job lease/Run/Plan/Artifact PostgreSQL authority、读取前后双重授权和deadline/stream backpressure；
    Scheduler侧也已用当前fence从PostgreSQL解析descriptor并完成canonical JSON、Plan limits和semantic digest复验；全部external leaf及
-   Subagent terminal lifecycle已有对应production process证据，剩余边界是Artifact-backed RunValue RPC故障窗口与L4滚动/网络故障。
+   Subagent terminal lifecycle已有对应production process证据；仓库内Phase 2 production terminal窗口已闭合，剩余边界是L4滚动/网络故障。
    closed expression owner、纯确定性evaluator、Plan节点与HardLimitProfile v5消费现已落地，production driver API也不接受外部
    observation；ChildAgent deferral现要求exact Plan v4、冻结slot Selection Policy和candidate evidence，并在同一SERIALIZABLE owner
    transaction中按当前Scope重解析input/可选route RunValue、锁定Policy/Revision当前gate且不依赖active head、重跑共享evaluator；fresh PostgreSQL
@@ -272,8 +273,9 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    quota、Receipt/Event/Outbox；fresh PostgreSQL覆盖Inline Return、wrong value整批回滚和Receipt replay。正式PostgreSQL durable store与
    coordinator现已把claim/start、Plan materialization、Start commit、Artifact-backed Return RunValue的leased resolver/reader/canonical
    materialization和Run Succeeded串成同一链，并断言exact output value。Raise safe Failure正向提交及不安全Failure拒绝/整批回滚
-   fixture也已在fresh PostgreSQL通过。CR-180 L1/L2 terminal证据已闭合；r365已补齐Typed Plan的独立Scheduler/Data Worker L3 kill/restart，
-   Artifact-backed terminal RunValue的独立进程窗口仍待补齐，因此尚不能计入完整Phase 2 production terminal证据。
+   fixture也已在fresh PostgreSQL通过。CR-180 L1/L2 terminal证据已闭合；r365补齐Typed Plan的独立Scheduler/Data Worker L3 kill/restart，
+   r366再以35-byte Artifact-backed RunInput、exact S3 generation/KMS locator、attempt 2 lease recovery及exact output value补齐terminal
+   RunValue独立进程窗口，因此Phase 2 production terminal materialization的仓库内L3证据已闭合。
 3. 独立Capability Native/Remote、Context Native/Remote production process、role-scoped pool/permit和deployment已闭合；跨role容量隔舱仍须L5实测。
 4. r243/r244已分别贯通Remote Context→Return及Model→Capability→Model→Return；production-equivalent network/identity与滚动故障仍归L4。
 
@@ -343,9 +345,8 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 
 按上游到下游执行，且每批通过后提交：
 
-1. 补Orchestration Worker↔Artifact Data Worker的Artifact-backed RunValue production process RPC kill/restart；
-2. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
-3. 外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
+2. 外部L4～L6、GitOps clean cut、current文档与规范归档。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。

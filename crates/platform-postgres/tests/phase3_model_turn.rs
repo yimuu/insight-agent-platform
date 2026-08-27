@@ -22,12 +22,12 @@ use insight_platform_contracts::{
     ContextWindowContract, DataClassification, DataRegion, DeploymentClosure, Effect,
     EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef,
     ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, InstalledModelAdapter, JobState,
-    ModelBudgetPolicyDocument, ModelCatalogEvidence, ModelDeploymentClosure,
+    JsonLimits, ModelBudgetPolicyDocument, ModelCatalogEvidence, ModelDeploymentClosure,
     ModelIdentityStability, ModelLimits, ModelModalities, ModelProfileResourceSpec,
     ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument,
     ModelSafetyPolicyDocument, ModelToolContract, ModelTurnState, ModelUsageContract,
-    NativeCapabilityContract, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
-    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    NativeCapabilityContract, Permission, PermissionSet, PlanNodeKind, PolicyDeploymentClosure,
+    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
     ProviderTrainingPolicy, PublishedVersionPayload, QuotaDimension, RegistryResourceKind,
     ResourceDocument, ResourceId, ResourceKind, RunBindingsSnapshot, SchedulingPolicyDocument,
@@ -63,10 +63,10 @@ use insight_platform_models::{
     SafeTraceContext,
 };
 use insight_platform_orchestrator::{
-    derive_candidate_selection, DataPortKey, ExactDataPortRef, ExactRunValueRef,
-    OrchestrationJobPayload, PlanLimits, PlanNodeKey, RunCurrentSnapshot, RuntimeDependencyKind,
-    RuntimeDependencySlot, RuntimeNode, RuntimePlan, ScopeDataEnvironmentSnapshot,
-    ScopeEnvironmentLimits,
+    derive_candidate_selection, AdmitRun, DataPortKey, ExactDataPortRef, ExactRunValueRef,
+    OrchestrationJobPayload, PlanLimits, PlanNodeKey, RunCurrentSnapshot, RunInputValue,
+    RuntimeDependencyKind, RuntimeDependencySlot, RuntimeNode, RuntimePlan,
+    ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits,
 };
 use insight_platform_postgres::{
     model_turn_repository::{
@@ -720,6 +720,30 @@ async fn install_production_typed_plan_object(
     artifact: &ProductionArtifactFixture,
 ) {
     let artifact_id = id(ResourceKind::Artifact, 0xa6);
+    let bytes = canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap();
+    let digest = fixture
+        .runtime_plan
+        .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
+    install_production_artifact_object(
+        pool,
+        &fixture.tenant_id,
+        &artifact_id,
+        &digest,
+        bytes,
+        artifact,
+    )
+    .await;
+}
+
+async fn install_production_artifact_object(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    artifact_id: &ResourceId,
+    expected_digest: &Sha256Digest,
+    bytes: Vec<u8>,
+    artifact: &ProductionArtifactFixture,
+) {
     let row: (String, String) = sqlx::query_as(
         r#"
         SELECT blob.blob_id, blob.encryption_domain_id
@@ -729,18 +753,13 @@ async fn install_production_typed_plan_object(
         WHERE artifact.tenant_id = $1 AND artifact.artifact_id = $2
         "#,
     )
-    .bind(fixture.tenant_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(artifact_id.to_string())
     .fetch_one(pool)
     .await
     .unwrap();
     let blob_id: ResourceId = row.0.parse().unwrap();
     let encryption_domain_id: ResourceId = row.1.parse().unwrap();
-    let bytes = canonical_json(&serde_json::to_value(&fixture.runtime_plan).unwrap()).unwrap();
-    let digest = fixture
-        .runtime_plan
-        .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
-        .unwrap();
     let byte_digest: Sha256Digest = format!(
         "sha256:{}",
         Sha256::digest(&bytes)
@@ -751,8 +770,8 @@ async fn install_production_typed_plan_object(
     .parse()
     .unwrap();
     assert_eq!(
-        digest, byte_digest,
-        "Typed Plan bytes must bind the semantic digest"
+        *expected_digest, byte_digest,
+        "Artifact bytes must bind the declared digest"
     );
     let catalog = AwsArtifactProviderCatalog::install(artifact.provider_config())
         .await
@@ -762,15 +781,15 @@ async fn install_production_typed_plan_object(
         .into_gateway_provider()
         .stage_bytes(
             AwsArtifactUploadRequest {
-                tenant_id: &fixture.tenant_id,
-                artifact_id: &artifact_id,
+                tenant_id,
+                artifact_id,
                 blob_id: &blob_id,
                 encryption_domain_id: &encryption_domain_id,
                 expected_size_bytes: u64::try_from(bytes.len()).unwrap(),
                 declared_media_type: Some("application/json"),
                 expires_in: StdDuration::from_secs(1),
             },
-            &digest,
+            expected_digest,
             bytes,
         )
         .await
@@ -784,7 +803,7 @@ async fn install_production_typed_plan_object(
         WHERE tenant_id = $1 AND blob_id = $2
         "#,
     )
-    .bind(fixture.tenant_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(blob_id.to_string())
     .bind(staged.storage_backend)
     .bind(staged.storage_binding_digest.to_string())
@@ -1176,6 +1195,9 @@ struct Fixture {
     output_schema: insight_platform_models::ClosedSchemaDocument,
     parameter_schema_digest: Sha256Digest,
     truncation_policy: ExactVersionRef,
+    policy_resource_id: ResourceId,
+    agent_resource_id: ResourceId,
+    agent_closure: AgentDeploymentClosure,
     deadline: DateTime<Utc>,
     runtime_plan: RuntimePlan,
 }
@@ -1243,6 +1265,292 @@ fn model_runtime_plan(
     plan.validate(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
     plan
+}
+
+fn return_run_input_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
+    let start = PlanNodeKey::new("start".to_owned()).unwrap();
+    let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
+    let plan = RuntimePlan {
+        plan_version: 4,
+        interface_revision_id,
+        entry_node_id: start.clone(),
+        dependency_slots: BTreeMap::new(),
+        nodes: BTreeMap::from([
+            (
+                start,
+                RuntimeNode::Start {
+                    next: finish.clone(),
+                },
+            ),
+            (
+                finish,
+                RuntimeNode::Return {
+                    value: ExactDataPortRef::RunInput {
+                        schema_digest: run_input_schema().canonical_digest,
+                    },
+                },
+            ),
+        ]),
+    };
+    plan.validate(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
+    plan
+}
+
+struct ProductionArtifactRun {
+    run_id: ResourceId,
+    job_id: ResourceId,
+    input_value_id: ResourceId,
+}
+
+async fn seed_production_artifact_run(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    artifact_provider: &ProductionArtifactFixture,
+) -> ProductionArtifactRun {
+    let interface = version(ResourceKind::AgentInterfaceRevision, 0xc01, '3');
+    let plan = return_run_input_runtime_plan(interface.revision_id.clone());
+    let plan_digest = plan
+        .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
+        .unwrap();
+    let plan_revision = ExactVersionRef::new(
+        id(ResourceKind::AgentPlanRevision, 0xc02),
+        plan_digest.clone(),
+    )
+    .unwrap();
+    let plan_bytes = canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+    let plan_artifact = ArtifactRef::new(
+        id(ResourceKind::Artifact, 0xc03),
+        plan_digest.clone(),
+        u64::try_from(plan_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("artifact-run-plan.json".to_owned()),
+    )
+    .unwrap();
+    let document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_package: authoring(0xc20, '4'),
+        contract_digest: digest('5'),
+        dependency_versions: vec![],
+        policy_versions: vec![fixture.invocation_policy.clone()],
+        input_schema: run_input_schema(),
+        output_schema: run_input_schema(),
+        error_schema: agent_schema(),
+        typed_plan_artifact_id: plan_artifact.artifact_id().clone(),
+        typed_plan_digest: plan_digest.clone(),
+    });
+    for (exact, revision_no) in [(&interface, 3), (&plan_revision, 4)] {
+        insert_version(
+            pool,
+            &fixture.tenant_id,
+            &fixture.agent_resource_id,
+            RegistryResourceKind::Agent,
+            exact,
+            revision_no,
+            &fixture.principal_id,
+            PublishedVersionPayload {
+                document: document.clone(),
+                validation: validation(),
+            },
+        )
+        .await;
+    }
+    insert_ready_artifact(
+        pool,
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        &fixture.invocation_policy.revision_id,
+        &plan_artifact,
+        0xc13,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.artifacts SET purpose = 'typed_plan' WHERE tenant_id = $1 AND artifact_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET artifact_id = $3 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(plan_revision.revision_id.to_string())
+    .bind(plan_artifact.artifact_id().to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let mut closure = fixture.agent_closure.clone();
+    closure.interface = interface;
+    closure.plan = plan_revision.clone();
+    closure.slots.clear();
+    closure.policies.clear();
+    let execution_profile_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: closure.execution_profile.revision.clone(),
+            applicability_digest: named_digest("artifact-run-execution-profile"),
+            qualification_evidence: plan_artifact.clone(),
+        }),
+    )
+    .unwrap();
+    let execution_profile_deployment_id = id(ResourceKind::PolicyDeployment, 0xc15);
+    insert_deployment(
+        pool,
+        &fixture.tenant_id,
+        &execution_profile_deployment_id,
+        &fixture.policy_resource_id,
+        &closure.execution_profile.revision.revision_id,
+        &fixture.principal_id,
+        &execution_profile_payload,
+    )
+    .await;
+    closure.execution_profile = ExactPolicyBinding {
+        deployment: ExactDeploymentRef::new(
+            execution_profile_deployment_id,
+            execution_profile_payload.digest.parse().unwrap(),
+        )
+        .unwrap(),
+        revision: closure.execution_profile.revision.clone(),
+    };
+    let deployment_payload =
+        TypedPayload::new(1, &DeploymentClosure::Agent(closure.clone())).unwrap();
+    let deployment_id = id(ResourceKind::AgentDeployment, 0xc05);
+    insert_deployment(
+        pool,
+        &fixture.tenant_id,
+        &deployment_id,
+        &fixture.agent_resource_id,
+        &plan_revision.revision_id,
+        &fixture.principal_id,
+        &deployment_payload,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(fixture.agent_resource_id.to_string())
+    .bind(deployment_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    let deployment = ExactDeploymentRef::new(
+        deployment_id.clone(),
+        deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let principal = PrincipalSnapshot::build(
+        fixture.tenant_id.clone(),
+        fixture.principal_id.clone(),
+        PrincipalKind::AgentRunner,
+        PermissionSet::new(vec![
+            Permission::AgentRun,
+            Permission::CapabilityInvoke,
+            Permission::ModelDeploy,
+            Permission::ModelInvoke,
+            Permission::RuntimeControl,
+            Permission::TenantManage,
+        ])
+        .unwrap(),
+        1,
+        1,
+        1,
+    )
+    .unwrap();
+    let bindings = RunBindingsSnapshot::build(deployment, principal, &closure).unwrap();
+
+    let input = json!({"prompt": "artifact-backed-return"});
+    let input_bytes = canonical_json(&input).unwrap();
+    let input_digest: Sha256Digest = canonical_digest(&input).unwrap().parse().unwrap();
+    let input_artifact = ArtifactRef::new(
+        id(ResourceKind::Artifact, 0xc04),
+        input_digest.clone(),
+        u64::try_from(input_bytes.len()).unwrap(),
+        "application/json",
+        DataClassification::Internal,
+        Some("artifact-run-input.json".to_owned()),
+    )
+    .unwrap();
+    insert_ready_artifact(
+        pool,
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        &fixture.invocation_policy.revision_id,
+        &input_artifact,
+        0xc14,
+    )
+    .await;
+
+    install_production_artifact_object(
+        pool,
+        &fixture.tenant_id,
+        plan_artifact.artifact_id(),
+        &plan_digest,
+        plan_bytes,
+        artifact_provider,
+    )
+    .await;
+    install_production_artifact_object(
+        pool,
+        &fixture.tenant_id,
+        input_artifact.artifact_id(),
+        &input_digest,
+        input_bytes,
+        artifact_provider,
+    )
+    .await;
+
+    let run_id = id(ResourceKind::Run, 0xc06);
+    let job_id = id(ResourceKind::Job, 0xc09);
+    let input_value_id = id(ResourceKind::RunValue, 0xc0a);
+    let command = AdmitRun {
+        audit: audit(&fixture.tenant_id, &fixture.principal_id, 0xc80, '6', '7'),
+        admission_scope_id: deployment_id.clone(),
+        run_id: run_id.clone(),
+        agent_deployment_id: deployment_id,
+        root_scope_id: id(ResourceKind::ScopeInstance, 0xc07),
+        entry_node_execution_id: id(ResourceKind::NodeExecution, 0xc08),
+        orchestration_job_id: job_id.clone(),
+        entry_plan_node_key: PlanNodeKey::new("start".to_owned()).unwrap(),
+        entry_node_kind: PlanNodeKind::Start,
+        bindings,
+        input: RunInputValue {
+            value_id: input_value_id.clone(),
+            classification: DataClassification::Internal,
+            schema_digest: run_input_schema().canonical_digest,
+            content_digest: input_digest,
+            value: ValueRef::Artifact {
+                artifact: input_artifact,
+            },
+        },
+        deadline: Utc::now() + Duration::minutes(5),
+        inline_limits: JsonLimits::CONTRACT_FIXTURE,
+        attempt_limit: 3,
+        retry_backoff_milliseconds: 100,
+    };
+    let mut transaction = repository.begin_run_transaction().await.unwrap();
+    assert!(matches!(
+        transaction.admit_run(command).await.unwrap(),
+        CommandOutcome::Applied(_)
+    ));
+    transaction.commit().await.unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() + interval '1 hour' WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    ProductionArtifactRun {
+        run_id,
+        job_id,
+        input_value_id,
+    }
 }
 
 async fn insert_resource(
@@ -1557,6 +1865,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             principal_kind: PrincipalKind::AgentRunner,
             payload: TenantPrincipalPayload {
                 permissions: PermissionSet::new(vec![
+                    Permission::AgentRun,
                     Permission::CapabilityInvoke,
                     Permission::ModelInvoke,
                     Permission::ModelDeploy,
@@ -2317,9 +2626,12 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         principal_id.clone(),
         PrincipalKind::AgentRunner,
         PermissionSet::new(vec![
+            Permission::AgentRun,
             Permission::CapabilityInvoke,
+            Permission::ModelDeploy,
             Permission::ModelInvoke,
             Permission::RuntimeControl,
+            Permission::TenantManage,
         ])
         .unwrap(),
         1,
@@ -2490,6 +2802,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         output_schema,
         parameter_schema_digest,
         truncation_policy,
+        policy_resource_id: policy_resource,
+        agent_resource_id: agent_resource,
+        agent_closure,
         deadline,
         runtime_plan,
     }
@@ -3916,6 +4231,144 @@ fn production_workers_complete_model_tool_result_return_chain() {
         .unwrap();
         assert_eq!(chain_facts, (2, 1, 2, 1, 0, 1, 2, 1, true));
 
+        let artifact_run = seed_production_artifact_run(
+            &pool,
+            &repository,
+            &fixture,
+            &production_artifact,
+        )
+        .await;
+        let mut run_value_authority_lock = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN")
+            .execute(&mut *run_value_authority_lock)
+            .await
+            .unwrap();
+        sqlx::query("LOCK TABLE insight_platform.run_values IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *run_value_authority_lock)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE insight_platform.jobs SET scheduled_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(artifact_run.job_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                let state: String = sqlx::query_scalar(
+                    "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+                )
+                .bind(fixture.tenant_id.to_string())
+                .bind(artifact_run.job_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if state == "running" {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Artifact-backed Return Job did not enter the locked RunValue RPC window");
+        artifact_worker.kill().unwrap();
+        artifact_worker.wait().unwrap();
+        recovered_worker.kill().unwrap();
+        recovered_worker.wait().unwrap();
+        recovered_worker_log.join().unwrap();
+        sqlx::query("ROLLBACK")
+            .execute(&mut *run_value_authority_lock)
+            .await
+            .unwrap();
+        drop(run_value_authority_lock);
+        sqlx::query(
+            "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+        )
+        .bind(fixture.tenant_id.to_string())
+        .bind(artifact_run.job_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        artifact_worker = spawn_production_artifact_worker(
+            &production_artifact,
+            &artifact_config_path,
+            &artifact_config_digest,
+            &database_url,
+            &ca_path,
+            &artifact_cert_path,
+            &artifact_key_path,
+        );
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                if tokio::net::TcpStream::connect(artifact_socket).await.is_ok() {
+                    break;
+                }
+                if let Some(status) = artifact_worker.try_wait().unwrap() {
+                    panic!("second restarted Artifact Data Worker exited during startup: {status}");
+                }
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("second restarted Artifact Data Worker did not become reachable");
+        recovered_worker = spawn_model_orchestration_worker(
+            &orchestration_binary,
+            &config_path,
+            &config_digest,
+            &database_url,
+            &ca_path,
+            &cert_path,
+            &key_path,
+        );
+        let artifact_run_worker_log = observe_process_start(&mut recovered_worker);
+        let started = std::time::Instant::now();
+        loop {
+            let state: (String, i32, String, i32, Option<String>) = sqlx::query_as(
+                r#"
+                SELECT run.state, run.active_work_count, job.state, job.attempt_no,
+                       run.output_value_id
+                FROM insight_platform.runs AS run
+                JOIN insight_platform.jobs AS job
+                  ON job.tenant_id = run.tenant_id AND job.run_id = run.run_id
+                WHERE run.tenant_id = $1 AND run.run_id = $2 AND job.job_id = $3
+                "#,
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(artifact_run.run_id.to_string())
+            .bind(artifact_run.job_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if state
+                == (
+                    "succeeded".to_owned(),
+                    0,
+                    "succeeded".to_owned(),
+                    2,
+                    Some(artifact_run.input_value_id.to_string()),
+                )
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < StdDuration::from_secs(10),
+                "Artifact-backed Return recovery stalled with state={state:?}"
+            );
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        let recovered_job_fence: (Option<String>, Option<String>, Option<DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT worker_id, lease_token_digest, lease_expires_at FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+            )
+            .bind(fixture.tenant_id.to_string())
+            .bind(artifact_run.job_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(recovered_job_fence, (None, None, None));
+
         capability_worker.kill().unwrap();
         capability_worker.wait().unwrap();
         capability_log.join().unwrap();
@@ -3925,7 +4378,7 @@ fn production_workers_complete_model_tool_result_return_chain() {
 
         recovered_worker.kill().unwrap();
         recovered_worker.wait().unwrap();
-        recovered_worker_log.join().unwrap();
+        artifact_run_worker_log.join().unwrap();
         artifact_worker.kill().unwrap();
         artifact_worker.wait().unwrap();
         let _ = egress_shutdown_sender.send(());
