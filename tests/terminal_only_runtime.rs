@@ -2107,6 +2107,10 @@ async fn artifact_staging_drain_catches_up_more_than_one_bounded_batch() {
             .unwrap()
     };
     let created_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    // Keep the production maintenance pump from racing this explicit drain. The rows become due
+    // only at the authority time passed to the drain below, so all 101 rows exercise its bounded
+    // multi-batch catch-up path deterministically.
+    let available_at = chrono::Utc::now() + chrono::Duration::hours(1);
     for index in 0..101_u32 {
         let bytes = format!("terminal-maintenance-catch-up-{index}").into_bytes();
         let artifact = ArtifactRef::new(
@@ -2129,7 +2133,7 @@ async fn artifact_staging_drain_catches_up_more_than_one_bounded_batch() {
                 content_hash: artifact.content_hash().clone(),
                 source_kind: TerminalArtifactSourceKind::RunOutput,
                 source_id: format!("maintenance-source-{index}"),
-                available_at: created_at,
+                available_at,
                 created_at,
             })
             .await
@@ -2140,7 +2144,7 @@ async fn artifact_staging_drain_catches_up_more_than_one_bounded_batch() {
     assert_eq!(
         fixture
             .engine
-            .run_artifact_staging_drain_at(chrono::Utc::now())
+            .run_artifact_staging_drain_at(available_at + chrono::Duration::minutes(1))
             .await
             .unwrap(),
         101
