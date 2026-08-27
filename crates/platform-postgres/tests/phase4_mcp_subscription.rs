@@ -64,8 +64,8 @@ use insight_platform_mcp_host::{
     McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
     McpSubscriptionWorkerAudit, McpTransportFailure, NewMcpAuthorizationBinding,
     NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, RecoverDueMcpSubscription,
-    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
-    WakeMcpSubscriptionReconcile,
+    RecoverExpiredMcpDiscoveryJob, ReportMcpSubscriptionTransportTermination,
+    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -3477,6 +3477,99 @@ async fn mcp_subscription_fixture() {
     };
     assert_eq!(replayed.operation_id, original.operation_id);
     assert_eq!(replayed.job_id, original.job_id);
+
+    let discovery_worker_a = id(ResourceKind::WorkerProcessGeneration, 0x650);
+    let discovery_worker_b = id(ResourceKind::WorkerProcessGeneration, 0x651);
+    let left_claim = repository.claim_mcp_discovery_jobs(ClaimJobs {
+        work_class: WorkClass::Mcp.as_str().to_owned(),
+        worker_id: discovery_worker_a,
+        limit: 1,
+        lease_milliseconds: 60_000,
+        lease_token_digests: vec![named_digest("discovery-claim-left")],
+    });
+    let right_claim = repository.claim_mcp_discovery_jobs(ClaimJobs {
+        work_class: WorkClass::Mcp.as_str().to_owned(),
+        worker_id: discovery_worker_b,
+        limit: 1,
+        lease_milliseconds: 60_000,
+        lease_token_digests: vec![named_digest("discovery-claim-right")],
+    });
+    let (left_claim, right_claim) = tokio::join!(left_claim, right_claim);
+    let mut discovery_claims = left_claim
+        .unwrap()
+        .into_iter()
+        .chain(right_claim.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(discovery_claims.len(), 1);
+    let discovery_claim = discovery_claims.pop().unwrap();
+    assert_eq!(discovery_claim.job_id, original.job_id.to_string());
+    let discovery_worker: ResourceId = discovery_claim.worker_id.as_ref().unwrap().parse().unwrap();
+    let discovery_token: Sha256Digest = discovery_claim
+        .lease_token_digest
+        .as_ref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let discovery_started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: original.job_id.to_string(),
+            worker_id: discovery_worker,
+            lease_epoch: discovery_claim.lease_epoch,
+            expected_job_version: discovery_claim.version,
+            lease_token_digest: discovery_token,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original.job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let observations = repository.list_expired_mcp_discovery_jobs(2).await.unwrap();
+    assert_eq!(observations.len(), 1);
+    let observation = &observations[0];
+    assert_eq!(observation.job_id, original.job_id);
+    assert_eq!(
+        observation.job_version,
+        u64::try_from(discovery_started.version).unwrap()
+    );
+    assert_eq!(observation.physical_attempt, 1);
+    let recovery = RecoverExpiredMcpDiscoveryJob {
+        tenant_id: observation.tenant_id.clone(),
+        operation_id: observation.operation_id.clone(),
+        job_id: observation.job_id.clone(),
+        observed_operation_version: observation.operation_version,
+        observed_job_version: observation.job_version,
+        observed_lease_generation: observation.lease_generation,
+        retry_at: Some(observation.observed_at + Duration::seconds(1)),
+        event_id: id(ResourceKind::Event, 0x652),
+        outbox_id: id(ResourceKind::OutboxEvent, 0x653),
+    };
+    let recovered_discovery = repository
+        .recover_expired_mcp_discovery_job(recovery.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        recovered_discovery.state,
+        insight_platform_mcp_host::McpDiscoveryOperationState::Pending
+    ));
+    let recovered_job_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original.job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(recovered_job_state, "retry_scheduled");
+    assert!(repository
+        .recover_expired_mcp_discovery_job(recovery)
+        .await
+        .is_err());
     let command = create_command(&fixture, now);
 
     let applied = create_subscription(&repository, command.clone())

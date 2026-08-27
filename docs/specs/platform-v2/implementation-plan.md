@@ -825,6 +825,13 @@
 > 并将Sandbox资格测试夹具对齐当前1/1/3策略schema版本，均不改变runtime行为。本轮无fresh PostgreSQL、真实外部MCP/S3、production cluster或
 > kill-window，故L2/L3及L4～L6仍Pending。
 
+> 2026-08-27 implementation evidence：r358在唯一baseline的fresh PostgreSQL 16上补齐MCP discovery exact-kind claim/recovery L2竞争。
+> 两个不同Worker generation并发调用`claim_mcp_discovery_jobs`竞争同一ready Job，`FOR UPDATE SKIP LOCKED`与typed
+> `McpDiscovery + Mcp + mcp_operation`谓词在同一事务内只产生一个leased winner；winner进入running/physical attempt 1后构造合法的过期
+> heartbeat/lease observation，recovery按exact operation version、Job version和lease generation原子转为`retry_scheduled/pending`，旧
+> observation重放被stale/conflict fence拒绝。fresh PostgreSQL phase4目标测试通过。该证据关闭discovery claim与running recovery竞争L2，不代表
+> Artifact stage/scan/finalize事务kill-window、production discovery多进程协议L3、真实S3或L4～L6完成。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

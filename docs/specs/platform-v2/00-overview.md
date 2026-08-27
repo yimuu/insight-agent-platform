@@ -550,6 +550,12 @@ TLS MCP fake server。fresh PostgreSQL 16门禁在首个外部`initialize`到达
 协议动作各一次；test-only loopback开关不进入production默认构建，SSRF destination guard保持fail closed。logical subscription真实外部
 Streamable HTTP/SSE protocol/crash component L3由此闭合；真实第三方服务、容量饱和、production telemetry scrape与L4～L6仍Pending。
 
+r358在唯一baseline的fresh PostgreSQL 16上补齐MCP discovery exact-kind claim/recovery L2竞争：两个不同Worker generation并发竞争同一
+ready discovery Job时只有一个leased winner，typed `McpDiscovery + Mcp + mcp_operation`谓词与行锁同事务生效；winner进入running/physical
+attempt 1并合法过期后，exact operation/Job version与lease generation observation只允许一次恢复为`retry_scheduled/pending`，旧observation
+重放被fence拒绝。该批关闭discovery claim/running recovery L2，不扩张为Artifact stage/scan/finalize kill-window、production discovery协议
+L3、真实S3或L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
