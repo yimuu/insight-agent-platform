@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use insight_platform_artifacts::{
     encode_canonical_skill_package, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
     SchedulerRunValueLease, SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
@@ -3896,7 +3896,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         },
         source_value_ids: vec![parent_input_value_id],
         budget: ChildBudget {
-            deadline: Utc::now() + Duration::seconds(30),
+            deadline: (Utc::now() + Duration::seconds(30))
+                .with_nanosecond(123_456_789)
+                .unwrap(),
             maximum_model_tokens: 1_000,
             maximum_capability_calls: 10,
             maximum_artifact_bytes: 1_048_576,
@@ -4400,7 +4402,9 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     cancel_child.child_orchestration_job_id =
         id("job_0198f1c3-9a00-7c3e-b1f3-773c2836800f");
     cancel_child.input.value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c28368010");
-    cancel_child.budget.deadline = Utc::now() + Duration::seconds(30);
+    cancel_child.budget.deadline = (Utc::now() + Duration::seconds(30))
+        .with_nanosecond(987_654_321)
+        .unwrap();
     cancel_child.logical_key = "child:cancel-path:attempt-1".to_owned();
     cancel_child.idempotency_key_digest = digest('0');
     cancel_child.request_digest = digest('1');

@@ -97,6 +97,11 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
+fn database_timestamp(value: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(value.timestamp_micros())
+        .expect("a valid DateTime always has a representable microsecond timestamp")
+}
+
 pub const DEFAULT_PAYLOAD_LIMIT: usize = 1_048_576;
 pub const MAX_JOB_LEASE_MILLISECONDS: i64 = 120_000;
 
@@ -9366,8 +9371,13 @@ impl PgSchedulerTransaction {
 
     pub async fn defer_orchestration_to_child_run(
         &mut self,
-        command: DeferOrchestrationToChildRun,
+        mut command: DeferOrchestrationToChildRun,
     ) -> Result<CommandOutcome<DeferredOrchestrationChildRun>, RepositoryError> {
+        // PostgreSQL timestamptz stores microseconds while JSON can preserve nanoseconds. Freeze
+        // one representable owner timestamp before it is written to both the typed column and the
+        // immutable ChildRunLink payload, otherwise a nanosecond clock makes the row fail its exact
+        // projection invariant after a successful commit.
+        command.budget.deadline = database_timestamp(command.budget.deadline);
         command.validate(self.expression_inline_limits)?;
         let plan_digest = command.plan.canonical_digest(self.plan_limits)?;
         let mut transaction = self.transaction.begin().await?;
