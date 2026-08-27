@@ -872,7 +872,7 @@
 > `stream_mcp_streamable_http_subscription`不再接受普通MCP Host，真实loopback mTLS证明confused deputy拒绝。Docker/Helm加入独立
 > ServiceAccount、Deployment、Service、PDB/HPA/ServiceMonitor、数据库凭据、TLS与仅Egress/PostgreSQL/DNS的NetworkPolicy；Security/Egress
 > caller allowlist、两条symptom-first backlog/recovery alert和runbook同步。当前15-role拓扑为21个隔离workload pool，动态capacity coverage为
-> 17/21；历史19-pool记录仍表示当时证据。MCP service全target、Egress RPC 6/6（真实mTLS需沙箱外loopback）、双crate strict Clippy、MCP/
+> 21/21；历史19-pool记录仍表示当时证据。MCP service全target、Egress RPC 6/6（真实mTLS需沙箱外loopback）、双crate strict Clippy、MCP/
 > observability/redaction/Helm/format/diff门禁通过。本轮无fresh PostgreSQL、真实外部SSE或进程kill-window，因此只关闭production composition
 > L1，不新增logical subscription L2/L3或L4～L6证据。
 

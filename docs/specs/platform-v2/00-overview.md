@@ -523,7 +523,7 @@ production binary和真实Egress discovery/Artifact端口，因此不新增fresh
 r354在r347 discovery pool之后继续补齐logical subscription production pool。独立Worker只领取`McpSubscription`，并把global expired
 lease/session recovery、periodic reconcile、真实Egress stream、notification digest ingress及Context durable invalidation组合到同一受监督process；
 普通MCP Host不再获准调用subscription stream。独立SPIFFE/数据库凭据/NetworkPolicy、permit/queue/dependency metrics、ServiceMonitor与两条
-backlog/recovery告警均已接线。当前15个ComponentRole映射为21个隔离workload pool，17个pool具备动态capacity；r289的19-pool和后续
+backlog/recovery告警均已接线。当前15个ComponentRole映射为21个隔离workload pool，21个pool具备动态capacity；r289的19-pool和后续
 13/19、15/19数字是当时历史证据。仓库内L1门禁通过，但无fresh PostgreSQL、真实外部SSE或logical subscription进程kill-window，L2/L3及
 L4～L6仍Pending。
 
