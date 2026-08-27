@@ -1,6 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_artifacts::{
+    ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobDeletionEvidence,
+    ArtifactReferenceSnapshot, ArtifactScanDisposition, ArtifactScanEvidence,
+    ArtifactScanEvidenceDraft, ArtifactScanRequest, ArtifactScanner, ArtifactWorkerService,
+    DeleteArtifactBlobGeneration, StageWorkloadArtifact, StageWorkloadArtifactRequest,
+    WorkloadArtifactStagePreflight,
+};
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
     GrpcNetworkTransport, GrpcTransportRequest, GrpcTransportResponse, HttpNetworkTransport,
@@ -15,26 +21,27 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
-    ArtifactReferenceKind, ArtifactRetentionPolicy, AuthoringPackage, CapabilityEndpointScheme,
-    CodeTrustClass, CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
-    ContextBackendKind, ContextBackendLimits, ContextCitationContract, ContextCitationStrength,
-    ContextConsistencyMode, ContextDataPolicyContract, ContextDeploymentClosure,
-    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
-    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract,
-    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, ExactDeploymentRef,
-    ExactSecretBindingRef, ExactVersionRef, McpAuthPolicyDocument, McpAuthorizationPrincipalKind,
-    McpClientCapabilities, McpDiscoverySnapshot, McpMetadataPolicy, McpMethodLimits,
-    McpNegotiatedCapabilities, McpOAuthClientAuthenticationKind, McpOAuthEndpoint,
-    McpProtocolPolicyDocument, McpServerLimits, McpServerResourceSpec, McpSessionState,
-    McpTransportBinding, McpTransportFeatures, Permission, PermissionSet, PolicyDeploymentClosure,
-    PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod,
-    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
-    ResourceKind, SandboxArtifactIoPolicyDocument, SandboxIsolationClass,
-    SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument,
-    SandboxRuntimeFamily, SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument,
-    SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, WorkClass, WorkerManifest, MCP_PROTOCOL_BASELINE,
-    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+    ArtifactReferenceKind, ArtifactRetentionPolicy, ArtifactWorkloadAudience, AuthoringPackage,
+    CapabilityEndpointScheme, CodeTrustClass, CommandAudit, CommandOutcome, ContextBackendBinding,
+    ContextBackendContract, ContextBackendKind, ContextBackendLimits, ContextCitationContract,
+    ContextCitationStrength, ContextConsistencyMode, ContextDataPolicyContract,
+    ContextDeploymentClosure, ContextImplementationContract, ContextImplementationResourceSpec,
+    ContextInterfaceLimits, ContextInterfaceResourceSpec, ContextLocatorKind,
+    ContextPaginationContract, ContextRankingContract, DataClassification, DataRegion,
+    DeploymentClosure, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef,
+    McpAuthPolicyDocument, McpAuthorizationPrincipalKind, McpClientCapabilities,
+    McpDiscoverySnapshot, McpMetadataPolicy, McpMethodLimits, McpNegotiatedCapabilities,
+    McpOAuthClientAuthenticationKind, McpOAuthEndpoint, McpProtocolPolicyDocument, McpServerLimits,
+    McpServerResourceSpec, McpSessionState, McpTransportBinding, McpTransportFeatures, Permission,
+    PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    SandboxArtifactIoPolicyDocument, SandboxIsolationClass, SandboxIsolationPolicyDocument,
+    SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument, SandboxRuntimeFamily,
+    SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretBindingPayload,
+    SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, WorkClass, WorkerManifest, MCP_PROTOCOL_BASELINE, WORKER_MANIFEST_VERSION,
+    WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress::{
     AeadMcpRemoteTaskStateCodec, AeadMcpSubscriptionStateCodec, DnsResolutionError,
@@ -55,17 +62,19 @@ use insight_platform_jobs::{JobFence as DomainJobFence, LeasePolicy};
 use insight_platform_mcp_host::{
     CompleteMcpSubscriptionReconcile, CompleteMcpSubscriptionRefresh,
     ContextSubscriptionRefreshResolver, CreateMcpDiscoveryOperation, CreateMcpResourceSubscription,
-    EncryptedMcpState, McpAuthorizationBindingRecord, McpDiscoveryAdmission,
+    EncryptedMcpState, FinalizeMcpDiscovery, McpAuthorizationBindingRecord, McpDiscoveryAdmission,
+    McpDiscoveryCandidate, McpDiscoveryContractQuery, McpDiscoveryExecutionContractResolver,
     McpDiscoveryOperationPayload, McpDiscoveryResultBinding, McpDiscoverySnapshotRecord,
     McpDiscoveryTransportEvidence, McpExecutionContractQuery, McpNotificationApplyDisposition,
     McpNotificationAudit, McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
     McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
     McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
     McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
-    McpSubscriptionWorkerAudit, McpTransportFailure, NewMcpAuthorizationBinding,
-    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, RecoverDueMcpSubscription,
-    RecoverExpiredMcpDiscoveryJob, ReportMcpSubscriptionTransportTermination,
-    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
+    McpSubscriptionWorkerAudit, McpTransportFailure, McpWorkerAudit, NewMcpAuthorizationBinding,
+    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, ParkMcpDiscoveryVerification,
+    RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob,
+    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
+    WakeMcpSubscriptionReconcile,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -73,15 +82,16 @@ use insight_platform_model_adapters::{
     ModelProviderWireStream,
 };
 use insight_platform_postgres::{
+    artifact_repository::{ArtifactExecutionSlot, StartedArtifactExecution},
     mcp_repository::{
         ClaimContextSubscriptionRefreshJobs, CommitContextSubscriptionRefresh,
         ContextSubscriptionRefreshClaimSlot, ContextSubscriptionRefreshRecoverySlot,
         DriveExpiredContextSubscriptionRefreshJobs,
     },
     repository::{
-        ClaimJobs, HeartbeatJob, JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount,
-        NewSecretBinding, NewTenant, NewTenantPrincipal, PgRepository, RepositoryError,
-        TypedPayload,
+        ArtifactWorkerRole, ClaimArtifactJobs, ClaimJobs, HeartbeatJob,
+        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewSecretBinding, NewTenant,
+        NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
     },
     verify_schema,
 };
@@ -438,6 +448,59 @@ impl SecretMaterialResolver for ProtocolFixtureSecrets {
             b"subscription-protocol-token".to_vec(),
         )
         .map_err(|_| SecretMaterialResolutionError::InvalidEvidence)
+    }
+}
+
+struct DiscoveryArtifactScanner {
+    content_digest: Sha256Digest,
+    size_bytes: u64,
+    media_type: String,
+}
+
+impl ArtifactScanner for DiscoveryArtifactScanner {
+    async fn scan(
+        &self,
+        request: ArtifactScanRequest,
+    ) -> Result<ArtifactScanEvidence, ArtifactBackendFailure> {
+        let observed_at = Utc::now() - Duration::seconds(1);
+        ArtifactScanEvidenceDraft {
+            schema_version: 1,
+            scan_kind: request.job.scan_kind,
+            scan_job_id: request.job_id,
+            scan_policy_revision: request.job.scan_policy_revision,
+            scanner_contract_digest: request.job.scanner_contract_digest,
+            ruleset_digest: request.job.ruleset_digest,
+            object_generation: request.job.object_generation,
+            content_digest: self.content_digest.clone(),
+            size_bytes: self.size_bytes,
+            verified_media_type: self.media_type.clone(),
+            disposition: ArtifactScanDisposition::Verified,
+            reason_class: None,
+            observed_at,
+            expires_at: observed_at
+                + Duration::milliseconds(
+                    i64::try_from(request.job.evidence_ttl_milliseconds).unwrap(),
+                ),
+        }
+        .seal()
+        .map_err(|_| ArtifactBackendFailure {
+            retryable: false,
+            reason_class: "fixture_scan_invalid".to_owned(),
+        })
+    }
+}
+
+struct UnusedDiscoveryBlobBackend;
+
+impl ArtifactBlobBackend for UnusedDiscoveryBlobBackend {
+    async fn delete_generation(
+        &self,
+        _request: DeleteArtifactBlobGeneration,
+    ) -> Result<ArtifactBlobDeletionEvidence, ArtifactBackendFailure> {
+        Err(ArtifactBackendFailure {
+            retryable: false,
+            reason_class: "fixture_blob_delete_unused".to_owned(),
+        })
     }
 }
 
@@ -3570,6 +3633,448 @@ async fn mcp_subscription_fixture() {
         .recover_expired_mcp_discovery_job(recovery)
         .await
         .is_err());
+
+    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
+    let resumed_worker = id(ResourceKind::WorkerProcessGeneration, 0x654);
+    let mut resumed_claims = repository
+        .claim_mcp_discovery_jobs(ClaimJobs {
+            work_class: WorkClass::Mcp.as_str().to_owned(),
+            worker_id: resumed_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 60_000,
+            lease_token_digests: vec![named_digest("discovery-resumed-claim")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed_claims.len(), 1);
+    let resumed_claim = resumed_claims.pop().unwrap();
+    let resumed_token: Sha256Digest = resumed_claim
+        .lease_token_digest
+        .as_ref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let resumed_started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: original.job_id.to_string(),
+            worker_id: resumed_worker.clone(),
+            lease_epoch: resumed_claim.lease_epoch,
+            expected_job_version: resumed_claim.version,
+            lease_token_digest: resumed_token.clone(),
+        })
+        .await
+        .unwrap();
+    let resumed_fence = DomainJobFence {
+        expected_version: u64::try_from(resumed_started.version).unwrap(),
+        worker_process_generation_id: resumed_worker.clone(),
+        lease_generation: u64::try_from(resumed_started.lease_epoch).unwrap(),
+        token_digest: resumed_token,
+    };
+    let resolved_discovery = repository
+        .resolve_mcp_discovery_execution(&McpDiscoveryContractQuery {
+            schema_version: 1,
+            tenant_id: fixture.tenant_id.clone(),
+            operation_id: original.operation_id.clone(),
+            job_id: original.job_id.clone(),
+            fence: resumed_fence.clone(),
+        })
+        .await
+        .unwrap();
+    let descriptor_bytes =
+        br#"{"prompts":[],"resources":[],"schema_version":1,"tools":[]}"#.to_vec();
+    let observed_at = Utc::now();
+    let candidate = McpDiscoveryCandidate::build(
+        MCP_PROTOCOL_BASELINE.to_owned(),
+        fixture.snapshot.negotiated_capabilities.clone(),
+        descriptor_bytes.clone(),
+        0,
+        observed_at,
+        observed_at + Duration::minutes(5),
+        &resolved_discovery.contract,
+    )
+    .unwrap();
+    let stage_request = StageWorkloadArtifactRequest {
+        schema_version: 1,
+        tenant_id: fixture.tenant_id.clone(),
+        producer_job_id: original.job_id.clone(),
+        producer_fence: resumed_fence.clone(),
+        verification_job_id: original
+            .payload
+            .admission
+            .artifact_preallocation
+            .verification_job_id
+            .clone(),
+        artifact_id: original
+            .payload
+            .admission
+            .artifact_preallocation
+            .artifact_id
+            .clone(),
+        blob_id: original
+            .payload
+            .admission
+            .artifact_preallocation
+            .blob_id
+            .clone(),
+        descriptor_bytes,
+        descriptor_digest: candidate.descriptor_digest.clone(),
+        media_type: original
+            .payload
+            .admission
+            .artifact_policy
+            .declared_media_type
+            .clone(),
+    };
+    let WorkloadArtifactStagePreflight::Authorized(stage_authority) = repository
+        .authorize_workload_artifact_stage(&stage_request)
+        .await
+        .unwrap()
+    else {
+        panic!("first discovery Artifact stage must require physical storage evidence");
+    };
+    let staged = match repository
+        .stage_workload_artifact(StageWorkloadArtifact {
+            schema_version: 1,
+            tenant_id: fixture.tenant_id.clone(),
+            caller: ArtifactWorkloadAudience::McpHost,
+            producer_job_id: original.job_id.clone(),
+            producer_fence: resumed_fence.clone(),
+            verification_job_id: stage_request.verification_job_id.clone(),
+            artifact_id: stage_request.artifact_id.clone(),
+            blob_id: stage_request.blob_id.clone(),
+            content_digest: stage_request.descriptor_digest.clone(),
+            size_bytes: u64::try_from(stage_request.descriptor_bytes.len()).unwrap(),
+            media_type: stage_request.media_type.clone(),
+            storage_backend: "s3".to_owned(),
+            storage_binding_digest: stage_authority.write_storage_binding_digest,
+            object_reference_ciphertext: vec![0x5a; 48],
+            object_generation: "discovery-stage-generation-1".to_owned(),
+            key_id: "discovery-stage-key".to_owned(),
+            encryption_domain_id: stage_authority.encryption_domain_id,
+            backend_evidence_digest: named_digest("discovery-stage-backend-evidence"),
+            staged_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(staged) => staged,
+        CommandOutcome::Replayed(_) => panic!("first discovery Artifact stage must apply"),
+    };
+    let transport_evidence = McpDiscoveryTransportEvidence::build(
+        &candidate,
+        &staged,
+        &original.payload.admission.artifact_preallocation,
+    )
+    .unwrap();
+    assert!(matches!(
+        repository
+            .authorize_workload_artifact_stage(&stage_request)
+            .await
+            .unwrap(),
+        WorkloadArtifactStagePreflight::Replayed(ref replayed) if replayed == &staged
+    ));
+    let park = ParkMcpDiscoveryVerification {
+        audit: McpWorkerAudit {
+            tenant_id: fixture.tenant_id.clone(),
+            worker_process_generation_id: resumed_worker,
+            receipt_id: id(ResourceKind::Receipt, 0x655),
+            event_id: id(ResourceKind::Event, 0x656),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x657),
+            idempotency_key_digest: named_digest("discovery-park-key"),
+            request_digest: named_digest("discovery-park-request"),
+            receipt_expires_at: Utc::now() + Duration::minutes(10),
+        },
+        operation_id: original.operation_id.clone(),
+        job_id: original.job_id.clone(),
+        fence: resumed_fence,
+        expected_operation_version: resolved_discovery.operation_version,
+        staged,
+        evidence: transport_evidence,
+    };
+    let parked = repository
+        .park_mcp_discovery_for_verification(park.clone())
+        .await
+        .unwrap();
+    let CommandOutcome::Applied(parked) = parked else {
+        panic!("first discovery verification park must apply");
+    };
+    assert!(matches!(
+        parked.state,
+        insight_platform_mcp_host::McpDiscoveryOperationState::Running
+    ));
+    assert!(parked.payload.pending_verification.is_some());
+    assert!(matches!(
+        repository
+            .park_mcp_discovery_for_verification(park)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    let parked_states: (String, String) = sqlx::query_as(
+        r#"
+        SELECT owner.state, verification.state
+        FROM insight_platform.jobs AS owner
+        JOIN insight_platform.jobs AS verification
+          ON verification.tenant_id = owner.tenant_id AND verification.job_id = $3
+        WHERE owner.tenant_id = $1 AND owner.job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original.job_id.to_string())
+    .bind(stage_request.verification_job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(parked_states, ("waiting".to_owned(), "ready".to_owned()));
+
+    let scan_worker = id(ResourceKind::WorkerProcessGeneration, 0x658);
+    let mut scan_claims = repository
+        .claim_artifact_jobs(ClaimArtifactJobs {
+            role: ArtifactWorkerRole::DataWorker,
+            worker_id: scan_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 60_000,
+            lease_token_digests: vec![named_digest("discovery-scan-claim")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(scan_claims.len(), 1);
+    let scan_claim = scan_claims.pop().unwrap();
+    assert_eq!(
+        scan_claim.job_id,
+        stage_request.verification_job_id.to_string()
+    );
+    let scan_token: Sha256Digest = scan_claim
+        .lease_token_digest
+        .as_ref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let scan_started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: stage_request.verification_job_id.to_string(),
+            worker_id: scan_worker.clone(),
+            lease_epoch: scan_claim.lease_epoch,
+            expected_job_version: scan_claim.version,
+            lease_token_digest: scan_token.clone(),
+        })
+        .await
+        .unwrap();
+    let scan_execution = repository
+        .load_started_artifact_execution(
+            ArtifactWorkerRole::DataWorker,
+            fixture.tenant_id.clone(),
+            stage_request.verification_job_id.clone(),
+            DomainJobFence {
+                expected_version: u64::try_from(scan_started.version).unwrap(),
+                worker_process_generation_id: scan_worker,
+                lease_generation: u64::try_from(scan_started.lease_epoch).unwrap(),
+                token_digest: scan_token,
+            },
+            ArtifactExecutionSlot {
+                receipt_id: id(ResourceKind::Receipt, 0x659),
+                event_id: id(ResourceKind::Event, 0x65a),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x65b),
+                duplicate_blob_cleanup_job_id: id(ResourceKind::Job, 0x65c),
+                receipt_expires_at: Utc::now() + Duration::minutes(10),
+            },
+        )
+        .await
+        .unwrap();
+    let StartedArtifactExecution::Scan(scan_execution) = scan_execution else {
+        panic!("discovery verification Job must start as an Artifact scan");
+    };
+    let scan_service = ArtifactWorkerService::new(
+        DiscoveryArtifactScanner {
+            content_digest: stage_request.descriptor_digest.clone(),
+            size_bytes: u64::try_from(stage_request.descriptor_bytes.len()).unwrap(),
+            media_type: stage_request.media_type.clone(),
+        },
+        UnusedDiscoveryBlobBackend,
+        repository.clone(),
+    );
+    let verified = scan_service
+        .execute_scan(scan_execution, Utc::now())
+        .await
+        .unwrap();
+    assert!(matches!(verified, CommandOutcome::Applied(_)));
+    let after_scan_states: (String, String, String) = sqlx::query_as(
+        r#"
+        SELECT owner.state, verification.state, artifact.state
+        FROM insight_platform.jobs AS owner
+        JOIN insight_platform.jobs AS verification
+          ON verification.tenant_id = owner.tenant_id AND verification.job_id = $3
+        JOIN insight_platform.artifacts AS artifact
+          ON artifact.tenant_id = owner.tenant_id AND artifact.artifact_id = $4
+        WHERE owner.tenant_id = $1 AND owner.job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original.job_id.to_string())
+    .bind(stage_request.verification_job_id.to_string())
+    .bind(stage_request.artifact_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_scan_states,
+        (
+            "ready".to_owned(),
+            "waiting".to_owned(),
+            "verified".to_owned()
+        )
+    );
+
+    let finalize_worker = id(ResourceKind::WorkerProcessGeneration, 0x65d);
+    let mut finalize_claims = repository
+        .claim_mcp_discovery_jobs(ClaimJobs {
+            work_class: WorkClass::Mcp.as_str().to_owned(),
+            worker_id: finalize_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 60_000,
+            lease_token_digests: vec![named_digest("discovery-finalize-claim")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(finalize_claims.len(), 1);
+    let finalize_claim = finalize_claims.pop().unwrap();
+    let finalize_token: Sha256Digest = finalize_claim
+        .lease_token_digest
+        .as_ref()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let finalize_started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: original.job_id.to_string(),
+            worker_id: finalize_worker.clone(),
+            lease_epoch: finalize_claim.lease_epoch,
+            expected_job_version: finalize_claim.version,
+            lease_token_digest: finalize_token.clone(),
+        })
+        .await
+        .unwrap();
+    let finalize_fence = DomainJobFence {
+        expected_version: u64::try_from(finalize_started.version).unwrap(),
+        worker_process_generation_id: finalize_worker.clone(),
+        lease_generation: u64::try_from(finalize_started.lease_epoch).unwrap(),
+        token_digest: finalize_token,
+    };
+    let finalize_resolution = repository
+        .resolve_mcp_discovery_execution(&McpDiscoveryContractQuery {
+            schema_version: 1,
+            tenant_id: fixture.tenant_id.clone(),
+            operation_id: original.operation_id.clone(),
+            job_id: original.job_id.clone(),
+            fence: finalize_fence.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(finalize_resolution.pending_verification.is_some());
+    let finalize = FinalizeMcpDiscovery {
+        audit: McpWorkerAudit {
+            tenant_id: fixture.tenant_id.clone(),
+            worker_process_generation_id: finalize_worker,
+            receipt_id: id(ResourceKind::Receipt, 0x65e),
+            event_id: id(ResourceKind::Event, 0x65f),
+            outbox_id: id(ResourceKind::OutboxEvent, 0x660),
+            idempotency_key_digest: named_digest("discovery-finalize-key"),
+            request_digest: named_digest("discovery-finalize-request"),
+            receipt_expires_at: Utc::now() + Duration::minutes(10),
+        },
+        operation_id: original.operation_id.clone(),
+        job_id: original.job_id.clone(),
+        fence: finalize_fence,
+        expected_operation_version: finalize_resolution.operation_version,
+    };
+    let finalized = repository
+        .finalize_mcp_discovery_after_verification(finalize.clone())
+        .await
+        .unwrap();
+    let CommandOutcome::Applied(finalized) = finalized else {
+        panic!("first discovery finalize must apply");
+    };
+    assert!(matches!(
+        finalized.state,
+        insight_platform_mcp_host::McpDiscoveryOperationState::Succeeded
+    ));
+    assert!(finalized.payload.result.is_some());
+    assert!(matches!(
+        repository
+            .finalize_mcp_discovery_after_verification(finalize)
+            .await
+            .unwrap(),
+        CommandOutcome::Replayed(_)
+    ));
+    let terminal_states: (String, String, String, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT owner.state, verification.state, artifact.state,
+          (SELECT count(*) FROM insight_platform.resources
+           WHERE tenant_id = $1 AND resource_id = $5 AND resource_kind = 'mcp_discovery_snapshot'),
+          (SELECT count(*) FROM insight_platform.artifact_links
+           WHERE tenant_id = $1 AND artifact_link_id = $6 AND state = 'active'),
+          quota.reserved_value,
+          (SELECT count(*) FROM insight_platform.quota_ledger
+           WHERE tenant_id = $1 AND quota_account_id = quota.quota_account_id
+             AND correlation_id = $4 AND entry_kind = 'settle'
+             AND reserved_amount = $7 AND used_amount = 0)
+        FROM insight_platform.jobs AS owner
+        JOIN insight_platform.jobs AS verification
+          ON verification.tenant_id = owner.tenant_id AND verification.job_id = $3
+        JOIN insight_platform.artifacts AS artifact
+          ON artifact.tenant_id = owner.tenant_id AND artifact.artifact_id = $4
+        JOIN insight_platform.quota_accounts AS quota
+          ON quota.tenant_id = owner.tenant_id AND quota.quota_account_id = $8
+        WHERE owner.tenant_id = $1 AND owner.job_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original.job_id.to_string())
+    .bind(stage_request.verification_job_id.to_string())
+    .bind(stage_request.artifact_id.to_string())
+    .bind(
+        original
+            .payload
+            .admission
+            .artifact_preallocation
+            .snapshot_id
+            .to_string(),
+    )
+    .bind(
+        original
+            .payload
+            .admission
+            .artifact_preallocation
+            .artifact_link_id
+            .to_string(),
+    )
+    .bind(i64::try_from(original.payload.admission.artifact_policy.maximum_bytes).unwrap())
+    .bind(
+        original
+            .payload
+            .admission
+            .artifact_policy
+            .quota_account_id
+            .to_string(),
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal_states,
+        (
+            "succeeded".to_owned(),
+            "succeeded".to_owned(),
+            "ready".to_owned(),
+            1,
+            1,
+            0,
+            1
+        )
+    );
     let command = create_command(&fixture, now);
 
     let applied = create_subscription(&repository, command.clone())

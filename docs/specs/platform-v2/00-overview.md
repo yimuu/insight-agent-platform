@@ -556,6 +556,13 @@ attempt 1并合法过期后，exact operation/Job version与lease generation obs
 重放被fence拒绝。该批关闭discovery claim/running recovery L2，不扩张为Artifact stage/scan/finalize kill-window、production discovery协议
 L3、真实S3或L4～L6证据。
 
+r359在唯一baseline的fresh PostgreSQL 16上闭合MCP discovery内部Artifact owner事务L2：恢复后的exact running Job完成stage preflight与
+物理证据提交，同generation重放复用原staged identity；park原子推进operation `pending -> running`、owner Job waiting与verification Job ready；
+Artifact scan提交Verified evidence并通过producer correlation持久唤醒owner，下一attempt再完成Artifact Ready、immutable Snapshot、active
+Evidence Link、双方Job终态及park/finalize幂等重放。该门禁同时修复stage authority预先要求operation running造成的不可达路径，以及
+`maximum_bytes`预留却按实际descriptor大小结算导致的quota冲突；终态证明完整预留settle且reserved归零。该证据关闭stage/scan/wake/finalize
+与提交后owner接管L2，不扩张为真实S3、production discovery多进程协议L3、容量饱和或L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

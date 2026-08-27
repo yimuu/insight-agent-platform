@@ -832,6 +832,16 @@
 > observation重放被stale/conflict fence拒绝。fresh PostgreSQL phase4目标测试通过。该证据关闭discovery claim与running recovery竞争L2，不代表
 > Artifact stage/scan/finalize事务kill-window、production discovery多进程协议L3、真实S3或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r359在唯一baseline的fresh PostgreSQL 16上闭合MCP discovery内部Artifact owner事务L2。
+> 恢复后的exact running discovery Job先以冻结Artifact policy执行stage preflight与物理证据提交；同一generation重放返回原
+> `StagedWorkloadArtifact`。随后park事务原子完成operation `pending -> running`、owner Job `running -> waiting`与verification Job
+> `waiting -> ready`，Artifact Data Worker scan提交`Verified` evidence并通过producer correlation持久唤醒owner；下一owner attempt核对
+> Artifact/Blob/verification Job与frozen dependencies后完成`Verified -> Ready`、immutable Snapshot、active Evidence Link及双方Job终态，
+> park/finalize重放均返回同一结果。该门禁发现并修复两个不可达条件：stage authority错误地预先要求operation已running；以及admission按
+> `maximum_bytes`预留staging quota、finalize却按实际descriptor大小匹配/释放。终态断言证明完整最大预留被settle且account
+> `reserved_value=0`。fresh PostgreSQL目标测试通过。该证据关闭stage/scan/wake/finalize及提交后owner接管L2，不代表真实S3、production
+> discovery多进程协议L3、容量饱和或L4～L6完成。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

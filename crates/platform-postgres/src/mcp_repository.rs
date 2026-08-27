@@ -1461,7 +1461,10 @@ impl PgRepository {
             .map_err(invalid_mcp_discovery)?;
         if current.job_id != command.job_id
             || current.version != command.expected_operation_version
-            || current.state != McpDiscoveryOperationState::Running
+            || !matches!(
+                current.state,
+                McpDiscoveryOperationState::Pending | McpDiscoveryOperationState::Running
+            )
             || current.payload.pending_verification.is_some()
             || current.payload.result.is_some()
             || command.evidence.expires_at > current.deadline
@@ -1508,10 +1511,10 @@ impl PgRepository {
         let operation_affected = sqlx::query(
             r#"
             UPDATE insight_platform.invocations
-            SET version = $4, payload_schema_version = $5, payload = $6,
+            SET state = 'running', version = $4, payload_schema_version = $5, payload = $6,
                 payload_digest = $7, updated_at = $8
             WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
-              AND invocation_kind = 'mcp_discovery' AND state = 'running'
+              AND invocation_kind = 'mcp_discovery' AND state IN ('pending', 'running')
             "#,
         )
         .bind(command.audit.tenant_id.to_string())
@@ -5613,8 +5616,10 @@ async fn require_mcp_discovery_artifact_stage_authority_for(
         load_mcp_discovery_operation(transaction, tenant_id, &operation_id, true).await?;
     require_exact_mcp_discovery_job_fence(&job, &operation, producer_fence, database_now)?;
     let preallocation = &operation.payload.admission.artifact_preallocation;
-    if operation.state != McpDiscoveryOperationState::Running
-        || operation.job_id != *producer_job_id
+    if !matches!(
+        operation.state,
+        McpDiscoveryOperationState::Pending | McpDiscoveryOperationState::Running
+    ) || operation.job_id != *producer_job_id
         || preallocation.verification_job_id != *verification_job_id
         || preallocation.artifact_id != *artifact_id
         || preallocation.blob_id != *blob_id
@@ -5761,14 +5766,23 @@ async fn settle_mcp_discovery_artifact_quota(
     transaction: &mut Transaction<'_, Postgres>,
     operation: &McpDiscoveryOperationRecord,
     command: &FinalizeMcpDiscovery,
-    amount: u64,
+    actual_amount: u64,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
     let admission = &operation.payload.admission;
     let quota_account_id = &admission.artifact_policy.quota_account_id;
-    let amount = i64::try_from(amount).map_err(|_| {
+    let actual_amount = i64::try_from(actual_amount).map_err(|_| {
         RepositoryError::InvalidInput("MCP discovery quota amount exceeds bigint".to_owned())
     })?;
+    let reservation_amount =
+        i64::try_from(admission.artifact_policy.maximum_bytes).map_err(|_| {
+            RepositoryError::CorruptRow("MCP discovery quota reservation exceeds bigint".to_owned())
+        })?;
+    if actual_amount > reservation_amount {
+        return Err(RepositoryError::Conflict(
+            "MCP discovery Artifact quota amount",
+        ));
+    }
     let account = sqlx::query(
         r#"
         SELECT scope_kind, scope_id, work_class, metric, reserved_value, version
@@ -5788,7 +5802,7 @@ async fn settle_mcp_discovery_artifact_quota(
         || account.try_get::<String, _>("scope_id")? != command.audit.tenant_id.to_string()
         || account.try_get::<String, _>("work_class")? != "artifact"
         || account.try_get::<String, _>("metric")? != "artifact.staging_bytes"
-        || account.try_get::<i64, _>("reserved_value")? < amount
+        || account.try_get::<i64, _>("reserved_value")? < reservation_amount
     {
         return Err(RepositoryError::Conflict(
             "MCP discovery Artifact quota authority",
@@ -5809,7 +5823,7 @@ async fn settle_mcp_discovery_artifact_quota(
     .bind(admission.artifact_preallocation.artifact_id.to_string())
     .fetch_optional(&mut **transaction)
     .await?;
-    if reserved != Some(amount) {
+    if reserved != Some(reservation_amount) {
         return Err(RepositoryError::Conflict(
             "MCP discovery Artifact quota reservation",
         ));
@@ -5828,7 +5842,7 @@ async fn settle_mcp_discovery_artifact_quota(
     .bind(command.audit.tenant_id.to_string())
     .bind(quota_account_id.to_string())
     .bind(account_version)
-    .bind(amount)
+    .bind(reservation_amount)
     .bind(database_now)
     .fetch_optional(&mut **transaction)
     .await?
@@ -5849,7 +5863,7 @@ async fn settle_mcp_discovery_artifact_quota(
     .bind(settlement_id.to_string())
     .bind(quota_account_id.to_string())
     .bind(admission.artifact_preallocation.artifact_id.to_string())
-    .bind(amount)
+    .bind(reservation_amount)
     .bind(next_version)
     .bind(command.audit.request_digest.to_string())
     .execute(&mut **transaction)
