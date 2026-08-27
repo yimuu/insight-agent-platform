@@ -846,6 +846,13 @@
 > library调用保留固定fence封装。MCP Host 61/61及strict Clippy、format/diff门禁通过。本批只关闭production driver heartbeat接线的domain L1
 > 前置，不宣称driver进程、fresh PostgreSQL竞争或subscription protocol L3已经完成。
 
+> 2026-08-27 implementation evidence：r351新增logical MCP subscription durable claim/execute driver。driver在claim前预留独立
+> Semaphore，只领取exact `McpSubscription` Job并执行`leased -> running`；五个owner phase使用唯一Receipt/Event/Outbox identity与稳定attempt
+> scope。`connecting/initializing`推进后，channel握手把latest owner fence交给driver，只有远端establish窗口启用小于lease三分之一的heartbeat，
+> exit再把最新version返回Worker后才允许Ready/terminal/reconcile CAS；错worker、lease generation、token、倒退version或非法phase顺序均fail
+> closed。取消使用bounded drain。MCP service 5/5、全部binary target tests及strict Clippy、format/diff门禁通过。本批尚未接global due
+> recovery/reconcile scanner与production binary，因此只关闭claim/execute/heartbeat库级L1，不新增fresh PostgreSQL或L3证据。
+
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical
 > request digest；同时定义bounded shared Context Job payload、caller audit、稳定`request_digest + durable_work_digest + Job + accepted_at`

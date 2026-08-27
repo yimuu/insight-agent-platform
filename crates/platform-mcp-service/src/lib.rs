@@ -1,5 +1,7 @@
 //! Production MCP discovery driver composition.
 
+pub mod subscription_driver;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, ResourceId, ResourceKind, Sha256Digest, WorkClass,
