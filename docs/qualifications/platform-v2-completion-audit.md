@@ -47,6 +47,10 @@ Discovery→S3/KMS→scan→owner finalize多进程L3已闭合，仍缺外部San
 最近一次完整仓库复核使用全新PG16数据库、NATS和all-feature workspace测试；工作树完成批次均按单一目的提交。
 这些结果在代码或环境改变后必须由CI重新产生，不能长期当作release evidence复用。
 
+2026-08-27首次把当前main推送到GitHub后，CI在crate-boundary步骤发现门禁仍使用早期workspace图。r368将第55个typed RPC trace role、
+后续已评审production composition边、dev-only跨进程fixture边与唯一test-only Egress feature精确写入checker；未知crate、额外边/feature及
+SQL/HTTP/cloud SDK越界仍fail closed。本地扫描通过55个workspace package和578个resolved package；远端复验由r368 push后的CI拥有。
+
 r296为MCP Tool Host与MCP Resource Host各自安装构造期必选的真实RPC admission semaphore，并从同一owner导出fixed `rpc_requests`
 available/used。permit在身份/trace授权后、业务decode前获取；饱和返回`ResourceExhausted`，drop后恢复available。closed配置/hard max、
 owner/config tests、真实mTLS、受影响PostgreSQL fixtures编译、strict Clippy及MCP/observability部署门禁通过。动态capacity coverage达到17/19；

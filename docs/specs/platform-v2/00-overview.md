@@ -621,6 +621,12 @@ r367复核Phase 4 telemetry closure时发现MCP Discovery已有exact Job authori
 alert inventory门禁，并把完成审计中14-panel/13-alert的过期累计修正为当前15-panel/28-alert。该证据关闭仓库内dashboard/alert覆盖缺口；
 production Prometheus scrape、alert delivery、L5 SLO/error budget与L4～L6仍未由此证明。
 
+r368在`8cb12ce9`首次推送后的真实GitHub CI发现crate-boundary checker未同步后续Platform v2进程拆分。修复新增第55个
+`insight-platform-rpc-trace` closed role，精确列出shared observability HTTP、typed RPC trace、MCP Discovery/Resource、Sandbox Controller与
+production worker composition边，并只允许PostgreSQL跨进程资格fixture使用dev-only Artifact/Egress边、trace collector及唯一
+`protocol-fixtures` test feature。门禁继续拒绝未知crate、未列边、production subscriber、额外feature及SQL/HTTP/cloud SDK越界；本地扫描通过
+55个workspace package、578个resolved package。该修复只恢复CI架构门禁的当前性，不新增L4～L6证据。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际

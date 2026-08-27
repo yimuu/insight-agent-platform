@@ -45,6 +45,7 @@ INTERNAL_ROLES = {
     "insight-platform-orchestrator": "orchestrator_domain",
     "insight-platform-postgres": "platform_postgres",
     "insight-platform-registry": "registry_domain",
+    "insight-platform-rpc-trace": "rpc_trace",
     "insight-platform-runtime": "platform_runtime",
     "insight-platform-sandbox": "sandbox_domain",
     "insight-platform-sandbox-attestor": "sandbox_attestor",
@@ -75,57 +76,58 @@ ALLOWED_INTERNAL = {
     "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
     "artifacts_domain": {"contracts", "jobs_domain"},
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
-    "artifact_rpc": {"artifacts_domain", "contracts", "models_domain", "sandbox_domain"},
+    "artifact_rpc": {"artifacts_domain", "contracts", "jobs_domain", "models_domain", "rpc_trace", "sandbox_domain"},
     # The Artifact Gateway binary reuses the public Artifact HTTP DTO/authorization boundary;
     # data and maintenance workers still use their owner/RPC ports and never call public routes.
-    "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "platform_api", "platform_postgres", "sandbox_domain"},
+    "artifact_service": {"artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "observability", "platform_api", "platform_postgres", "sandbox_domain"},
     # HTTP DTOs consume generated contracts plus safe Artifact/Task domain projections;
     # persistence and state transitions remain behind application ports.
     "platform_api": {"artifacts_domain", "contracts", "mcp_host", "tasks_domain"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     # The remote Capability binary uses only the typed mTLS Egress RPC client; the native binary
     # remains network-client free and is checked independently by its deployment boundary test.
-    "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "mcp_rpc", "platform_postgres", "platform_worker"},
+    "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "mcp_rpc", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
     "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
     # Native and Remote Context binaries share durable composition; only the Remote binary imports
     # the typed Egress RPC client, while the Native binary remains separately deployment-checked.
-    "context_worker": {"context_domain", "contracts", "egress_rpc", "jobs_domain", "platform_postgres", "platform_worker"},
+    "context_worker": {"context_domain", "contracts", "egress_rpc", "jobs_domain", "mcp_rpc", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
     "public_gateway": {"context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
     "egress_core": {"capability_adapters", "context_domain", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
-    "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "secret_broker", "security_rpc"},
-    "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "mcp_host", "model_adapters", "sandbox_domain"},
+    "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "observability", "secret_broker", "security_rpc"},
+    "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "mcp_host", "model_adapters", "rpc_trace", "sandbox_domain"},
     "invocations_domain": {"contracts", "jobs_domain"},
     "jobs_domain": {"contracts"},
-    "mcp_host": {"contracts", "jobs_domain"},
-    "mcp_rpc": {"contracts", "mcp_host"},
-    "mcp_service": {"contracts", "egress_rpc", "mcp_host", "mcp_rpc"},
-    "mcp_cleanup_worker": {"contracts", "egress_rpc", "mcp_host", "platform_postgres"},
+    "mcp_host": {"artifacts_domain", "context_domain", "contracts", "jobs_domain", "rpc_trace"},
+    "mcp_rpc": {"context_domain", "contracts", "mcp_host", "rpc_trace"},
+    "mcp_service": {"artifact_rpc", "artifacts_domain", "contracts", "egress_rpc", "jobs_domain", "mcp_host", "mcp_rpc", "observability", "platform_postgres", "rpc_trace"},
+    "mcp_cleanup_worker": {"contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "model_adapters": {"contracts", "jobs_domain", "models_domain"},
-    "model_worker": {"artifact_rpc", "contracts", "egress_rpc", "jobs_domain", "model_adapters", "models_domain", "platform_postgres", "platform_worker"},
+    "model_worker": {"artifact_rpc", "contracts", "egress_rpc", "jobs_domain", "model_adapters", "models_domain", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
     "models_domain": {"contracts", "invocations_domain", "jobs_domain"},
-    "observability": set(),
-    "orchestration_worker": {"artifact_rpc", "artifacts_domain", "contracts", "orchestrator_domain", "platform_postgres", "platform_runtime", "platform_worker"},
+    "observability": {"platform_worker"},
+    "orchestration_worker": {"artifact_rpc", "artifacts_domain", "contracts", "observability", "orchestrator_domain", "platform_postgres", "platform_runtime", "platform_worker"},
     "orchestrator_domain": {"contracts", "jobs_domain"},
     "registry_domain": {"contracts"},
+    "rpc_trace": {"contracts"},
     "scheduler_domain": {"contracts"},
     "secret_broker": {"contracts", "egress_core", "mcp_host", "security_domain"},
     "security_domain": {"contracts"},
-    "security_authority": {"contracts", "platform_postgres", "security_domain", "security_rpc"},
-    "security_rpc": {"contracts", "security_domain"},
+    "security_authority": {"contracts", "observability", "platform_postgres", "security_domain", "security_rpc"},
+    "security_rpc": {"contracts", "rpc_trace", "security_domain"},
     "tasks_domain": {"contracts"},
     "platform_postgres": {"artifact_broker", "artifacts_domain", "capability_adapters", "contracts", "context_domain", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "security_domain", "tasks_domain"},
-    "platform_runtime": {"artifact_rpc", "artifacts_domain", "contracts", "invocations_domain", "jobs_domain", "models_domain", "orchestrator_domain", "platform_postgres", "platform_worker", "sandbox_domain", "sandbox_rpc", "security_domain", "tasks_domain"},
+    "platform_runtime": {"artifact_rpc", "artifacts_domain", "contracts", "invocations_domain", "jobs_domain", "models_domain", "orchestrator_domain", "platform_postgres", "platform_worker", "rpc_trace", "sandbox_domain", "sandbox_rpc", "security_domain", "tasks_domain"},
     "sandbox_domain": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
-    "sandbox_attestor": {"contracts", "sandbox_domain", "sandbox_rpc"},
-    "sandbox_controller": {"artifact_rpc", "contracts", "platform_postgres", "sandbox_domain", "sandbox_rpc"},
-    "sandbox_executor": {"contracts", "jobs_domain", "sandbox_domain", "sandbox_rpc", "sandbox_gvisor_executor", "sandbox_wasi_executor", "platform_worker"},
+    "sandbox_attestor": {"contracts", "observability", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_controller": {"artifact_rpc", "contracts", "observability", "platform_postgres", "platform_runtime", "sandbox_domain", "sandbox_rpc"},
+    "sandbox_executor": {"contracts", "jobs_domain", "observability", "platform_worker", "rpc_trace", "sandbox_domain", "sandbox_rpc", "sandbox_gvisor_executor", "sandbox_wasi_executor"},
     "sandbox_gvisor_executor": {"contracts"},
     "sandbox_guest": {"artifact_rpc", "contracts", "sandbox_domain"},
-    "sandbox_rpc": {"contracts", "jobs_domain", "sandbox_domain"},
+    "sandbox_rpc": {"contracts", "jobs_domain", "rpc_trace", "sandbox_domain"},
     "sandbox_wasi_executor": {"contracts", "sandbox_domain"},
     "platform_worker": {"contracts"},
 }
@@ -138,7 +140,21 @@ ALLOWED_DEV_INTERNAL = {
     # implement its three leaf connector traits. These edges are test-only; the shipped Host still
     # reaches provider/MCP networks solely through the egress_rpc dependency.
     "mcp_service": {"capability_adapters", "model_adapters"},
-    "platform_postgres": {"egress_rpc"},
+    "platform_postgres": {"artifact_rpc", "egress_core", "egress_rpc"},
+}
+
+# Test harnesses may install a tracing collector without granting production crates permission to
+# own subscriber configuration. The dependency must remain dev-only; a normal/build edge fails.
+ALLOWED_DEV_DIRECT = {
+    "platform_api": {"tracing-subscriber"},
+    "rpc_trace": {"tracing-subscriber"},
+}
+
+# `protocol-fixtures` only exposes deterministic, test-only transport observation hooks to the
+# cross-process PostgreSQL qualification harness. It is not an alternative production backend or
+# compatibility mode. Any additional internal feature still fails closed.
+ALLOWED_INTERNAL_FEATURES = {
+    "egress_core": {"default", "protocol-fixtures"},
 }
 
 FORBIDDEN_DIRECT = {
@@ -168,7 +184,7 @@ FORBIDDEN_DIRECT = {
     "artifact_service": {"reqwest", "dotenvy", "tracing-subscriber", "aws-sdk-secretsmanager"},
     "platform_api": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "capability_adapters": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "capability_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "capability_worker": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "callback_api": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "contracts": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "context_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
@@ -176,31 +192,32 @@ FORBIDDEN_DIRECT = {
     # egress and every cloud administrative SDK remain forbidden in the public Gateway.
     "public_gateway": {"aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "egress_core": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
-    "egress_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "egress_broker": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "egress_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "invocations_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "jobs_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "mcp_host": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "mcp_cleanup_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "mcp_cleanup_worker": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "model_adapters": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "model_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
+    "model_worker": {"reqwest", "dotenvy", "tracing-subscriber"},
     "models_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "observability": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "orchestration_worker": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "observability": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "orchestration_worker": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "orchestrator_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "registry_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "rpc_trace": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "scheduler_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "secret_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "security_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "security_authority": {"axum", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
+    "security_authority": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "security_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "tasks_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "platform_postgres": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "platform_runtime": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_attestor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_controller": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_attestor": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_controller": {"reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_executor": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_gvisor_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_guest": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
@@ -485,6 +502,10 @@ def check(metadata, baseline_path, workspace_root):
                 dependency_role in ALLOWED_DEV_INTERNAL.get(role, set())
                 and dependency_kind_set == {"dev"}
             )
+            dev_direct_allowed = (
+                dependency_package["name"] in ALLOWED_DEV_DIRECT.get(role, set())
+                and dependency_kind_set == {"dev"}
+            )
             if (
                 dependency_role is not None
                 and dependency_role not in ALLOWED_INTERNAL[role]
@@ -494,16 +515,21 @@ def check(metadata, baseline_path, workspace_root):
                     f"{role}: forbidden {kinds} internal edge to {dependency_role} "
                     f"({format_package(dependency_package)})"
                 )
-            if dependency_package["name"] in FORBIDDEN_DIRECT.get(role, set()):
+            if (
+                dependency_package["name"] in FORBIDDEN_DIRECT.get(role, set())
+                and not dev_direct_allowed
+            ):
                 errors.append(
                     f"{role}: forbidden direct {kinds} dependency on "
                     f"{format_package(dependency_package)}"
                 )
 
-        if role != "root" and package.get("features"):
+        features = set(package.get("features", {}))
+        allowed_features = ALLOWED_INTERNAL_FEATURES.get(role, set())
+        if role != "root" and features != allowed_features:
             errors.append(
                 f"{role}: internal crate feature matrix is not allowed in the first cutover: "
-                f"{sorted(package['features'])}"
+                f"actual={sorted(features)}, allowed={sorted(allowed_features)}"
             )
 
     for role in ("engine", "dsl", "durable"):
