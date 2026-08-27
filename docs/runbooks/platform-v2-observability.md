@@ -137,6 +137,20 @@ and subscription work must preserve their frozen request/execution identity; nev
 I/O or clear leases manually. Let the Context owner transaction choose safe retry, recovery or
 terminal settlement.
 
+## InsightPlatformMcpDiscoveryDurableJobLagHigh
+
+Compare the exact discovery due count and age with the dedicated worker's discovery permit,
+PostgreSQL health, Egress outcomes and Artifact Data Worker outcomes. Do not let an ordinary MCP
+Host claim this lane or bypass the durable Artifact verification wake; restore the qualified
+worker path or use qualified GitOps scaling.
+
+## InsightPlatformMcpDiscoveryExpiredLeaseRecoveryLagHigh
+
+Check discovery-worker restarts, database time, heartbeat/fence failures and the staged Artifact
+verification state. Preserve the exact MCP operation, Job lease, Artifact/Blob generation and
+transport evidence. Never clear the lease, restage the object or publish a Snapshot manually; the
+owner recovery transaction must revalidate the frozen closure and resume from durable evidence.
+
 ## InsightPlatformMcpSubscriptionDurableJobLagHigh
 
 Compare the exact logical-subscription due count and age with the worker's subscription permit,

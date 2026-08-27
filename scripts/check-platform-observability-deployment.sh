@@ -59,6 +59,8 @@ expected = %w[
   InsightPlatformExpiredOutboxClaimLagHigh
   InsightPlatformHttpFailureRatioHigh
   InsightPlatformHttpLatencyHigh
+  InsightPlatformMcpDiscoveryDurableJobLagHigh
+  InsightPlatformMcpDiscoveryExpiredLeaseRecoveryLagHigh
   InsightPlatformMcpSubscriptionDurableJobLagHigh
   InsightPlatformMcpSubscriptionExpiredLeaseRecoveryLagHigh
   InsightPlatformModelDurableJobLagHigh

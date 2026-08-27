@@ -29,6 +29,11 @@
 > response上限加wire余量独立限96 MiB。Artifact RPC 9/9真实loopback mTLS、Artifact 31/31、PostgreSQL lib 14/14及相关strict Clippy通过。
 > 本轮无fresh PostgreSQL，跨事务kill-window与真实S3/KMS条件重放仍不宣称L2/L3完成。
 
+> 2026-08-27 implementation evidence：r367完成Phase 4 telemetry累计审计并补齐唯一缺口。MCP Discovery production sampler已从exact
+> `McpDiscovery + Mcp + mcp_operation`共享Job authority导出`due|expired_lease` count/lag，通用dashboard也已消费；新增固定
+> `mcp-discovery-worker`的due/expired-lease symptom-first alert、逐项runbook及28条exact inventory门禁。当前仓库闭包为15-panel、28-alert，
+> observability、redaction、MCP deployment与diff门禁通过。该批不生成production scrape/alert-delivery、L5 SLO/error-budget或L4～L6证据。
+
 > CR-199 implementation order：先把ArtifactIo Policy owner/schema升级v2并更新generated registry/fixtures；再让public Artifact与MCP discovery
 > admission从TenantConfig exact slot逐字段冻结scanner digest、evidence TTL与retry backoff；随后让Data Worker startup/claim验证installed support。
 > 删除Artifact Gateway对这三项业务默认的所有权；部署配置只保留supported scanner集合与不可放大的hard limits。

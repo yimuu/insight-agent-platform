@@ -701,6 +701,12 @@ r331为Context Native、Remote与Subscription Worker按exact JobKind接入三个
 Context role-set due/expired symptom alert、runbook及静态inventory同步锁定；目标13/13、strict Clippy、Context部署、observability/redaction门禁通过。
 没有fresh PostgreSQL、production Prometheus、remote endpoint fault或L4～L5证据，因此只关闭三条Context Worker queue的仓库内L1 wiring。
 
+r367补齐MCP Discovery durable queue的运营闭包。既有production sampler已按exact `McpDiscovery + Mcp + mcp_operation`从共享Job
+authority导出`due|expired_lease` count/lag，role-filtered durable Job dashboard也已覆盖该series；本批新增两条仅匹配固定
+`mcp-discovery-worker` role的symptom-first lag alert，并为排查Egress、Artifact verification、lease/fence与禁止手工restage/发布Snapshot提供逐项
+runbook。observability checker以28条exact inventory、HTTPS runbook、高基数/Secret label负向约束fail closed。该证据关闭已接线durable queue
+role的仓库内dashboard/alert缺口，不替代production Prometheus scrape、alert delivery、L5 SLO/error budget或L4～L6。
+
 r288实现production candidate供应链入口。workflow action、toolchain、base image与GitOps environment输入均固定不可变revision；runtime和sandbox guest分别生成exact
 image digest、SPDX SBOM、SLSA/GitHub provenance及keyless signature，随后由确定性生成器构造15-role CandidateManifest和7项实际
 WorkerManifest闭包。gVisor guest digest冻结在`sandbox-executor.gvisor.adapter_runtime_digest`，不会因其不是主workload role而丢失。

@@ -36,7 +36,7 @@ Discovery→S3/KMS→scan→owner finalize多进程L3已闭合，仍缺外部San
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
 | 已有部署 | 11个chart覆盖全部15个ComponentRole、21个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、MCP Tool/Resource/Discovery/Subscription、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
 | HTTP observability | shared bounded-label owner；全部21个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency；真实TCP fixture验证Prometheus text scrape和metric canary为零 | process wiring与component real-socket scrape闭合，不代表Prometheus deployment scrape或完整业务observability |
-| Dashboard/alerts | 独立chart提供role-filtered process/HTTP、capacity、Orchestration及Outbox业务dashboard、13条symptom-first PrometheusRule和逐alert checked-in runbook；CI拒绝非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 已有series的L1运营合同闭合；不替代完整业务SLI或真实alert delivery |
+| Dashboard/alerts | 独立chart提供15-panel role-filtered process/HTTP、capacity、durable Job/Outbox、dependency与observation dashboard；28条symptom-first PrometheusRule覆盖全部已接线durable queue role并各有checked-in runbook；CI拒绝inventory漂移、非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 仓库内L1运营合同闭合；不替代production scrape、完整业务SLI或真实alert delivery |
 | Worker/queue telemetry | 全部21个workload pool从实际semaphore或SQLx owner导出capacity；Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从共享Job authority采样各自due/expired lease backlog与lag；共享Outbox及六类外部依赖另有低基数观测 | 仓库内动态capacity、domain queue与dependency owner接线闭合；production scrape和L5 mixed-load/saturation profile仍待外部证据 |
 | Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security mTLS/UDS hop保持同一trace ID/new span；fixed public/internal spans的动态采集验证parent trace、per-hop span与context outcome，reclaim恢复原trace，provider与guest/storage边界不转发header | CR-197 machine/runtime、component L3连续性与动态correlation采集闭合；不替代production telemetry backend验证 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；真实TCP metrics与真实loopback provider tracing动态注入payload/identity/token/query、`tracestate`及`baggage` canary，采集结果均为零且允许的bounded metadata存在 | source-level与component L3 dynamic metric/log/trace负向合同闭合；不替代RBAC/retention或production backend验证 |
@@ -325,9 +325,10 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从实际permit、连接池或共享Job authority
    导出domain backlog/recovery观测；共享Outbox及六类external dependency的仓库内owner接线也已闭合。仍缺production Prometheus scrape及L5
    mixed-load/saturation profile证据。
-3. 全部21个pool及Sandbox process attestor已有ServiceMonitor；process/HTTP/Orchestration/Outbox dashboard及逐alert
-   runbook已扩展到14个panel和13条alert，包含operational capacity、Orchestration Job、shared Outbox lag/dead queue及通用dependency failure ratio；其他role
-   domain backlog/recovery与saturation对应的panel/alert仍待指标owner接线后补齐。
+3. 全部21个pool及Sandbox process attestor已有ServiceMonitor；15-panel dashboard覆盖process/HTTP、capacity、全部已接线durable Job queue、
+   shared Outbox、dependency与observation outcome。28条逐项runbook的symptom-first alert覆盖Orchestration、Model、Capability、Context、Artifact、
+   Sandbox及MCP Discovery/Subscription的due/expired-lease lag，以及capacity、dependency与Outbox症状；仓库内inventory由静态门禁fail closed。
+   production Prometheus scrape、alert delivery和L5 SLO/error-budget判定仍须外部环境。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；尚无实际registry run artifact、GitOps

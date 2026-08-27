@@ -616,6 +616,11 @@ Data Worker重验Job/Run/value/artifact/fence authority、KMS解封并按exact S
 Scheduler RPC双进程kill/restart L3，并与r365共同闭合Phase 2 terminal materialization的仓库内production进程窗口；LocalStack仍不代表AWS云
 workload identity、网络滚动故障或L4～L6。
 
+r367复核Phase 4 telemetry closure时发现MCP Discovery已有exact Job authority的due/expired-lease count/lag及通用dashboard，却是唯一没有
+对应symptom-first durable queue alert的已接线role。本批增加固定`mcp-discovery-worker`的due与expired-lease lag告警、逐项runbook及28条exact
+alert inventory门禁，并把完成审计中14-panel/13-alert的过期累计修正为当前15-panel/28-alert。该证据关闭仓库内dashboard/alert覆盖缺口；
+production Prometheus scrape、alert delivery、L5 SLO/error budget与L4～L6仍未由此证明。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
