@@ -12,6 +12,7 @@ insight-platform-artifact-rpc.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-observability.workspace = true
 insight-platform-postgres.workspace = true
+insight-platform-runtime.workspace = true
 insight-platform-sandbox.workspace = true
 insight-platform-sandbox-rpc.workspace = true
 ipnet.workspace = true
@@ -22,6 +23,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [[bin]]
 name = "platform-sandbox-controller"

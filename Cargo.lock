@@ -3150,6 +3150,7 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-observability",
  "insight-platform-postgres",
+ "insight-platform-runtime",
  "insight-platform-sandbox",
  "insight-platform-sandbox-rpc",
  "ipnet",
@@ -3160,6 +3161,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "url",
+ "uuid",
 ]
 
 [[package]]

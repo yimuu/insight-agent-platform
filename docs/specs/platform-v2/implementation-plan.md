@@ -821,9 +821,18 @@
 > canonical descriptor bytes；Artifact stage只接受exact discovery worker SPIFFE identity，旧MCP Host与其他角色在authority前拒绝。Helm/Docker加入独立
 > ServiceAccount、Deployment、Service、PDB/HPA/ServiceMonitor、数据库凭据、双上游TLS与仅Egress/Artifact/PostgreSQL/DNS的NetworkPolicy，并更新MCP/
 > Artifact fail-closed deployment门禁。Artifact RPC 9/9、Egress 58/58、Egress RPC 6/6、MCP Host 60/60、workspace all-target、workspace strict
-> Clippy、contract/schema及deployment/observability/redaction门禁通过；同时修复workspace feature-unified并发下telemetry capture测试的dispatcher作用域，
+> Clippy、contract/schema及deployment/observability/redaction门禁通过；同时修复workspace feature-unified并发下telemetry capture测试的subscriber/callsite作用域，
 > 并将Sandbox资格测试夹具对齐当前1/1/3策略schema版本，均不改变runtime行为。本轮无fresh PostgreSQL、真实外部MCP/S3、production cluster或
 > kill-window，故L2/L3及L4～L6仍Pending。
+
+> 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
+> Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
+> critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，
+> 复用既有owner事务原子提交RunValue、Invocation/Job/配额、Receipt/Event/Outbox first winner；业务Executor authority与critical-control连接池
+> 物理隔离，Executor继续没有数据库凭据。进程监督outcome driver提前退出、数据库observer/RPC/HTTP任一失败和bounded shutdown，metrics导出实际
+> `outcome_merge` capacity；Helm/config门禁拒绝共享/零critical pool、零capacity和非法scan/backoff。Runtime 30/30、Controller 4/4、workspace
+> all-target、workspace strict Clippy、Sandbox deployment与observability门禁通过。本轮无fresh PostgreSQL、真实WASI/gVisor Executor kill-window或runsc cluster，因此只关闭
+> Sandbox-backed Capability production composition/L1，L2/L3及Phase 2/3 exit gate仍Pending。
 
 > 2026-08-26 implementation evidence：r268在Context owner crate新增closed subscription refresh admission L1合同：冻结tenant、subscription、
 > exact Context/MCP Deployment、Discovery identity/digest、authorization/session/event generation、root resource identity、deadline及canonical

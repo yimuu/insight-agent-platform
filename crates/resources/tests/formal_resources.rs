@@ -950,7 +950,7 @@ async fn production_provider_tracing_emits_metadata_without_dynamic_payload_cana
         .with_ansi(false)
         .with_writer(captured.clone())
         .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let request = ChatRequest {
         messages: vec![ChatMessage::from_text(
             ChatRole::User,

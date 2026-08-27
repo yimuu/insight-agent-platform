@@ -10,6 +10,13 @@
 {{- if or (lt (int .Values.controller.observabilityPort) 1) (gt (int .Values.controller.observabilityPort) 65535) (eq (int .Values.controller.observabilityPort) (int .Values.controller.port)) }}
 {{- fail "controller observability port must be distinct and in 1..65535" }}
 {{- end }}
+{{- $controllerDatabaseConnections := add (int .Values.controller.database.businessMaxConnections) (int .Values.controller.database.criticalControlMaxConnections) }}
+{{- if or (lt (int .Values.controller.database.businessMaxConnections) 2) (lt (int .Values.controller.database.criticalControlMaxConnections) 2) (gt $controllerDatabaseConnections 64) }}
+{{- fail "Controller business and critical-control PostgreSQL pools must be independently bounded" }}
+{{- end }}
+{{- if or (lt (int .Values.controller.outcomeConvergence.maximumInFlight) 1) (gt (int .Values.controller.outcomeConvergence.maximumInFlight) 16) (lt (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds) 1) (ge (int .Values.controller.outcomeConvergence.scanJitterMilliseconds) (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds)) (lt (int .Values.controller.outcomeConvergence.failureBackoffMilliseconds) 1) (gt (int .Values.controller.outcomeConvergence.failureBackoffMilliseconds) (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds)) (lt (int .Values.controller.outcomeConvergence.receiptTtlSeconds) 1) }}
+{{- fail "Controller Sandbox outcome convergence bounds are invalid" }}
+{{- end }}
 {{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}
 {{- fail "monitoring requires exact namespace and Pod selectors" }}
 {{- end }}

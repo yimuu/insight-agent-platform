@@ -298,7 +298,7 @@ mod tests {
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
             .with_writer(captured.clone())
             .finish();
-        let _subscriber = tracing::subscriber::set_default(subscriber);
+        tracing::subscriber::set_global_default(subscriber).unwrap();
         let context = RpcTraceContext::start(identity(), TraceFlags::Sampled).unwrap();
         scope_trace(context, async {
             tracing::info!(

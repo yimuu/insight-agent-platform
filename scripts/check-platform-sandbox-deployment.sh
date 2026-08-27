@@ -31,6 +31,14 @@ if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platf
   echo "sandbox deployment: Controller shared observability composition is missing" >&2
   exit 1
 fi
+if ! rg -q 'insight-platform-runtime.workspace = true' "$root/crates/platform-sandbox-controller/Cargo.toml" ||
+   ! rg -q 'SandboxOutcomeDriver::new' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! rg -q 'database_business_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! rg -q 'database_critical_control_max_connections' "$root/crates/platform-sandbox-controller/src/main.rs" ||
+   ! rg -q 'OutcomeMergeCapacityObservation' "$root/crates/platform-sandbox-controller/src/main.rs"; then
+  echo "sandbox deployment: Controller durable Capability outcome convergence is missing" >&2
+  exit 1
+fi
 if ! rg -q 'insight-platform-observability.workspace = true' "$root/crates/platform-sandbox-executor/Cargo.toml" ||
    ! rg -q 'process_observability_router' "$root/crates/platform-sandbox-executor/src/main.rs"; then
   echo "sandbox deployment: Executor shared observability composition is missing" >&2
@@ -56,6 +64,10 @@ for mutation in \
   '--set image.digest=latest' \
   '--set controller.replicas=1' \
   '--set controller.observabilityPort=7443' \
+  '--set controller.database.criticalControlMaxConnections=0' \
+  '--set controller.database.businessMaxConnections=64' \
+  '--set controller.outcomeConvergence.maximumInFlight=0' \
+  '--set controller.outcomeConvergence.failureBackoffMilliseconds=1001' \
   '--set executor.observabilityPort=7444' \
   '--set gvisor.observabilityPort=0' \
   '--set attestor.observabilityPort=7444' \

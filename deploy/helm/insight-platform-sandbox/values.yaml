@@ -25,7 +25,14 @@ controller:
   database:
     existingSecret: insight-platform-sandbox-database
     urlKey: database-url
-    maxConnections: 10
+    businessMaxConnections: 8
+    criticalControlMaxConnections: 2
+  outcomeConvergence:
+    maximumInFlight: 1
+    scanIntervalMilliseconds: 1000
+    scanJitterMilliseconds: 100
+    failureBackoffMilliseconds: 100
+    receiptTtlSeconds: 7200
   serviceAccount: {}
   artifactBroker:
     endpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9443

@@ -37,7 +37,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   "schema_version" 1
   "listen_address" (printf "0.0.0.0:%d" (int .Values.controller.port))
   "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.controller.observabilityPort))
-  "database_max_connections" (int .Values.controller.database.maxConnections)
+  "database_business_max_connections" (int .Values.controller.database.businessMaxConnections)
+  "database_critical_control_max_connections" (int .Values.controller.database.criticalControlMaxConnections)
+  "outcome_convergence" (dict
+    "maximum_in_flight" (int .Values.controller.outcomeConvergence.maximumInFlight)
+    "scan_interval_milliseconds" (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds)
+    "scan_jitter_milliseconds" (int .Values.controller.outcomeConvergence.scanJitterMilliseconds)
+    "failure_backoff_milliseconds" (int .Values.controller.outcomeConvergence.failureBackoffMilliseconds)
+    "receipt_ttl_seconds" (int .Values.controller.outcomeConvergence.receiptTtlSeconds))
   "artifact_broker" (dict
     "endpoint" .Values.controller.artifactBroker.endpoint
     "tls_server_name" .Values.controller.artifactBroker.tlsServerName

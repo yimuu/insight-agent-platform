@@ -3,7 +3,7 @@
 use crate::{CoordinatorIdentityFactory, IdentityFactoryError, SafetyDriverTiming};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use insight_platform_contracts::{CommandOutcome, HardLimitProfile, ResourceKind, WorkClass};
+use insight_platform_contracts::{CommandOutcome, HardLimitProfile, ResourceId, ResourceKind};
 use insight_platform_postgres::{
     repository::{
         PgRepository, RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard,
@@ -13,7 +13,6 @@ use insight_platform_postgres::{
 use insight_platform_sandbox::{
     MergeSandboxCapabilityOutcome, PendingSandboxCapabilityOutcome, SandboxOutcomeMergeAudit,
 };
-use insight_platform_worker::{LocalWorkerPoolError, LocalWorkerPools};
 use std::{
     error::Error,
     fmt,
@@ -24,7 +23,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::Notify,
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError},
     task::{JoinError, JoinHandle},
     time::{Instant, MissedTickBehavior},
 };
@@ -255,10 +254,54 @@ impl SandboxOutcomeMetrics {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxOutcomeCapacitySnapshot {
+    pub maximum: usize,
+    pub available: usize,
+}
+
+/// Process-local critical-control capacity owned by the trusted Sandbox Controller.
+///
+/// This is deliberately not a `WorkerManifest`: the Controller never claims or executes an
+/// untrusted Sandbox Job, and Executors remain database-credential-free.
+#[derive(Clone)]
+pub struct SandboxOutcomeCapacity {
+    maximum: usize,
+    semaphore: Arc<Semaphore>,
+}
+
+impl SandboxOutcomeCapacity {
+    pub fn new(maximum: usize) -> Result<Self, SandboxOutcomeDriverError> {
+        if maximum == 0 {
+            return Err(SandboxOutcomeDriverError::NoCriticalControlCapacity);
+        }
+        Ok(Self {
+            maximum,
+            semaphore: Arc::new(Semaphore::new(maximum)),
+        })
+    }
+
+    pub fn snapshot(&self) -> SandboxOutcomeCapacitySnapshot {
+        SandboxOutcomeCapacitySnapshot {
+            maximum: self.maximum,
+            available: self.semaphore.available_permits(),
+        }
+    }
+
+    fn try_acquire(&self) -> Result<Option<OwnedSemaphorePermit>, SandboxOutcomeDriverError> {
+        match Arc::clone(&self.semaphore).try_acquire_owned() {
+            Ok(permit) => Ok(Some(permit)),
+            Err(TryAcquireError::NoPermits) => Ok(None),
+            Err(TryAcquireError::Closed) => Err(SandboxOutcomeDriverError::CapacityClosed),
+        }
+    }
+}
+
 pub struct SandboxOutcomeDriver<S, I> {
     store: Arc<S>,
     identities: Arc<I>,
-    pools: LocalWorkerPools,
+    controller_process_generation_id: ResourceId,
+    capacity: SandboxOutcomeCapacity,
     config: SandboxOutcomeConfig,
     wake: Arc<Notify>,
 }
@@ -271,20 +314,18 @@ where
     pub fn new(
         store: Arc<S>,
         identities: Arc<I>,
-        pools: LocalWorkerPools,
+        controller_process_generation_id: ResourceId,
+        capacity: SandboxOutcomeCapacity,
         config: SandboxOutcomeConfig,
     ) -> Result<Self, SandboxOutcomeDriverError> {
-        let pool = pools.snapshot();
-        if pool.work_class != WorkClass::Sandbox {
-            return Err(SandboxOutcomeDriverError::WrongWorkerManifest);
-        }
-        if pool.critical_control_capacity == 0 {
-            return Err(SandboxOutcomeDriverError::NoCriticalControlCapacity);
+        if controller_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration {
+            return Err(SandboxOutcomeDriverError::InvalidControllerProcessGeneration);
         }
         Ok(Self {
             store,
             identities,
-            pools,
+            controller_process_generation_id,
+            capacity,
             config,
             wake: Arc::new(Notify::new()),
         })
@@ -300,10 +341,7 @@ where
         ),
         SandboxOutcomeDriverError,
     > {
-        let permit = self
-            .pools
-            .try_acquire_critical_control()
-            .map_err(SandboxOutcomeDriverError::LocalPool)?;
+        let permit = self.capacity.try_acquire()?;
         let Some(_permit) = permit else {
             return Err(SandboxOutcomeDriverError::CriticalControlCapacityBusy);
         };
@@ -355,10 +393,7 @@ where
         let mut command = MergeSandboxCapabilityOutcome {
             audit: SandboxOutcomeMergeAudit {
                 tenant_id: candidate.tenant_id.clone(),
-                controller_process_generation_id: self
-                    .pools
-                    .snapshot()
-                    .worker_process_generation_id,
+                controller_process_generation_id: self.controller_process_generation_id.clone(),
                 source_event_id: candidate.source_event_id.clone(),
                 source_job_version: candidate.source_job_version,
                 source_event_payload_digest: candidate.source_event_payload_digest.clone(),
@@ -429,11 +464,7 @@ where
             .timing
             .scan_interval
             .checked_add(deterministic_outcome_jitter(
-                self.pools
-                    .snapshot()
-                    .worker_process_generation_id
-                    .uuid()
-                    .as_u128(),
+                self.controller_process_generation_id.uuid().as_u128(),
                 self.config.timing.scan_jitter,
             ))
             .ok_or(SandboxOutcomeDriverError::TimingOverflow)?;
@@ -520,14 +551,14 @@ fn sandbox_outcome_snapshot(metrics: &SandboxOutcomeMetrics) -> SandboxOutcomeSn
 
 #[derive(Debug)]
 pub enum SandboxOutcomeDriverError {
-    WrongWorkerManifest,
+    InvalidControllerProcessGeneration,
     NoCriticalControlCapacity,
     CriticalControlCapacityBusy,
+    CapacityClosed,
     InvalidSourceCandidate,
     TimingOverflow,
     InvalidGeneratedCommand,
     Identity(IdentityFactoryError),
-    LocalPool(LocalWorkerPoolError),
     Store(SandboxOutcomeStoreFailure),
     DriverTask(JoinError),
 }
@@ -535,14 +566,14 @@ pub enum SandboxOutcomeDriverError {
 impl fmt::Display for SandboxOutcomeDriverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WrongWorkerManifest => {
-                formatter.write_str("Sandbox outcome driver requires a Sandbox WorkerManifest")
-            }
+            Self::InvalidControllerProcessGeneration => formatter
+                .write_str("Sandbox outcome driver requires a Controller process generation"),
             Self::NoCriticalControlCapacity => formatter
                 .write_str("Sandbox outcome driver requires reserved critical-control capacity"),
             Self::CriticalControlCapacityBusy => {
                 formatter.write_str("Sandbox critical-control capacity is busy")
             }
+            Self::CapacityClosed => formatter.write_str("Sandbox outcome capacity is closed"),
             Self::InvalidSourceCandidate => {
                 formatter.write_str("Sandbox outcome source candidate is invalid")
             }
@@ -551,7 +582,6 @@ impl fmt::Display for SandboxOutcomeDriverError {
                 formatter.write_str("Sandbox outcome driver generated an invalid command")
             }
             Self::Identity(failure) => failure.fmt(formatter),
-            Self::LocalPool(failure) => failure.fmt(formatter),
             Self::Store(failure) => failure.fmt(formatter),
             Self::DriverTask(failure) => {
                 write!(formatter, "Sandbox outcome task failed: {failure}")
@@ -564,7 +594,6 @@ impl Error for SandboxOutcomeDriverError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Identity(failure) => Some(failure),
-            Self::LocalPool(failure) => Some(failure),
             Self::Store(failure) => Some(failure),
             Self::DriverTask(failure) => Some(failure),
             _ => None,
@@ -606,13 +635,19 @@ impl RunningSandboxOutcomeDriver {
         self.cancellation.cancel();
     }
 
+    pub async fn wait(&mut self) -> Result<SandboxOutcomeSnapshot, SandboxOutcomeDriverError> {
+        let joined = self
+            .join
+            .as_mut()
+            .expect("running Sandbox outcome driver owns exactly one task")
+            .await;
+        self.join = None;
+        joined.map_err(SandboxOutcomeDriverError::DriverTask)?
+    }
+
     pub async fn shutdown(mut self) -> Result<SandboxOutcomeSnapshot, SandboxOutcomeDriverError> {
         self.request_stop();
-        let join = self
-            .join
-            .take()
-            .expect("running Sandbox outcome driver owns exactly one task");
-        join.await.map_err(SandboxOutcomeDriverError::DriverTask)?
+        self.wait().await
     }
 }
 
@@ -627,9 +662,7 @@ mod tests {
     use super::*;
     use crate::UuidCoordinatorIdentityFactory;
     use chrono::TimeZone;
-    use insight_platform_contracts::{
-        checked_in_hard_limit_profile, ResourceId, Sha256Digest, WorkerManifest,
-    };
+    use insight_platform_contracts::{checked_in_hard_limit_profile, ResourceId, Sha256Digest};
     use std::sync::Mutex;
 
     struct RecordingStore {
@@ -676,22 +709,6 @@ mod tests {
             .unwrap()
     }
 
-    fn pools() -> LocalWorkerPools {
-        LocalWorkerPools::new(
-            WorkerManifest {
-                manifest_version: 1,
-                worker_role: "sandbox-outcome".to_owned(),
-                work_class: WorkClass::Sandbox,
-                adapter_runtime_digest: digest('a'),
-                protocol_version: 1,
-                max_concurrency: 1,
-                critical_control_reserved_slots: 1,
-            },
-            id(ResourceKind::WorkerProcessGeneration, "0031"),
-        )
-        .unwrap()
-    }
-
     fn config() -> SandboxOutcomeConfig {
         SandboxOutcomeConfig::from_profile(
             &checked_in_hard_limit_profile(),
@@ -732,7 +749,8 @@ mod tests {
         let driver = SandboxOutcomeDriver::new(
             Arc::clone(&store),
             Arc::new(UuidCoordinatorIdentityFactory),
-            pools(),
+            id(ResourceKind::WorkerProcessGeneration, "0031"),
+            SandboxOutcomeCapacity::new(1).unwrap(),
             config(),
         )
         .unwrap();
@@ -755,5 +773,51 @@ mod tests {
             command.audit.request_digest,
             command.canonical_request_digest().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn controller_capacity_is_reserved_before_any_durable_scan() {
+        let store = Arc::new(RecordingStore {
+            candidate: candidate(),
+            commands: Mutex::new(Vec::new()),
+        });
+        let capacity = SandboxOutcomeCapacity::new(1).unwrap();
+        let _held = capacity.try_acquire().unwrap().unwrap();
+        let driver = SandboxOutcomeDriver::new(
+            Arc::clone(&store),
+            Arc::new(UuidCoordinatorIdentityFactory),
+            id(ResourceKind::WorkerProcessGeneration, "0036"),
+            capacity,
+            config(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            driver.drive_once(None).await,
+            Err(SandboxOutcomeDriverError::CriticalControlCapacityBusy)
+        ));
+        assert!(store.commands.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn controller_identity_and_capacity_fail_closed() {
+        let store = Arc::new(RecordingStore {
+            candidate: candidate(),
+            commands: Mutex::new(Vec::new()),
+        });
+        assert!(matches!(
+            SandboxOutcomeDriver::new(
+                store,
+                Arc::new(UuidCoordinatorIdentityFactory),
+                id(ResourceKind::Job, "0037"),
+                SandboxOutcomeCapacity::new(1).unwrap(),
+                config(),
+            ),
+            Err(SandboxOutcomeDriverError::InvalidControllerProcessGeneration)
+        ));
+        assert!(matches!(
+            SandboxOutcomeCapacity::new(0),
+            Err(SandboxOutcomeDriverError::NoCriticalControlCapacity)
+        ));
     }
 }

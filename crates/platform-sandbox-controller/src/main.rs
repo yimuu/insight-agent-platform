@@ -11,8 +11,8 @@ use dependency_observer::install_postgres_dependency_metrics;
 
 use insight_platform_artifact_rpc::{ArtifactInternalRpcLimits, ArtifactSandboxBrokerGrpcClient};
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, Sha256Digest,
-    WorkClass,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, JsonLimits, ResourceId,
+    ResourceKind, Sha256Digest, WorkClass,
 };
 use insight_platform_observability::{
     process_observability_router, DurableJobQueueMetrics, DurableJobQueueSnapshot,
@@ -22,8 +22,12 @@ use insight_platform_observability::{
 use insight_platform_postgres::{
     dependency_health::run_postgres_health_sampler,
     operational_metrics::{observe_durable_job_queue_for_owner, DurableJobOwnerKind},
-    repository::PgRepository,
+    repository::{PgRepository, SafetyScanShard},
     verify_schema,
+};
+use insight_platform_runtime::{
+    SafetyDriverTiming, SandboxOutcomeCapacity, SandboxOutcomeConfig, SandboxOutcomeDriver,
+    UuidCoordinatorIdentityFactory,
 };
 use insight_platform_sandbox::{
     NodeAttestorRoute, ProveSandboxProcessGenerationAbsent,
@@ -51,6 +55,7 @@ use std::{
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig};
+use uuid::Uuid;
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_SANDBOX_CONTROLLER_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_SANDBOX_CONTROLLER_CONFIG_DIGEST";
@@ -79,6 +84,20 @@ impl OperationalCapacitySource for ArtifactResponseCapacityObservation {
         .expect("Sandbox Artifact response semaphore preserves its configured capacity")
     }
 }
+
+#[derive(Clone)]
+struct OutcomeMergeCapacityObservation(SandboxOutcomeCapacity);
+
+impl OperationalCapacitySource for OutcomeMergeCapacityObservation {
+    fn snapshot(&self) -> OperationalCapacitySnapshot {
+        let snapshot = self.0.snapshot();
+        OperationalCapacitySnapshot::new(
+            u64::try_from(snapshot.maximum).unwrap_or(u64::MAX),
+            u64::try_from(snapshot.available).unwrap_or(u64::MAX),
+        )
+        .expect("Sandbox outcome semaphore preserves its configured capacity")
+    }
+}
 const MAX_TLS_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;
 
@@ -88,12 +107,24 @@ struct ControllerProcessConfig {
     schema_version: u32,
     listen_address: String,
     observability_listen_address: String,
-    database_max_connections: u32,
+    database_business_max_connections: u32,
+    database_critical_control_max_connections: u32,
+    outcome_convergence: OutcomeConvergenceProcessConfig,
     artifact_broker: ArtifactBrokerProcessConfig,
     process_isolation_attestor: AttestorProcessConfig,
     connect_timeout_milliseconds: u64,
     request_timeout_milliseconds: u64,
     shutdown_grace_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutcomeConvergenceProcessConfig {
+    maximum_in_flight: usize,
+    scan_interval_milliseconds: u64,
+    scan_jitter_milliseconds: u64,
+    failure_backoff_milliseconds: u64,
+    receipt_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,11 +187,25 @@ impl ControllerProcessConfig {
             .observability_listen_address
             .parse()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let database_connections = self
+            .database_business_max_connections
+            .checked_add(self.database_critical_control_max_connections)
+            .ok_or(ProcessError::InvalidConfiguration)?;
         if self.schema_version != 1
             || listen.port() == 0
             || observability.port() == 0
             || observability == listen
-            || !(2..=64).contains(&self.database_max_connections)
+            || !(2..=64).contains(&self.database_business_max_connections)
+            || !(2..=64).contains(&self.database_critical_control_max_connections)
+            || database_connections > 64
+            || !(1..=16).contains(&self.outcome_convergence.maximum_in_flight)
+            || self.outcome_convergence.scan_interval_milliseconds == 0
+            || self.outcome_convergence.scan_jitter_milliseconds
+                >= self.outcome_convergence.scan_interval_milliseconds
+            || self.outcome_convergence.failure_backoff_milliseconds == 0
+            || self.outcome_convergence.failure_backoff_milliseconds
+                > self.outcome_convergence.scan_interval_milliseconds
+            || self.outcome_convergence.receipt_ttl_seconds == 0
             || !closed_https_endpoint(
                 &self.artifact_broker.endpoint,
                 &self.artifact_broker.tls_server_name,
@@ -203,6 +248,27 @@ impl ControllerProcessConfig {
         .map_err(|_| ProcessError::InvalidConfiguration)
         .map(|_| ())
     }
+
+    fn outcome_config(
+        &self,
+    ) -> Result<SandboxOutcomeConfig, insight_platform_runtime::SandboxOutcomeConfigError> {
+        SandboxOutcomeConfig::from_profile(
+            &checked_in_hard_limit_profile(),
+            SafetyScanShard::whole(),
+            SafetyDriverTiming {
+                scan_interval: Duration::from_millis(
+                    self.outcome_convergence.scan_interval_milliseconds,
+                ),
+                scan_jitter: Duration::from_millis(
+                    self.outcome_convergence.scan_jitter_milliseconds,
+                ),
+                failure_backoff: Duration::from_millis(
+                    self.outcome_convergence.failure_backoff_milliseconds,
+                ),
+            },
+            Duration::from_secs(self.outcome_convergence.receipt_ttl_seconds),
+        )
+    }
 }
 
 #[tokio::main]
@@ -218,24 +284,50 @@ async fn run() -> Result<(), ProcessError> {
     let limits = SandboxInternalRpcLimits::from_profile(&checked_in_hard_limit_profile())
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let database_url = required(DATABASE_URL_ENV)?;
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database_max_connections)
+    let business_pool = PgPoolOptions::new()
+        .max_connections(config.database_business_max_connections)
         .acquire_timeout(Duration::from_millis(config.request_timeout_milliseconds))
         .connect(&database_url)
         .await
         .map_err(|_| ProcessError::DatabaseUnavailable)?;
-    verify_schema(&pool)
+    let critical_control_pool = PgPoolOptions::new()
+        .max_connections(config.database_critical_control_max_connections)
+        .acquire_timeout(Duration::from_millis(config.request_timeout_milliseconds))
+        .connect(&database_url)
+        .await
+        .map_err(|_| ProcessError::DatabaseUnavailable)?;
+    verify_schema(&critical_control_pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
-    let database_health_pool = pool.clone();
-    let durable_queue_pool = pool.clone();
-    let repository = Arc::new(PgRepository::new(pool));
+    let business_health_pool = business_pool.clone();
+    let critical_control_health_pool = critical_control_pool.clone();
+    let durable_queue_pool = critical_control_pool.clone();
+    let repository = Arc::new(PgRepository::new(business_pool));
+    let critical_control_repository = Arc::new(PgRepository::new(critical_control_pool));
     let (dependency_metrics, postgres_observer) =
         install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
 
     let artifacts = Arc::new(connect_artifact_broker(&config).await?);
 
     let process_isolation = Arc::new(RoutedProcessAttestor::new(&config, limits)?);
+
+    let controller_process_generation_id =
+        ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let outcome_capacity =
+        SandboxOutcomeCapacity::new(config.outcome_convergence.maximum_in_flight)
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let outcome_driver = SandboxOutcomeDriver::new(
+        critical_control_repository,
+        Arc::new(UuidCoordinatorIdentityFactory),
+        controller_process_generation_id,
+        outcome_capacity.clone(),
+        config
+            .outcome_config()
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+    )
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let mut outcome_driver = outcome_driver.spawn();
 
     let maximum = limits.maximum_message_bytes();
     let authority_service = SandboxExecutorAuthorityServiceServer::new(
@@ -297,15 +389,17 @@ async fn run() -> Result<(), ProcessError> {
     let capacity_observation: Arc<dyn OperationalCapacitySource> = Arc::new(
         ArtifactResponseCapacityObservation(artifact_response_capacity),
     );
+    let outcome_capacity_observation: Arc<dyn OperationalCapacitySource> =
+        Arc::new(OutcomeMergeCapacityObservation(outcome_capacity));
     let durable_queue_metrics = Arc::new(DurableJobQueueMetrics::default());
     let metrics = Arc::new(
         ProcessHttpMetrics::install_with_capacities(
             "sandbox-controller",
             PROCESS_OBSERVABILITY_OPERATIONS,
-            vec![OperationalCapacityMetric::new(
-                "artifact_response",
-                capacity_observation,
-            )],
+            vec![
+                OperationalCapacityMetric::new("artifact_response", capacity_observation),
+                OperationalCapacityMetric::new("outcome_merge", outcome_capacity_observation),
+            ],
         )
         .map_err(|_| ProcessError::InvalidConfiguration)?
         .with_durable_job_queue(Arc::clone(&durable_queue_metrics))
@@ -315,7 +409,12 @@ async fn run() -> Result<(), ProcessError> {
     let mut postgres_health = tokio::spawn(async move {
         tokio::join!(
             run_postgres_health_sampler(
-                database_health_pool,
+                business_health_pool,
+                Arc::clone(&postgres_observer),
+                health_cancellation.child_token(),
+            ),
+            run_postgres_health_sampler(
+                critical_control_health_pool,
                 postgres_observer,
                 health_cancellation.child_token(),
             ),
@@ -341,9 +440,11 @@ async fn run() -> Result<(), ProcessError> {
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|_| ProcessError::RpcUnavailable)?;
             cancellation.cancel();
+            outcome_driver.request_stop();
         }
         result = &mut server => {
             cancellation.cancel();
+            outcome_driver.request_stop();
             let rpc_result = result.map_err(|_| ProcessError::RpcUnavailable)
                 .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
             let observability_result = observability.await
@@ -351,36 +452,63 @@ async fn run() -> Result<(), ProcessError> {
                 .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
             let postgres_result = postgres_health.await
                 .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            let outcome_result = outcome_driver.wait().await
+                .map_err(|_| ProcessError::OutcomeDriverFailed);
             rpc_result?;
             observability_result?;
             postgres_result?;
+            outcome_result?;
             return Err(ProcessError::RpcUnavailable);
         }
         result = &mut observability => {
             cancellation.cancel();
+            outcome_driver.request_stop();
             let observability_result = result.map_err(|_| ProcessError::ObservabilityUnavailable)
                 .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
             let rpc_result = server.await.map_err(|_| ProcessError::RpcUnavailable)
                 .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
             let postgres_result = postgres_health.await
                 .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            let outcome_result = outcome_driver.wait().await
+                .map_err(|_| ProcessError::OutcomeDriverFailed);
             observability_result?;
             rpc_result?;
             postgres_result?;
+            outcome_result?;
             return Err(ProcessError::ObservabilityUnavailable);
         }
         result = &mut postgres_health => {
             cancellation.cancel();
+            outcome_driver.request_stop();
             let postgres_result = result.map_err(|_| ProcessError::DependencyObserverUnavailable);
             let rpc_result = server.await.map_err(|_| ProcessError::RpcUnavailable)
                 .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
             let observability_result = observability.await
                 .map_err(|_| ProcessError::ObservabilityUnavailable)
                 .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
+            let outcome_result = outcome_driver.wait().await
+                .map_err(|_| ProcessError::OutcomeDriverFailed);
             postgres_result?;
             rpc_result?;
             observability_result?;
+            outcome_result?;
             return Err(ProcessError::DependencyObserverUnavailable);
+        }
+        result = outcome_driver.wait() => {
+            cancellation.cancel();
+            let outcome_result = result.map_err(|_| ProcessError::OutcomeDriverFailed);
+            let rpc_result = server.await.map_err(|_| ProcessError::RpcUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::RpcUnavailable));
+            let observability_result = observability.await
+                .map_err(|_| ProcessError::ObservabilityUnavailable)
+                .and_then(|result| result.map_err(|_| ProcessError::ObservabilityUnavailable));
+            let postgres_result = postgres_health.await
+                .map_err(|_| ProcessError::DependencyObserverUnavailable);
+            outcome_result?;
+            rpc_result?;
+            observability_result?;
+            postgres_result?;
+            return Err(ProcessError::OutcomeDriverFailed);
         }
     }
     tokio::time::timeout(
@@ -397,6 +525,10 @@ async fn run() -> Result<(), ProcessError> {
             postgres_health
                 .await
                 .map_err(|_| ProcessError::DependencyObserverUnavailable)?;
+            outcome_driver
+                .wait()
+                .await
+                .map_err(|_| ProcessError::OutcomeDriverFailed)?;
             Ok(())
         },
     )
@@ -684,6 +816,7 @@ enum ProcessError {
     RpcUnavailable,
     ObservabilityUnavailable,
     DependencyObserverUnavailable,
+    OutcomeDriverFailed,
     ShutdownDeadlineExceeded,
 }
 
@@ -698,6 +831,7 @@ impl fmt::Display for ProcessError {
             Self::RpcUnavailable => "Controller RPC server failed",
             Self::ObservabilityUnavailable => "Controller observability server failed",
             Self::DependencyObserverUnavailable => "Controller dependency observer failed",
+            Self::OutcomeDriverFailed => "Sandbox outcome convergence driver failed",
             Self::ShutdownDeadlineExceeded => "Controller graceful shutdown deadline exceeded",
         })
     }
@@ -714,7 +848,15 @@ mod tests {
             "schema_version": 1,
             "listen_address": "0.0.0.0:7443",
             "observability_listen_address": "0.0.0.0:9090",
-            "database_max_connections": 8,
+            "database_business_max_connections": 6,
+            "database_critical_control_max_connections": 2,
+            "outcome_convergence": {
+                "maximum_in_flight": 1,
+                "scan_interval_milliseconds": 1000,
+                "scan_jitter_milliseconds": 100,
+                "failure_backoff_milliseconds": 100,
+                "receipt_ttl_seconds": 7200
+            },
             "artifact_broker": {
                 "endpoint": "https://artifact-broker.platform-artifacts.svc:9443",
                 "tls_server_name": "artifact-broker.platform-artifacts.svc",
@@ -796,5 +938,33 @@ mod tests {
             .artifact_broker
             .maximum_in_flight_responses = MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD + 1;
         assert!(excessive_response_capacity.validate().is_err());
+    }
+
+    #[test]
+    fn controller_requires_isolated_bounded_outcome_convergence() {
+        let valid = valid_config();
+        valid.validate().unwrap();
+        valid.outcome_config().unwrap();
+
+        let mut shared_pool_budget = valid.clone();
+        shared_pool_budget.database_critical_control_max_connections = 0;
+        assert!(shared_pool_budget.validate().is_err());
+
+        let mut excessive_pool_budget = valid.clone();
+        excessive_pool_budget.database_business_max_connections = 64;
+        assert!(excessive_pool_budget.validate().is_err());
+
+        let mut no_capacity = valid.clone();
+        no_capacity.outcome_convergence.maximum_in_flight = 0;
+        assert!(no_capacity.validate().is_err());
+
+        let mut invalid_timing = valid;
+        invalid_timing
+            .outcome_convergence
+            .failure_backoff_milliseconds = invalid_timing
+            .outcome_convergence
+            .scan_interval_milliseconds
+            + 1;
+        assert!(invalid_timing.validate().is_err());
     }
 }
