@@ -1,5 +1,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifact_rpc::{
+    proto::artifact_data_worker_service_server::ArtifactDataWorkerServiceServer,
+    ArtifactDataWorkerGrpcService, ArtifactInternalRpcLimits, ArtifactWorkloadStageAuthority,
+    ArtifactWorkloadStageError, McpDiscoveryWorkerWorkloadIdentity,
+    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
+};
 use insight_platform_artifacts::{
     ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobDeletionEvidence,
     ArtifactReferenceSnapshot, ArtifactScanDisposition, ArtifactScanEvidence,
@@ -64,17 +70,17 @@ use insight_platform_mcp_host::{
     ContextSubscriptionRefreshResolver, CreateMcpDiscoveryOperation, CreateMcpResourceSubscription,
     EncryptedMcpState, FinalizeMcpDiscovery, McpAuthorizationBindingRecord, McpDiscoveryAdmission,
     McpDiscoveryCandidate, McpDiscoveryContractQuery, McpDiscoveryExecutionContractResolver,
-    McpDiscoveryOperationPayload, McpDiscoveryResultBinding, McpDiscoverySnapshotRecord,
-    McpDiscoveryTransportEvidence, McpExecutionContractQuery, McpNotificationApplyDisposition,
-    McpNotificationAudit, McpNotificationClass, McpNotificationCommit, McpResourceRefreshConnector,
-    McpResourceRefreshTransportEvidence, McpResourceRefreshTransportRequest,
-    McpSubscriptionContractQuery, McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan,
-    McpSubscriptionRecord, McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan,
-    McpSubscriptionWorkerAudit, McpTransportFailure, McpWorkerAudit, NewMcpAuthorizationBinding,
-    NewMcpDiscoveryAdmission, NewMcpDiscoverySnapshotRecord, ParkMcpDiscoveryVerification,
-    RecoverDueMcpSubscription, RecoverExpiredMcpDiscoveryJob,
-    ReportMcpSubscriptionTransportTermination, SaveMcpSubscriptionSession,
-    WakeMcpSubscriptionReconcile,
+    McpDiscoveryOperationPayload, McpDiscoveryOperationRecord, McpDiscoveryResultBinding,
+    McpDiscoverySnapshotRecord, McpDiscoveryTransportEvidence, McpExecutionContractQuery,
+    McpNotificationApplyDisposition, McpNotificationAudit, McpNotificationClass,
+    McpNotificationCommit, McpResourceRefreshConnector, McpResourceRefreshTransportEvidence,
+    McpResourceRefreshTransportRequest, McpSubscriptionContractQuery,
+    McpSubscriptionExecutionResolver, McpSubscriptionReconcileScan, McpSubscriptionRecord,
+    McpSubscriptionRecoveryCause, McpSubscriptionRecoveryScan, McpSubscriptionWorkerAudit,
+    McpTransportFailure, McpWorkerAudit, NewMcpAuthorizationBinding, NewMcpDiscoveryAdmission,
+    NewMcpDiscoverySnapshotRecord, ParkMcpDiscoveryVerification, RecoverDueMcpSubscription,
+    RecoverExpiredMcpDiscoveryJob, ReportMcpSubscriptionTransportTermination,
+    SaveMcpSubscriptionSession, WakeMcpSubscriptionReconcile,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -401,6 +407,9 @@ impl McpResourceRefreshConnector for ProcessRefreshConnector {
 }
 
 const PROTOCOL_EGRESS_CONFIG_ENV: &str = "PLATFORM_SUBSCRIPTION_EGRESS_FIXTURE_CONFIG";
+const DISCOVERY_ARTIFACT_CONFIG_ENV: &str = "PLATFORM_DISCOVERY_ARTIFACT_FIXTURE_CONFIG";
+const DISCOVERY_ARTIFACT_DATABASE_URL_ENV: &str =
+    "PLATFORM_DISCOVERY_ARTIFACT_FIXTURE_DATABASE_URL";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -416,6 +425,99 @@ struct ProtocolEgressFixtureConfig {
     control_prefix: String,
     resource_uri: String,
     pause_second_initialize: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryArtifactFixtureConfig {
+    listen_address: SocketAddr,
+    ca_pem: String,
+    server_cert: String,
+    server_key: String,
+    control_prefix: String,
+}
+
+struct DiscoveryArtifactStageAuthority {
+    repository: PgRepository,
+    pool: PgPool,
+    control_prefix: String,
+}
+
+#[async_trait]
+impl ArtifactWorkloadStageAuthority for DiscoveryArtifactStageAuthority {
+    async fn stage_workload_artifact(
+        &self,
+        request: StageWorkloadArtifactRequest,
+    ) -> Result<insight_platform_artifacts::StagedWorkloadArtifact, ArtifactWorkloadStageError>
+    {
+        let preflight = self
+            .repository
+            .authorize_workload_artifact_stage(&request)
+            .await
+            .map_err(map_discovery_artifact_fixture_error)?;
+        let WorkloadArtifactStagePreflight::Authorized(authority) = preflight else {
+            let WorkloadArtifactStagePreflight::Replayed(staged) = preflight else {
+                unreachable!("closed preflight has two variants");
+            };
+            return Ok(staged);
+        };
+        std::fs::write(
+            protocol_control_path(&self.control_prefix, "artifact-stage.started"),
+            b"started",
+        )
+        .unwrap();
+        let staged_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| ArtifactWorkloadStageError::Unavailable)?;
+        match self
+            .repository
+            .stage_workload_artifact(StageWorkloadArtifact {
+                schema_version: 1,
+                tenant_id: request.tenant_id,
+                caller: ArtifactWorkloadAudience::McpHost,
+                producer_job_id: request.producer_job_id,
+                producer_fence: request.producer_fence,
+                verification_job_id: request.verification_job_id,
+                artifact_id: request.artifact_id,
+                blob_id: request.blob_id,
+                content_digest: request.descriptor_digest,
+                size_bytes: u64::try_from(request.descriptor_bytes.len())
+                    .map_err(|_| ArtifactWorkloadStageError::Integrity)?,
+                media_type: request.media_type,
+                storage_backend: "s3".to_owned(),
+                storage_binding_digest: authority.write_storage_binding_digest,
+                object_reference_ciphertext: vec![0x6b; 48],
+                object_generation: "discovery-process-generation-1".to_owned(),
+                key_id: "discovery-process-key".to_owned(),
+                encryption_domain_id: authority.encryption_domain_id,
+                backend_evidence_digest: named_digest("discovery-process-backend-evidence"),
+                staged_at,
+            })
+            .await
+            .map_err(map_discovery_artifact_fixture_error)?
+        {
+            CommandOutcome::Applied(staged) | CommandOutcome::Replayed(staged) => Ok(staged),
+        }
+    }
+}
+
+fn map_discovery_artifact_fixture_error(error: RepositoryError) -> ArtifactWorkloadStageError {
+    match error {
+        RepositoryError::PermissionDenied | RepositoryError::QuotaExceeded => {
+            ArtifactWorkloadStageError::Denied
+        }
+        RepositoryError::StaleFence | RepositoryError::LeaseExpired => {
+            ArtifactWorkloadStageError::StaleFence
+        }
+        RepositoryError::Conflict(_) | RepositoryError::IdempotencyConflict => {
+            ArtifactWorkloadStageError::Conflict
+        }
+        RepositoryError::Database(_) => ArtifactWorkloadStageError::Unavailable,
+        RepositoryError::InvalidInput(_)
+        | RepositoryError::NotFound(_)
+        | RepositoryError::CorruptRow(_) => ArtifactWorkloadStageError::Integrity,
+    }
 }
 
 struct ProtocolFixtureDns(SocketAddr);
@@ -455,6 +557,7 @@ struct DiscoveryArtifactScanner {
     content_digest: Sha256Digest,
     size_bytes: u64,
     media_type: String,
+    observed_at: DateTime<Utc>,
 }
 
 impl ArtifactScanner for DiscoveryArtifactScanner {
@@ -462,7 +565,7 @@ impl ArtifactScanner for DiscoveryArtifactScanner {
         &self,
         request: ArtifactScanRequest,
     ) -> Result<ArtifactScanEvidence, ArtifactBackendFailure> {
-        let observed_at = Utc::now() - Duration::seconds(1);
+        let observed_at = self.observed_at;
         ArtifactScanEvidenceDraft {
             schema_version: 1,
             scan_kind: request.job.scan_kind,
@@ -800,6 +903,7 @@ async fn run_protocol_egress_fixture(config: ProtocolEgressFixtureConfig) {
             Arc::new(EmptyGrpc),
             limits,
         )
+        .with_mcp_discovery(connector.clone())
         .with_mcp_resource_refresh(connector)
         .with_mcp_streamable_http_subscription(subscription_connector, bridge),
     );
@@ -838,10 +942,60 @@ fn subscription_egress_protocol_fixture_process() {
         .block_on(run_protocol_egress_fixture(config));
 }
 
+async fn run_discovery_artifact_fixture(config: DiscoveryArtifactFixtureConfig) {
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&std::env::var(DISCOVERY_ARTIFACT_DATABASE_URL_ENV).unwrap())
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let service = ArtifactDataWorkerServiceServer::new(ArtifactDataWorkerGrpcService::new(
+        Arc::new(DiscoveryArtifactStageAuthority {
+            repository: PgRepository::new(pool.clone()),
+            pool,
+            control_prefix: config.control_prefix,
+        }),
+        ArtifactInternalRpcLimits::with_write_limit(1_048_576, 262_144, 2_097_152).unwrap(),
+    ));
+    let service = tonic::service::interceptor::InterceptedService::new(
+        service,
+        McpDiscoveryWorkerWorkloadIdentity,
+    );
+    eprintln!("discovery Artifact fixture started");
+    Server::builder()
+        .tls_config(
+            ServerTlsConfig::new()
+                .identity(Identity::from_pem(config.server_cert, config.server_key))
+                .client_ca_root(Certificate::from_pem(config.ca_pem)),
+        )
+        .unwrap()
+        .add_service(service)
+        .serve(config.listen_address)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn discovery_artifact_fixture_process() {
+    let Ok(path) = std::env::var(DISCOVERY_ARTIFACT_CONFIG_ENV) else {
+        return;
+    };
+    let config: DiscoveryArtifactFixtureConfig =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_discovery_artifact_fixture(config));
+}
+
 struct ProcessTlsFixture {
     ca: String,
     egress_server_cert: String,
     egress_server_key: String,
+    artifact_server_cert: String,
+    artifact_server_key: String,
     resource_host_server_cert: String,
     resource_host_server_key: String,
     resource_host_client_cert: String,
@@ -850,6 +1004,8 @@ struct ProcessTlsFixture {
     context_worker_client_key: String,
     subscription_worker_client_cert: String,
     subscription_worker_client_key: String,
+    discovery_worker_client_cert: String,
+    discovery_worker_client_key: String,
     mcp_server_cert: String,
     mcp_server_key: String,
 }
@@ -876,6 +1032,12 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         vec![SanType::DnsName("egress.test".try_into().unwrap())],
         ExtendedKeyUsagePurpose::ServerAuth,
     );
+    let (artifact_server_cert, artifact_server_key) = issue(
+        vec![SanType::DnsName(
+            "artifact-data-worker.test".try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
     let (resource_host_server_cert, resource_host_server_key) = issue(
         vec![SanType::DnsName("resource-host.test".try_into().unwrap())],
         ExtendedKeyUsagePurpose::ServerAuth,
@@ -900,6 +1062,12 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         )],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
+    let (discovery_worker_client_cert, discovery_worker_client_key) = issue(
+        vec![SanType::URI(
+            MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
     let (mcp_server_cert, mcp_server_key) = issue(
         vec![SanType::DnsName("mcp.example.test".try_into().unwrap())],
         ExtendedKeyUsagePurpose::ServerAuth,
@@ -908,6 +1076,8 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         ca: ca.pem(),
         egress_server_cert,
         egress_server_key,
+        artifact_server_cert,
+        artifact_server_key,
         resource_host_server_cert,
         resource_host_server_key,
         resource_host_client_cert,
@@ -916,6 +1086,8 @@ fn process_tls_fixture() -> ProcessTlsFixture {
         context_worker_client_key,
         subscription_worker_client_cert,
         subscription_worker_client_key,
+        discovery_worker_client_cert,
+        discovery_worker_client_key,
         mcp_server_cert,
         mcp_server_key,
     }
@@ -2415,6 +2587,8 @@ fn available_address() -> std::net::SocketAddr {
 struct ProcessFixtureFiles {
     prefix: String,
     ca: PathBuf,
+    artifact_server_cert: PathBuf,
+    artifact_server_key: PathBuf,
     resource_host_server_cert: PathBuf,
     resource_host_server_key: PathBuf,
     resource_host_client_cert: PathBuf,
@@ -2423,6 +2597,8 @@ struct ProcessFixtureFiles {
     context_worker_client_key: PathBuf,
     subscription_worker_client_cert: PathBuf,
     subscription_worker_client_key: PathBuf,
+    discovery_worker_client_cert: PathBuf,
+    discovery_worker_client_key: PathBuf,
     mcp_server_cert: PathBuf,
     mcp_server_key: PathBuf,
 }
@@ -2437,6 +2613,8 @@ impl ProcessFixtureFiles {
         let files = Self {
             prefix: prefix.clone(),
             ca: path("ca.pem"),
+            artifact_server_cert: path("artifact-server.pem"),
+            artifact_server_key: path("artifact-server-key.pem"),
             resource_host_server_cert: path("resource-host.pem"),
             resource_host_server_key: path("resource-host-key.pem"),
             resource_host_client_cert: path("resource-host-client.pem"),
@@ -2445,11 +2623,15 @@ impl ProcessFixtureFiles {
             context_worker_client_key: path("context-worker-client-key.pem"),
             subscription_worker_client_cert: path("subscription-worker-client.pem"),
             subscription_worker_client_key: path("subscription-worker-client-key.pem"),
+            discovery_worker_client_cert: path("discovery-worker-client.pem"),
+            discovery_worker_client_key: path("discovery-worker-client-key.pem"),
             mcp_server_cert: path("mcp-server.pem"),
             mcp_server_key: path("mcp-server-key.pem"),
         };
         for (path, contents) in [
             (&files.ca, &tls.ca),
+            (&files.artifact_server_cert, &tls.artifact_server_cert),
+            (&files.artifact_server_key, &tls.artifact_server_key),
             (
                 &files.resource_host_server_cert,
                 &tls.resource_host_server_cert,
@@ -2481,6 +2663,14 @@ impl ProcessFixtureFiles {
             (
                 &files.subscription_worker_client_key,
                 &tls.subscription_worker_client_key,
+            ),
+            (
+                &files.discovery_worker_client_cert,
+                &tls.discovery_worker_client_cert,
+            ),
+            (
+                &files.discovery_worker_client_key,
+                &tls.discovery_worker_client_key,
             ),
             (&files.mcp_server_cert, &tls.mcp_server_cert),
             (&files.mcp_server_key, &tls.mcp_server_key),
@@ -2612,6 +2802,47 @@ fn spawn_mcp_subscription_worker(input: SubscriptionWorkerSpawn<'_>) -> Child {
         )
         .env(
             "PLATFORM_MCP_SUBSCRIPTION_WORKER_EGRESS_CA_PATH",
+            &input.files.ca,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+struct DiscoveryWorkerSpawn<'a> {
+    binary: &'a str,
+    database_url: &'a str,
+    files: &'a ProcessFixtureFiles,
+    config_path: &'a PathBuf,
+    config_digest: &'a str,
+}
+
+fn spawn_mcp_discovery_worker(input: DiscoveryWorkerSpawn<'_>) -> Child {
+    std::process::Command::new(input.binary)
+        .env("PLATFORM_MCP_DISCOVERY_WORKER_CONFIG", input.config_path)
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_CONFIG_DIGEST",
+            input.config_digest,
+        )
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_DATABASE_URL",
+            input.database_url,
+        )
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_CERT_PATH",
+            &input.files.discovery_worker_client_cert,
+        )
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_KEY_PATH",
+            &input.files.discovery_worker_client_key,
+        )
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_EGRESS_CA_PATH",
+            &input.files.ca,
+        )
+        .env(
+            "PLATFORM_MCP_DISCOVERY_WORKER_ARTIFACT_CA_PATH",
             &input.files.ca,
         )
         .stdout(Stdio::null())
@@ -3181,6 +3412,389 @@ fn spawn_protocol_egress_process(config_path: &std::path::Path) -> Child {
         .unwrap()
 }
 
+fn spawn_discovery_artifact_process(config_path: &std::path::Path, database_url: &str) -> Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("discovery_artifact_fixture_process")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(DISCOVERY_ARTIFACT_CONFIG_ENV, config_path)
+        .env(DISCOVERY_ARTIFACT_DATABASE_URL_ENV, database_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+async fn run_discovery_worker_process_l3(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+    operation: &McpDiscoveryOperationRecord,
+    database_url: &str,
+    discovery_worker_binary: &str,
+) {
+    let tls = process_tls_fixture();
+    let files = ProcessFixtureFiles::new(&tls);
+    let egress_address = available_address();
+    let artifact_address = available_address();
+    let mcp_address = SocketAddr::from(([127, 0, 0, 1], fixture.mcp_endpoint.port));
+    let control_prefix = format!("{}-discovery", files.prefix);
+    for name in [
+        "methods.log",
+        "attempt-1.started",
+        "attempt-2.started",
+        "artifact-stage.started",
+    ] {
+        let _ = std::fs::remove_file(protocol_control_path(&control_prefix, name));
+    }
+    let protocol_config = ProtocolEgressFixtureConfig {
+        egress_address,
+        mcp_address,
+        ca_pem: tls.ca.clone(),
+        egress_server_cert: tls.egress_server_cert.clone(),
+        egress_server_key: tls.egress_server_key.clone(),
+        mcp_server_cert: tls.mcp_server_cert.clone(),
+        mcp_server_key: tls.mcp_server_key.clone(),
+        endpoint: InstalledMcpStreamableHttpEndpoint {
+            schema_version: 1,
+            deployment: fixture.mcp_deployment.clone(),
+            endpoint: fixture.mcp_endpoint.clone(),
+            endpoint_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+            server_identity_digest: fixture.mcp_endpoint.canonical_digest().unwrap(),
+            protocol_policy: fixture.protocol_policy.clone(),
+            network_policy: fixture.network_policy.clone(),
+            tls_policy: fixture.tls_policy.clone(),
+            trust_policy: fixture.trust_policy.clone(),
+            auth_policy: fixture.auth_policy.clone(),
+            token_credential_purpose: fixture.token_purpose.clone(),
+            trusted_root_pem: tls.ca.clone(),
+        },
+        control_prefix: control_prefix.clone(),
+        resource_uri: "mcp://catalog.example.test/discovery".to_owned(),
+        pause_second_initialize: false,
+    };
+    let protocol_config_path = PathBuf::from(format!("{}-discovery-egress.json", files.prefix));
+    std::fs::write(
+        &protocol_config_path,
+        serde_json::to_vec(&protocol_config).unwrap(),
+    )
+    .unwrap();
+    let artifact_config = DiscoveryArtifactFixtureConfig {
+        listen_address: artifact_address,
+        ca_pem: tls.ca.clone(),
+        server_cert: tls.artifact_server_cert.clone(),
+        server_key: tls.artifact_server_key.clone(),
+        control_prefix: control_prefix.clone(),
+    };
+    let artifact_config_path = PathBuf::from(format!("{}-discovery-artifact.json", files.prefix));
+    std::fs::write(
+        &artifact_config_path,
+        serde_json::to_vec(&artifact_config).unwrap(),
+    )
+    .unwrap();
+    let worker_config = serde_json::json!({
+        "schema_version": 1,
+        "observability_listen_address": available_address().to_string(),
+        "database_max_connections": 8,
+        "database_acquire_timeout_milliseconds": 5000,
+        "claim_batch_size": 1,
+        "recovery_batch_size": 4,
+        "maximum_concurrency": 1,
+        "lease_milliseconds": 30000,
+        "scan_interval_milliseconds": 20,
+        "failure_backoff_milliseconds": 20,
+        "heartbeat_interval_milliseconds": 5000,
+        "retry_backoff_milliseconds": 20,
+        "receipt_ttl_milliseconds": 60000,
+        "drain_grace_milliseconds": 1000,
+        "egress": {
+            "endpoint": format!("https://{egress_address}/"),
+            "tls_server_name": "egress.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_rpc_metadata_bytes": 65536,
+            "maximum_rpc_payload_bytes": 1048576
+        },
+        "artifact_data_worker": {
+            "endpoint": format!("https://{artifact_address}/"),
+            "tls_server_name": "artifact-data-worker.test",
+            "connect_timeout_milliseconds": 1000,
+            "request_timeout_milliseconds": 30000,
+            "maximum_read_request_bytes": 1048576,
+            "maximum_chunk_bytes": 262144,
+            "maximum_write_request_bytes": 2097152
+        }
+    });
+    let (worker_config_path, worker_config_digest) =
+        files.write_config("discovery-worker", &worker_config);
+    let spawn_worker = || {
+        spawn_mcp_discovery_worker(DiscoveryWorkerSpawn {
+            binary: discovery_worker_binary,
+            database_url,
+            files: &files,
+            config_path: &worker_config_path,
+            config_digest: &worker_config_digest,
+        })
+    };
+
+    let mut artifact = spawn_discovery_artifact_process(&artifact_config_path, database_url);
+    let (startup, artifact_stderr) = monitor_process_stderr(artifact.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("discovery Artifact fixture started"),
+        "{startup}"
+    );
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, first_egress_stderr) =
+        monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("subscription protocol Egress fixture started"),
+        "{startup}"
+    );
+    let mut first_worker = spawn_worker();
+    let (startup, first_worker_stderr) =
+        monitor_process_stderr(first_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-mcp-discovery-worker started"),
+        "{startup}"
+    );
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "attempt-1.started"),
+        StdDuration::from_secs(10),
+    )
+    .await;
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    first_egress_stderr.await.unwrap();
+    first_worker.kill().unwrap();
+    first_worker.wait().unwrap();
+    first_worker_stderr.await.unwrap();
+    let expired = sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(operation.job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(expired.rows_affected(), 1);
+
+    let mut egress = spawn_protocol_egress_process(&protocol_config_path);
+    let (startup, second_egress_stderr) =
+        monitor_process_stderr(egress.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("subscription protocol Egress fixture started"),
+        "{startup}"
+    );
+    let mut second_worker = spawn_worker();
+    let (startup, second_worker_stderr) =
+        monitor_process_stderr(second_worker.stderr.take().unwrap()).await;
+    assert!(
+        startup.contains("platform-mcp-discovery-worker started"),
+        "{startup}"
+    );
+    wait_for_control_file(
+        &protocol_control_path(&control_prefix, "artifact-stage.started"),
+        StdDuration::from_secs(15),
+    )
+    .await;
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &operation.job_id,
+        "waiting",
+        StdDuration::from_secs(15),
+    )
+    .await;
+
+    let artifact_row: (String, i64, String) = sqlx::query_as(
+        "SELECT expected_digest, expected_size_bytes, declared_media_type FROM insight_platform.artifacts WHERE tenant_id = $1 AND artifact_id = $2 AND state = 'verifying'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(operation.payload.admission.artifact_preallocation.artifact_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let scan_worker = id(ResourceKind::WorkerProcessGeneration, 0x748);
+    let mut claims = repository
+        .claim_artifact_jobs(ClaimArtifactJobs {
+            role: ArtifactWorkerRole::DataWorker,
+            worker_id: scan_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![named_digest("discovery-process-scan-claim")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    let claim = claims.pop().unwrap();
+    assert_eq!(
+        claim.job_id,
+        operation
+            .payload
+            .admission
+            .artifact_preallocation
+            .verification_job_id
+            .to_string()
+    );
+    let token: Sha256Digest = claim.lease_token_digest.as_ref().unwrap().parse().unwrap();
+    let started = repository
+        .start_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: claim.job_id.clone(),
+            worker_id: scan_worker.clone(),
+            lease_epoch: claim.lease_epoch,
+            expected_job_version: claim.version,
+            lease_token_digest: token.clone(),
+        })
+        .await
+        .unwrap();
+    let execution = repository
+        .load_started_artifact_execution(
+            ArtifactWorkerRole::DataWorker,
+            fixture.tenant_id.clone(),
+            operation
+                .payload
+                .admission
+                .artifact_preallocation
+                .verification_job_id
+                .clone(),
+            DomainJobFence {
+                expected_version: u64::try_from(started.version).unwrap(),
+                worker_process_generation_id: scan_worker,
+                lease_generation: u64::try_from(started.lease_epoch).unwrap(),
+                token_digest: token,
+            },
+            ArtifactExecutionSlot {
+                receipt_id: id(ResourceKind::Receipt, 0x749),
+                event_id: id(ResourceKind::Event, 0x74a),
+                outbox_id: id(ResourceKind::OutboxEvent, 0x74b),
+                duplicate_blob_cleanup_job_id: id(ResourceKind::Job, 0x74c),
+                receipt_expires_at: Utc::now() + Duration::minutes(10),
+            },
+        )
+        .await
+        .unwrap();
+    let StartedArtifactExecution::Scan(execution) = execution else {
+        panic!("discovery process verification Job must be a scan");
+    };
+    let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    ArtifactWorkerService::new(
+        DiscoveryArtifactScanner {
+            content_digest: artifact_row.0.parse().unwrap(),
+            size_bytes: u64::try_from(artifact_row.1).unwrap(),
+            media_type: artifact_row.2,
+            observed_at: scan_now,
+        },
+        UnusedDiscoveryBlobBackend,
+        repository.clone(),
+    )
+    .execute_scan(execution, scan_now)
+    .await
+    .unwrap();
+    wait_for_context_job_state(
+        pool,
+        &fixture.tenant_id,
+        &operation.job_id,
+        "succeeded",
+        StdDuration::from_secs(15),
+    )
+    .await;
+    let terminal: (String, String, i32, String, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT invocation.state, artifact.state, owner.attempt_no, verification.state,
+          (SELECT count(*) FROM insight_platform.resources
+           WHERE tenant_id = $1 AND resource_id = $5 AND resource_kind = 'mcp_discovery_snapshot'),
+          (SELECT count(*) FROM insight_platform.artifact_links
+           WHERE tenant_id = $1 AND artifact_link_id = $6 AND state = 'active')
+        FROM insight_platform.invocations AS invocation
+        JOIN insight_platform.jobs AS owner
+          ON owner.tenant_id = invocation.tenant_id
+         AND owner.owner_kind = 'mcp_operation'
+         AND owner.owner_id = invocation.invocation_id
+         AND owner.job_id = $3
+        JOIN insight_platform.artifacts AS artifact
+          ON artifact.tenant_id = invocation.tenant_id AND artifact.artifact_id = $4
+        JOIN insight_platform.jobs AS verification
+          ON verification.tenant_id = invocation.tenant_id AND verification.job_id = $7
+        WHERE invocation.tenant_id = $1 AND invocation.invocation_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(operation.operation_id.to_string())
+    .bind(operation.job_id.to_string())
+    .bind(
+        operation
+            .payload
+            .admission
+            .artifact_preallocation
+            .artifact_id
+            .to_string(),
+    )
+    .bind(
+        operation
+            .payload
+            .admission
+            .artifact_preallocation
+            .snapshot_id
+            .to_string(),
+    )
+    .bind(
+        operation
+            .payload
+            .admission
+            .artifact_preallocation
+            .artifact_link_id
+            .to_string(),
+    )
+    .bind(
+        operation
+            .payload
+            .admission
+            .artifact_preallocation
+            .verification_job_id
+            .to_string(),
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal,
+        (
+            "succeeded".to_owned(),
+            "ready".to_owned(),
+            3,
+            "succeeded".to_owned(),
+            1,
+            1
+        )
+    );
+    let methods =
+        std::fs::read_to_string(protocol_control_path(&control_prefix, "methods.log")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec![
+            "initialize",
+            "initialize",
+            "notifications/initialized",
+            "resources/list"
+        ]
+    );
+
+    second_worker.kill().unwrap();
+    second_worker.wait().unwrap();
+    second_worker_stderr.await.unwrap();
+    egress.kill().unwrap();
+    egress.wait().unwrap();
+    second_egress_stderr.await.unwrap();
+    artifact.kill().unwrap();
+    artifact.wait().unwrap();
+    artifact_stderr.await.unwrap();
+}
+
 async fn run_subscription_protocol_process_l3(
     pool: &PgPool,
     repository: &PgRepository,
@@ -3733,6 +4347,10 @@ async fn mcp_subscription_fixture() {
     else {
         panic!("first discovery Artifact stage must require physical storage evidence");
     };
+    let staged_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let staged = match repository
         .stage_workload_artifact(StageWorkloadArtifact {
             schema_version: 1,
@@ -3753,7 +4371,7 @@ async fn mcp_subscription_fixture() {
             key_id: "discovery-stage-key".to_owned(),
             encryption_domain_id: stage_authority.encryption_domain_id,
             backend_evidence_digest: named_digest("discovery-stage-backend-evidence"),
-            staged_at: Utc::now() - Duration::seconds(1),
+            staged_at,
         })
         .await
         .unwrap()
@@ -3886,17 +4504,22 @@ async fn mcp_subscription_fixture() {
     let StartedArtifactExecution::Scan(scan_execution) = scan_execution else {
         panic!("discovery verification Job must start as an Artifact scan");
     };
+    let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let scan_service = ArtifactWorkerService::new(
         DiscoveryArtifactScanner {
             content_digest: stage_request.descriptor_digest.clone(),
             size_bytes: u64::try_from(stage_request.descriptor_bytes.len()).unwrap(),
             media_type: stage_request.media_type.clone(),
+            observed_at: scan_now,
         },
         UnusedDiscoveryBlobBackend,
         repository.clone(),
     );
     let verified = scan_service
-        .execute_scan(scan_execution, Utc::now())
+        .execute_scan(scan_execution, scan_now)
         .await
         .unwrap();
     assert!(matches!(verified, CommandOutcome::Applied(_)));
@@ -4075,6 +4698,41 @@ async fn mcp_subscription_fixture() {
             1
         )
     );
+    if let Ok(discovery_worker_binary) = std::env::var("PLATFORM_MCP_DISCOVERY_WORKER_BIN") {
+        let mut process_audit =
+            command_audit(&fixture.tenant_id, &fixture.principal_id, 0x700, now);
+        process_audit.idempotency_key_digest = named_digest("process-discovery-key");
+        process_audit.request_digest = named_digest("process-discovery-request");
+        let process_discovery = match repository
+            .create_mcp_discovery_operation(CreateMcpDiscoveryOperation {
+                audit: process_audit,
+                operation_id: id(ResourceKind::McpOperation, 0x710),
+                job_id: id(ResourceKind::Job, 0x711),
+                logical_key: "process-discovery-request".to_owned(),
+                mcp_deployment: fixture.mcp_deployment.clone(),
+                authorization_binding_id: fixture.authorization.authorization_binding_id.clone(),
+                artifact_preallocation: discovery_preallocation(0x720),
+                attempt_limit: 3,
+                deadline: now + Duration::minutes(30),
+            })
+            .await
+            .unwrap()
+        {
+            CommandOutcome::Applied(record) => record,
+            CommandOutcome::Replayed(_) => panic!("process discovery admission must apply"),
+        };
+        run_discovery_worker_process_l3(
+            &pool,
+            &repository,
+            &fixture,
+            &process_discovery,
+            &database_url,
+            &discovery_worker_binary,
+        )
+        .await;
+    } else {
+        eprintln!("discovery Worker binary is unset; discovery process L3 skipped");
+    }
     let command = create_command(&fixture, now);
 
     let applied = create_subscription(&repository, command.clone())

@@ -842,6 +842,15 @@
 > `reserved_value=0`。fresh PostgreSQL目标测试通过。该证据关闭stage/scan/wake/finalize及提交后owner接管L2，不代表真实S3、production
 > discovery多进程协议L3、容量饱和或L4～L6完成。
 
+> 2026-08-27 implementation evidence：r360在唯一baseline的fresh PostgreSQL 16上闭合production MCP discovery进程/协议L3。
+> 独立Egress OS fixture、Artifact unary mTLS OS fixture与真实`platform-mcp-discovery-worker`共同运行：attempt 1在外部TLS MCP endpoint收到
+> `initialize`但尚未响应时终止Egress与Worker，exact lease过期后重启；attempt 2重新执行`initialize`、`notifications/initialized`与
+> `resources/list`，经Artifact RPC stage并durable park。真实`ArtifactWorkerService` scan提交Verified evidence与durable wake后，同一production
+> Worker以attempt 3 claim并完成owner finalize。终态断言固定Invocation/Artifact/verification Job均成功、owner `attempt_no=3`，immutable
+> Snapshot与active Evidence Link各唯一；方法日志固定两次`initialize`及其余协议动作各一次。fresh PostgreSQL目标测试通过。Artifact fixture仅使用
+> S3-shaped测试证据且scan仍在测试进程内，因此本轮不代表真实S3/KMS、Artifact Data Worker进程L3、第三方endpoint、容量饱和、production scrape
+> 或L4～L6完成。
+
 > 2026-08-27 implementation evidence：r348把terminal Sandbox Job→Capability Invocation的durable convergence接入production
 > Sandbox Controller。Controller不再伪装成Executor WorkerManifest，而以独立process generation、独立bounded outcome-merge semaphore和
 > critical-control PostgreSQL pool周期扫描terminal `SandboxCapabilityExecution`，重验source Event/Job version、request digest与Invocation fence后，

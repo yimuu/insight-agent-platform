@@ -563,6 +563,14 @@ Evidence Link、双方Job终态及park/finalize幂等重放。该门禁同时修
 `maximum_bytes`预留却按实际descriptor大小结算导致的quota冲突；终态证明完整预留settle且reserved归零。该证据关闭stage/scan/wake/finalize
 与提交后owner接管L2，不扩张为真实S3、production discovery多进程协议L3、容量饱和或L4～L6证据。
 
+r360在唯一baseline的fresh PostgreSQL 16上闭合production MCP discovery进程/协议L3。独立Egress OS fixture、Artifact unary mTLS OS fixture与
+真实`platform-mcp-discovery-worker`共同运行：attempt 1在外部TLS MCP endpoint收到`initialize`但尚未响应时强制终止Egress与Worker，exact lease
+过期后重启；attempt 2重新执行`initialize`、`notifications/initialized`与`resources/list`，经Artifact RPC提交stage evidence并durable park；真实
+`ArtifactWorkerService` scan提交Verified evidence及durable wake后，同一production Worker以attempt 3 claim并完成owner finalize。终态断言固定
+discovery Invocation/Artifact/verification Job均成功、owner `attempt_no=3`，且immutable Snapshot和active Evidence Link各唯一；协议日志固定为两次
+`initialize`及其余方法各一次。fixture使用S3-shaped测试证据且scan仍在测试进程内，因此该证据不扩张为真实S3/KMS、Artifact Data Worker进程L3、
+第三方endpoint、容量饱和、production scrape或L4～L6。
+
 r288新增独立production-candidate CI workflow：所有action固定commit SHA，且必须先以40位commit SHA只读checkout GitOps environment closure；
 以两个Docker target构建exact-digest runtime与gVisor guest，生成并
 签名SPDX SBOM、BuildKit/GitHub provenance、CandidateManifest和传递闭合的release-bundle index；Candidate冻结15个ComponentRole、7个实际
