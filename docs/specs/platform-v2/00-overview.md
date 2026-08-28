@@ -664,6 +664,11 @@ WorkerManifest、唯一baseline migration、contract/config/limit/policy/qualifi
 Rust `validate-production-candidate`通过。该批实现可执行的signed candidate producer，但尚无实际外部registry/GitOps运行产物、人工审批
 或production-equivalent L4～L6运行证据，因此`signed_supply_chain`仍不得标记passed。
 
+r383把GitHub environment repository作为真实外部发布authority接入：稳定`production/closure`与资格后的`releases`分离，candidate workflow
+只允许从`main`通过repository-scoped只读deploy key读取精确commit，并在构建前验证environment对application commit、QualificationProfile、
+multi-node/runsc/admission、受保护node selector及无credential Git策略的closed绑定。该接线没有运行registry candidate、目标cluster或人工promotion，
+因此不改变L4～L6与spec00～18状态。
+
 r289最终静态复核确认subscription Context Worker与MCP Resource Host加入后，15个ComponentRole当前映射为19个隔离workload pool，
 其中9个LocalWorkerPools具备动态permit指标；早期r248～r267记录的17-pool是当时历史证据，不再代表当前拓扑。Security/Egress全局门禁同步
 纳入CR-192 `RefreshMcpResources` closed RPC，当时要求Egress只暴露13个reviewed remote-only method；后续CR-198增加仅用于discovery的

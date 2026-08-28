@@ -557,6 +557,12 @@
 > timestamp。测试报告、migration、SBOM及Candidate signature由canonical release-bundle index传递闭合并再次签名。静态供应链门禁、负向fixture、
 > Platform v1合同检查及Rust production candidate validator通过。该实现提供L6执行入口，不构成registry/GitOps/人工promotion或目标环境gate通过。
 
+> 2026-08-28 implementation evidence：r383创建private GitHub environment repository，将稳定candidate输入`production/closure`与资格后写入的
+> `releases`分离，消除`deployment_config_digest`自引用；应用仓库candidate Environment限制为`main`，跨仓库读取使用只绑定环境仓库的只读
+> deploy key而不复用个人PAT。workflow在构建前验证closed `environment.json`的exact application commit、canonical QualificationProfile digest、
+> multi-node/runsc/admission、NodeRestriction selector与无Secret/Kubeconfig策略。该批关闭GitOps输入与读取权限缺口；真实registry run、目标集群
+> L4～L6和独立人工promotion仍Pending。
+
 > 2026-08-26 implementation evidence：r289最终render复核确认CR-192后当前闭包为15-role/19-pool，Context subscription pool使动态permit
 > coverage达到9/19；此前17-pool/8-pool描述只保留为历史批次证据。Security/Egress checker补入已实现的`RefreshMcpResources`并继续exact
 > 验证当时的13个remote-only RPC。后续CR-198增加仅用于discovery的第14项，当前exact inventory以r370为准。全局

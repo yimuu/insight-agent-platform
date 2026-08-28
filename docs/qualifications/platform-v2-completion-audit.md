@@ -367,15 +367,16 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    production Prometheus scrape、alert delivery和L5 SLO/error-budget判定仍须外部环境。
 4. 全部role的render、digest image、config digest、PDB/HPA、resource、default-deny与ServiceAccount互斥已有全局checker；DB role/pool、
    mTLS与live identity enforcement仍须production-equivalent L4验证。
-5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；尚无实际registry run artifact、GitOps
-   environment repository输入及人工promotion证据。
+5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；GitHub private GitOps repository、
+   main-only candidate Environment及跨仓库只读deploy key已配置，closed `environment.json`现在绑定exact application commit与canonical
+   QualificationProfile digest并由workflow fail closed验证；尚无实际registry run artifact或人工promotion证据。
 
 ### 外部门禁
 
-2026-08-28只读复核仍返回：GitHub Environment `platform-production-candidate`不存在或当前token不可见，candidate workflow没有历史run，
-当前owner可见仓库中没有可识别的GitOps environment repository；本机Kubernetes context为单节点OrbStack，且
-`RuntimeClass/runsc`不存在。缺少exact GitOps repository/commit/path、environment read token和production-equivalent多节点runsc环境时，
-不得伪造candidate输入、以本机Docker替代L4～L6或执行clean cut。
+2026-08-28已创建private `yimuu/insight-agent-platform-environments`，生产闭包路径为
+`platform-v2/production/closure`；应用仓库的`platform-production-candidate` Environment只允许`main`，并通过只读deploy key Secret访问环境仓库。
+独立人工reviewer尚未配置，candidate workflow仍没有历史run；本机Kubernetes context为单节点OrbStack且`RuntimeClass/runsc`不存在。
+缺少production-equivalent多节点runsc环境时，不得以本机Docker替代L4～L6或执行clean cut。
 
 - production-equivalent多节点Kubernetes、独立WASI/gVisor node pool、exact runsc与支持范围内kubectl/server版本；
 - L4 RBAC/mTLS/NetworkPolicy/admission与真实协议/故障矩阵；

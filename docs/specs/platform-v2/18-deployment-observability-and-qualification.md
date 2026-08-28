@@ -736,6 +736,12 @@ application Helm/Docker closure与exact GitOps environment closure共同形成`d
 签名均进入canonical release-bundle index并再次签名。仓库门禁只证明producer结构与本地合同通过；
 registry、GitOps和目标环境验证尚未运行，故L6 gate仍为Pending。
 
+r383建立private GitHub GitOps environment authority及`production/closure`与`releases`分离布局，避免candidate输入闭包引用其自身
+`deployment_config_digest`。candidate Environment只允许`main`，跨私有仓库checkout改用environment-repository scoped只读deploy key；
+closed `environment.json`必须绑定exact application repository/commit、canonical QualificationProfile digest、multi-node/runsc/admission要求、
+受保护的WASI/gVisor/attestor selector及无credential Git策略，任一漂移在build/image publish前fail closed。该闭合提供真实GitOps输入和权限边界，
+但尚未产生registry candidate、L4～L6目标环境证据或人工promotion，故L6继续Pending。
+
 r289复核当前render closure并更正累计计数：subscription Context Worker与MCP Resource Host使15个role对应19个隔离pool，动态permit覆盖为
 9/19；r248～r267的17-pool数字保留为历史批次证据。Security/Egress deployment checker同时登记既有CR-192 `RefreshMcpResources` method，
 以当时的exact 13-method集合继续拒绝任意额外RPC；后续CR-198增加仅用于discovery的第14项，当前清单以r370为准。该批仅修复门禁/审计漂移，

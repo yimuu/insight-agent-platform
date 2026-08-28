@@ -17,8 +17,8 @@ required_workflow = (
     "actions/attest@", "gh attestation verify", "--predicate-type https://spdx.dev/Document",
     "validate-production-candidate", "candidate-manifest.json", "migration-baseline.sql",
     "qualification-tests.txt", "release-bundle-manifest.json", "cosign verify-blob",
-    "environment_repository", "environment_commit", "ENVIRONMENT_REPOSITORY_READ_TOKEN",
-    "--environment-closure", "rev-parse HEAD",
+    "environment_repository", "environment_commit", "ENVIRONMENT_REPOSITORY_READ_SSH_KEY",
+    "validate-platform-gitops-environment.py", "--environment-closure", "rev-parse HEAD",
     "actions/upload-artifact@", "environment: platform-production-candidate",
 )
 for marker in required_workflow:

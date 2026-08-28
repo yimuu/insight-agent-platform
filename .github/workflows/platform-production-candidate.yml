@@ -51,13 +51,21 @@ jobs:
         with:
           repository: ${{ inputs.environment_repository }}
           ref: ${{ inputs.environment_commit }}
-          token: ${{ secrets.ENVIRONMENT_REPOSITORY_READ_TOKEN }}
+          ssh-key: ${{ secrets.ENVIRONMENT_REPOSITORY_READ_SSH_KEY }}
           path: target/gitops-environment
           fetch-depth: 1
+          persist-credentials: false
       - name: Verify exact GitOps environment commit
         env:
           ENVIRONMENT_COMMIT: ${{ inputs.environment_commit }}
         run: test "$(git -C target/gitops-environment rev-parse HEAD)" = "$ENVIRONMENT_COMMIT"
+      - name: Validate closed production environment input
+        run: |
+          python3 scripts/validate-platform-gitops-environment.py \
+            --closure "target/gitops-environment/${{ inputs.environment_path }}" \
+            --application-repository "$GITHUB_REPOSITORY" \
+            --application-commit "$GITHUB_SHA" \
+            --qualification-profile contracts/platform-v1/qualification/production-release-profile.json
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
