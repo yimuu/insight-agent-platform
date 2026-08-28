@@ -1473,25 +1473,36 @@ async fn sqlite_worker_heartbeat_retry_timeout_and_zombie_fences_use_frozen_poli
         put_delay: std::time::Duration::from_secs(2),
         put_calls: materialization_puts.clone(),
     };
-    assert!(matches!(
+    // Keep the lease comfortably wider than the frozen 1.1-second operation
+    // deadline. The test proves that the operation deadline wins while an
+    // artifact write is in flight; it must not accidentally turn into a
+    // lease-loss test when a shared CI runner is descheduled for a few
+    // seconds.
+    let materialization_claim_seconds = 15;
+    let materialization_outcome =
         insight_agent_platform::engine::repository::consume_scheduler_task_once_with_artifact_store(
             &repository,
             &registry,
             &FrozenSchedulerWorkerFailurePolicy,
             "worker-materialization-timeout",
-            3,
+            materialization_claim_seconds,
             1,
             tokio_util::sync::CancellationToken::new(),
             &materialization_store,
             &NoSchedulerCrash,
         )
         .await
-        .unwrap(),
-        SchedulerWorkerPumpOutcome::Committed {
-            acknowledged: false,
-            ..
-        }
-    ));
+        .unwrap();
+    assert!(
+        matches!(
+            materialization_outcome,
+            SchedulerWorkerPumpOutcome::Committed {
+                acknowledged: false,
+                ..
+            }
+        ),
+        "unexpected materialization-timeout outcome: {materialization_outcome:?}"
+    );
     assert_eq!(
         materialization_puts.load(std::sync::atomic::Ordering::SeqCst),
         1
@@ -1531,7 +1542,7 @@ async fn sqlite_worker_heartbeat_retry_timeout_and_zombie_fences_use_frozen_poli
             &registry,
             &FrozenSchedulerWorkerFailurePolicy,
             "worker-materialization-timeout-recovery",
-            3,
+            materialization_claim_seconds,
             1,
             tokio_util::sync::CancellationToken::new(),
             &NoSchedulerCrash,
