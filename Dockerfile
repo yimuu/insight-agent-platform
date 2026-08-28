@@ -1,12 +1,53 @@
-FROM rust:1.94-bullseye@sha256:f4f82b80e5f2945fed4ba17af177c6d6be85d98cde38ff318fc7666ce4505617 AS builder
+FROM rust:1.94-bullseye@sha256:f4f82b80e5f2945fed4ba17af177c6d6be85d98cde38ff318fc7666ce4505617 AS chef
+RUN cargo install --locked --version 0.1.78 cargo-chef
 WORKDIR /workspace
 
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY src ./src
 COPY catalog ./catalog
 COPY contracts ./contracts
 COPY proto ./proto
+COPY database ./database
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /workspace/recipe.json recipe.json
+# RPC build scripts consume checked-in protobuf sources while Cargo Chef compiles the stable
+# dependency skeleton. This layer remains reusable when ordinary Rust source files change.
+COPY proto ./proto
+RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
+    --bin insight-agent-platform \
+    --bin platform-callback-api \
+    --bin platform-gateway \
+    --bin platform-model-worker \
+    --bin platform-context-worker \
+    --bin platform-remote-context-worker \
+    --bin platform-subscription-context-worker \
+    --bin platform-orchestration-worker \
+    --bin platform-capability-native-worker \
+    --bin platform-capability-remote-worker \
+    --bin platform-mcp-cleanup-worker \
+    --bin platform-mcp-host \
+    --bin platform-mcp-resource-host \
+    --bin platform-mcp-discovery-worker \
+    --bin platform-mcp-subscription-worker \
+    --bin platform-artifact-data-worker \
+    --bin platform-artifact-gateway \
+    --bin platform-artifact-maintenance \
+    --bin platform-egress-broker \
+    --bin platform-security-authority \
+    --bin platform-sandbox-controller \
+    --bin platform-sandbox-attestor \
+    --bin platform-sandbox-executor \
+    --bin platform-sandbox-guest
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY src ./src
+COPY catalog ./catalog
+COPY contracts ./contracts
 COPY database ./database
 
 RUN cargo build --locked --release --workspace \

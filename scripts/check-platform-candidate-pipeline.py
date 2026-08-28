@@ -74,8 +74,15 @@ if dockerfile.count("cargo build --locked --release") != 1:
     failures.append("Dockerfile must compile the production closure in one Cargo invocation")
 if "cargo build --locked --release --workspace" not in dockerfile:
     failures.append("Dockerfile production build must select binaries across the workspace")
+for build_cache_marker in (
+    "cargo install --locked --version 0.1.78 cargo-chef",
+    "cargo chef prepare --recipe-path recipe.json",
+    "cargo chef cook --locked --release --workspace --recipe-path recipe.json",
+):
+    if build_cache_marker not in dockerfile:
+        failures.append(f"Dockerfile production build misses dependency cache stage {build_cache_marker}")
 for binary in production_bins:
-    if f"--bin {binary}" not in dockerfile:
+    if dockerfile.count(f"--bin {binary}") != 2:
         failures.append(f"Dockerfile production build misses binary {binary}")
 for runtime_package in ("python3=3.9.2-3", "nodejs=12.22.12~dfsg-1~deb11u8"):
     if runtime_package not in dockerfile:
