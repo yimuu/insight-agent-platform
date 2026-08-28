@@ -153,6 +153,7 @@ jobs:
           push-to-registry: true
       - name: Verify signed GitHub attestations resolve to exact subjects
         env:
+          GH_TOKEN: ${{ github.token }}
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
           SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
         run: |
