@@ -87,6 +87,8 @@ jobs:
           tags: ${{ env.RUNTIME_IMAGE }}:candidate-${{ github.sha }}
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=platform-production-candidate
+          cache-to: type=gha,mode=max,scope=platform-production-candidate
       - name: Build sandbox guest image with registry provenance and SBOM
         id: sandbox_guest
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -97,22 +99,32 @@ jobs:
           tags: ${{ env.SANDBOX_GUEST_IMAGE }}:candidate-${{ github.sha }}
           provenance: mode=max
           sbom: true
-      - name: Sign and verify exact image subjects
+          cache-from: type=gha,scope=platform-production-candidate
+      - name: Sign exact image subjects
+        timeout-minutes: 10
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
           SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
         run: |
           cosign sign --yes "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
           cosign sign --yes "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+      - name: Verify exact image signatures
+        timeout-minutes: 10
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+        run: |
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
+      - name: Generate exact SPDX SBOM files
+        timeout-minutes: 20
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+        run: |
           mkdir -p target/platform-supply-chain
           syft "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" -o spdx-json=target/platform-supply-chain/runtime.spdx.json
           syft "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" -o spdx-json=target/platform-supply-chain/sandbox-guest.spdx.json
-          cosign attest --yes --type spdxjson --predicate target/platform-supply-chain/runtime.spdx.json "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
-          cosign attest --yes --type spdxjson --predicate target/platform-supply-chain/sandbox-guest.spdx.json "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
-          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
-          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
-          cosign verify-attestation --type spdxjson --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
-          cosign verify-attestation --type spdxjson --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}"
       - name: Sign GitHub build provenance for runtime image
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:

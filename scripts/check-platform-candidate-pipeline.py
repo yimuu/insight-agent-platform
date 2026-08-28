@@ -14,7 +14,9 @@ failures = []
 required_workflow = (
     "id-token: write", "packages: write", "provenance: mode=max", "sbom: true",
     "docker/build-push-action@", "sigstore/cosign-installer@", "cosign sign --yes",
-    "cosign attest --yes", "cosign verify", "cosign verify-attestation", "cosign sign-blob",
+    "cosign verify", "cosign sign-blob", "cache-from: type=gha",
+    "cache-to: type=gha,mode=max", "Sign exact image subjects",
+    "Verify exact image signatures", "Generate exact SPDX SBOM files",
     "actions/attest@", "gh attestation verify", "--predicate-type https://spdx.dev/Document",
     "validate-production-candidate", "candidate-manifest.json", "migration-baseline.sql",
     "qualification-tests.txt", "release-bundle-manifest.json", "cosign verify-blob",
@@ -29,6 +31,15 @@ for marker in required_workflow:
 for forbidden in ("docker build ", ":latest", "kubectl apply", "helm upgrade", "git push"):
     if forbidden in workflow:
         failures.append(f"candidate workflow contains forbidden release mutation {forbidden!r}")
+
+for redundant in ("cosign attest --yes", "cosign verify-attestation"):
+    if redundant in workflow:
+        failures.append(f"candidate workflow duplicates GitHub SBOM attestation with {redundant!r}")
+
+if workflow.count("cache-from: type=gha,scope=platform-production-candidate") < 2:
+    failures.append("both candidate image builds must restore the shared BuildKit cache")
+if workflow.count("cache-to: type=gha,mode=max,scope=platform-production-candidate") != 1:
+    failures.append("the expensive runtime build must export the shared BuildKit cache exactly once")
 
 for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE):
     revision = action.rsplit("@", 1)[-1]
