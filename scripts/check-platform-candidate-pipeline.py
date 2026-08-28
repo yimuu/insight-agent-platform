@@ -66,6 +66,9 @@ if "cargo build --locked --release --workspace" not in dockerfile:
 for binary in production_bins:
     if f"--bin {binary}" not in dockerfile:
         failures.append(f"Dockerfile production build misses binary {binary}")
+for runtime_package in ("python3=3.9.2-3", "nodejs=12.22.12~dfsg-1~deb11u8"):
+    if runtime_package not in dockerfile:
+        failures.append(f"Dockerfile sandbox guest misses frozen runtime package {runtime_package}")
 
 if failures:
     raise SystemExit("\n".join(failures))

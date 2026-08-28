@@ -90,7 +90,7 @@ FROM runtime-base AS sandbox-guest
 
 USER root
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends python3=3.9.2-3 nodejs=12.22.12~dfsg-1~deb11u4 \
+    && apt-get install --yes --no-install-recommends python3=3.9.2-3 nodejs=12.22.12~dfsg-1~deb11u8 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/target/release/platform-sandbox-guest /usr/local/bin/platform-sandbox-guest
 RUN mkdir -p /scratch \
