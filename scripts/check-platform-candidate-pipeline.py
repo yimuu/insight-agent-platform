@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 workflow = (ROOT / ".github/workflows/platform-production-candidate.yml").read_text()
 generator = (ROOT / "scripts/build-platform-production-candidate.py").read_text()
+dockerfile = (ROOT / "Dockerfile").read_text()
 failures = []
 
 required_workflow = (
@@ -45,6 +46,26 @@ for role in (
 
 if workflow.count("cosign sign-blob") < 2:
     failures.append("candidate workflow must independently sign the CandidateManifest and release bundle index")
+
+production_bins = (
+    "insight-agent-platform", "platform-callback-api", "platform-gateway",
+    "platform-model-worker", "platform-context-worker", "platform-remote-context-worker",
+    "platform-subscription-context-worker", "platform-orchestration-worker",
+    "platform-capability-native-worker", "platform-capability-remote-worker",
+    "platform-mcp-cleanup-worker", "platform-mcp-host", "platform-mcp-resource-host",
+    "platform-mcp-discovery-worker", "platform-mcp-subscription-worker",
+    "platform-artifact-data-worker", "platform-artifact-gateway",
+    "platform-artifact-maintenance", "platform-egress-broker",
+    "platform-security-authority", "platform-sandbox-controller",
+    "platform-sandbox-attestor", "platform-sandbox-executor", "platform-sandbox-guest",
+)
+if dockerfile.count("cargo build --locked --release") != 1:
+    failures.append("Dockerfile must compile the production closure in one Cargo invocation")
+if "cargo build --locked --release --workspace" not in dockerfile:
+    failures.append("Dockerfile production build must select binaries across the workspace")
+for binary in production_bins:
+    if f"--bin {binary}" not in dockerfile:
+        failures.append(f"Dockerfile production build misses binary {binary}")
 
 if failures:
     raise SystemExit("\n".join(failures))

@@ -9,30 +9,31 @@ COPY contracts ./contracts
 COPY proto ./proto
 COPY database ./database
 
-RUN cargo build --locked --release --bin insight-agent-platform \
-    && cargo build --locked --release -p insight-platform-callback-api --bin platform-callback-api \
-    && cargo build --locked --release -p insight-platform-gateway --bin platform-gateway \
-    && cargo build --locked --release -p insight-platform-model-worker --bin platform-model-worker \
-    && cargo build --locked --release -p insight-platform-context-worker --bin platform-context-worker \
-    && cargo build --locked --release -p insight-platform-context-worker --bin platform-remote-context-worker \
-    && cargo build --locked --release -p insight-platform-context-worker --bin platform-subscription-context-worker \
-    && cargo build --locked --release -p insight-platform-orchestration-worker --bin platform-orchestration-worker \
-    && cargo build --locked --release -p insight-platform-capability-worker --bin platform-capability-native-worker \
-    && cargo build --locked --release -p insight-platform-capability-worker --bin platform-capability-remote-worker \
-    && cargo build --locked --release -p insight-platform-mcp-cleanup-worker --bin platform-mcp-cleanup-worker \
-    && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-host \
-    && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-resource-host \
-    && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-discovery-worker \
-    && cargo build --locked --release -p insight-platform-mcp-service --bin platform-mcp-subscription-worker \
-    && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-data-worker \
-    && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-gateway \
-    && cargo build --locked --release -p insight-platform-artifact-service --bin platform-artifact-maintenance \
-    && cargo build --locked --release -p insight-platform-egress-broker --bin platform-egress-broker \
-    && cargo build --locked --release -p insight-platform-security-authority --bin platform-security-authority \
-    && cargo build --locked --release -p insight-platform-sandbox-controller --bin platform-sandbox-controller \
-    && cargo build --locked --release -p insight-platform-sandbox-attestor --bin platform-sandbox-attestor \
-    && cargo build --locked --release -p insight-platform-sandbox-executor --bin platform-sandbox-executor \
-    && cargo build --locked --release -p insight-platform-sandbox-guest --bin platform-sandbox-guest
+RUN cargo build --locked --release --workspace \
+    --bin insight-agent-platform \
+    --bin platform-callback-api \
+    --bin platform-gateway \
+    --bin platform-model-worker \
+    --bin platform-context-worker \
+    --bin platform-remote-context-worker \
+    --bin platform-subscription-context-worker \
+    --bin platform-orchestration-worker \
+    --bin platform-capability-native-worker \
+    --bin platform-capability-remote-worker \
+    --bin platform-mcp-cleanup-worker \
+    --bin platform-mcp-host \
+    --bin platform-mcp-resource-host \
+    --bin platform-mcp-discovery-worker \
+    --bin platform-mcp-subscription-worker \
+    --bin platform-artifact-data-worker \
+    --bin platform-artifact-gateway \
+    --bin platform-artifact-maintenance \
+    --bin platform-egress-broker \
+    --bin platform-security-authority \
+    --bin platform-sandbox-controller \
+    --bin platform-sandbox-attestor \
+    --bin platform-sandbox-executor \
+    --bin platform-sandbox-guest
 
 FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
