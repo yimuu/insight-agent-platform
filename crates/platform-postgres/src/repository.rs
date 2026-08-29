@@ -743,7 +743,20 @@ impl PgRepository {
         .fetch_one(&mut *transaction)
         .await?;
         if state_count != 0 {
-            return Err(RepositoryError::Conflict("development bootstrap"));
+            verify_development_profile_replay(
+                &mut transaction,
+                &command,
+                &installation_payload,
+                &installation_event,
+                &tenant_config,
+                &developer_payload,
+                &registry_validator_payload,
+                &tenant_bindings,
+                artifact_authority.as_ref(),
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(BootstrapOutcome::Replayed);
         }
         sqlx::query(
             r#"
@@ -3622,6 +3635,388 @@ impl PgRepository {
             recovery_shard_limit: self.recovery_shard_limit,
         })
     }
+}
+
+/// Replays the development bootstrap only when every immutable/configuration root still matches
+/// the exact closed input. Runtime-created rows and mutable quota usage are deliberately ignored;
+/// they are ordinary authority state and must survive a local process restart.
+async fn verify_development_profile_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &BootstrapDevelopmentProfile,
+    installation_payload: &TypedPayload,
+    installation_event: &TypedPayload,
+    tenant_config: &TypedPayload,
+    developer_payload: &TypedPayload,
+    registry_validator_payload: &TypedPayload,
+    tenant_bindings: &[TypedPayload],
+    artifact_authority: Option<&DevelopmentArtifactAuthorityMaterial>,
+) -> Result<(), RepositoryError> {
+    for (principal, payload) in [(&command.installation, installation_payload)] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.principals
+                WHERE principal_id = $1 AND state = 'active'
+                  AND authentication_authority_digest = $2 AND subject_digest = $3
+                  AND payload_schema_version = $4 AND payload_digest = $5
+            )
+            "#,
+        )
+        .bind(principal.principal_id.to_string())
+        .bind(principal.authentication_authority_digest.to_string())
+        .bind(principal.subject_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap installation principal",
+            ));
+        }
+    }
+    for (principal, payload) in [
+        (&command.developer, developer_payload),
+        (&command.registry_validator, registry_validator_payload),
+    ] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.principals
+                WHERE principal_id = $1 AND state = 'active'
+                  AND authentication_authority_digest = $2 AND subject_digest = $3
+                  AND payload_schema_version = $4 AND payload_digest = $5
+            )
+            "#,
+        )
+        .bind(principal.principal_id.to_string())
+        .bind(principal.authentication_authority_digest.to_string())
+        .bind(principal.subject_digest.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap tenant principal",
+            ));
+        }
+    }
+
+    let event_id = format!(
+        "evt_{}",
+        command.installation.request_id.uuid().hyphenated()
+    );
+    let exact_event: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.events
+            WHERE tenant_id IS NULL AND event_id = $1 AND aggregate_kind = 'principal'
+              AND aggregate_id = $2 AND aggregate_version = 1
+              AND event_type = 'installation.bootstrap' AND visibility = 'internal'
+              AND payload_schema_version = $3 AND payload_digest = $4
+        )
+        "#,
+    )
+    .bind(event_id)
+    .bind(command.installation.principal_id.to_string())
+    .bind(installation_event.schema_version)
+    .bind(&installation_event.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exact_event {
+        return Err(RepositoryError::Conflict("development bootstrap event"));
+    }
+
+    let exact_tenant: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.tenants
+            WHERE tenant_id = $1 AND state = $2 AND config_schema_version = $3
+              AND config_digest = $4
+        )
+        "#,
+    )
+    .bind(&command.tenant.tenant_id)
+    .bind(&command.tenant.state)
+    .bind(tenant_config.schema_version)
+    .bind(&tenant_config.digest)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exact_tenant || tenant_bindings.len() != command.tenant_principal_bindings.len() {
+        return Err(RepositoryError::Conflict("development bootstrap tenant"));
+    }
+
+    for (binding, payload) in command
+        .tenant_principal_bindings
+        .iter()
+        .zip(tenant_bindings.iter())
+    {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.tenant_principals
+                WHERE tenant_id = $1 AND principal_id = $2 AND principal_kind = $3
+                  AND state = 'active' AND permissions_schema_version = $4
+                  AND permissions_digest = $5
+            )
+            "#,
+        )
+        .bind(binding.tenant_id.to_string())
+        .bind(binding.principal_id.to_string())
+        .bind(binding.principal_kind.as_str())
+        .bind(payload.schema_version)
+        .bind(&payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap tenant binding",
+            ));
+        }
+    }
+
+    let (Some(seed), Some(material)) = (&command.artifact_authority, artifact_authority) else {
+        return if command.artifact_authority.is_none() && artifact_authority.is_none() {
+            Ok(())
+        } else {
+            Err(RepositoryError::Conflict(
+                "development bootstrap artifact configuration",
+            ))
+        };
+    };
+    for (resource_id, deployment_id, payload) in [
+        (
+            &seed.retention_policy_id,
+            &seed.retention_policy_deployment_id,
+            &material.retention_resource,
+        ),
+        (
+            &seed.artifact_io_policy_id,
+            &seed.artifact_io_policy_deployment_id,
+            &material.artifact_io_resource,
+        ),
+        (
+            &seed.scheduling_policy_id,
+            &seed.scheduling_policy_deployment_id,
+            &material.scheduling_resource,
+        ),
+    ] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.resources
+                WHERE tenant_id = $1 AND resource_id = $2 AND resource_kind = 'policy'
+                  AND lifecycle_state = 'active' AND gate_state = 'enabled'
+                  AND active_version_id IS NULL AND active_deployment_id = $3
+                  AND payload_schema_version = $4 AND payload_digest = $5
+            )
+            "#,
+        )
+        .bind(&command.tenant.tenant_id)
+        .bind(resource_id.to_string())
+        .bind(deployment_id.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap artifact policy resource",
+            ));
+        }
+    }
+    for (resource_id, revision_id, payload) in [
+        (
+            &seed.retention_policy_id,
+            &seed.retention_policy_revision_id,
+            &material.retention_version,
+        ),
+        (
+            &seed.artifact_io_policy_id,
+            &seed.artifact_io_policy_revision_id,
+            &material.artifact_io_version,
+        ),
+        (
+            &seed.scheduling_policy_id,
+            &seed.scheduling_policy_revision_id,
+            &material.scheduling_version,
+        ),
+    ] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.resource_versions
+                WHERE tenant_id = $1 AND resource_version_id = $2 AND resource_id = $3
+                  AND resource_version_kind = 'policy_revision' AND revision_no = 1
+                  AND content_digest = $4 AND artifact_id = $5
+                  AND payload_schema_version = $6 AND payload_digest = $4
+            )
+            "#,
+        )
+        .bind(&command.tenant.tenant_id)
+        .bind(revision_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(&payload.digest)
+        .bind(seed.authoring_artifact_id.to_string())
+        .bind(payload.schema_version)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap artifact policy version",
+            ));
+        }
+    }
+    for (resource_id, revision_id, deployment_id, payload) in [
+        (
+            &seed.retention_policy_id,
+            &seed.retention_policy_revision_id,
+            &seed.retention_policy_deployment_id,
+            &material.retention_deployment,
+        ),
+        (
+            &seed.artifact_io_policy_id,
+            &seed.artifact_io_policy_revision_id,
+            &seed.artifact_io_policy_deployment_id,
+            &material.artifact_io_deployment,
+        ),
+        (
+            &seed.scheduling_policy_id,
+            &seed.scheduling_policy_revision_id,
+            &seed.scheduling_policy_deployment_id,
+            &material.scheduling_deployment,
+        ),
+    ] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.deployments
+                WHERE tenant_id = $1 AND deployment_id = $2 AND resource_id = $3
+                  AND resource_version_id = $4 AND environment = 'local'
+                  AND bindings_digest = $5 AND payload_schema_version = $6
+            )
+            "#,
+        )
+        .bind(&command.tenant.tenant_id)
+        .bind(deployment_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(revision_id.to_string())
+        .bind(&payload.digest)
+        .bind(payload.schema_version)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap artifact policy deployment",
+            ));
+        }
+    }
+
+    let exact_blob: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.artifact_blobs
+            WHERE tenant_id = $1 AND blob_id = $2 AND backend = 'builtin'
+              AND storage_binding_digest = $3 AND security_domain_digest = $4
+              AND object_generation = 'builtin-v1' AND key_id = 'builtin-development'
+              AND encryption_domain_id = $5 AND content_digest = $6
+              AND size_bytes = $7 AND object_reference_ciphertext = $8
+              AND state = 'verified' AND verified_at IS NOT NULL
+        )
+        "#,
+    )
+    .bind(&command.tenant.tenant_id)
+    .bind(seed.authoring_blob_id.to_string())
+    .bind(
+        seed.artifact_io_policy
+            .write_storage_binding_digest
+            .to_string(),
+    )
+    .bind(material.security_domain_digest.to_string())
+    .bind(seed.artifact_io_policy.encryption_domain_id.to_string())
+    .bind(material.authoring_content_digest.to_string())
+    .bind(material.authoring_size_bytes)
+    .bind(
+        canonical_json(&serde_json::json!({
+            "kind": "builtin-development-authority",
+            "tenant_id": command.tenant.tenant_id,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+    )
+    .fetch_one(&mut **transaction)
+    .await?;
+    let exact_artifact: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.artifacts
+            WHERE tenant_id = $1 AND artifact_id = $2 AND blob_id = $3
+              AND purpose = 'authoring_document' AND classification = 'internal'
+              AND expected_size_bytes = $4 AND expected_digest = $5
+              AND declared_media_type = 'application/json'
+              AND verified_media_type = 'application/json' AND state = 'ready'
+              AND metadata_schema_version = $6 AND metadata_digest = $7
+              AND retention_policy_revision_id = $8 AND created_by = $9
+        )
+        "#,
+    )
+    .bind(&command.tenant.tenant_id)
+    .bind(seed.authoring_artifact_id.to_string())
+    .bind(seed.authoring_blob_id.to_string())
+    .bind(material.authoring_size_bytes)
+    .bind(material.authoring_content_digest.to_string())
+    .bind(material.authoring_metadata.schema_version)
+    .bind(&material.authoring_metadata.digest)
+    .bind(seed.retention_policy_revision_id.to_string())
+    .bind(command.developer.principal_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !exact_blob || !exact_artifact {
+        return Err(RepositoryError::Conflict(
+            "development bootstrap builtin artifact",
+        ));
+    }
+    for (quota_id, work_class, metric, limit) in [
+        (
+            &seed.staging_quota_account_id,
+            "artifact",
+            "artifact.staging_bytes",
+            seed.staging_quota_bytes,
+        ),
+        (
+            &seed.orchestration_quota_account_id,
+            "orchestration",
+            "concurrent_jobs",
+            seed.orchestration_concurrent_jobs,
+        ),
+    ] {
+        let exact: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM insight_platform.quota_accounts
+                WHERE tenant_id = $1 AND quota_account_id = $2
+                  AND scope_kind = 'tenant' AND scope_id = $1
+                  AND work_class = $3 AND metric = $4 AND limit_value = $5
+                  AND payload_schema_version = $6 AND payload_digest = $7
+            )
+            "#,
+        )
+        .bind(&command.tenant.tenant_id)
+        .bind(quota_id.to_string())
+        .bind(work_class)
+        .bind(metric)
+        .bind(limit)
+        .bind(material.quota_payload.schema_version)
+        .bind(&material.quota_payload.digest)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exact {
+            return Err(RepositoryError::Conflict(
+                "development bootstrap quota root",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub struct PgRegistryTransaction {

@@ -408,14 +408,13 @@ async fn run() -> Result<(), ProcessError> {
         })
         .await
         .map_err(ProcessError::Repository)?;
-    if outcome != BootstrapOutcome::Created {
-        return Err(ProcessError::Repository(
-            insight_platform_postgres::repository::RepositoryError::Conflict(
-                "development bootstrap already completed",
-            ),
-        ));
-    }
-    println!("development tenant and developer principal created");
+    println!(
+        "development tenant and developer principal {}",
+        match outcome {
+            BootstrapOutcome::Created => "created",
+            BootstrapOutcome::Replayed => "verified",
+        }
+    );
     Ok(())
 }
 

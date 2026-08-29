@@ -693,7 +693,7 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(queued["state"], "queued");
 
-    let _replacement = restart_orchestration_worker(insight, project);
+    let replacement = restart_orchestration_worker(insight, project);
     let watched = run_json_lines(
         insight,
         &[
@@ -930,4 +930,69 @@ fn public_cli_deterministic_first_run() {
         json!({"kind": "inline", "value": {"message": "after task"}})
     );
     assert_eq!(human_task_result["schema_digest"], schema_digest);
+
+    // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business
+    // state is neither treated as a bootstrap conflict nor used as a reason to skip verification.
+    let build_state_path = project.join(".insight/runtime/build.json");
+    let profile_state_path = project.join(".insight/runtime/profile.json");
+    let build_state_before = fs::read(&build_state_path).expect("build state is readable");
+    let profile_state_before = fs::read(&profile_state_path).expect("profile state is readable");
+    let build_state_modified_before = fs::metadata(&build_state_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("build state modification time is readable");
+    drop(replacement);
+    let stopped = Command::new(insight)
+        .args(["stop", "--path", project.to_str().unwrap()])
+        .output()
+        .expect("insight stop starts");
+    assert!(
+        stopped.status.success(),
+        "insight stop failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stopped.stdout),
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let restarted = Command::new(insight)
+        .args([
+            "dev",
+            "--profile",
+            "base",
+            "--path",
+            project.to_str().unwrap(),
+        ])
+        .output()
+        .expect("insight dev restart starts");
+    assert!(
+        restarted.status.success(),
+        "insight dev restart failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&restarted.stdout),
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert_eq!(
+        fs::read(&build_state_path).expect("restarted build state is readable"),
+        build_state_before,
+        "unchanged source must preserve the exact build cache state"
+    );
+    assert_eq!(
+        fs::metadata(&build_state_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("restarted build state modification time is readable"),
+        build_state_modified_before,
+        "unchanged source must not invoke the release build path"
+    );
+    assert_eq!(
+        fs::read(&profile_state_path).expect("restarted profile state is readable"),
+        profile_state_before,
+        "role restart must not rotate ports, authority IDs, TLS or cursor material"
+    );
+    let persisted = run_json(
+        insight,
+        &[
+            "run",
+            "get",
+            human_task_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(persisted["state"], "succeeded");
 }

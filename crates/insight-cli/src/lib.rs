@@ -1081,6 +1081,9 @@ pub struct LocalProfileState {
 struct RuntimeProfileState {
     schema_version: u32,
     kind: String,
+    /// Provenance of the source tree that first generated this immutable local profile closure.
+    /// Build reuse is tracked separately; ordinary source edits must not rotate authority IDs,
+    /// ports, TLS material, cursor keys, or policy bindings.
     #[serde(default)]
     source_fingerprint: String,
     kms_key_arn: String,
@@ -2153,15 +2156,10 @@ fn run_development_profile(
     let fingerprint = workspace_fingerprint(&workspace)?;
     compose_up(&workspace, &compose_project)?;
     let profile_state = match read_runtime_profile_state(&runtime)? {
-        Some(state) if state.source_fingerprint == fingerprint => state,
-        existing => {
-            if existing.is_some() {
-                reset_runtime_generated_configuration(&runtime)?;
-            }
-            let kms_key_arn = existing.map_or_else(
-                || initialize_localstack_artifact_dependency(&workspace, &compose_project),
-                |state| Ok(state.kms_key_arn),
-            )?;
+        Some(state) => state,
+        None => {
+            let kms_key_arn =
+                initialize_localstack_artifact_dependency(&workspace, &compose_project)?;
             let ports = RuntimePortBindings::allocate()?;
             prepare_runtime_profile_with_ports(&root, &kms_key_arn, &fingerprint, &ports)?;
             read_runtime_profile_state(&runtime)?.ok_or_else(|| {
@@ -2171,30 +2169,17 @@ fn run_development_profile(
             })?
         }
     };
-    let profile_state = match ensure_localstack_artifact_dependency(
+    ensure_localstack_artifact_dependency(
         &workspace,
         &compose_project,
         &profile_state.kms_key_arn,
-    ) {
-        Ok(()) => profile_state,
-        Err(_) => {
-            // LocalStack may have been deliberately reset while its compose volume was removed.
-            // The KMS ARN is part of every digest-bound Artifact configuration, so recreate the
-            // local-only dependency and its closed configs together rather than accepting stale
-            // bindings or patching individual files.
-            reset_runtime_generated_configuration(&runtime)?;
-            let kms_key_arn =
-                initialize_localstack_artifact_dependency(&workspace, &compose_project)?;
-            let ports = RuntimePortBindings::allocate()?;
-            prepare_runtime_profile_with_ports(&root, &kms_key_arn, &fingerprint, &ports)?;
-            read_runtime_profile_state(&runtime)?.ok_or_else(|| {
-                CliError::RuntimeState(
-                    "runtime profile was not persisted after rebuilding local S3/KMS state"
-                        .to_owned(),
-                )
-            })?
-        }
-    };
+    )
+    .map_err(|_| {
+        CliError::RuntimeUnavailable(
+            "the exact local S3/KMS dependency is unavailable; this LocalStack Community profile cannot recover Artifact authority after its dependency container is recreated, so restore the original container or initialize a fresh local project"
+                .to_owned(),
+        )
+    })?;
     ensure_runtime_binaries(&workspace, &runtime, &fingerprint)?;
     provision_and_bootstrap_authority(&workspace, &runtime, &project.identity, &profile_state)?;
     let processes = start_base_processes(&workspace, &runtime, &profile_state)?;
@@ -2261,7 +2246,7 @@ fn runtime_logs(root: &Path, role: Option<&str>) -> Result<String, CliError> {
 }
 
 fn stop_development_profile(workspace: &Path, root: &Path) -> Result<String, CliError> {
-    let workspace = workspace_root(workspace)?;
+    workspace_root(workspace)?;
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
         source,
@@ -2285,11 +2270,10 @@ fn stop_development_profile(workspace: &Path, root: &Path) -> Result<String, Cli
             stop_process(process.pid)?;
         }
     }
-    compose_down(&workspace, &state.compose_project)?;
     state.processes.clear();
     write_runtime_json_replace(&runtime.join(RUNTIME_PROCESS_STATE_FILE), &state)?;
     Ok(
-        "stopped local Platform base profile; PostgreSQL and LocalStack volumes are preserved\n"
+        "stopped local Platform roles; PostgreSQL, NATS and LocalStack dependencies remain ready for durable restart\n"
             .to_owned(),
     )
 }
@@ -2326,12 +2310,6 @@ fn compose_up(workspace: &Path, project: &str) -> Result<(), CliError> {
         "start local PostgreSQL, NATS and S3/KMS dependencies",
     )?;
     wait_for_localstack(workspace, project)
-}
-
-fn compose_down(workspace: &Path, project: &str) -> Result<(), CliError> {
-    let mut command = compose_command(workspace, project);
-    command.args(["down"]);
-    run_external(command, "stop local dependency containers").map(|_| ())
 }
 
 fn compose_command(workspace: &Path, project: &str) -> ProcessCommand {
@@ -2582,46 +2560,44 @@ fn provision_and_bootstrap_authority(
             .env("PLATFORM_DATABASE_URL", database_url)
             .arg("provision");
         run_external(provision, "provision the fresh local PostgreSQL authority")?;
-        let bootstrap = binaries.get("platform-dev-bootstrap").ok_or_else(|| {
-            CliError::RuntimeState("development bootstrap binary path is unavailable".to_owned())
-        })?;
-        let config_path = runtime
-            .parent()
-            .ok_or_else(|| {
-                CliError::RuntimeState("local runtime path has no state parent".to_owned())
-            })?
-            .join(IDENTITY_DIRECTORY)
-            .join(IDENTITY_BOOTSTRAP_CONFIG_FILE);
-        let mut command = ProcessCommand::new(bootstrap);
-        command
-            .env("PLATFORM_DATABASE_URL", database_url)
-            .env("PLATFORM_DEV_BOOTSTRAP_CONFIG", config_path)
-            .env(
-                "PLATFORM_DEV_BOOTSTRAP_CONFIG_DIGEST",
-                &identity.bootstrap_config_digest,
-            )
-            .env(
-                "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG",
-                runtime
-                    .join(RUNTIME_CONFIGURATION_DIRECTORY)
-                    .join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE),
-            )
-            .env(
-                "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG_DIGEST",
-                profile
-                    .config_digests
-                    .get("artifact-bootstrap")
-                    .ok_or_else(|| {
-                        CliError::RuntimeState(
-                            "Artifact bootstrap config digest is unavailable".to_owned(),
-                        )
-                    })?,
-            );
-        run_external(
-            command,
-            "bootstrap the local tenant and developer principal",
-        )?;
     }
+    let bootstrap = binaries.get("platform-dev-bootstrap").ok_or_else(|| {
+        CliError::RuntimeState("development bootstrap binary path is unavailable".to_owned())
+    })?;
+    let config_path = runtime
+        .parent()
+        .ok_or_else(|| CliError::RuntimeState("local runtime path has no state parent".to_owned()))?
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_BOOTSTRAP_CONFIG_FILE);
+    let mut command = ProcessCommand::new(bootstrap);
+    command
+        .env("PLATFORM_DATABASE_URL", database_url)
+        .env("PLATFORM_DEV_BOOTSTRAP_CONFIG", config_path)
+        .env(
+            "PLATFORM_DEV_BOOTSTRAP_CONFIG_DIGEST",
+            &identity.bootstrap_config_digest,
+        )
+        .env(
+            "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG",
+            runtime
+                .join(RUNTIME_CONFIGURATION_DIRECTORY)
+                .join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE),
+        )
+        .env(
+            "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG_DIGEST",
+            profile
+                .config_digests
+                .get("artifact-bootstrap")
+                .ok_or_else(|| {
+                    CliError::RuntimeState(
+                        "Artifact bootstrap config digest is unavailable".to_owned(),
+                    )
+                })?,
+        );
+    run_external(
+        command,
+        "ensure the exact local tenant and developer authority roots",
+    )?;
     Ok(())
 }
 
@@ -3117,30 +3093,6 @@ fn run_external(mut command: ProcessCommand, purpose: &str) -> Result<String, Cl
 
 fn read_runtime_profile_state(runtime: &Path) -> Result<Option<RuntimeProfileState>, CliError> {
     read_runtime_json(&runtime.join(RUNTIME_PROFILE_STATE_FILE))
-}
-
-fn reset_runtime_generated_configuration(runtime: &Path) -> Result<(), CliError> {
-    let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
-    if configuration.exists() {
-        fs::remove_dir_all(&configuration).map_err(|source| CliError::InitializeProject {
-            path: configuration.display().to_string(),
-            source,
-        })?;
-    }
-    for name in [RUNTIME_PROFILE_STATE_FILE, RUNTIME_CURSOR_KEY_FILE] {
-        let path = runtime.join(name);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(CliError::InitializeProject {
-                    path: path.display().to_string(),
-                    source,
-                })
-            }
-        }
-    }
-    Ok(())
 }
 
 fn read_runtime_process_state(runtime: &Path) -> Result<Option<RuntimeProcessState>, CliError> {

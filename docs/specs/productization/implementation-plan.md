@@ -66,14 +66,19 @@ M0 的已审查输入保存在：
 
 状态：**In Progress**。当前实现仅覆盖 base profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
 以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和七个独立 Platform role。role
-监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`full` profile 和本里程碑的其余
+监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`stop` 停止 Platform roles 但保留
+LocalStack Community dependency process，因为该固定版本不能在容器重建后恢复本 profile 的 S3/KMS authority；
+依赖容器销毁明确不属于本地 durable restart。`full` profile 和本里程碑的其余
 退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
 Verified。
 
 2026-08-29 macOS P2 journey 已在 fresh PostgreSQL/LocalStack 上只通过 public CLI 完成 Artifact upload、Policy/Agent
 publication、deterministic Run、durable SSE 与 Inline result。随后测试停止唯一 Orchestration Worker，在 Worker 缺席时
 创建第二个 Run 并观察 PostgreSQL authority 保持 `queued`，再以同一配置和 workload identity 启动替代 Worker；第二个
-Run 恢复为 `succeeded`。该证据覆盖应用角色重启，不宣称 LocalStack/KMS 基础设施销毁恢复或 production restore。
+Run 恢复为 `succeeded`。同一 fresh P2 journey 随后停止全部 Platform roles，保留固定依赖 authority process，重新执行
+schema verify 与 exact development bootstrap replay，再启动七个 roles；旧 HumanTask Run 仍可按 ID 读取为 `succeeded`，
+profile/build state 字节与 build-state mtime 均未变化，证明没有 release rebuild 或 identity/port/key rotation。该证据覆盖
+应用角色重启，不宣称 LocalStack/KMS 基础设施销毁恢复或 production restore。
 
 2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
 Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立

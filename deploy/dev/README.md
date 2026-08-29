@@ -19,14 +19,18 @@ cargo run --locked -p insight-cli -- dev --path /path/to/my-platform-project --p
 
 `status`, `logs --role <role>`, and `stop` use the same `--path`. The supervisor provisions the
 fresh local PostgreSQL baseline and developer identity, creates the versioned S3 bucket and KMS
-key, then starts the six independent roles. It writes only generated state below
+key, then starts the seven independent roles. It writes only generated state below
 `/path/to/my-platform-project/.insight/`; private keys do not enter the role configuration files.
 
 PostgreSQL, NATS, and LocalStack keep their fixed loopback ports `5432`, `4222`, and `4566`.
 Platform role ports are allocated from free loopback ports and recorded in the local profile, so
-they do not collide with ordinary desktop applications. `stop` stops containers but retains the
-PostgreSQL and LocalStack volumes. A restart with unchanged source and profile state reuses the
-existing release binaries instead of invoking a release build.
+they do not collide with ordinary desktop applications. `stop` stops every Platform role but
+deliberately leaves PostgreSQL, NATS and LocalStack running. LocalStack Community 3.8.1 does not
+persist this profile's S3/KMS authority across container recreation; keeping the pinned dependency
+container alive is therefore part of the base profile's durable local restart contract. A later
+`dev` reuses the same immutable profile closure and, when the source fingerprint is unchanged, the
+existing release binaries without invoking a release build. Removing the Compose dependency
+containers is an explicit local-environment teardown, not a supported durability/recovery operation.
 
 The `full` profile is intentionally not implemented yet. Nor does the base profile claim a
 first-run authoring workflow, external-model operation, gVisor qualification, multi-node
