@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / initial lifecycle implemented |
+| 状态 | Implemented / M2 In Progress |
 | 日期 | 2026-08-29 |
 | owner | `crates/insight-cli/src/apply.rs` |
 | public authority | Management Gateway `/v1` |
@@ -92,13 +92,19 @@ Operation，证明 CLI 返回 exact timeout，且超时后没有继续 publish�
 固定 Authorization、Accept、Content-Type、traceparent、Receipt 和 If-Match 规则，拒绝 proxy/redirect，校验
 Location、cache、trace、body/header ETag、Operation terminal 与 exact Deployment closure。普通 CI 的 mock authority
 测试已覆盖 queued -> running -> succeeded 时 Operation ETag 演进、Policy self Version 注入和 token 不泄露；真实 fresh
-P2 journey 也已接入该脚本，待当前 exact revision 重跑后形成新的资格报告。
+P2 journey 已在 exact revision `939cd9e9d766ce17b242627daba7697fa3687799` 通过，并形成 `http_fixture=passed`
+的 checked incomplete 资格报告；报告只因同场景 Console 入口尚未运行而保持 incomplete。
 
-以下仍是 M2 未完成项：
+八类 closure matrix 现逐一构造 Agent Interface/Plan、Skill、Capability Interface、Context Source Interface、Model
+Profile、MCP Server、Policy 与 Sandbox Profile publish summary，确认 CLI 只把 authority 返回的 exact self Version ID
+和 semantic digest 注入对应 typed Deployment 字段。额外交叉类型 probe 用 Skill Revision 解析 Policy closure 时必须
+fail closed，防止仅凭 published list 顺序或 mutable head 选取 Version。
 
-- Agent/其他七种 closure 的 checked fixture；
+Apply/Operation 命令面既定正常、失败、恢复、curl 与八类 self closure contract matrix 已闭合。以下是更高层 M2/M4
+仍未完成的 fresh scenario 门禁：
+
 - fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 Policy/Agent publication、Run create/watch/result 与
-  Orchestration Worker restart 已形成 P2 journey；当前 revision 的新增 curl lifecycle 尚待 fresh rerun，其余 Resource
-  kinds 仍未完成。
+  Orchestration Worker restart 及新增 curl lifecycle 已形成 P2 journey；其余 Resource kinds 仍未完成。
 
-因此本文件只描述已实现的 initial lifecycle，不是 M2 完成声明，也不改变 Platform v2 production L4～L6 状态。
+因此本文件是 Apply 子命令完成声明，不是整个 M2/M4 或 spec00～18 完成声明，也不改变 Platform v2 production
+L4～L6 状态。

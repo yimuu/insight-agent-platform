@@ -3,9 +3,10 @@ mod tests {
     use super::*;
     use insight_platform_api::resource::{deployment_etag, resource_etag, resource_version_etag};
     use insight_platform_contracts::{
-        operation_etag, ApiProblem, ApiProblemCode, AuthoringPackage, DataClassification,
-        PolicyKind, PolicyResourceSpec, SafeJobFailure, SafeJobResult, TraceId,
-        ValidationSummary,
+        operation_etag, ApiProblem, ApiProblemCode, AuthoringPackage,
+        CapabilityEndpointScheme, CanonicalHttpEndpoint, ClosedJsonValue, DataClassification,
+        ExactDeploymentRef, ExactVersionRef, PolicyKind, PolicyResourceSpec, SafeJobFailure,
+        SafeJobResult, TraceId, ValidationSummary,
     };
     use std::{
         io::{ErrorKind, Read as _, Write as _},
@@ -28,6 +29,45 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    fn exact_version(kind: ResourceKind, marker: char) -> ExactVersionRef {
+        ExactVersionRef::new(id(kind), digest(marker)).unwrap()
+    }
+
+    fn exact_deployment(kind: ResourceKind, marker: char) -> ExactDeploymentRef {
+        ExactDeploymentRef::new(id(kind), digest(marker)).unwrap()
+    }
+
+    fn evidence(marker: char) -> ArtifactRef {
+        ArtifactRef::new(
+            id(ResourceKind::Artifact),
+            digest(marker),
+            128,
+            "application/json",
+            DataClassification::Internal,
+            Some("qualification.json".to_owned()),
+        )
+        .unwrap()
+    }
+
+    fn policy_binding(marker: char) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: exact_deployment(ResourceKind::PolicyDeployment, marker),
+            revision: exact_version(ResourceKind::PolicyRevision, marker),
+        }
+    }
+
+    fn published(kind: ResourceKind, marker: char) -> PublishedResourceVersionSummaryV1 {
+        let resource_version_id = id(kind);
+        let content_digest = digest(marker);
+        PublishedResourceVersionSummaryV1 {
+            etag: resource_version_etag(&resource_version_id, &content_digest),
+            resource_version_id,
+            revision_no: 1,
+            content_digest,
+            artifact_id: None,
+        }
     }
 
     fn policy_manifest() -> serde_json::Value {
@@ -918,5 +958,186 @@ mod tests {
                 ApplyError::OperationTerminal { state, .. } if state == expected_name
             ));
         }
+    }
+
+    #[test]
+    fn every_apply_resource_closure_resolves_only_its_published_self_versions() {
+        let agent_interface = published(ResourceKind::AgentInterfaceRevision, '1');
+        let agent_plan = published(ResourceKind::AgentPlanRevision, '2');
+        let resolved = ApplyDeploymentClosure::Agent(ApplyAgentDeploymentBindings {
+            entry_node_id: "start".to_owned(),
+            entry_node_kind: PlanNodeKind::Start,
+            slots: Vec::new(),
+            policies: vec![policy_binding('3')],
+            execution_profile: policy_binding('4'),
+        })
+        .resolve(&[agent_interface.clone(), agent_plan.clone()])
+        .unwrap();
+        let DeploymentClosure::Agent(closure) = resolved else {
+            panic!("Agent closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.interface.revision_id, agent_interface.resource_version_id);
+        assert_eq!(closure.interface.semantic_digest, agent_interface.content_digest);
+        assert_eq!(closure.plan.revision_id, agent_plan.resource_version_id);
+        assert_eq!(closure.plan.semantic_digest, agent_plan.content_digest);
+
+        let skill_revision = published(ResourceKind::SkillRevision, '5');
+        let resolved = ApplyDeploymentClosure::Skill(ApplySkillDeploymentBindings {
+            requirements: Vec::new(),
+            selection_policy: policy_binding('6'),
+            qualification_evidence: evidence('7'),
+        })
+        .resolve(std::slice::from_ref(&skill_revision))
+        .unwrap();
+        let DeploymentClosure::Skill(closure) = resolved else {
+            panic!("Skill closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.skill_revision.revision_id, skill_revision.resource_version_id);
+        assert_eq!(closure.skill_revision.semantic_digest, skill_revision.content_digest);
+
+        let capability_revision =
+            published(ResourceKind::CapabilityInterfaceRevision, '8');
+        let resolved = ApplyDeploymentClosure::CapabilityInterface(
+            ApplyCapabilityDeploymentBindings {
+                implementation: exact_version(
+                    ResourceKind::CapabilityImplementationRevision,
+                    '9',
+                ),
+                backend: CapabilityBackendBinding::Native {
+                    worker_manifest_digest: digest('a'),
+                    adapter_module_digest: digest('b'),
+                },
+                secret_bindings: Vec::new(),
+                policies: Vec::new(),
+                conformance_evidence: evidence('c'),
+            },
+        )
+        .resolve(std::slice::from_ref(&capability_revision))
+        .unwrap();
+        let DeploymentClosure::CapabilityInterface(closure) = resolved else {
+            panic!("Capability closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.interface.revision_id, capability_revision.resource_version_id);
+        assert_eq!(closure.interface.semantic_digest, capability_revision.content_digest);
+
+        let context_revision =
+            published(ResourceKind::ContextSourceInterfaceRevision, 'd');
+        let resolved = ApplyDeploymentClosure::ContextSourceInterface(
+            ApplyContextDeploymentBindings {
+                implementation: exact_version(
+                    ResourceKind::ContextSourceImplementationRevision,
+                    'e',
+                ),
+                required_worker_manifest_digest: digest('f'),
+                backend: ContextBackendBinding::NativeCatalog {
+                    installed_adapter_digest: digest('1'),
+                },
+                secret_bindings: Vec::new(),
+                network_policy: None,
+                tls_policy: None,
+                trust_policy: None,
+                parser_policy: exact_version(ResourceKind::PolicyRevision, '2'),
+                chunker_policy: exact_version(ResourceKind::PolicyRevision, '3'),
+                embedding_model_deployment: None,
+                ranking_policy: exact_version(ResourceKind::PolicyRevision, '4'),
+                data_policy: exact_version(ResourceKind::PolicyRevision, '5'),
+                conformance_evidence: evidence('6'),
+            },
+        )
+        .resolve(std::slice::from_ref(&context_revision))
+        .unwrap();
+        let DeploymentClosure::ContextSourceInterface(closure) = resolved else {
+            panic!("Context closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.interface.revision_id, context_revision.resource_version_id);
+        assert_eq!(closure.interface.semantic_digest, context_revision.content_digest);
+
+        let endpoint = CanonicalHttpEndpoint {
+            scheme: CapabilityEndpointScheme::Https,
+            host: "mcp.example.test".to_owned(),
+            port: 443,
+            base_path: "/mcp".to_owned(),
+        };
+        let mcp_revision = published(ResourceKind::McpServerRevision, '7');
+        let resolved = ApplyDeploymentClosure::McpServer(ApplyMcpDeploymentBindings {
+            server_identity_digest: digest('8'),
+            transport: McpTransportBinding::StreamableHttp {
+                endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
+                endpoint,
+                network_policy: exact_version(ResourceKind::PolicyRevision, '9'),
+                tls_policy: exact_version(ResourceKind::PolicyRevision, 'a'),
+            },
+            protocol_policy: exact_version(ResourceKind::PolicyRevision, 'b'),
+            trust_policy: exact_version(ResourceKind::PolicyRevision, 'c'),
+            auth_policy: None,
+            secret_bindings: Vec::new(),
+            conformance_evidence: evidence('d'),
+        })
+        .resolve(std::slice::from_ref(&mcp_revision))
+        .unwrap();
+        let DeploymentClosure::McpServer(closure) = resolved else {
+            panic!("MCP closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.server_revision.revision_id, mcp_revision.resource_version_id);
+        assert_eq!(closure.server_revision.semantic_digest, mcp_revision.content_digest);
+
+        let model_revision = published(ResourceKind::ModelProfileRevision, 'e');
+        let resolved = ApplyDeploymentClosure::ModelProfile(ApplyModelDeploymentBindings {
+            provider_deployment: exact_deployment(
+                ResourceKind::ModelProviderDeployment,
+                'f',
+            ),
+            data_policy: exact_version(ResourceKind::PolicyRevision, '1'),
+            safety_policy: exact_version(ResourceKind::PolicyRevision, '2'),
+            budget_policy: exact_version(ResourceKind::PolicyRevision, '3'),
+            public_projection_policy: exact_version(ResourceKind::PolicyRevision, '4'),
+            generation_defaults: ClosedJsonValue::build(
+                digest('5'),
+                serde_json::json!({"temperature_millis": 0}),
+            )
+            .unwrap(),
+        })
+        .resolve(std::slice::from_ref(&model_revision))
+        .unwrap();
+        let DeploymentClosure::ModelProfile(closure) = resolved else {
+            panic!("Model closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.profile_revision.revision_id, model_revision.resource_version_id);
+        assert_eq!(closure.profile_revision.semantic_digest, model_revision.content_digest);
+
+        let policy_revision = published(ResourceKind::PolicyRevision, '6');
+        let resolved = ApplyDeploymentClosure::Policy(ApplyPolicyDeploymentBindings {
+            applicability_digest: digest('7'),
+            qualification_evidence: evidence('8'),
+        })
+        .resolve(std::slice::from_ref(&policy_revision))
+        .unwrap();
+        let DeploymentClosure::Policy(closure) = resolved else {
+            panic!("Policy closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.policy_revision.revision_id, policy_revision.resource_version_id);
+        assert_eq!(closure.policy_revision.semantic_digest, policy_revision.content_digest);
+
+        let sandbox_revision = published(ResourceKind::SandboxProfileRevision, '9');
+        let resolved = ApplyDeploymentClosure::SandboxProfile(ApplySandboxDeploymentBindings {
+            runtime_revision: exact_version(ResourceKind::SandboxRuntimeRevision, 'a'),
+            policy_bindings: Vec::new(),
+            qualification_evidence: evidence('b'),
+        })
+        .resolve(std::slice::from_ref(&sandbox_revision))
+        .unwrap();
+        let DeploymentClosure::SandboxProfile(closure) = resolved else {
+            panic!("Sandbox closure resolved to another Resource kind");
+        };
+        assert_eq!(closure.profile_revision.revision_id, sandbox_revision.resource_version_id);
+        assert_eq!(closure.profile_revision.semantic_digest, sandbox_revision.content_digest);
+
+        let error = ApplyDeploymentClosure::Policy(ApplyPolicyDeploymentBindings {
+            applicability_digest: digest('c'),
+            qualification_evidence: evidence('d'),
+        })
+        .resolve(std::slice::from_ref(&skill_revision))
+        .unwrap_err();
+        assert!(matches!(error, ApplyError::InvalidResponse(_)));
     }
 }
