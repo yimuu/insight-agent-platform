@@ -77,7 +77,7 @@ fn raw_runtime_client(project: &Path) -> (Client, String, String) {
         .as_u64()
         .and_then(|value| u16::try_from(value).ok())
         .expect("Runtime Gateway port");
-    let token = fs::read_to_string(project.join(".insight/identity/access-token.jwt"))
+    let token = fs::read_to_string(project.join(".insight/identity/developer-access-token.jwt"))
         .expect("local access token is readable")
         .trim()
         .to_owned();
