@@ -1,17 +1,25 @@
-# M2 CLI Artifact read evidence
+# M2 CLI Artifact lifecycle evidence
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented read subset / M2 In Progress |
+| 状态 | Implemented initial lifecycle / M2 In Progress |
 | public authority | Runtime Gateway `/v1/artifacts*` |
-| 当前命令 | `artifact get|read` |
+| 当前命令 | `artifact upload|get|read` |
 
 ## 1. 命令面
 
 ```text
+insight artifact upload --file <file> --purpose <purpose> --classification <classification>
+  [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <project>]
 insight artifact get <artifact_id> [--path <project>]
 insight artifact read <artifact_id> --output <file> [--path <project>]
 ```
+
+`upload` 对 regular file 进行有界流式 SHA-256，使用 exact size/digest 构造 closed prepare request；prepare 返回的 URL
+和 completion proof 均为 secret-bearing，仅在进程内用于本次上传，不进入 stdout、report 或日志。对象 PUT 使用独立
+no-proxy/no-redirect HTTPS client，且不设置 Runtime OIDC Authorization；只接受 exact `200 OK`。随后 CLI 以 prepare
+Artifact ETag 完成 complete-upload，等待同一 ArtifactVerify Operation terminal，并读取 Ready metadata 重验 purpose、
+classification、length、media type 和 digest。
 
 `get` 输出 closed `ArtifactViewV1`。`read` 先从同一 Runtime Gateway 读取 metadata，只允许 Ready 且具有 exact
 `ArtifactRef` 的内容，再经 `/v1/artifacts/{artifact_id}/content` 流式下载。CLI 不读取 object locator、不获取 S3/KMS
@@ -30,14 +38,15 @@ insight artifact read <artifact_id> --output <file> [--path <project>]
 
 ## 3. 当前证据与剩余门禁
 
-loopback HTTP fixture 覆盖 metadata -> content，并断言 Runtime Authorization、closed envelope、exact digest 和最终文件；
-命令 parser 覆盖 get/read 与必需 output。
+loopback HTTP fixture 覆盖 prepare -> isolated uploader -> complete -> Operation wait -> Ready metadata，并断言
+Authorization、Receipt、If-Match、Location、trace、exact Operation target 和最终 content closure；安全负向断言最终 report
+不含签名 URL、completion proof 或 token。另一 fixture 覆盖 metadata -> content、exact digest 和最终文件。命令 parser
+覆盖 upload/get/read 的必需参数。
 
 以下仍未完成：
 
-- `artifact upload` 的 prepare -> secret-bearing HTTPS PUT -> complete -> Operation wait -> Ready 闭环；
-- upload target 绝不能携带 Runtime OIDC token，且需要 no-proxy/no-redirect、expiry、response-loss journal 与 digest
-  mismatch 负向 fixture；
+- prepare/complete 的 request-before-send journal、过期 target 重新 prepare 与 response-loss 精确恢复；
+- 真实 HTTPS object PUT 的 redirect/proxy/token 泄露、非 200、TLS、expiry 和 digest mismatch 负向 fixture；
 - 409/412/429、quarantined/rejected/deleted、truncated/oversized stream 和真实 Artifact Gateway + S3/KMS P1 journey。
 
-因此本文件不声明 Artifact lifecycle、M2 或 spec00～18 已完成。
+因此本文件只声明初始 Artifact lifecycle，不声明 M2 或 spec00～18 已完成。

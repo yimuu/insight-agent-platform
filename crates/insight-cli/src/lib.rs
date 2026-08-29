@@ -11,7 +11,9 @@ mod public_client;
 mod run;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use insight_platform_contracts::{canonical_digest, PublicJobState, ResourceId, ResourceKind};
+use insight_platform_contracts::{
+    canonical_digest, ArtifactPurpose, DataClassification, PublicJobState, ResourceId, ResourceKind,
+};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -138,6 +140,15 @@ pub enum CliCommand {
         root: PathBuf,
         artifact_id: String,
         output: PathBuf,
+    },
+    ArtifactUpload {
+        root: PathBuf,
+        file: PathBuf,
+        purpose: String,
+        classification: String,
+        media_type: Option<String>,
+        display_name: Option<String>,
+        timeout_seconds: u64,
     },
     Help,
 }
@@ -736,6 +747,9 @@ fn parse_artifact(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     let Some(action) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(CliError::Usage);
     };
+    if action == "upload" {
+        return parse_artifact_upload(&arguments[1..]);
+    }
     let Some(artifact_id) = arguments.get(1).and_then(|value| value.to_str()) else {
         return Err(CliError::Usage);
     };
@@ -747,6 +761,77 @@ fn parse_artifact(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "read" => parse_artifact_read(artifact_id, &arguments[2..]),
         _ => Err(CliError::UnknownCommand(format!("artifact {action}"))),
     }
+}
+
+fn parse_artifact_upload(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let mut root = None;
+    let mut file = None;
+    let mut purpose = None;
+    let mut classification = None;
+    let mut media_type = None;
+    let mut display_name = None;
+    let mut timeout_seconds = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        let value = || {
+            arguments
+                .get(cursor + 1)
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    CliError::MissingValue(match flag.as_ref() {
+                        "--path" => "--path",
+                        "--file" => "--file",
+                        "--purpose" => "--purpose",
+                        "--classification" => "--classification",
+                        "--media-type" => "--media-type",
+                        "--display-name" => "--display-name",
+                        "--timeout-seconds" => "--timeout-seconds",
+                        _ => "artifact upload option",
+                    })
+                })
+        };
+        match flag.as_ref() {
+            "--path" if root.is_none() => root = Some(PathBuf::from(value()?)),
+            "--file" if file.is_none() => file = Some(PathBuf::from(value()?)),
+            "--purpose" if purpose.is_none() => purpose = Some(value()?.to_owned()),
+            "--classification" if classification.is_none() => {
+                classification = Some(value()?.to_owned())
+            }
+            "--media-type" if media_type.is_none() => media_type = Some(value()?.to_owned()),
+            "--display-name" if display_name.is_none() => display_name = Some(value()?.to_owned()),
+            "--timeout-seconds" if timeout_seconds.is_none() => {
+                let raw = value()?;
+                timeout_seconds = Some(
+                    raw.parse::<u64>()
+                        .ok()
+                        .filter(|seconds| (1..=3_600).contains(seconds))
+                        .ok_or_else(|| CliError::InvalidOptionValue {
+                            option: "--timeout-seconds",
+                            value: raw.to_owned(),
+                        })?,
+                );
+            }
+            "--path" => return Err(CliError::DuplicateOption("--path")),
+            "--file" => return Err(CliError::DuplicateOption("--file")),
+            "--purpose" => return Err(CliError::DuplicateOption("--purpose")),
+            "--classification" => return Err(CliError::DuplicateOption("--classification")),
+            "--media-type" => return Err(CliError::DuplicateOption("--media-type")),
+            "--display-name" => return Err(CliError::DuplicateOption("--display-name")),
+            "--timeout-seconds" => return Err(CliError::DuplicateOption("--timeout-seconds")),
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+        cursor += 2;
+    }
+    Ok(CliCommand::ArtifactUpload {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        file: file.ok_or(CliError::MissingValue("--file"))?,
+        purpose: purpose.ok_or(CliError::MissingValue("--purpose"))?,
+        classification: classification.ok_or(CliError::MissingValue("--classification"))?,
+        media_type,
+        display_name,
+        timeout_seconds: timeout_seconds.unwrap_or(30),
+    })
 }
 
 fn parse_artifact_read(artifact_id: &str, arguments: &[OsString]) -> Result<CliCommand, CliError> {
@@ -3627,6 +3712,27 @@ pub fn execute(
             let output = resolve_root(current_directory, output);
             download_local_artifact(&root, &artifact_id, &output)
         }
+        CliCommand::ArtifactUpload {
+            root,
+            file,
+            purpose,
+            classification,
+            media_type,
+            display_name,
+            timeout_seconds,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let file = resolve_root(current_directory, file);
+            upload_local_artifact(
+                &root,
+                &file,
+                &purpose,
+                &classification,
+                media_type,
+                display_name,
+                timeout_seconds,
+            )
+        }
     }
 }
 
@@ -3639,7 +3745,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. Artifact content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
 fn apply_local_manifest(
@@ -3806,6 +3912,48 @@ fn download_local_artifact(
     let (client, _) = local_runtime_http_client(root)?;
     let report =
         artifact::download_artifact(&client, &artifact_id, output).map_err(CliError::Artifact)?;
+    render_json(&report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_local_artifact(
+    root: &Path,
+    file: &Path,
+    purpose: &str,
+    classification: &str,
+    media_type: Option<String>,
+    display_name: Option<String>,
+    timeout_seconds: u64,
+) -> Result<String, CliError> {
+    let purpose = purpose
+        .parse::<ArtifactPurpose>()
+        .map_err(|_| CliError::InvalidOptionValue {
+            option: "--purpose",
+            value: purpose.to_owned(),
+        })?;
+    let classification =
+        classification
+            .parse::<DataClassification>()
+            .map_err(|_| CliError::InvalidOptionValue {
+                option: "--classification",
+                value: classification.to_owned(),
+            })?;
+    let (client, tenant_id) = local_runtime_http_client(root)?;
+    let uploader = artifact::HttpsArtifactObjectUploader::new().map_err(CliError::Artifact)?;
+    let report = artifact::upload_artifact(
+        &client,
+        &uploader,
+        &tenant_id,
+        file,
+        artifact::ArtifactUploadOptions {
+            purpose,
+            classification,
+            declared_media_type: media_type,
+            display_name,
+            operation_timeout: Duration::from_secs(timeout_seconds),
+        },
+    )
+    .map_err(CliError::Artifact)?;
     render_json(&report)
 }
 
@@ -4516,5 +4664,32 @@ mod tests {
             ]),
             Err(CliError::MissingValue("--output"))
         ));
+
+        assert_eq!(
+            parse_command(&[
+                OsString::from("artifact"),
+                OsString::from("upload"),
+                OsString::from("--file"),
+                OsString::from("input.txt"),
+                OsString::from("--purpose"),
+                OsString::from("run_input"),
+                OsString::from("--classification"),
+                OsString::from("internal"),
+                OsString::from("--media-type"),
+                OsString::from("text/plain"),
+                OsString::from("--timeout-seconds"),
+                OsString::from("90"),
+            ])
+            .unwrap(),
+            CliCommand::ArtifactUpload {
+                root: PathBuf::from("."),
+                file: PathBuf::from("input.txt"),
+                purpose: "run_input".to_owned(),
+                classification: "internal".to_owned(),
+                media_type: Some("text/plain".to_owned()),
+                display_name: None,
+                timeout_seconds: 90,
+            }
+        );
     }
 }

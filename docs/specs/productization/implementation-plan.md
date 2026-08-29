@@ -118,9 +118,10 @@ Verified。
 content digest 或 Artifact digest/classification 做重验。SSE watch、control response-loss journal、真实 first Run 和
 restart recovery 仍未完成。
 
-[`insight artifact`](m2-cli-artifact.md) 已增加 get/read：CLI 先重验 Ready metadata，再有界流式下载，按 exact
-ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。prepare/upload/complete、
-verification Operation 与真实 S3/KMS P1 journey 尚未完成。
+[`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
+携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
+content；read 按 exact ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。
+upload response-loss journal、完整负向矩阵与真实 S3/KMS P1 journey 尚未完成。
 
 ### 5.1 工作项
 

@@ -1,17 +1,26 @@
 //! Public Artifact metadata and integrity-checked content download client.
 
 use crate::public_client::{PublicClientError, PublicHttpClient, PublicJsonResponse};
+use chrono::Utc;
 use insight_platform_contracts::{
-    ArtifactPurpose, ArtifactRef, ArtifactState, DataClassification, ResourceId, ResourceKind,
-    UtcTimestamp,
+    canonical_digest, ArtifactPurpose, ArtifactRef, ArtifactState, DataClassification,
+    OperationViewV1, PublicJobKind, PublicJobState, PublicJobTarget, ResourceId, ResourceKind,
+    Sha256Digest, UtcTimestamp,
 };
-use reqwest::StatusCode;
+use reqwest::{
+    blocking::{Body, Client},
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+    redirect::Policy,
+    StatusCode, Url,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     fmt,
-    fs::{self, OpenOptions},
-    io::Write as _,
+    fs::{self, File, OpenOptions},
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -93,6 +102,278 @@ pub struct ArtifactDownloadReportV1 {
     pub trace_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareArtifactUploadRequestV1 {
+    pub schema_version: u32,
+    pub purpose: ArtifactPurpose,
+    pub classification: DataClassification,
+    pub expected_size_bytes: u64,
+    pub expected_digest: Option<Sha256Digest>,
+    pub declared_media_type: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+struct OpaqueUploadCompletionProof(String);
+
+impl fmt::Debug for OpaqueUploadCompletionProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpaqueUploadCompletionProof([REDACTED])")
+    }
+}
+
+impl OpaqueUploadCompletionProof {
+    fn validate(&self) -> bool {
+        !self.0.is_empty()
+            && self.0.len() <= 4_096
+            && self.0.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
+            })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SecretBearingUploadTargetV1 {
+    url: String,
+    completion_proof: OpaqueUploadCompletionProof,
+}
+
+impl fmt::Debug for SecretBearingUploadTargetV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretBearingUploadTargetV1([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareArtifactUploadResponseV1 {
+    schema_version: u32,
+    artifact_id: ResourceId,
+    operation_id: ResourceId,
+    upload_grant_id: ResourceId,
+    artifact_etag: String,
+    upload_target: SecretBearingUploadTargetV1,
+    upload_expires_at: UtcTimestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompleteArtifactUploadRequestV1<'a> {
+    schema_version: u32,
+    completion_proof: &'a OpaqueUploadCompletionProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactMutationAcceptedV1 {
+    schema_version: u32,
+    artifact_id: ResourceId,
+    artifact_etag: String,
+    operation_id: ResourceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactUploadOptions {
+    pub purpose: ArtifactPurpose,
+    pub classification: DataClassification,
+    pub declared_media_type: Option<String>,
+    pub display_name: Option<String>,
+    pub operation_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactUploadReportV1 {
+    pub schema_version: u16,
+    pub kind: &'static str,
+    pub artifact_id: String,
+    pub operation_id: String,
+    pub upload_grant_id: String,
+    pub byte_length: u64,
+    pub media_type: String,
+    pub content_digest: String,
+    pub artifact_etag: String,
+}
+
+pub trait ArtifactObjectUploader {
+    fn put(
+        &self,
+        target_url: &str,
+        source: &Path,
+        content_length: u64,
+        content_type: Option<&str>,
+    ) -> Result<(), ArtifactClientError>;
+}
+
+#[derive(Debug)]
+pub struct HttpsArtifactObjectUploader {
+    client: Client,
+}
+
+impl HttpsArtifactObjectUploader {
+    pub fn new() -> Result<Self, ArtifactClientError> {
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .no_proxy()
+            .timeout(Duration::from_secs(300))
+            .user_agent("insight-cli-artifact-upload/0.1")
+            .build()
+            .map_err(|_| {
+                ArtifactClientError::InvalidRequest(
+                    "cannot initialize isolated HTTPS upload client".to_owned(),
+                )
+            })?;
+        Ok(Self { client })
+    }
+}
+
+impl ArtifactObjectUploader for HttpsArtifactObjectUploader {
+    fn put(
+        &self,
+        target_url: &str,
+        source: &Path,
+        content_length: u64,
+        content_type: Option<&str>,
+    ) -> Result<(), ArtifactClientError> {
+        validate_secret_upload_url(target_url)?;
+        let file = File::open(source).map_err(|error| file_error(source, &error.to_string()))?;
+        let mut request = self
+            .client
+            .put(target_url)
+            .header(CONTENT_LENGTH, content_length)
+            .body(Body::new(file));
+        if let Some(content_type) = content_type {
+            request = request.header(CONTENT_TYPE, content_type);
+        }
+        let response = request.send().map_err(|_| {
+            ArtifactClientError::InvalidResponse(
+                "secret-bearing object upload transport failed".to_owned(),
+            )
+        })?;
+        if response.status() != StatusCode::OK {
+            return Err(ArtifactClientError::InvalidResponse(
+                "secret-bearing object upload was not accepted".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn upload_artifact<U: ArtifactObjectUploader>(
+    client: &PublicHttpClient,
+    uploader: &U,
+    expected_tenant_id: &ResourceId,
+    source: &Path,
+    options: ArtifactUploadOptions,
+) -> Result<ArtifactUploadReportV1, ArtifactClientError> {
+    if expected_tenant_id.kind() != ResourceKind::Tenant
+        || options.operation_timeout.is_zero()
+        || options.operation_timeout > Duration::from_secs(3_600)
+    {
+        return Err(ArtifactClientError::InvalidRequest(
+            "tenant or operation timeout is outside its closed bound".to_owned(),
+        ));
+    }
+    validate_media_type(options.declared_media_type.as_deref())?;
+    validate_display_name(options.display_name.as_deref())?;
+    let (content_length, content_digest) = describe_file(source)?;
+    let request = PrepareArtifactUploadRequestV1 {
+        schema_version: 1,
+        purpose: options.purpose,
+        classification: options.classification,
+        expected_size_bytes: content_length,
+        expected_digest: Some(content_digest.clone()),
+        declared_media_type: options.declared_media_type.clone(),
+        display_name: options.display_name,
+    };
+    let request_digest = canonical_digest(
+        &serde_json::to_value(&request)
+            .map_err(|error| ArtifactClientError::InvalidRequest(error.to_string()))?,
+    )
+    .map_err(|error| ArtifactClientError::InvalidRequest(error.to_string()))?;
+    let prepare_receipt = format!(
+        "insight-artifact-v1-{}-prepare",
+        request_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&request_digest)
+    );
+    let prepared: PublicJsonResponse<PrepareArtifactUploadResponseV1> = client.post_json(
+        "/v1/artifacts:prepare-upload",
+        &request,
+        StatusCode::CREATED,
+        &prepare_receipt,
+        None,
+    )?;
+    validate_prepare_response(&prepared)?;
+    let authority = prepared.body;
+    uploader.put(
+        &authority.upload_target.url,
+        source,
+        content_length,
+        options.declared_media_type.as_deref(),
+    )?;
+
+    let proof_digest = canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "artifact_id": authority.artifact_id,
+        "completion_proof": authority.upload_target.completion_proof,
+    }))
+    .map_err(|error| ArtifactClientError::InvalidRequest(error.to_string()))?;
+    let complete_receipt = format!(
+        "insight-artifact-v1-{}-complete",
+        proof_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&proof_digest)
+    );
+    let completion = CompleteArtifactUploadRequestV1 {
+        schema_version: 1,
+        completion_proof: &authority.upload_target.completion_proof,
+    };
+    let completed: PublicJsonResponse<ArtifactMutationAcceptedV1> = client.post_json(
+        &format!("/v1/artifacts/{}:complete-upload", authority.artifact_id),
+        &completion,
+        StatusCode::ACCEPTED,
+        &complete_receipt,
+        Some(&authority.artifact_etag),
+    )?;
+    validate_complete_response(&completed, &authority)?;
+    let operation = client.wait_operation(
+        &authority.operation_id,
+        expected_tenant_id,
+        options.operation_timeout,
+    )?;
+    validate_artifact_operation(&operation, &authority.artifact_id)?;
+    let artifact = read_artifact(client, &authority.artifact_id)?;
+    let content = artifact.content.as_ref().ok_or_else(|| {
+        ArtifactClientError::InvalidResponse(
+            "verification succeeded without Ready Artifact content".to_owned(),
+        )
+    })?;
+    if artifact.purpose != request.purpose
+        || artifact.classification != request.classification
+        || artifact.expected_size_bytes != content_length
+        || artifact.declared_media_type != request.declared_media_type
+        || content.content_digest() != &content_digest
+    {
+        return Err(ArtifactClientError::InvalidResponse(
+            "Ready Artifact differs from the exact upload request".to_owned(),
+        ));
+    }
+    Ok(ArtifactUploadReportV1 {
+        schema_version: 1,
+        kind: "insight.platform.artifact-upload-report/v1",
+        artifact_id: authority.artifact_id.to_string(),
+        operation_id: authority.operation_id.to_string(),
+        upload_grant_id: authority.upload_grant_id.to_string(),
+        byte_length: content.byte_length(),
+        media_type: content.media_type().to_owned(),
+        content_digest: content.content_digest().to_string(),
+        artifact_etag: artifact.etag,
+    })
+}
+
 pub fn read_artifact(
     client: &PublicHttpClient,
     artifact_id: &ResourceId,
@@ -102,6 +383,186 @@ pub fn read_artifact(
         client.get_json(&format!("/v1/artifacts/{artifact_id}"), StatusCode::OK)?;
     validate_artifact_response(&response, artifact_id)?;
     Ok(response.body)
+}
+
+fn validate_prepare_response(
+    response: &PublicJsonResponse<PrepareArtifactUploadResponseV1>,
+) -> Result<(), ArtifactClientError> {
+    let prepared = &response.body;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(prepared.upload_expires_at.as_str())
+        .map_err(|_| ArtifactClientError::InvalidResponse("upload expiry is invalid".to_owned()))?
+        .with_timezone(&Utc);
+    if prepared.schema_version != 1
+        || prepared.artifact_id.kind() != ResourceKind::Artifact
+        || prepared.operation_id.kind() != ResourceKind::Job
+        || prepared.upload_grant_id.kind() != ResourceKind::ArtifactGrant
+        || prepared.artifact_etag != response.etag
+        || !valid_strong_etag(&prepared.artifact_etag)
+        || response.location.as_deref()
+            != Some(format!("/v1/artifacts/{}", prepared.artifact_id).as_str())
+        || !prepared.upload_target.completion_proof.validate()
+        || validate_secret_upload_url(&prepared.upload_target.url).is_err()
+        || expires_at <= Utc::now()
+    {
+        return Err(ArtifactClientError::InvalidResponse(
+            "prepare response identity, target, expiry, or envelope is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_complete_response(
+    response: &PublicJsonResponse<ArtifactMutationAcceptedV1>,
+    prepared: &PrepareArtifactUploadResponseV1,
+) -> Result<(), ArtifactClientError> {
+    let completed = &response.body;
+    if completed.schema_version != 1
+        || completed.artifact_id != prepared.artifact_id
+        || completed.operation_id != prepared.operation_id
+        || completed.artifact_etag != response.etag
+        || !valid_strong_etag(&completed.artifact_etag)
+        || response.location.as_deref()
+            != Some(format!("/v1/operations/{}", completed.operation_id).as_str())
+    {
+        return Err(ArtifactClientError::InvalidResponse(
+            "complete response differs from the prepared Artifact authority".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_operation(
+    operation: &OperationViewV1,
+    artifact_id: &ResourceId,
+) -> Result<(), ArtifactClientError> {
+    if operation.kind != PublicJobKind::ArtifactVerify
+        || !matches!(
+            &operation.target,
+            PublicJobTarget::Artifact { artifact_id: target } if target == artifact_id
+        )
+    {
+        return Err(ArtifactClientError::InvalidResponse(
+            "verification Operation does not target the exact Artifact".to_owned(),
+        ));
+    }
+    if operation.state != PublicJobState::Succeeded {
+        return Err(ArtifactClientError::InvalidResponse(format!(
+            "verification Operation reached terminal state {}",
+            public_job_state_name(operation.state)
+        )));
+    }
+    Ok(())
+}
+
+const fn public_job_state_name(state: PublicJobState) -> &'static str {
+    match state {
+        PublicJobState::Queued => "queued",
+        PublicJobState::Running => "running",
+        PublicJobState::Waiting => "waiting",
+        PublicJobState::Succeeded => "succeeded",
+        PublicJobState::Failed => "failed",
+        PublicJobState::Cancelled => "cancelled",
+        PublicJobState::TimedOut => "timed_out",
+        PublicJobState::ReconciliationRequired => "reconciliation_required",
+    }
+}
+
+fn describe_file(source: &Path) -> Result<(u64, Sha256Digest), ArtifactClientError> {
+    let metadata = fs::metadata(source).map_err(|error| file_error(source, &error.to_string()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 1_073_741_824 {
+        return Err(ArtifactClientError::InvalidRequest(
+            "upload source must be a regular file within 1..=1073741824 bytes".to_owned(),
+        ));
+    }
+    let mut file = File::open(source).map_err(|error| file_error(source, &error.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| file_error(source, &error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        observed = observed.checked_add(read as u64).ok_or_else(|| {
+            ArtifactClientError::InvalidRequest("upload source length overflowed".to_owned())
+        })?;
+        if observed > metadata.len() {
+            return Err(ArtifactClientError::InvalidRequest(
+                "upload source changed while hashing".to_owned(),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if observed != metadata.len() {
+        return Err(ArtifactClientError::InvalidRequest(
+            "upload source changed while hashing".to_owned(),
+        ));
+    }
+    let mut encoded = String::from("sha256:");
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").map_err(|_| {
+            ArtifactClientError::InvalidRequest("cannot encode upload digest".to_owned())
+        })?;
+    }
+    let digest = encoded
+        .parse::<Sha256Digest>()
+        .map_err(|error| ArtifactClientError::InvalidRequest(error.to_string()))?;
+    Ok((observed, digest))
+}
+
+fn validate_secret_upload_url(value: &str) -> Result<(), ArtifactClientError> {
+    let parsed = Url::parse(value).map_err(|_| {
+        ArtifactClientError::InvalidResponse("secret-bearing upload target is invalid".to_owned())
+    })?;
+    if value.len() > 8_192
+        || parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ArtifactClientError::InvalidResponse(
+            "secret-bearing upload target is outside its closed HTTPS shape".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_media_type(value: Option<&str>) -> Result<(), ArtifactClientError> {
+    if value.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 255
+            || !value.is_ascii()
+            || value.bytes().any(|byte| byte.is_ascii_control())
+            || !value.split(';').next().unwrap_or_default().contains('/')
+    }) {
+        return Err(ArtifactClientError::InvalidRequest(
+            "declared media type is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_display_name(value: Option<&str>) -> Result<(), ArtifactClientError> {
+    if value.is_some_and(|value| {
+        value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+    }) {
+        return Err(ArtifactClientError::InvalidRequest(
+            "display name is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_strong_etag(value: &str) -> bool {
+    value.len() >= 3
+        && value.len() <= 128
+        && value.starts_with('"')
+        && value.ends_with('"')
+        && !value.starts_with("W/")
 }
 
 pub fn download_artifact(
@@ -227,10 +688,9 @@ fn file_error(path: &Path, detail: &str) -> ArtifactClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use insight_platform_contracts::Sha256Digest;
-    use sha2::{Digest as _, Sha256};
+    use insight_platform_contracts::{operation_etag, SafeJobResult};
+    use sha2::Sha256;
     use std::{
-        io::Read as _,
         net::{TcpListener, TcpStream},
         thread,
         time::Duration,
@@ -321,6 +781,215 @@ mod tests {
         server.join().unwrap();
     }
 
+    struct FixtureUploader;
+
+    impl ArtifactObjectUploader for FixtureUploader {
+        fn put(
+            &self,
+            target_url: &str,
+            source: &Path,
+            content_length: u64,
+            content_type: Option<&str>,
+        ) -> Result<(), ArtifactClientError> {
+            assert_eq!(
+                target_url,
+                "https://uploads.example/object?signature=secret"
+            );
+            assert_eq!(fs::read(source).unwrap(), b"upload body");
+            assert_eq!(content_length, 11);
+            assert_eq!(content_type, Some("text/plain"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn upload_uses_isolated_target_then_waits_for_exact_ready_artifact() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("input.txt");
+        fs::write(&source, b"upload body").unwrap();
+        let content_digest = digest(b"upload body");
+        let tenant_id = id(ResourceKind::Tenant);
+        let artifact_id = id(ResourceKind::Artifact);
+        let operation_id = id(ResourceKind::Job);
+        let grant_id = id(ResourceKind::ArtifactGrant);
+        let prepared_etag = format!("\"{artifact_id}-1\"");
+        let completed_etag = format!("\"{artifact_id}-2\"");
+        let ready_etag = format!("\"{artifact_id}-4\"");
+        let operation_etag = operation_etag(&operation_id.to_string(), 3);
+        let prepared = PrepareArtifactUploadResponseV1 {
+            schema_version: 1,
+            artifact_id: artifact_id.clone(),
+            operation_id: operation_id.clone(),
+            upload_grant_id: grant_id.clone(),
+            artifact_etag: prepared_etag.clone(),
+            upload_target: SecretBearingUploadTargetV1 {
+                url: "https://uploads.example/object?signature=secret".to_owned(),
+                completion_proof: OpaqueUploadCompletionProof("proof_123.safe".to_owned()),
+            },
+            upload_expires_at: UtcTimestamp::from_datetime(Utc::now() + chrono::Duration::hours(1)),
+        };
+        let completed = ArtifactMutationAcceptedV1 {
+            schema_version: 1,
+            artifact_id: artifact_id.clone(),
+            artifact_etag: completed_etag,
+            operation_id: operation_id.clone(),
+        };
+        let operation = OperationViewV1 {
+            operation_id: operation_id.clone(),
+            tenant_id: tenant_id.clone(),
+            kind: PublicJobKind::ArtifactVerify,
+            target: PublicJobTarget::Artifact {
+                artifact_id: artifact_id.clone(),
+            },
+            state: PublicJobState::Succeeded,
+            progress: None,
+            result: Some(SafeJobResult {
+                result_digest: digest(b"verification"),
+            }),
+            error: None,
+            created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
+            updated_at: "2026-08-29T00:00:01.000000Z".parse().unwrap(),
+            etag: operation_etag.clone(),
+        };
+        let content = ArtifactRef::new(
+            artifact_id.clone(),
+            content_digest.clone(),
+            11,
+            "text/plain",
+            DataClassification::Internal,
+            Some("input.txt".to_owned()),
+        )
+        .unwrap();
+        let ready = ArtifactViewV1 {
+            schema_version: 1,
+            artifact_id: artifact_id.clone(),
+            purpose: ArtifactPurpose::RunInput,
+            classification: DataClassification::Internal,
+            state: ArtifactState::Ready,
+            version: 4,
+            expected_size_bytes: 11,
+            declared_media_type: Some("text/plain".to_owned()),
+            verified_media_type: Some("text/plain".to_owned()),
+            content: Some(content),
+            retain_until: "2026-09-29T00:00:00.000000Z".parse().unwrap(),
+            created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
+            updated_at: "2026-08-29T00:00:02.000000Z".parse().unwrap(),
+            etag: ready_etag.clone(),
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_artifact_id = artifact_id.clone();
+        let server_operation_id = operation_id.clone();
+        let server_digest = content_digest.clone();
+        let server = thread::spawn(move || {
+            for step in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, body) = read_request(&mut stream);
+                assert_eq!(header_value(&head, "authorization"), Some("Bearer token"));
+                match step {
+                    0 => {
+                        assert!(head.starts_with("POST /v1/artifacts:prepare-upload HTTP/1.1"));
+                        assert!(header_value(&head, "idempotency-key")
+                            .is_some_and(|value| value.ends_with("-prepare")));
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(request["expected_digest"], server_digest.to_string());
+                        let trace = request_trace_id(&head);
+                        write_json_envelope(
+                            &mut stream,
+                            "201 Created",
+                            &trace,
+                            Some(&prepared_etag),
+                            Some(&format!("/v1/artifacts/{server_artifact_id}")),
+                            &prepared,
+                        );
+                    }
+                    1 => {
+                        assert!(head.starts_with(&format!(
+                            "POST /v1/artifacts/{server_artifact_id}:complete-upload HTTP/1.1"
+                        )));
+                        assert_eq!(
+                            header_value(&head, "if-match"),
+                            Some(prepared_etag.as_str())
+                        );
+                        assert!(header_value(&head, "idempotency-key")
+                            .is_some_and(|value| value.ends_with("-complete")));
+                        assert_eq!(
+                            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+                                ["completion_proof"],
+                            "proof_123.safe"
+                        );
+                        let trace = request_trace_id(&head);
+                        write_json_envelope(
+                            &mut stream,
+                            "202 Accepted",
+                            &trace,
+                            Some(&completed.artifact_etag),
+                            Some(&format!("/v1/operations/{server_operation_id}")),
+                            &completed,
+                        );
+                    }
+                    2 => {
+                        assert!(head.starts_with(&format!(
+                            "GET /v1/operations/{server_operation_id} HTTP/1.1"
+                        )));
+                        write_json_envelope(
+                            &mut stream,
+                            "200 OK",
+                            "33333333333333333333333333333333",
+                            Some(&operation_etag),
+                            None,
+                            &operation,
+                        );
+                    }
+                    3 => {
+                        assert!(head.starts_with(&format!(
+                            "GET /v1/artifacts/{server_artifact_id} HTTP/1.1"
+                        )));
+                        write_json_envelope(
+                            &mut stream,
+                            "200 OK",
+                            "44444444444444444444444444444444",
+                            Some(&ready_etag),
+                            None,
+                            &ready,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let report = upload_artifact(
+            &client,
+            &FixtureUploader,
+            &tenant_id,
+            &source,
+            ArtifactUploadOptions {
+                purpose: ArtifactPurpose::RunInput,
+                classification: DataClassification::Internal,
+                declared_media_type: Some("text/plain".to_owned()),
+                display_name: Some("input.txt".to_owned()),
+                operation_timeout: Duration::from_secs(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.artifact_id, artifact_id.to_string());
+        assert_eq!(report.operation_id, operation_id.to_string());
+        assert_eq!(report.upload_grant_id, grant_id.to_string());
+        assert_eq!(report.content_digest, content_digest.to_string());
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("signature=secret"));
+        assert!(!serialized.contains("proof_123"));
+        assert!(!serialized.contains("Bearer"));
+        server.join().unwrap();
+    }
+
     fn read_request_head(stream: &mut TcpStream) -> String {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 2048];
@@ -332,6 +1001,32 @@ mod tests {
                 return String::from_utf8(bytes[..index + 4].to_vec()).unwrap();
             }
         }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&buffer[..read]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let head = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let content_length = header_value(&head, "content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while bytes.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        (
+            head,
+            bytes[header_end..header_end + content_length].to_vec(),
+        )
     }
 
     fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
@@ -349,6 +1044,40 @@ mod tests {
             body.len(), view.etag
         )
         .unwrap();
+        stream.write_all(&body).unwrap();
+    }
+
+    fn request_trace_id(head: &str) -> String {
+        header_value(head, "traceparent")
+            .unwrap()
+            .split('-')
+            .nth(1)
+            .unwrap()
+            .to_owned()
+    }
+
+    fn write_json_envelope<T: Serialize>(
+        stream: &mut TcpStream,
+        status: &str,
+        trace_id: &str,
+        etag: Option<&str>,
+        location: Option<&str>,
+        value: &T,
+    ) {
+        let body = serde_json::to_vec(value).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: {trace_id}\r\n",
+            body.len()
+        )
+        .unwrap();
+        if let Some(etag) = etag {
+            write!(stream, "etag: {etag}\r\n").unwrap();
+        }
+        if let Some(location) = location {
+            write!(stream, "location: {location}\r\n").unwrap();
+        }
+        write!(stream, "connection: close\r\n\r\n").unwrap();
         stream.write_all(&body).unwrap();
     }
 }
