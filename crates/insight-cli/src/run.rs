@@ -537,14 +537,18 @@ const fn run_json_limits() -> JsonLimits {
 mod tests {
     use super::*;
     use insight_platform_contracts::{
-        DurablePublicRunEventData, OpaqueRunEventCursor, PublicRunEventSourceKind,
-        PublicRunEventType, TraceId,
+        ApiProblem, ApiProblemCode, DurablePublicRunEventData, OpaqueRunEventCursor,
+        PublicRunEventSourceKind, PublicRunEventType, TraceId,
     };
     use serde_json::json;
     use std::{
         fs,
         io::Read as _,
         net::{TcpListener, TcpStream},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
         thread,
         time::Duration,
     };
@@ -557,6 +561,47 @@ mod tests {
 
     fn digest(character: char) -> String {
         format!("sha256:{}", character.to_string().repeat(64))
+    }
+
+    fn running_run(run_id: ResourceId) -> RunViewV1 {
+        RunViewV1 {
+            schema_version: 1,
+            run_id: run_id.clone(),
+            agent_deployment_id: id(ResourceKind::AgentDeployment),
+            state: RunState::Running,
+            version: 1,
+            input_value_id: id(ResourceKind::RunValue),
+            output_value_id: None,
+            pause_generation: 0,
+            cancel_generation: 0,
+            deadline: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+            started_at: Some("2026-08-29T00:00:01.000000Z".parse().unwrap()),
+            terminal_at: None,
+            created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
+            updated_at: "2026-08-29T00:00:01.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-1\""),
+        }
+    }
+
+    fn problem(
+        status: u16,
+        code: ApiProblemCode,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        trace_id: TraceId,
+    ) -> ApiProblem {
+        ApiProblem {
+            type_uri: format!("urn:insight:problem:{}", code.as_str()),
+            title: "Run request rejected".to_owned(),
+            status,
+            code,
+            detail: Some("safe public diagnostic".to_owned()),
+            request_id: id(ResourceKind::ServerRequest),
+            trace_id,
+            retryable,
+            retry_after_ms,
+            field_errors: Vec::new(),
+        }
     }
 
     #[derive(Default)]
@@ -615,6 +660,301 @@ mod tests {
         let mut mismatched = result;
         mismatched.content_digest = digest('c').parse().unwrap();
         assert!(validate_run_result(&mismatched, &run_id).is_err());
+    }
+
+    #[test]
+    fn control_preserves_closed_cas_and_backpressure_problems() {
+        let cases = [
+            (
+                "409 Conflict",
+                409,
+                ApiProblemCode::InvalidStateTransition,
+                false,
+                None,
+            ),
+            (
+                "412 Precondition Failed",
+                412,
+                ApiProblemCode::PreconditionFailed,
+                false,
+                None,
+            ),
+            (
+                "429 Too Many Requests",
+                429,
+                ApiProblemCode::RateLimited,
+                true,
+                Some(250),
+            ),
+            (
+                "503 Service Unavailable",
+                503,
+                ApiProblemCode::TemporarilyUnavailable,
+                true,
+                Some(500),
+            ),
+        ];
+
+        for (status_line, status, code, retryable, retry_after_ms) in cases {
+            let run_id = id(ResourceKind::Run);
+            let current = running_run(run_id.clone());
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_run_id = run_id.clone();
+            let server_current = current.clone();
+            let server_code = code;
+            let server = thread::spawn(move || {
+                let (mut read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut read);
+                assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                write_json_response(
+                    &mut read,
+                    "200 OK",
+                    "11111111111111111111111111111111",
+                    Some(&server_current.etag),
+                    None,
+                    &server_current,
+                );
+
+                let (mut mutation, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut mutation);
+                assert!(head.starts_with(&format!("POST /v1/runs/{server_run_id}:pause HTTP/1.1")));
+                assert_eq!(
+                    header_value(&head, "if-match"),
+                    Some(server_current.etag.as_str())
+                );
+                assert!(header_value(&head, "idempotency-key")
+                    .is_some_and(|value| value.ends_with("-pause")));
+                let trace_id = request_trace_id(&head).parse().unwrap();
+                let problem = problem(status, server_code, retryable, retry_after_ms, trace_id);
+                write_problem_response(&mut mutation, status_line, &problem);
+            });
+            let client = PublicHttpClient::new(
+                format!("http://127.0.0.1:{port}"),
+                "token".to_owned(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let journals = TempDir::new().unwrap();
+            let error = control_run(&client, &run_id, RunControlAction::Pause, journals.path())
+                .unwrap_err();
+            match error {
+                RunClientError::Public(PublicClientError::Problem(actual)) => {
+                    assert_eq!(actual.status, status);
+                    assert_eq!(actual.code, code);
+                    assert_eq!(actual.retryable, retryable);
+                    assert_eq!(actual.retry_after_ms, retry_after_ms);
+                }
+                other => panic!("expected closed Run Problem, got {other:?}"),
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn result_not_ready_preserves_run_not_terminal_problem() {
+        let run_id = id(ResourceKind::Run);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_run_id = run_id.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut stream);
+            assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/result HTTP/1.1")));
+            let trace_id = "22222222222222222222222222222222".parse().unwrap();
+            let problem = problem(
+                409,
+                ApiProblemCode::RunNotTerminal,
+                true,
+                Some(100),
+                trace_id,
+            );
+            write_problem_response(&mut stream, "409 Conflict", &problem);
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        match read_run_result(&client, &run_id).unwrap_err() {
+            RunClientError::Public(PublicClientError::Problem(actual)) => {
+                assert_eq!(actual.code, ApiProblemCode::RunNotTerminal);
+                assert!(actual.retryable);
+                assert_eq!(actual.retry_after_ms, Some(100));
+            }
+            other => panic!("expected result-not-ready Problem, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn watch_reports_a_failed_terminal_run() {
+        let run_id = id(ResourceKind::Run);
+        let failed = RunViewV1 {
+            state: RunState::Failed,
+            version: 2,
+            terminal_at: Some("2026-08-29T00:00:02.000000Z".parse().unwrap()),
+            updated_at: "2026-08-29T00:00:02.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-2\""),
+            ..running_run(run_id.clone())
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_run_id = run_id.clone();
+        let server_failed = failed.clone();
+        let server = thread::spawn(move || {
+            let (mut events, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut events);
+            assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+            write_empty_sse_response(&mut events);
+
+            let (mut read, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut read);
+            assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+            write_json_response(
+                &mut read,
+                "200 OK",
+                "11111111111111111111111111111111",
+                Some(&server_failed.etag),
+                None,
+                &server_failed,
+            );
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut output = FlushWriter::default();
+        assert_eq!(
+            watch_run(&client, &run_id, Duration::from_secs(2), &mut output).unwrap(),
+            failed
+        );
+        assert_eq!(output.flushes, 1);
+        let record: serde_json::Value = serde_json::from_slice(&output.bytes).unwrap();
+        assert_eq!(record["kind"], "terminal");
+        assert_eq!(record["run"]["state"], "failed");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn watch_preserves_cursor_and_backpressure_problems() {
+        let cases = [
+            (
+                "400 Bad Request",
+                400,
+                ApiProblemCode::CursorInvalid,
+                false,
+                None,
+            ),
+            ("410 Gone", 410, ApiProblemCode::CursorExpired, false, None),
+            (
+                "429 Too Many Requests",
+                429,
+                ApiProblemCode::RateLimited,
+                true,
+                Some(250),
+            ),
+            (
+                "503 Service Unavailable",
+                503,
+                ApiProblemCode::TemporarilyUnavailable,
+                true,
+                Some(500),
+            ),
+        ];
+        for (status_line, status, code, retryable, retry_after_ms) in cases {
+            let run_id = id(ResourceKind::Run);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_run_id = run_id.clone();
+            let server_code = code;
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut stream);
+                assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+                let trace_id = "44444444444444444444444444444444".parse().unwrap();
+                let problem = problem(status, server_code, retryable, retry_after_ms, trace_id);
+                write_problem_response(&mut stream, status_line, &problem);
+            });
+            let client = PublicHttpClient::new(
+                format!("http://127.0.0.1:{port}"),
+                "token".to_owned(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let mut output = FlushWriter::default();
+            match watch_run(&client, &run_id, Duration::from_secs(2), &mut output).unwrap_err() {
+                RunClientError::Public(PublicClientError::Problem(actual)) => {
+                    assert_eq!(actual.status, status);
+                    assert_eq!(actual.code, code);
+                    assert_eq!(actual.retryable, retryable);
+                    assert_eq!(actual.retry_after_ms, retry_after_ms);
+                }
+                other => panic!("expected closed SSE Problem, got {other:?}"),
+            }
+            assert!(output.bytes.is_empty());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn watch_times_out_without_mutating_a_nonterminal_run() {
+        let run_id = id(ResourceKind::Run);
+        let running = running_run(run_id.clone());
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let done = Arc::new(AtomicBool::new(false));
+        let server_done = Arc::clone(&done);
+        let server_run_id = run_id.clone();
+        let server_running = running.clone();
+        let server = thread::spawn(move || {
+            while !server_done.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept watch timeout fixture: {error}"),
+                };
+                let (head, _) = read_request(&mut stream);
+                if head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")) {
+                    write_empty_sse_response(&mut stream);
+                } else {
+                    assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        "11111111111111111111111111111111",
+                        Some(&server_running.etag),
+                        None,
+                        &server_running,
+                    );
+                }
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut output = FlushWriter::default();
+        assert!(matches!(
+            watch_run(&client, &run_id, Duration::from_secs(1), &mut output),
+            Err(RunClientError::WatchTimeout {
+                timeout_seconds: 1,
+                ..
+            })
+        ));
+        done.store(true, Ordering::Release);
+        server.join().unwrap();
+        assert!(output.bytes.is_empty());
+        assert_eq!(running.state, RunState::Running);
     }
 
     #[test]
@@ -1102,5 +1442,25 @@ mod tests {
             body.len()
         )
         .unwrap();
+    }
+
+    fn write_empty_sse_response(stream: &mut TcpStream) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: 33333333333333333333333333333333\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+        .unwrap();
+    }
+
+    fn write_problem_response(stream: &mut TcpStream, status: &str, problem: &ApiProblem) {
+        let body = serde_json::to_vec(problem).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            problem.trace_id,
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
     }
 }

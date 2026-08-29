@@ -883,6 +883,52 @@ mod tests {
     }
 
     #[test]
+    fn sse_parser_rejects_truncated_duplicate_and_oversized_pages() {
+        for malformed in [
+            b"id:cursor\nevent:run.queued\n\n".as_slice(),
+            b"id:cursor\nid:duplicate\nevent:run.queued\ndata:{}\n\n".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_sse_frames::<serde_json::Value>(malformed),
+                Err(PublicClientError::InvalidResponse(_))
+            ));
+        }
+
+        let frames = (0..=MAX_PUBLIC_SSE_FRAMES)
+            .map(|index| format!("id:{index}\nevent:run.queued\ndata:{{}}\n\n"))
+            .collect::<String>();
+        assert!(matches!(
+            parse_sse_frames::<serde_json::Value>(frames.as_bytes()),
+            Err(PublicClientError::InvalidResponse(_))
+        ));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: {OPERATION_CACHE_CONTROL}\r\ntrace-id: 33333333333333333333333333333333\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                MAX_PUBLIC_SSE_BYTES + 1
+            )
+            .unwrap();
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(matches!(
+            client.get_sse_json::<serde_json::Value>("/v1/runs/run/events", None),
+            Err(PublicClientError::InvalidResponse(_))
+        ));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn public_problem_preserves_retry_and_trace_identity() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();

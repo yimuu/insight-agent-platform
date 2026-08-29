@@ -141,8 +141,11 @@ Verified。
 与 Management Gateway。create 使用 canonical request Receipt，control 使用 current ETag + Receipt，result 对 Inline
 content digest 或 Artifact digest/classification 做重验；watch 按 opaque Last-Event-ID 重连 durable SSE，逐条校验、
 输出和 flush，直到 Run authority terminal。control 已在 mutation 前持久化 exact Receipt/If-Match，并由 response-loss
-fixture 证明跨调用精确重放。真实 first Run 与 Orchestration Worker restart 已由 P2 journey 覆盖；SSE/Problem
-负向矩阵仍未完成。
+fixture 证明跨调用精确重放。命令级 fixture 已覆盖 control 的 409/412/429/503 closed Problem、
+result-not-ready、SSE cursor invalid/expired/backpressure 以及 failed terminal watch，保留 problem code、retryability、
+retry-after 与 CAS headers；parser 同时拒绝截断、重复和 oversized page。真实 first Run 与 Orchestration Worker restart
+已由 P2 journey 覆盖；bounded watch timeout 也已证明不产生 mutation 或伪终态。Run 命令面的既定负向矩阵已闭合，
+M2 仍受 Task、Artifact 与完整 HTTP fixture 门禁约束。
 
 [`insight task`](m2-cli-task.md) 已增加 get/submit-input/approve/reject/cancel，只通过 Runtime Gateway 读取和提交
 Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt 和 bounded closed intent/result journal；

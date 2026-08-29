@@ -52,15 +52,19 @@ closed request 和 result digest 另有负向单元测试。
 control crash-window fixture 在服务端收到 pause 后丢弃响应，确认第二次 CLI 调用跳过 GET 并复用 exact Receipt/If-Match；
 authority 响应持久化后，第三次调用只读取 current Run，不创建第二个 mutation。
 
+Run 命令级 closed Problem fixture 现已覆盖 control 的 409 `invalid_state_transition`、412
+`precondition_failed`、429 `rate_limited` 与 503 `temporarily_unavailable`。fixture 先读取 current Run，再断言
+mutation 携带 exact If-Match/Receipt，并确认 CLI 原样保留 status、problem code、retryable 与 retry-after，而不是把
+CAS/backpressure 压缩成普通字符串。`run result` 另覆盖 409 `run_not_terminal`；`run watch` 覆盖 cursor
+invalid/expired、429/503、无新事件页后的 `failed` terminal authority 投影和即时 flush。SSE parser fixture 还拒绝
+缺字段截断帧、重复字段、超过 128 帧的 page，以及由 Content-Length 声明超过 8 MiB 的 page。
+独立 timeout fixture 保持 authority Run 为 nonterminal、无输出记录，并返回精确 bounded timeout；它不发送任何
+control mutation。
+
 fresh macOS P2 journey 使用真实 Gateway、PostgreSQL、Artifact 与 Orchestration roles 完成 deterministic first Run。
 测试随后停止唯一 Orchestration Worker，在 Worker 缺席时通过 public create/get 证明第二个 Run durable `queued`，并由
 同一配置和 workload identity 的替代 Worker 恢复；watch 通过 durable SSE 得到 `succeeded`，result 返回 exact Inline
 value。该 journey 不访问数据库业务状态，也不以进程内 fixture 代替 authority。
 
-本批尚不关闭 M2：
-
-- cursor expired/invalid、429/503、truncated/oversized/duplicate SSE frame 与 timeout 的完整负向矩阵尚未实现；
-- terminal failure、409/412/429 与 result-not-ready 的 CLI fixture 尚未完成。
-
-因此该命令面已具备首次 Run 与应用 Worker durable restart 证据，但仍不是 M2 完成声明，也不改变 spec00～18
-Accepted/In Progress 状态。
+Run 命令面的上述既定负向矩阵已闭合。M2 仍受 Task、Artifact 与完整原始 HTTP lifecycle 等跨命令门禁约束，
+因此这仍不是 M2 完成声明，也不改变 spec00～18 Accepted/In Progress 状态。
