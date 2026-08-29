@@ -4,8 +4,8 @@
 //! public response envelope before returning authority state to the command layer.
 
 use insight_platform_contracts::{
-    ApiProblem, OperationViewV1, ResourceId, ResourceKind, SpanId, TraceId, MAX_FIELD_ERRORS,
-    MAX_SAFE_TEXT_BYTES,
+    ApiProblem, OperationViewV1, ResourceId, ResourceKind, Sha256Digest, SpanId, TraceId,
+    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use reqwest::{
     blocking::{Client, Response},
@@ -17,9 +17,10 @@ use reqwest::{
     Method, StatusCode,
 };
 use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     fmt,
-    io::Read,
+    io::{Read, Write},
     time::{Duration, Instant},
 };
 
@@ -94,6 +95,15 @@ pub struct PublicJsonResponse<T> {
 #[derive(Debug)]
 pub struct PublicBodyResponse<T> {
     pub body: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicBinaryResponse {
+    pub content_length: u64,
+    pub content_type: String,
+    pub etag: String,
+    pub content_digest: Sha256Digest,
+    pub trace_id: TraceId,
 }
 
 impl PublicHttpClient {
@@ -228,6 +238,129 @@ impl PublicHttpClient {
             .send()
             .map_err(|error| PublicClientError::Transport(error.to_string()))?;
         decode_body_response(response, expected_status)
+    }
+
+    pub fn get_binary_to_writer<W: Write>(
+        &self,
+        path: &str,
+        maximum_bytes: u64,
+        writer: &mut W,
+    ) -> Result<PublicBinaryResponse, PublicClientError> {
+        if maximum_bytes == 0 || maximum_bytes > 1_073_741_824 {
+            return Err(PublicClientError::InvalidConfiguration(
+                "binary response limit is outside its closed bounds",
+            ));
+        }
+        validate_public_path(path)?;
+        let mut response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .header(ACCEPT, "application/octet-stream")
+            .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token))
+            .send()
+            .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+        let status = response.status();
+        let trace_id = required_header(&response, "trace-id")?
+            .parse::<TraceId>()
+            .map_err(|_| PublicClientError::InvalidResponse("trace-id is invalid".to_owned()))?;
+        if status != StatusCode::OK {
+            if !status.is_client_error() && !status.is_server_error() {
+                return Err(PublicClientError::InvalidResponse(format!(
+                    "unexpected HTTP status {status}"
+                )));
+            }
+            require_json_content_type(&response)?;
+            return decode_problem(response, status, trace_id);
+        }
+        if required_header(&response, CACHE_CONTROL.as_str())? != OPERATION_CACHE_CONTROL
+            || required_header(&response, "content-disposition")? != "attachment"
+        {
+            return Err(PublicClientError::InvalidResponse(
+                "binary response cache or disposition is invalid".to_owned(),
+            ));
+        }
+        let content_length = required_header(&response, CONTENT_LENGTH.as_str())?
+            .parse::<u64>()
+            .ok()
+            .filter(|length| *length > 0 && *length <= maximum_bytes)
+            .ok_or_else(|| {
+                PublicClientError::InvalidResponse(
+                    "binary response Content-Length is outside its bound".to_owned(),
+                )
+            })?;
+        let content_type = required_header(&response, CONTENT_TYPE.as_str())?;
+        if content_type.is_empty()
+            || content_type.len() > 255
+            || !content_type.is_ascii()
+            || content_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(PublicClientError::InvalidResponse(
+                "binary response Content-Type is invalid".to_owned(),
+            ));
+        }
+        let content_type = content_type.to_owned();
+        let etag = required_header(&response, ETAG.as_str())?;
+        if etag.len() < 3
+            || etag.len() > 128
+            || !etag.starts_with('"')
+            || !etag.ends_with('"')
+            || etag.starts_with("W/")
+        {
+            return Err(PublicClientError::InvalidResponse(
+                "binary response ETag is invalid".to_owned(),
+            ));
+        }
+        let etag = etag.to_owned();
+        let mut hasher = Sha256::new();
+        let mut written = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            written = written.checked_add(read as u64).ok_or_else(|| {
+                PublicClientError::InvalidResponse("binary response length overflowed".to_owned())
+            })?;
+            if written > content_length || written > maximum_bytes {
+                return Err(PublicClientError::InvalidResponse(
+                    "binary response exceeded its declared length".to_owned(),
+                ));
+            }
+            hasher.update(&buffer[..read]);
+            writer
+                .write_all(&buffer[..read])
+                .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+        }
+        if written != content_length {
+            return Err(PublicClientError::InvalidResponse(
+                "binary response ended before its declared length".to_owned(),
+            ));
+        }
+        let mut encoded_digest = String::with_capacity(71);
+        encoded_digest.push_str("sha256:");
+        for byte in hasher.finalize() {
+            use std::fmt::Write as _;
+            write!(&mut encoded_digest, "{byte:02x}").map_err(|_| {
+                PublicClientError::InvalidResponse(
+                    "binary response digest could not be represented".to_owned(),
+                )
+            })?;
+        }
+        let content_digest = encoded_digest.parse::<Sha256Digest>().map_err(|_| {
+            PublicClientError::InvalidResponse(
+                "binary response digest could not be represented".to_owned(),
+            )
+        })?;
+        Ok(PublicBinaryResponse {
+            content_length,
+            content_type,
+            etag,
+            content_digest,
+            trace_id,
+        })
     }
 
     pub fn post_json<Request: Serialize, ResponseBody: DeserializeOwned>(
@@ -491,7 +624,7 @@ mod tests {
         operation_etag, ApiProblemCode, PublicJobKind, PublicJobState, PublicJobTarget,
         SafeJobResult, Sha256Digest, UtcTimestamp,
     };
-    use std::{io::Write as _, net::TcpListener, thread};
+    use std::{net::TcpListener, thread};
     use uuid::Uuid;
 
     fn id(kind: ResourceKind) -> ResourceId {

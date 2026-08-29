@@ -6,6 +6,7 @@
 
 mod apply;
 mod apply_journal;
+mod artifact;
 mod public_client;
 mod run;
 
@@ -129,6 +130,15 @@ pub enum CliCommand {
         root: PathBuf,
         run_id: String,
     },
+    ArtifactGet {
+        root: PathBuf,
+        artifact_id: String,
+    },
+    ArtifactRead {
+        root: PathBuf,
+        artifact_id: String,
+        output: PathBuf,
+    },
     Help,
 }
 
@@ -190,6 +200,7 @@ pub enum CliError {
     PublicClient(public_client::PublicClientError),
     Apply(apply::ApplyError),
     Run(run::RunClientError),
+    Artifact(artifact::ArtifactClientError),
     OperationTerminal {
         operation_id: String,
         state: String,
@@ -272,6 +283,7 @@ impl std::fmt::Display for CliError {
             Self::PublicClient(error) => write!(formatter, "{error}"),
             Self::Apply(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
+            Self::Artifact(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
                 state,
@@ -301,6 +313,7 @@ impl std::error::Error for CliError {
             Self::PublicClient(source) => Some(source),
             Self::Apply(source) => Some(source),
             Self::Run(source) => Some(source),
+            Self::Artifact(source) => Some(source),
             _ => None,
         }
     }
@@ -332,6 +345,7 @@ impl CliError {
             | Self::PublicClient(_)
             | Self::Apply(_)
             | Self::Run(_)
+            | Self::Artifact(_)
             | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
@@ -361,6 +375,7 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "apply" => parse_apply(&arguments[1..]),
         "operation" => parse_operation(&arguments[1..]),
         "run" => parse_run(&arguments[1..]),
+        "artifact" => parse_artifact(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
 }
@@ -714,6 +729,60 @@ fn parse_run_create(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     Ok(CliCommand::RunCreate {
         root: root.unwrap_or_else(|| PathBuf::from(".")),
         file: file.ok_or(CliError::MissingValue("--file"))?,
+    })
+}
+
+fn parse_artifact(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let Some(action) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    let Some(artifact_id) = arguments.get(1).and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    match action {
+        "get" => Ok(CliCommand::ArtifactGet {
+            root: parse_path_only(&arguments[2..])?,
+            artifact_id: artifact_id.to_owned(),
+        }),
+        "read" => parse_artifact_read(artifact_id, &arguments[2..]),
+        _ => Err(CliError::UnknownCommand(format!("artifact {action}"))),
+    }
+}
+
+fn parse_artifact_read(artifact_id: &str, arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let mut root = None;
+    let mut output = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--path"));
+                };
+                root = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            "--output" => {
+                if output.is_some() {
+                    return Err(CliError::DuplicateOption("--output"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--output"));
+                };
+                output = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    Ok(CliCommand::ArtifactRead {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        artifact_id: artifact_id.to_owned(),
+        output: output.ok_or(CliError::MissingValue("--output"))?,
     })
 }
 
@@ -3545,6 +3614,19 @@ pub fn execute(
             let root = resolve_root(current_directory, root);
             read_local_run_result(&root, &run_id)
         }
+        CliCommand::ArtifactGet { root, artifact_id } => {
+            let root = resolve_root(current_directory, root);
+            read_local_artifact(&root, &artifact_id)
+        }
+        CliCommand::ArtifactRead {
+            root,
+            artifact_id,
+            output,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let output = resolve_root(current_directory, output);
+            download_local_artifact(&root, &artifact_id, &output)
+        }
     }
 }
 
@@ -3557,7 +3639,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` uses only the Runtime Gateway `/v1` authority and emits closed machine-readable views. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. Artifact content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
 fn apply_local_manifest(
@@ -3708,10 +3790,38 @@ fn read_local_run_result(root: &Path, run_id: &str) -> Result<String, CliError> 
     render_json(&view)
 }
 
+fn read_local_artifact(root: &Path, artifact_id: &str) -> Result<String, CliError> {
+    let artifact_id = parse_artifact_id(artifact_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = artifact::read_artifact(&client, &artifact_id).map_err(CliError::Artifact)?;
+    render_json(&view)
+}
+
+fn download_local_artifact(
+    root: &Path,
+    artifact_id: &str,
+    output: &Path,
+) -> Result<String, CliError> {
+    let artifact_id = parse_artifact_id(artifact_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let report =
+        artifact::download_artifact(&client, &artifact_id, output).map_err(CliError::Artifact)?;
+    render_json(&report)
+}
+
 fn parse_run_id(value: &str) -> Result<ResourceId, CliError> {
     ResourceId::parse_expected(value, ResourceKind::Run).map_err(|_| CliError::InvalidOptionValue {
         option: "run_id",
         value: value.to_owned(),
+    })
+}
+
+fn parse_artifact_id(value: &str) -> Result<ResourceId, CliError> {
+    ResourceId::parse_expected(value, ResourceKind::Artifact).map_err(|_| {
+        CliError::InvalidOptionValue {
+            option: "artifact_id",
+            value: value.to_owned(),
+        }
     })
 }
 
@@ -4363,6 +4473,48 @@ mod tests {
         assert!(matches!(
             parse_command(&[OsString::from("run"), OsString::from("create"),]),
             Err(CliError::MissingValue("--file"))
+        ));
+    }
+
+    #[test]
+    fn command_parser_accepts_closed_artifact_reads() {
+        let artifact_id = format!("art_{}", Uuid::now_v7());
+        assert_eq!(
+            parse_command(&[
+                OsString::from("artifact"),
+                OsString::from("get"),
+                OsString::from(&artifact_id),
+                OsString::from("--path"),
+                OsString::from("demo"),
+            ])
+            .unwrap(),
+            CliCommand::ArtifactGet {
+                root: PathBuf::from("demo"),
+                artifact_id: artifact_id.clone(),
+            }
+        );
+        assert_eq!(
+            parse_command(&[
+                OsString::from("artifact"),
+                OsString::from("read"),
+                OsString::from(&artifact_id),
+                OsString::from("--output"),
+                OsString::from("result.bin"),
+            ])
+            .unwrap(),
+            CliCommand::ArtifactRead {
+                root: PathBuf::from("."),
+                artifact_id,
+                output: PathBuf::from("result.bin"),
+            }
+        );
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("artifact"),
+                OsString::from("read"),
+                OsString::from(format!("art_{}", Uuid::now_v7())),
+            ]),
+            Err(CliError::MissingValue("--output"))
         ));
     }
 }

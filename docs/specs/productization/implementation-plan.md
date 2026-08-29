@@ -118,6 +118,10 @@ Verified。
 content digest 或 Artifact digest/classification 做重验。SSE watch、control response-loss journal、真实 first Run 和
 restart recovery 仍未完成。
 
+[`insight artifact`](m2-cli-artifact.md) 已增加 get/read：CLI 先重验 Ready metadata，再有界流式下载，按 exact
+ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。prepare/upload/complete、
+verification Operation 与真实 S3/KMS P1 journey 尚未完成。
+
 ### 5.1 工作项
 
 1. 以 authoritative Platform `/v1` OpenAPI/JSON Schema 校验实际 route、request、response、Problem 与样例，
