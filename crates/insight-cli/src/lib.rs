@@ -62,6 +62,10 @@ const RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE: &str = "gateway-client.pem";
 const RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE: &str = "gateway-client-key.pem";
 const RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE: &str = "orchestration-client.pem";
 const RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE: &str = "orchestration-client-key.pem";
+const RUNTIME_NATS_SERVER_CERTIFICATE_FILE: &str = "nats-server.pem";
+const RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE: &str = "nats-server-key.pem";
+const RUNTIME_NATS_CLIENT_CERTIFICATE_FILE: &str = "nats-client.pem";
+const RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE: &str = "nats-client-key.pem";
 const RUNTIME_CONFIGURATION_DIRECTORY: &str = "config";
 const RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE: &str = "gateway-management.json";
 const RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE: &str = "gateway-runtime.json";
@@ -1521,6 +1525,24 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
         Some(SCHEDULER_WORKLOAD_IDENTITY),
         ExtendedKeyUsagePurpose::ClientAuth,
         &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
+        RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+        RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some("spiffe://insight.platform/workload/local-nats-client"),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
     )
 }
 
@@ -2155,12 +2177,12 @@ fn run_development_profile(
     }
 
     let fingerprint = workspace_fingerprint(&workspace)?;
-    compose_up(&workspace, &compose_project)?;
+    compose_up(&workspace, &compose_project, &runtime)?;
     let profile_state = match read_runtime_profile_state(&runtime)? {
         Some(state) => state,
         None => {
             let kms_key_arn =
-                initialize_localstack_artifact_dependency(&workspace, &compose_project)?;
+                initialize_localstack_artifact_dependency(&workspace, &compose_project, &runtime)?;
             let ports = RuntimePortBindings::allocate()?;
             prepare_runtime_profile_with_ports(&root, &kms_key_arn, &fingerprint, &ports)?;
             read_runtime_profile_state(&runtime)?.ok_or_else(|| {
@@ -2173,6 +2195,7 @@ fn run_development_profile(
     ensure_localstack_artifact_dependency(
         &workspace,
         &compose_project,
+        &runtime,
         &profile_state.kms_key_arn,
     )
     .map_err(|_| {
@@ -2303,41 +2326,59 @@ fn compose_project_name(tenant_id: &str) -> Result<String, CliError> {
     Ok(format!("insight-{suffix}"))
 }
 
-fn compose_up(workspace: &Path, project: &str) -> Result<(), CliError> {
-    let mut command = compose_command(workspace, project);
+fn compose_up(workspace: &Path, project: &str, runtime: &Path) -> Result<(), CliError> {
+    let mut command = compose_command(workspace, project, runtime);
     command.args(["up", "--detach", "--wait"]);
     run_external(
         command,
         "start local PostgreSQL, NATS and S3/KMS dependencies",
     )?;
-    wait_for_localstack(workspace, project)
+    wait_for_localstack(workspace, project, runtime)
 }
 
-fn compose_command(workspace: &Path, project: &str) -> ProcessCommand {
+fn compose_command(workspace: &Path, project: &str, runtime: &Path) -> ProcessCommand {
+    let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
     let mut command = ProcessCommand::new("docker");
-    command.current_dir(workspace).args([
-        "compose",
-        "--project-name",
-        project,
-        "--file",
-        "deploy/dev/compose.yaml",
-    ]);
+    command
+        .current_dir(workspace)
+        .env(
+            "INSIGHT_DEV_NATS_CA_PATH",
+            tls.join(RUNTIME_CA_CERTIFICATE_FILE),
+        )
+        .env(
+            "INSIGHT_DEV_NATS_SERVER_CERT_PATH",
+            tls.join(RUNTIME_NATS_SERVER_CERTIFICATE_FILE),
+        )
+        .env(
+            "INSIGHT_DEV_NATS_SERVER_KEY_PATH",
+            tls.join(RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE),
+        )
+        .args([
+            "compose",
+            "--project-name",
+            project,
+            "--file",
+            "deploy/dev/compose.yaml",
+        ]);
     command
 }
 
 fn initialize_localstack_artifact_dependency(
     workspace: &Path,
     compose_project: &str,
+    runtime: &Path,
 ) -> Result<String, CliError> {
     compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &["s3api", "head-bucket", "--bucket", LOCAL_ARTIFACT_BUCKET],
     )
     .or_else(|_| {
         compose_awslocal(
             workspace,
             compose_project,
+            runtime,
             &["s3api", "create-bucket", "--bucket", LOCAL_ARTIFACT_BUCKET],
         )
         .map(|_| String::new())
@@ -2345,6 +2386,7 @@ fn initialize_localstack_artifact_dependency(
     compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &[
             "s3api",
             "put-bucket-versioning",
@@ -2357,6 +2399,7 @@ fn initialize_localstack_artifact_dependency(
     let arn = compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &[
             "kms",
             "create-key",
@@ -2380,16 +2423,19 @@ fn initialize_localstack_artifact_dependency(
 fn ensure_localstack_artifact_dependency(
     workspace: &Path,
     compose_project: &str,
+    runtime: &Path,
     kms_key_arn: &str,
 ) -> Result<(), CliError> {
     compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &["s3api", "head-bucket", "--bucket", LOCAL_ARTIFACT_BUCKET],
     )?;
     compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &[
             "s3api",
             "get-bucket-versioning",
@@ -2400,22 +2446,28 @@ fn ensure_localstack_artifact_dependency(
     compose_awslocal(
         workspace,
         compose_project,
+        runtime,
         &["kms", "describe-key", "--key-id", kms_key_arn],
     )?;
     Ok(())
 }
 
-fn compose_awslocal(workspace: &Path, project: &str, args: &[&str]) -> Result<String, CliError> {
-    let mut command = compose_command(workspace, project);
+fn compose_awslocal(
+    workspace: &Path,
+    project: &str,
+    runtime: &Path,
+    args: &[&str],
+) -> Result<String, CliError> {
+    let mut command = compose_command(workspace, project, runtime);
     command.args(["exec", "--no-TTY", "localstack", "awslocal"]);
     command.args(args);
     run_external(command, "prepare local S3/KMS dependency")
 }
 
-fn wait_for_localstack(workspace: &Path, project: &str) -> Result<(), CliError> {
+fn wait_for_localstack(workspace: &Path, project: &str, runtime: &Path) -> Result<(), CliError> {
     let deadline = SystemTime::now() + Duration::from_secs(30);
     while SystemTime::now() < deadline {
-        if compose_awslocal(workspace, project, &["kms", "list-keys"]).is_ok() {
+        if compose_awslocal(workspace, project, runtime, &["kms", "list-keys"]).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -4649,6 +4701,8 @@ mod tests {
             RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
             RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
             RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+            RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
+            RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -4663,6 +4717,8 @@ mod tests {
                 RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE,
                 RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE,
                 RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
+                RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE,
+                RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))

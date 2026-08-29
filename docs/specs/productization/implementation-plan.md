@@ -94,6 +94,11 @@ Interface Revision ID；Deployment 与 materialization 分别重验 exact Interf
 Coordinator，并包含 owner/batch/digest 漂移 fail-closed 断言。该闭环只解除首次 Run 的合同阻塞；public first Run 本身和
 restart recovery 后续已由上述 P2 journey 补齐，但其余 M1/M2 门禁仍未完成。
 
+同日后续 fresh base regression 将 NATS 从仅有 JetStream 的开发依赖收紧为 project-local CA 签发的双向 TLS：
+`init` 分别生成 ServerAuth 与带 workload SPIFFE URI 的 ClientAuth 证书，Compose 只挂载该 fresh project 的证书路径并
+启用 client certificate verification，CLI 启停流程显式传递这些路径。七个 Platform role、P2 deterministic first Run
+与收束流程在该边界下再次通过；这只证明 base dependency transport closure，不代表 `full` profile 或 M1 已完成。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

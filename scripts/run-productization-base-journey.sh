@@ -103,7 +103,10 @@ if not re.fullmatch(r"insight-[0-9a-f]{8}", project):
 print(project)
 PY
 )"
-    docker compose \
+    INSIGHT_DEV_NATS_CA_PATH="$project/.insight/runtime/tls/ca.pem" \
+    INSIGHT_DEV_NATS_SERVER_CERT_PATH="$project/.insight/runtime/tls/nats-server.pem" \
+    INSIGHT_DEV_NATS_SERVER_KEY_PATH="$project/.insight/runtime/tls/nats-server-key.pem" \
+      docker compose \
       --project-name "$compose_project" \
       --file "$workspace/deploy/dev/compose.yaml" \
       down

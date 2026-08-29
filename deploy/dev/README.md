@@ -23,6 +23,10 @@ key, then starts the seven independent roles. It writes only generated state bel
 `/path/to/my-platform-project/.insight/`; private keys do not enter the role configuration files.
 
 PostgreSQL, NATS, and LocalStack keep their fixed loopback ports `5432`, `4222`, and `4566`.
+NATS JetStream requires mutual TLS even in the development profile. `insight init` generates a
+project-local CA, `localhost` server certificate and client certificate; the supervisor passes only
+the three exact server-side paths to Compose, while NATS-consuming Platform roles receive the CA
+and client identity directly. Compose has no plaintext NATS fallback and no checked-in private key.
 Platform role ports are allocated from free loopback ports and recorded in the local profile, so
 they do not collide with ordinary desktop applications. `stop` stops every Platform role but
 deliberately leaves PostgreSQL, NATS and LocalStack running. LocalStack Community 3.8.1 does not

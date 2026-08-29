@@ -19,9 +19,19 @@ services:
 
   nats:
     image: nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
-    command: ["-js"]
+    command:
+      - "--jetstream"
+      - "--tls"
+      - "--tlscert=/etc/nats/tls/server.pem"
+      - "--tlskey=/etc/nats/tls/server-key.pem"
+      - "--tlscacert=/etc/nats/tls/ca.pem"
+      - "--tlsverify"
     ports:
       - "127.0.0.1:4222:4222"
+    volumes:
+      - "${INSIGHT_DEV_NATS_CA_PATH:?project-local NATS CA path is required}:/etc/nats/tls/ca.pem:ro"
+      - "${INSIGHT_DEV_NATS_SERVER_CERT_PATH:?project-local NATS server certificate path is required}:/etc/nats/tls/server.pem:ro"
+      - "${INSIGHT_DEV_NATS_SERVER_KEY_PATH:?project-local NATS server key path is required}:/etc/nats/tls/server-key.pem:ro"
 
   localstack:
     image: localstack/localstack@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
