@@ -66,9 +66,14 @@ M0 的已审查输入保存在：
 
 状态：**In Progress**。当前实现仅覆盖 base profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
 以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和七个独立 Platform role。role
-监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`full` profile、first Run
-authoring、重启后的 durable Run 恢复和本里程碑的全部退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
+监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`full` profile 和本里程碑的其余
+退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
 Verified。
+
+2026-08-29 macOS P2 journey 已在 fresh PostgreSQL/LocalStack 上只通过 public CLI 完成 Artifact upload、Policy/Agent
+publication、deterministic Run、durable SSE 与 Inline result。随后测试停止唯一 Orchestration Worker，在 Worker 缺席时
+创建第二个 Run 并观察 PostgreSQL authority 保持 `queued`，再以同一配置和 workload identity 启动替代 Worker；第二个
+Run 恢复为 `succeeded`。该证据覆盖应用角色重启，不宣称 LocalStack/KMS 基础设施销毁恢复或 production restore。
 
 2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
 Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立
@@ -77,13 +82,13 @@ role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探
 Interface Revision ID；Deployment 与 materialization 分别重验 exact Interface/Plan 同 Agent、同 publish batch 和合同 digest。
 真实 PostgreSQL 已覆盖 Resource lifecycle、Run kernel、Context、Model Turn、Capability Invocation 与独立 Orchestration
 Coordinator，并包含 owner/batch/digest 漂移 fail-closed 断言。该闭环只解除首次 Run 的合同阻塞；public first Run 本身和
-restart recovery 尚未完成，不能据此关闭 M1/M2。
+restart recovery 后续已由上述 P2 journey 补齐，但其余 M1/M2 门禁仍未完成。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway
-内联验证或伪造 `ValidationSummary` 绕过 authority。`insight apply` 已提供 public authoring/lifecycle 入口；仍缺 Agent
-首次 Run fixture、真实进程 journey、restart recovery 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
+内联验证或伪造 `ValidationSummary` 绕过 authority。`insight apply` 已提供 public authoring/lifecycle 入口；仍缺后续
+M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 
 ### 4.1 工作项
 
@@ -126,7 +131,8 @@ Verified。
 与 Management Gateway。create 使用 canonical request Receipt，control 使用 current ETag + Receipt，result 对 Inline
 content digest 或 Artifact digest/classification 做重验；watch 按 opaque Last-Event-ID 重连 durable SSE，逐条校验、
 输出和 flush，直到 Run authority terminal。control 已在 mutation 前持久化 exact Receipt/If-Match，并由 response-loss
-fixture 证明跨调用精确重放。SSE/Problem 负向矩阵、真实 first Run 和 restart recovery 仍未完成。
+fixture 证明跨调用精确重放。真实 first Run 与 Orchestration Worker restart 已由 P2 journey 覆盖；SSE/Problem
+负向矩阵仍未完成。
 
 [`insight task`](m2-cli-task.md) 已增加 get/submit-input/approve/reject/cancel，只通过 Runtime Gateway 读取和提交
 Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt 和 bounded closed intent/result journal；
@@ -136,7 +142,8 @@ response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成�
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
 content；read 按 exact ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。
-upload response-loss journal、完整负向矩阵与真实 S3/KMS P1 journey 尚未完成。
+upload response-loss journal 与完整负向矩阵尚未完成；fresh 真实 S3/KMS upload 已由 deterministic first Run P2
+journey 覆盖。
 
 ### 5.1 工作项
 

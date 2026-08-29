@@ -46,7 +46,7 @@ Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check
 
 | profile | 目标场景 | 必要依赖 | 现状与 M1 要求 |
 |---|---|---|---|
-| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability/Registry Validation Worker role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **部分实现**：CLI 已启动该独立 role，并为它生成独立 ServiceIdentity、pool 与配置；first Run、真实进程 smoke 和重启恢复仍未完成，不能假设 root binary 等价。 |
+| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability/Registry Validation Worker role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **已覆盖首条 P2 journey**：fresh authority 上的 Artifact -> Policy/Agent -> Run -> SSE/result 已通过，停止唯一 Orchestration Worker 后创建的 durable queued Run 可由同身份替代 Worker 恢复；其余 M1 失败矩阵与 `full` profile 仍未完成。 |
 | `full` | Model、remote Capability、MCP、Context、Artifact maintenance、WASI | `base` 加 Egress/Security、对应 worker、Artifact Maintenance 与其所需 lifecycle configuration | **未实现**。每个增量依赖只能由所需场景启用。 |
 | `qualification` | gVisor preflight 与生产结构检查 | Kubernetes、`RuntimeClass=runsc`、restricted launcher RBAC、专用 node pool | 已有 static tooling；真实多节点 L4～L6 仍 Not run。 |
 

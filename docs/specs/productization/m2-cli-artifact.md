@@ -43,10 +43,14 @@ Authorization、Receipt、If-Match、Location、trace、exact Operation target �
 不含签名 URL、completion proof 或 token。另一 fixture 覆盖 metadata -> content、exact digest 和最终文件。命令 parser
 覆盖 upload/get/read 的必需参数。
 
+fresh deterministic first Run P2 journey 已通过真实 Artifact Gateway、Artifact Data Worker 与 HTTPS S3/KMS dependency
+上传并读取 scheduler 所需 typed Plan、authoring 与 qualification Artifact，随后完成 Agent publication 与 Run。该证据
+覆盖真实 upload 主路径，但不替代下列故障矩阵。
+
 以下仍未完成：
 
 - prepare/complete 的 request-before-send journal、过期 target 重新 prepare 与 response-loss 精确恢复；
 - 真实 HTTPS object PUT 的 redirect/proxy/token 泄露、非 200、TLS、expiry 和 digest mismatch 负向 fixture；
-- 409/412/429、quarantined/rejected/deleted、truncated/oversized stream 和真实 Artifact Gateway + S3/KMS P1 journey。
+- 409/412/429、quarantined/rejected/deleted、truncated/oversized stream 和真实 public download journey。
 
 因此本文件只声明初始 Artifact lifecycle，不声明 M2 或 spec00～18 已完成。

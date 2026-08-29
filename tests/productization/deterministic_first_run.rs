@@ -1,13 +1,135 @@
 use chrono::{Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{env, fmt::Write as _, fs, path::Path, process::Command};
+use std::{
+    env,
+    fmt::Write as _,
+    fs::{self, OpenOptions},
+    net::TcpStream,
+    path::Path,
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration as StdDuration, Instant},
+};
 use tempfile::TempDir;
 
 const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
 const CONTRACT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+struct RestartedOrchestrationWorker(Child);
+
+impl Drop for RestartedOrchestrationWorker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn process_is_running(pid: u64) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn stop_orchestration_worker(project: &Path) {
+    let process_state: Value = serde_json::from_slice(
+        &fs::read(project.join(".insight/runtime/processes.json"))
+            .expect("runtime process state is readable"),
+    )
+    .expect("runtime process state is closed JSON");
+    let pid = process_state["processes"]["orchestration"]["pid"]
+        .as_u64()
+        .expect("orchestration PID");
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success()),
+        "orchestration worker accepts TERM"
+    );
+    let deadline = Instant::now() + StdDuration::from_secs(15);
+    while process_is_running(pid) && Instant::now() < deadline {
+        thread::sleep(StdDuration::from_millis(50));
+    }
+    assert!(
+        !process_is_running(pid),
+        "orchestration worker did not stop"
+    );
+}
+
+fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrchestrationWorker {
+    let workspace = insight
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("insight binary is inside workspace target directory");
+    let runtime = project.join(".insight/runtime");
+    let profile: Value = serde_json::from_slice(
+        &fs::read(runtime.join("profile.json")).expect("runtime profile is readable"),
+    )
+    .expect("runtime profile is closed JSON");
+    let port = profile["ports"]["orchestration_observability"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .expect("orchestration observability port");
+    let config_digest = profile["config_digests"]["orchestration"]
+        .as_str()
+        .expect("orchestration config digest");
+    let tls = runtime.join("tls");
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.join("logs/orchestration-restart.log"))
+        .expect("restart log is writable");
+    let stderr = log.try_clone().expect("restart log can be cloned");
+    let mut child = Command::new(workspace.join("target/release/platform-orchestration-worker"))
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_CONFIG",
+            runtime.join("config/orchestration.json"),
+        )
+        .env("PLATFORM_ORCHESTRATION_WORKER_CONFIG_DIGEST", config_digest)
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL",
+            "postgres://insight:insight@127.0.0.1:5432/insight_platform",
+        )
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CA_PATH",
+            tls.join("ca.pem"),
+        )
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH",
+            tls.join("orchestration-client.pem"),
+        )
+        .env(
+            "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH",
+            tls.join("orchestration-client-key.pem"),
+        )
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("replacement orchestration worker starts");
+    let address = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + StdDuration::from_secs(30);
+    loop {
+        if TcpStream::connect(&address).is_ok() {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("replacement status is readable") {
+            panic!("replacement orchestration worker exited before readiness: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replacement orchestration worker did not become ready"
+        );
+        thread::sleep(StdDuration::from_millis(50));
+    }
+    RestartedOrchestrationWorker(child)
+}
 
 fn canonical_bytes(value: &Value) -> Vec<u8> {
     serde_jcs::to_vec(value).expect("fixture is canonicalizable")
@@ -432,6 +554,75 @@ fn public_cli_deterministic_first_run() {
     assert_eq!(
         result["value"],
         json!({"kind": "inline", "value": {"message": "hello"}})
+    );
+    assert_eq!(result["schema_digest"], schema_digest);
+
+    stop_orchestration_worker(project);
+    let restart_request = json!({
+        "agent_id": agent_report["resource_id"],
+        "input": {
+            "classification": "internal",
+            "schema_digest": schema_digest,
+            "value": {"kind": "inline", "value": {"message": "after restart"}},
+        },
+        "deadline": (Utc::now() + Duration::minutes(5))
+            .to_rfc3339_opts(SecondsFormat::Micros, true),
+    });
+    let restart_request_path =
+        write_canonical(fixture.path(), "restart-run.json", &restart_request);
+    let restart_run = run_json(
+        insight,
+        &[
+            "run",
+            "create",
+            "--file",
+            restart_request_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    let restart_run_id = restart_run["run_id"].as_str().expect("restart Run ID");
+    let queued = run_json(
+        insight,
+        &[
+            "run",
+            "get",
+            restart_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(queued["state"], "queued");
+
+    let _replacement = restart_orchestration_worker(insight, project);
+    let watched = run_json_lines(
+        insight,
+        &[
+            "run",
+            "watch",
+            restart_run_id,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    let terminal = watched.last().expect("restart terminal watch record");
+    assert_eq!(terminal["kind"], "terminal");
+    assert_eq!(terminal["run"]["state"], "succeeded");
+    let result = run_json(
+        insight,
+        &[
+            "run",
+            "result",
+            restart_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        result["value"],
+        json!({"kind": "inline", "value": {"message": "after restart"}})
     );
     assert_eq!(result["schema_digest"], schema_digest);
 }

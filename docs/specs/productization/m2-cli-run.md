@@ -52,11 +52,15 @@ closed request 和 result digest 另有负向单元测试。
 control crash-window fixture 在服务端收到 pause 后丢弃响应，确认第二次 CLI 调用跳过 GET 并复用 exact Receipt/If-Match；
 authority 响应持久化后，第三次调用只读取 current Run，不创建第二个 mutation。
 
+fresh macOS P2 journey 使用真实 Gateway、PostgreSQL、Artifact 与 Orchestration roles 完成 deterministic first Run。
+测试随后停止唯一 Orchestration Worker，在 Worker 缺席时通过 public create/get 证明第二个 Run durable `queued`，并由
+同一配置和 workload identity 的替代 Worker 恢复；watch 通过 durable SSE 得到 `succeeded`，result 返回 exact Inline
+value。该 journey 不访问数据库业务状态，也不以进程内 fixture 代替 authority。
+
 本批尚不关闭 M2：
 
 - cursor expired/invalid、429/503、truncated/oversized/duplicate SSE frame 与 timeout 的完整负向矩阵尚未实现；
-- 真实 Gateway + fresh PostgreSQL + Orchestration Worker 的 first Run 和跨 worker restart 尚未形成 P1 journey；
 - terminal failure、409/412/429 与 result-not-ready 的 CLI fixture 尚未完成。
 
-因此该命令面是可测试的初始 public client，不是首次 Run 或 durable observation 的完成声明，也不改变 spec00～18
+因此该命令面已具备首次 Run 与应用 Worker durable restart 证据，但仍不是 M2 完成声明，也不改变 spec00～18
 Accepted/In Progress 状态。

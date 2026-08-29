@@ -2276,6 +2276,7 @@ fn stop_development_profile(workspace: &Path, root: &Path) -> Result<String, Cli
         "gateway-runtime",
         "gateway-management",
         "orchestration",
+        "registry-validation",
         "capability-native",
         "artifact-gateway",
         "artifact-data",

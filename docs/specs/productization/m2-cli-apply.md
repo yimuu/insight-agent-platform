@@ -84,7 +84,8 @@ report 且不访问网络。单独 fixture 覆盖成功 Operation envelope 和 4
 以下仍是 M2 未完成项：
 
 - Agent/其他七种 closure 的 checked fixture，以及 409/412/429、Operation failure/timeout 的完整 contract matrix；
-- Artifact upload/read、Run create/watch/control/result、Task resolve 及原始 curl lifecycle fixture；
-- fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 P1 journey，以及 worker restart 后的恢复观察。
+- Artifact read、Run control、Task resolve 及原始 curl lifecycle fixture；
+- fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 Policy/Agent publication、Run create/watch/result 与
+  Orchestration Worker restart 已形成 P2 journey；其余 Resource kinds 和失败矩阵仍未完成。
 
 因此本文件只描述已实现的 initial lifecycle，不是 M2 完成声明，也不改变 Platform v2 production L4～L6 状态。
