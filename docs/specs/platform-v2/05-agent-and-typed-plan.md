@@ -2,13 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-25 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
+
+> 2026-08-29 implementation feedback（CR-203）：public Agent Draft在publish前无法知道服务端将生成的Interface Revision ID。
+> current Typed Plan wire提升为v5，使用Draft内已验证的`interface_contract_digest`绑定Interface语义；publish原子生成的
+> Interface/Plan Revision ID只进入immutable Version、Deployment与Run binding。materialization必须同时重验同一Agent publish
+> batch、exact Version owner和contract digest，不能把digest当作可变head或compatibility selector。
 
 > 2026-08-24 implementation feedback（CR-180）：Run terminal接线时确认无字段的`Return`/`Raise`无法从冻结Plan确定
 > final value或safe Failure，而06要求Succeeded/Failed各自拥有typed terminal authority。CR-180将两者收紧为exact data-port
@@ -200,7 +205,7 @@ Agent Deployment将每个slot解析为exact resource Deployment并同时冻结�
 ```rust
 struct TypedPlan {
     plan_version: PlanVersion,
-    interface_revision_id: ResourceVersionId,
+    interface_contract_digest: Digest,
     entry_node_id: PlanNodeId,
     nodes: BTreeMap<PlanNodeId, PlanNode>,
     control_edges: Vec<ControlEdge>,
@@ -210,6 +215,11 @@ struct TypedPlan {
     semantic_digest: Digest,
 }
 ```
+
+`interface_contract_digest`必须等于同一Agent Draft的`AgentResourceSpec.contract_digest`。它只消除publication前的身份
+依赖，不替代exact Version identity：publish仍为Interface和Plan生成不同UUIDv7；Deployment必须绑定同一Agent、同一publish
+batch的exact Interface/Plan Revision；Run admission继续冻结这两个ID与semantic digest。materialization若发现owner、batch、
+digest或schema任一不一致，必须在创建Node/Job前fail closed。
 
 ### 8.1 可执行表达式闭包
 
@@ -375,7 +385,8 @@ Capability tool slots没有逐slot route字段，因此这些slot首版只允许
 输出必须是有界array；Loop的`condition`输出必须是non-null boolean。表达式所需input port是Node readiness条件的一部分。
 Map `item_port`必须是producer等于当前Map node的`NodeOutput` ref并冻结element schema digest；Compiler/publication必须从items
 array schema验证其element schema完全一致，不能在runtime从array digest猜测、复用array schema或接受caller声明。该wire变更将未发布
-Typed Plan `plan_version`提升为4，version 1/2/3不进入clean-cut target。`Return.value`必须在其词法Scope可达，schema digest必须等于
+Typed Plan `plan_version`提升为5，version 1/2/3/4不进入clean-cut target。v5保留v4全部external leaf与terminal
+port语义，并以`interface_contract_digest`消除publish前身份环。`Return.value`必须在其词法Scope可达，schema digest必须等于
 exact Agent Interface Revision的`output_schema.canonical_digest`；`Raise.failure`同样必须可达并等于该Interface的
 `error_schema` canonical digest，且物化正文必须能解码为平台safe `Failure` nominal type。Compiler/publication拒绝RunInput/NodeOutput
 owner不合法、schema不等、跨结构化region或无法在该terminal路径到达的port。
@@ -558,7 +569,7 @@ Timer、Signal 和 HumanTask 都是 durable wait。等待态不占 execution per
 
 ModelLoop 是 durable controller，不是一个隐藏的同步函数：
 
-ModelLoop的唯一machine wire是10.3的Plan v4 `ModelLoopNode`；本节不另定义含自由`messages`或运行时模板的旧node shape。
+ModelLoop的唯一machine wire是10.3的Plan v5 `ModelLoopNode`；本节不另定义含自由`messages`或运行时模板的旧node shape。
 Agent contract、exact Plan node语义和Prompt Asset来源均由已发布Agent Revision、Typed Plan与Deployment closure冻结，运行时
 只能将这些exact材料投影成11/16的canonical assembly block，不能从active head、自由模板或caller正文补猜。
 

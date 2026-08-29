@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-29 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-203 impact：增加public Agent authoring P1 fixture：调用方只持有Draft内容和Artifact，不能预知Version ID；publish后
+> Interface/Plan exact IDs不同且同属一个Agent publish batch，fresh Run materialization以Plan v5 contract digest与exact owner
+> 双重校验成功。wrong digest、cross-Agent Interface/Plan拼接、旧Plan v4均须在Node/Job写入前fail closed。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production
@@ -26,7 +30,7 @@
 > kill/reclaim continuity、Event/problem correlation和第三方零trace-header计数。`tracestate`/`baggage`、payload/identity canary必须在动态采集结果中
 > 为零；静态source扫描不能替代该门禁。
 
-> CR-181 impact：资格矩阵增加Plan v4 external leaf dispatch、candidate selection、result binding与crash recovery；静态manifest或
+> CR-181/203 impact：资格矩阵增加Plan v5 publication identity、external leaf dispatch、candidate selection、result binding与crash recovery；静态manifest或
 > repository单元fixture不能替代多进程owner-boundary证据。
 
 > CR-185 impact：L1/L2增加Skill frame canonicalization、截断/溢出/trailing bytes、path/digest/length mismatch与错误media拒绝；

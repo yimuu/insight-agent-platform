@@ -1,10 +1,35 @@
-# Platform v2 00～18 Cross-review（CR-202）
+# Platform v2 00～18 Cross-review（CR-203）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-29 |
-| 输入 | 00～18 live tree、implementation-plan、CR-202 Registry Validation closure review、ADR-0001、ADR-0002、AGENTS.md |
+| 输入 | 00～18 live tree、implementation-plan、CR-203 Agent publication identity review、ADR-0001、ADR-0002、AGENTS.md |
+
+### CR-203 Agent publication identity cycle cross-review
+
+productization fresh first-Run探针发现：public Agent Draft必须在`draft:publish`前已有immutable typed Plan Artifact；现有Plan v4
+又要求该Artifact嵌入publish时才由服务端生成的Agent Interface Revision UUIDv7。public route没有reserve-ID或caller-selected
+Version ID，因而任何只走`/v1`的客户端都无法构造首个合法Agent。这是05 owner contract与02/17 lifecycle之间的P0环。
+
+CR-203选择内容寻址消环：Typed Plan v5绑定Draft已知的`interface_contract_digest`。Interface/Plan Revision仍由同一publish
+command生成不同UUIDv7；Deployment与Run仍冻结exact Revision/Deployment ID。digest只证明Plan针对哪个Interface contract编译，
+不参与active-head查找、compatibility selection或跨Resource拼接。
+
+| Spec | CR-203 结论 |
+|---|---|
+| 00 | 保持In Progress；记录first-Run P0与clean-cut只接受Plan v5，不升级为Verified |
+| 01～04 | plane、Resource/Version/Deployment、Job/Receipt/Event、tenant/permission authority不变；不新增表、route、ID kind或current projection |
+| 05 | Typed Plan wire升为v5并绑定`interface_contract_digest`；publish后Plan Revision仍引用exact Interface Revision ID |
+| 06～07 | admission/materialization先验证exact Interface/Plan同owner、同publish batch，再比较contract digest；失败时Node/Job零写入 |
+| 08～16 | external leaf、Subagent、Capability、Skill、Context、MCP、Sandbox、Artifact、Model payload与owner transaction不变，只消费current Plan v5 |
+| 17 | public DTO不接受Version ID；publish响应仍返回server-generated Version matrix；Deployment create加强same-owner/batch验证 |
+| 18 | 增加fresh public authoring正向fixture及wrong digest、cross-Agent拼接、Plan v4负向fixture；L4～L6状态不变 |
+
+复核覆盖state ownership、ID与closed JSON、错误、transaction/Event/Receipt、permission、capacity、recovery和fixture。CR-203
+不增加table、aggregate、ResourceKind、JobKind、WorkClass、ComponentRole、Secret路径、public/internal route或兼容fallback；NATS仍
+只携带wake，PostgreSQL仍是Version/Deployment/Run authority。受影响合同按05→06～16→17→18完成复核并恢复Accepted，授权实现
+Plan v5、same-owner/batch repository guard和fresh first-Run evidence；它不授权伪造production L4～L6 passed状态。
 
 ### CR-202 Registry Validation closure impact review
 
@@ -46,7 +71,8 @@ manifest/preflight仍是当前产品化工作，未执行L4～L6也不因该交�
 复核覆盖state ownership、IDs/JSON/protobuf/OpenAPI schema、errors、transactions/events、permissions、capacity、failure recovery和fixtures。
 CR-201不新增或删除table、aggregate、route、ComponentRole、WorkClass、JobKind、Secret路径或runtime fallback；也不把OrbStack、Docker、
 静态Helm或CI candidate冒充为live L4～L6。基于commit `1efcbabc17af73bef9f21237eee65a5e6af78f19`，GitHub CI run
-`33182282744`与production-candidate run `33183969085`均成功，00～18推进Verified / CR-201，implementation plan的仓库范围关闭。
+`33182282744`与production-candidate run `33183969085`均成功；当时00～18曾推进Verified / CR-201并关闭仓库范围，
+该状态已由CR-202状态纠正与CR-203实现反馈撤回，不代表当前状态。
 
 ### CR-200 Artifact storage authority closure impact review
 

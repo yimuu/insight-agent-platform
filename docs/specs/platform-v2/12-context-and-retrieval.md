@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-26 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
@@ -10,7 +10,7 @@
 > CR-197 impact：ContextQuery/Dataset/subscription refresh Job复制其admission trace ID；MCP Host/Egress内部hop传播同一trace ID与新span。
 > Remote Context请求不向第三方转发平台trace header，query、URI、tenant/source identity仍不得成为trace attribute。
 
-> CR-181 impact：ContextQuery由05 Plan v4冻结Context slot、request/result port、item limit与resume；Scheduler、Context Worker和
+> CR-181/203 impact：ContextQuery由05 Plan v5冻结Context slot、request/result port、item limit与resume；Scheduler、Context Worker和
 > public API不得另行提供dataset head、schema、classification或continuation。
 
 > Persistence ruling：Context registry 使用共享 Resource；查询是共享 Invocation，物理工作是 Job，结果进入 run_values/
@@ -689,7 +689,7 @@ r331将Native query、Remote query与MCP subscription refresh按三个exact JobK
 独立owner/lane承担，不计入这些Worker backlog。固定role due/expired告警与runbook要求关联permit、PostgreSQL及对应adapter/Host依赖，禁止跨role
 搬移或手工重放remote I/O。目标13/13、strict Clippy和静态部署/observability/redaction门禁通过；production scrape、fault与L4/L5仍按18取证。
 
-CR-181 cross-review已确认Plan v4 Context dispatch/result binding并恢复Accepted；r234已补齐expired-lease L2 owner recovery，独立production
+CR-203 cross-review已确认Plan v5 publication identity不改变Context dispatch/result binding；r234已补齐expired-lease L2 owner recovery，独立production
 Context Worker及NativeCatalog受限部署已经接线，r240关闭其真实多进程kill-window；remote backend protocol L3 evidence仍待完成。
 
 CR-166已将CanonicalRegion和Context binding exact-match统一到02/12，Dataset build直接使用shared Job。本规范已

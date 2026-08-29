@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`06-durable-run-state-machine.md`](06-durable-run-state-machine.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`10-capability-invocation.md`](10-capability-invocation.md) |
 | 直接下游 | 17、18 |
@@ -13,7 +13,7 @@
 > Persistence ruling：ChildRunLink 是 Run/Node 的 typed relation 与 snapshot，不建立独立 lifecycle、transition、budget
 > 或 interaction 表族；历史关系写入共享 Run/Node/Event/Task/Quota 聚合。
 
-> CR-181：ChildAgentCall由05 Plan v4冻结slot、input/output、candidate route、budget limit、cancel/retry与resume；Scheduler
+> CR-181/203：ChildAgentCall由05 Plan v5冻结slot、input/output、candidate route、budget limit、cancel/retry与resume；Scheduler
 > 不能从测试fixture或caller body补充这些字段。04 exact selector决定候选，创建事务重验全部evidence。
 
 ## 1. 决策摘要
@@ -106,7 +106,7 @@ ChildAgentCall drive 在一个 PostgreSQL transaction 中：
 5. 写 parent NodeExecution Waiting continuation；
 6. 写 parent/child transitions 和 outbox。
 
-事务还必须重新加载Plan v4 node，确认slot/input/output/budget/cancel/retry/resume完全一致，按Scope词法链解析input与route，并重验04
+事务还必须重新加载Plan v5 node，确认slot/input/output/budget/cancel/retry/resume完全一致，按Scope词法链解析input与route，并重验04
 `CandidateSelectionEvidence`。child input正文和classification复制自已解析parent RunValue，command不得降低classification或提交另一份
 自由JSON。`logical child key`固定由`parent_node_execution_id + attempt_ordinal + selected_deployment_digest + input_content_digest`
 规范计算；caller不能选择。child entry node/key/interface来自selected exact Deployment closure，不能由Scheduler声明。
@@ -312,6 +312,6 @@ span 中。
 ## 20. 未决问题
 
 CR-166已确认child Run只继承parent允许的exact Deployment/ResourceVersion closure，不读取installation或release candidate。
-CR-181 cross-review已确认Plan v4 selection/dispatch/terminal-link闭合并恢复Accepted；parent/child transaction、quota、
+CR-203 cross-review已确认Plan v5 publication identity与既有selection/dispatch/terminal-link闭合并恢复Accepted；parent/child transaction、quota、
 cancel/recovery和schema fixture仍待实现。Detached background Agent
 尚未进入本合同，也没有隐藏发布开关。

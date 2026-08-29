@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-25 |
 | 依赖 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 07、08、10、15、16、17、18 |
@@ -18,7 +18,8 @@
 > 必须从当前Scope词法环境解析immutable RunValue，重验tenant/run/value/schema/content/classification并在可见正文上执行exact
 > Agent output/error schema校验后，才可提交Run terminal、Node/Job、Receipt/Event/Outbox与output引用。
 
-> CR-181：05 Plan v4冻结external leaf的slot、input/output、budget/deadline与wait payload。Scheduler不得用fixture常量或
+> CR-181/203：05 Plan v5冻结external leaf的slot、input/output、budget/deadline与wait payload，并以Interface contract
+> digest消除publish前身份环。Scheduler不得用fixture常量或
 > caller-supplied selected Deployment推进leaf；下述owner transaction必须重验exact Plan、RunBindings、Scope RunValue与04
 > CandidateSelectionEvidence。
 
@@ -395,7 +396,7 @@ CapabilityCall的同步停驻顺序固定为：Orchestration Attempt在Node Runn
 terminal winner关闭leaf permit、递减active work、写结果证据并把Node `Waiting -> Ready`。Approval拒绝不创建伪Attempt，
 但必须与拒绝回执和相同节点唤醒原子提交。
 
-Plan v4 external leaf的首次dispatch只有以下owner mutation：
+Plan v5 external leaf的首次dispatch只有以下owner mutation：
 
 - `ModelLoop`创建16的durable Model controller/首个Model Job；
 - `CapabilityCall`创建10的Invocation及其approval Task或首个Job；
@@ -403,7 +404,7 @@ Plan v4 external leaf的首次dispatch只有以下owner mutation：
 - `ChildAgentCall`按08原子创建ChildRunLink、child Run与child Orchestration Job；
 - `HumanTask`创建shared Task；`TimerWait/SignalWait`创建03唯一WakeContract Job。
 
-每条mutation锁定`Run -> Scope/Node -> Job -> leaf owner`，重新读取Plan v4 node、解析input/route RunValue、重验04 selection evidence，
+每条mutation锁定`Run -> Scope/Node -> Job -> leaf owner`，重新读取Plan v5 node、解析input/route RunValue、重验04 selection evidence，
 然后以同一first-winner事务把当前Orchestration Job terminal、释放其quota、把Node/Run置Waiting并写Receipt/Event/Outbox。mutation ID可以
 由Scheduler预分配，但slot、port、schema、classification、deadline、selected candidate、Task/Wake kind和resume target都必须从owner
 authority推导并重验，command不能自由声明。
@@ -587,6 +588,6 @@ Run/node ID 不进入 metric label。Trace span 可以携带 opaque IDs，但不
 ## 22. 未决问题
 
 CR-166已统一root current与child inherited exact binding合同，无installation/release中间层。CR-181 cross-review已确认external
-leaf owner transaction与Plan v4闭合并恢复Accepted；
+leaf owner transaction与Plan v5闭合并恢复Accepted；
 durable state、崩溃恢复与parent/child fixture仍待实现。public status的精简映射与SSE schema由17定义，
 不能改变这里的durable first-winner状态机。

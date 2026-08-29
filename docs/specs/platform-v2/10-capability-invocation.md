@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-25 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
@@ -10,7 +10,7 @@
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
 
-> CR-181 impact：Agent Plan发起的Invocation只能由05 Plan v4 CapabilityCall owner mutation创建；public/internal caller不得提交
+> CR-181/203 impact：Agent Plan发起的Invocation只能由05 Plan v5 CapabilityCall owner mutation创建；public/internal caller不得提交
 > selected Deployment、input/output port、schema、deadline、retry或resume target。
 
 ## 1. 决策摘要
@@ -196,7 +196,7 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 
 ## 14. 未决问题
 
-CR-181 cross-review已确认Plan v4 dispatch/result binding并恢复Accepted。fresh PostgreSQL 16 r208已通过Native exact manifest双进程
+CR-203 cross-review已确认Plan v5 publication identity不改变dispatch/result binding。fresh PostgreSQL 16 r208已通过Native exact manifest双进程
 kill/expired-lease recovery、quota settlement与non-idempotent reconciliation L3；r217进一步以真实Remote Worker+mTLS Egress RPC分别
 通过HTTP/gRPC错manifest零claim/零外部调用、响应后commit-window kill及第二进程只收敛到non-idempotent reconciliation且不重放远端
 调用。MCP Host production binary已通过双mTLS、到达Egress后强杀、`CompletionUnknown`及重启安全重放的进程fixture；fresh PostgreSQL

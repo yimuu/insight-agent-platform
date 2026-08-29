@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-25 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -10,7 +10,7 @@
 > CR-197 impact：ModelTurn/Job复制Run trace identity，tool loop所有Turn/Invocation保持同一trace ID并使用新span。Egress调用provider时剥离
 > 平台内部trace header；prompt/response/tool arguments、provider URL与tenant/model高基数identity仍不得进入trace attribute。
 
-> CR-181 impact：ModelLoop由05 Plan v4冻结model/skill/capability slots、input/output、route和全部budget；Model Worker不能从
+> CR-181/203 impact：ModelLoop由05 Plan v5冻结model/skill/capability slots、input/output、route和全部budget；Model Worker不能从
 > prompt/tool intent扩大bindings、budget或选择另一个output port。
 
 ## 1. 决策摘要
@@ -159,7 +159,7 @@ digest；不得把response envelope标成Agent output schema后直接暴露给Sc
 terminal winner事务必须验证ModelTurn/Job当前fence、response digest/schema/safety、usage/budget和Receipt，然后
 创建RunValue、推进ModelTurn、关闭Job、settle quota、追加Event/Outbox并唤醒Node。不涉及Artifact Ready或Link。
 
-当ModelTurn属于Plan v4 ModelLoop时，创建事务重验model route的04 selection evidence，并只装配node列出的exact Skill/Capability
+当ModelTurn属于Plan v5 ModelLoop时，创建事务重验model route的04 selection evidence，并只装配node列出的exact Skill/Capability
 slots。最终structured output只能写node声明的`output` RunValue，终结当前ModelLoop Node并按Plan `resume`创建目标NodeExecution及唯一
 Orchestration Job；不得把同一ModelLoop Node置回Ready。tool intent仍经10创建Invocation。
 Model Worker不能扩大tool集合、修改budget/output port或把ModelTurn terminal直接当Run terminal。
@@ -242,7 +242,7 @@ production-equivalent saturation/fault qualification分层运行。开发fixture
 
 ## 17. 未决问题
 
-CR-181 cross-review已确认Plan v4 ModelLoop dispatch/tool/result并恢复Accepted。fresh PostgreSQL 16 r233已完成production Model Worker
+CR-203 cross-review已确认Plan v5 publication identity不改变ModelLoop dispatch/tool/result。fresh PostgreSQL 16 r233已完成production Model Worker
 到mTLS Egress/NATS的provider process L3：错manifest在attempt/quota与外部I/O前fail closed；Provider响应后进程强杀由第二进程按共享
 Job过期租约合同恢复，保守结算未知尝试并安全重放，最终只提交一个structured Inline结果。Model tool-result整链与Context协同L3仍待完成。
 

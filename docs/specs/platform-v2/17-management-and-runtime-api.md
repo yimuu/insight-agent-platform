@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-203 impact：public Agent create/draft-update/publish DTO与route不新增caller-selected Version ID。Agent Draft提交的typed
+> Plan v5绑定`interface_contract_digest`；publish在同一command中生成Interface/Plan UUIDv7并保持原有响应矩阵。Deployment
+> create必须验证两个exact Revision属于同一tenant、同一Agent与同一publish batch，防止以digest匹配替代exact owner identity。
 
 > CR-200 impact：public及producer-facing internal DTO均不增加storage locator/binding/encryption authority字段。owner admission从exact
 > `ArtifactIo` v3冻结选择，Data Worker内部post-write命令才携带加密locator与backend evidence。

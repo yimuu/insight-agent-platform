@@ -1,12 +1,18 @@
-# Platform v2 四阶段实现计划（CR-201）
+# Platform v2 四阶段实现计划（CR-203）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Complete / repository scope closed; external environment qualification not run |
+| 状态 | In Progress / CR-203 implementation authorized |
 | 日期 | 2026-08-29 |
-| 合同输入 | 00～18、cross-review CR-201、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-203、ADR-0001、ADR-0002、AGENTS.md |
 
-> CR-201 completion decision：Phase 1～4按仓库交付范围关闭。真实多节点Kubernetes、`RuntimeClass=runsc`、production telemetry、
+> 2026-08-29 CR-203：fresh public first-Run发现Plan v4预先依赖server-generated Interface Revision ID。00～18已完成
+> identity/digest/owner/batch/error/transaction/permission/recovery/fixture cross-review并恢复实现授权。实现必须升级Plan v5，
+> 以Agent Draft contract digest消环，同时在Deployment/materialization重验exact Interface/Plan同owner与同publish batch；禁止
+> caller-selected Version ID、预写数据库、placeholder ID或兼容旧Plan wire。
+
+> CR-201 historical completion decision：Phase 1～4曾按仓库交付范围关闭；该状态已被CR-202/CR-203撤回，当前Plan v5与
+> fresh public first-Run仍需实现。真实多节点Kubernetes、`RuntimeClass=runsc`、production telemetry、
 > mixed-load/soak、backup/restore与人工GitOps promotion没有执行，也不再作为本实现计划的剩余任务。对应profile、validator、preflight、workflow
 > 与runbook保留给未来部署方；除非其在目标环境实际运行，不得声称production-ready或将L4～L6标记passed。
 

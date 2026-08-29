@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -96,12 +96,12 @@ count、Loop condition或Compute output。表达式求值消耗Orchestration本�
 Scheduler可携带事务外物化的value正文，但不能决定Compute output classification；repository在提交事务从exact input RunValue rows
 按05 lattice规则重算effective classification，空input闭包使用`Internal`，并把同一结果写入全部Compute output。
 
-Return/Raise使用05当前Plan v4（CR-180首次引入于v3）冻结的exact terminal port。Scheduler只能请求物化该port解析出的immutable RunValue正文并生成bounded
+Return/Raise使用05当前Plan v5（CR-180首次引入于v3）冻结的exact terminal port。Scheduler只能请求物化该port解析出的immutable RunValue正文并生成bounded
 terminal evidence；不能选择另一个value、声明schema/classification或把Worker outcome直接当Run terminal。owner transaction必须重新解析
 当前Scope环境、重验RunValue及Interface schema，并以同一提交关闭Node/Job/root Scope/Run及写Receipt/Event/Outbox。Artifact Data RPC
 deadline不得越过Job/Run deadline，读取前后沿用exact lease与Run binding双重授权。
 
-External leaf使用05 Plan v4。Scheduler读取node的exact input/route port，经同一brokered RunValue read路径获得正文，执行04 closed
+External leaf使用05 Plan v5。Scheduler读取node的exact input/route port，经同一brokered RunValue read路径获得正文，执行04 closed
 candidate selector并生成`CandidateSelectionEvidence`，再调用06按leaf kind区分的owner command。Scheduler只负责纯选择和command transport；
 repository重新加载exact Plan/Policy/binding并重验evidence。Task definition、child budget、retry、timeout、output port与resume target不得由
 Scheduler配置文件、NATS payload或Worker outcome补充。dispatch提交后原Orchestration Job已terminal，Scheduler crash/replay只能得到同一

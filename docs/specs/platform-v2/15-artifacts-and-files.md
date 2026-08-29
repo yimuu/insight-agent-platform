@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
@@ -21,7 +21,7 @@
 > CR-197 impact：Gateway/Data Worker/Maintenance与Sandbox/Model/Scheduler调用传播同一trace ID；storage SDK/object request不接收平台内部
 > correlation header。object key、upload target/proof、locator和正文禁止进入span attribute；Artifact/Blob/Grant状态仍是唯一业务authority。
 
-> CR-181 impact：Plan v4 input/route/result为Artifact-backed ValueRef时仍走Artifact Data Worker的brokered exact RunValue read/write；
+> CR-181/203 impact：Plan v5 input/route/result为Artifact-backed ValueRef时仍走Artifact Data Worker的brokered exact RunValue read/write；
 > Artifact metadata不能替代RunValue schema/content/classification authority，也不能决定selected candidate或resume target。
 
 > CR-185 impact：Skill package使用11冻结的`insight.skill-package/1`无压缩frame与专用verified media type；Artifact

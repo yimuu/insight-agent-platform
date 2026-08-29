@@ -2,11 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-202 |
+| 状态 | In Progress / CR-203 |
 | 日期 | 2026-08-29 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-29 implementation feedback（CR-203）：productization fresh first-Run 探针确认public Agent Draft必须在
+> publish前提交typed Plan Artifact，但Plan v4要求嵌入仅在publish时由服务端生成的Agent Interface Revision ID，形成
+> 无合法public命令可闭合的身份环。CR-203将current Typed Plan wire提升为v5，以Draft已知且内容寻址的
+> `interface_contract_digest`替代预生成Revision ID；publish仍原子生成Interface/Plan Revision，Deployment与Run仍冻结exact ID。
+> 本变更不增加route、table、aggregate、Job、role或兼容wire，v1～v4均不进入clean-cut target。
 
 > 2026-08-29 status correction（CR-202）：此前将00～18标作`Verified / CR-201`不够诚实；真实多节点Kubernetes、
 > `RuntimeClass=runsc`、production telemetry、容量/混沌/恢复、持续soak与人工GitOps promotion仍未执行，且
@@ -191,25 +197,25 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Verified / CR-201 | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Verified / CR-201 | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Verified / CR-201 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Verified / CR-201 | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Verified / CR-201 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Verified / CR-201 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Verified / CR-201 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Verified / CR-201 | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Verified / CR-201 | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Verified / CR-201 | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Verified / CR-201 | 调用协议、幂等、同步快路径、异步恢复 |
-| 11 | [`11-skill-system.md`](11-skill-system.md) | Verified / CR-201 | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Verified / CR-201 | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Verified / CR-201 | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Verified / CR-201 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Verified / CR-201 | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Verified / CR-201 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Verified / CR-201 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Verified / CR-201 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 00 | `00-overview.md` | In Progress / CR-203 | 总体路线、规范模板、依赖和完成定义 |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-201（CR-203 reviewed） | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-202（CR-203 reviewed） | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-202（CR-203 reviewed） | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-202（CR-203 reviewed） | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-203 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-203 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-203 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-203 | Child Run、父子通信、取消传播和循环限制 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-203 | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-203 | 调用协议、幂等、同步快路径、异步恢复 |
+| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-203 | Skill Package、发现、选择、绑定和依赖 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-203 | ContextSource、检索、引用和数据权限 |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203 | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-203 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-203 | S3、内容寻址、上传、生命周期和内容安全 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-203 | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-203 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-203 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
@@ -355,7 +361,8 @@ tenant/permission/quota、lease fence、Artifact content integrity及Sandbox物�
 当前checked-in persistence baseline是23张总表/22张业务表、schema contract v8和单一`0001_platform_baseline.sql`。仓库有
 CR-171之前候选架构的多类functional fixture；只有已按CR-171重新对照且通过适用门禁的批次可计为实现证据，尚不能据此宣称全部phase完成。
 
-截至2026-08-25，Plan v4的ChildAgent、HumanTask、TimerWait与SignalWait已接入PostgreSQL owner transaction和durable Plan store。
+截至2026-08-25，历史Plan v4的ChildAgent、HumanTask、TimerWait与SignalWait已接入PostgreSQL owner transaction和durable Plan store；
+CR-203要求这些语义迁移到current Plan v5后重新通过同级证据，不能把v4通过结果当作v5完成。
 SignalWait的exact key、可选payload schema/摘要、immutable RunValue、当前Scope绑定、首次胜出和Receipt重放，以及Timer due/Signal
 timeout的typed Job scheduling与critical-control bounded scan已通过fresh PostgreSQL 16 r88 L2 fixture；Timer另已在fresh PostgreSQL 16
 r113完成claim、durable park、独立safety到期唤醒、continuation claim、Return物化与Run终态的真实协调器L3链路；r181进一步完成
@@ -700,5 +707,6 @@ CR-171把public Artifact使用的Retention与ArtifactIo default revision加入te
 manifest、RPC、Helm和资格入口删除或隔离；首版闭包保持WASI/gVisor、三角色Artifact和最小`/v1`，且禁止恢复host execution、plain runc或
 第二持久状态权威。
 
-[implementation-plan.md](implementation-plan.md)已按CR-201关闭仓库范围，00～18为Verified。该状态不声明production拓扑、容量/SLO、真实
+[implementation-plan.md](implementation-plan.md)保留历史CR-201仓库范围记录；当前00为In Progress、01～18为Accepted，均不得标作Verified。
+CR-203 Plan v5实现、productization first Run和其余仓库门禁尚未完成。该状态不声明production拓扑、容量/SLO、真实
 runsc、restore、promotion或clean cut已经通过；cutover前current behavior继续以[docs/current](../../current/README.md)为准。

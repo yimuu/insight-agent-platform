@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
+| 状态 | Accepted / CR-203 |
 | 日期 | 2026-08-20 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
 
-> CR-181 impact：05 Plan v4的CapabilityCall冻结slot、input/output、candidate route与retry limit；Capability Interface/
+> CR-181/203 impact：05 Plan v5的CapabilityCall冻结slot、input/output、candidate route与retry limit；Capability Interface/
 > Deployment必须为publication和owner transaction提供exact input/output schema及04 selector closure，不能由Invocation caller补充。
 
 > CR-182：Capability/Model/Skill candidate binding的Selection Policy Revision必须解码为04 schema v1 document；空Policy document、
