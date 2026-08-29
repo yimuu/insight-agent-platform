@@ -4,7 +4,16 @@
 //! connect to an authority or execute worker logic; each generated document is consumed and
 //! revalidated by the corresponding independent Platform process.
 
-use insight_platform_contracts::canonical_digest;
+use super::fresh_resource_id;
+use insight_platform_capability_worker::{
+    builtin_json_codec_module_digest, builtin_json_grpc_error_mapping_digest,
+    builtin_json_grpc_protobuf_contract_digest, builtin_json_grpc_request_mapping_digest,
+    builtin_json_grpc_response_mapping_digest, builtin_json_http_error_mapping_digest,
+    builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
+    builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
+    BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
+};
+use insight_platform_contracts::{canonical_digest, ResourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -18,6 +27,9 @@ pub(crate) const SECURITY_AUTHORITY_CONFIG_FILE: &str = "security-authority.json
 pub(crate) const EGRESS_BROKER_CONFIG_FILE: &str = "egress-broker.json";
 pub(crate) const MODEL_WORKER_CONFIG_FILE: &str = "model-worker.json";
 pub(crate) const CONTEXT_REMOTE_CONFIG_FILE: &str = "context-remote.json";
+pub(crate) const MCP_HOST_CONFIG_FILE: &str = "mcp-host.json";
+pub(crate) const MCP_RESOURCE_HOST_CONFIG_FILE: &str = "mcp-resource-host.json";
+pub(crate) const CAPABILITY_REMOTE_CONFIG_FILE: &str = "capability-remote.json";
 pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority.pem";
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
@@ -30,20 +42,39 @@ pub(crate) const MODEL_WORKER_CLIENT_CERTIFICATE_FILE: &str = "model-worker-clie
 pub(crate) const MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "model-worker-client-key.pem";
 pub(crate) const CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE: &str = "context-worker-client.pem";
 pub(crate) const CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "context-worker-client-key.pem";
+pub(crate) const MCP_HOST_CERTIFICATE_FILE: &str = "mcp-host.pem";
+pub(crate) const MCP_HOST_PRIVATE_KEY_FILE: &str = "mcp-host-key.pem";
+pub(crate) const MCP_RESOURCE_HOST_CERTIFICATE_FILE: &str = "mcp-resource-host.pem";
+pub(crate) const MCP_RESOURCE_HOST_PRIVATE_KEY_FILE: &str = "mcp-resource-host-key.pem";
+pub(crate) const MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE: &str = "mcp-host-egress-client.pem";
+pub(crate) const MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE: &str = "mcp-host-egress-client-key.pem";
+pub(crate) const MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE: &str =
+    "mcp-resource-egress-client.pem";
+pub(crate) const MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE: &str =
+    "mcp-resource-egress-client-key.pem";
+pub(crate) const CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE: &str = "capability-remote-client.pem";
+pub(crate) const CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE: &str =
+    "capability-remote-client-key.pem";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
 pub(crate) const MODEL_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/model-worker";
 pub(crate) const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
+pub(crate) const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
+pub(crate) const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/capability-worker";
 
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 6] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 9] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
     "platform-egress-broker",
     "platform-model-worker",
     "platform-remote-context-worker",
+    "platform-mcp-host",
+    "platform-mcp-resource-host",
+    "platform-capability-remote-worker",
 ];
 
 pub(crate) struct ProcessLaunch {
@@ -93,6 +124,16 @@ pub(crate) struct PortBindings {
     pub(crate) model_worker_observability: u16,
     #[serde(default = "default_remote_context_worker_observability_port")]
     pub(crate) remote_context_worker_observability: u16,
+    #[serde(default = "default_mcp_host_port")]
+    pub(crate) mcp_host: u16,
+    #[serde(default = "default_mcp_host_observability_port")]
+    pub(crate) mcp_host_observability: u16,
+    #[serde(default = "default_mcp_resource_host_port")]
+    pub(crate) mcp_resource_host: u16,
+    #[serde(default = "default_mcp_resource_host_observability_port")]
+    pub(crate) mcp_resource_host_observability: u16,
+    #[serde(default = "default_capability_remote_observability_port")]
+    pub(crate) capability_remote_observability: u16,
 }
 
 impl PortBindings {
@@ -106,6 +147,11 @@ impl PortBindings {
             egress_broker_observability: next()?,
             model_worker_observability: next()?,
             remote_context_worker_observability: next()?,
+            mcp_host: next()?,
+            mcp_host_observability: next()?,
+            mcp_resource_host: next()?,
+            mcp_resource_host_observability: next()?,
+            capability_remote_observability: next()?,
         })
     }
 
@@ -119,6 +165,11 @@ impl PortBindings {
             egress_broker_observability: default_egress_broker_observability_port(),
             model_worker_observability: default_model_worker_observability_port(),
             remote_context_worker_observability: default_remote_context_worker_observability_port(),
+            mcp_host: default_mcp_host_port(),
+            mcp_host_observability: default_mcp_host_observability_port(),
+            mcp_resource_host: default_mcp_resource_host_port(),
+            mcp_resource_host_observability: default_mcp_resource_host_observability_port(),
+            capability_remote_observability: default_capability_remote_observability_port(),
         }
     }
 }
@@ -137,6 +188,26 @@ const fn default_model_worker_observability_port() -> u16 {
 
 const fn default_remote_context_worker_observability_port() -> u16 {
     19_102
+}
+
+const fn default_mcp_host_port() -> u16 {
+    19_103
+}
+
+const fn default_mcp_host_observability_port() -> u16 {
+    19_104
+}
+
+const fn default_mcp_resource_host_port() -> u16 {
+    19_105
+}
+
+const fn default_mcp_resource_host_observability_port() -> u16 {
+    19_106
+}
+
+const fn default_capability_remote_observability_port() -> u16 {
+    19_107
 }
 
 impl Default for PortBindings {
@@ -162,6 +233,51 @@ pub(crate) fn initial_configs(
     });
     let model_manifest_digest = canonical_digest(&model_manifest)
         .expect("the closed local Model worker manifest is canonical JSON");
+    let capability_http_codecs = vec![json!({
+        "codec_id": BUILTIN_JSON_CODEC_ID,
+        "codec_version": BUILTIN_JSON_CODEC_VERSION,
+        "module_digest": builtin_json_codec_module_digest(),
+        "worker_protocol_version": 1,
+        "descriptor_digest": closed_local_digest("capability-http-descriptor"),
+        "protocol_contract_digest": builtin_json_http_protocol_contract_digest(),
+        "request_mapping_digest": builtin_json_http_request_mapping_digest(),
+        "response_mapping_digest": builtin_json_http_response_mapping_digest(),
+        "error_mapping_digest": builtin_json_http_error_mapping_digest(),
+    })];
+    let capability_grpc_codecs = vec![json!({
+        "codec_id": BUILTIN_JSON_CODEC_ID,
+        "codec_version": BUILTIN_JSON_CODEC_VERSION,
+        "module_digest": builtin_json_codec_module_digest(),
+        "worker_protocol_version": 1,
+        "descriptor_digest": closed_local_digest("capability-grpc-descriptor"),
+        "protobuf_contract_digest": builtin_json_grpc_protobuf_contract_digest(),
+        "service_name": "insight.fixture.v1.Lookup",
+        "method_name": "Get",
+        "request_mapping_digest": builtin_json_grpc_request_mapping_digest(),
+        "response_mapping_digest": builtin_json_grpc_response_mapping_digest(),
+        "error_mapping_digest": builtin_json_grpc_error_mapping_digest(),
+    })];
+    let capability_mcp_codecs = vec![json!({
+        "codec_id": BUILTIN_JSON_CODEC_ID,
+        "codec_version": BUILTIN_JSON_CODEC_VERSION,
+        "module_digest": builtin_json_codec_module_digest(),
+        "worker_protocol_version": 1,
+        "descriptor_digest": closed_local_digest("capability-mcp-descriptor"),
+        "remote_tool_name": "fixture_lookup",
+        "remote_input_schema_digest": closed_local_digest("capability-mcp-input-schema"),
+        "output_mapping_digest": builtin_json_mcp_output_mapping_digest(),
+        "protocol_profile_id": fresh_resource_id(ResourceKind::PolicyRevision),
+        "protocol_profile_digest": closed_local_digest("capability-mcp-protocol-profile"),
+        "discovery_semantic_evidence_digest": closed_local_digest("capability-mcp-discovery"),
+    })];
+    let capability_closure = json!({
+        "schema_version": 1,
+        "http": capability_http_codecs,
+        "grpc": capability_grpc_codecs,
+        "mcp": capability_mcp_codecs,
+    });
+    let capability_adapter_digest = canonical_digest(&capability_closure)
+        .expect("the closed local remote Capability codec closure is canonical JSON");
     BTreeMap::from([
         (
             "context-native".to_owned(),
@@ -392,7 +508,109 @@ pub(crate) fn initial_configs(
                 }),
             ),
         ),
+        (
+            "mcp-host".to_owned(),
+            (
+                MCP_HOST_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "listen_address": loopback_address(ports.mcp_host),
+                    "observability_listen_address": loopback_address(ports.mcp_host_observability),
+                    "tls_server_name": "localhost",
+                    "maximum_rpc_message_bytes": 1048576,
+                    "maximum_in_flight_requests": 8,
+                    "egress": {
+                        "endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_metadata_bytes": 65536,
+                        "maximum_rpc_payload_bytes": 1048576,
+                    },
+                    "drain_grace_milliseconds": 30000,
+                }),
+            ),
+        ),
+        (
+            "mcp-resource-host".to_owned(),
+            (
+                MCP_RESOURCE_HOST_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "listen_address": loopback_address(ports.mcp_resource_host),
+                    "observability_listen_address": loopback_address(ports.mcp_resource_host_observability),
+                    "maximum_rpc_message_bytes": 1048576,
+                    "maximum_in_flight_requests": 8,
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "egress": {
+                        "endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_metadata_bytes": 65536,
+                        "maximum_rpc_payload_bytes": 1048576,
+                    },
+                    "drain_grace_milliseconds": 30000,
+                }),
+            ),
+        ),
+        (
+            "capability-remote".to_owned(),
+            (
+                CAPABILITY_REMOTE_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.capability_remote_observability),
+                    "worker_manifest": {
+                        "manifest_version": 1,
+                        "worker_role": "capability.remote",
+                        "work_class": "capability_remote",
+                        "adapter_runtime_digest": capability_adapter_digest,
+                        "protocol_version": 1,
+                        "max_concurrency": 4,
+                        "critical_control_reserved_slots": 1,
+                    },
+                    "installed_http_codecs": capability_closure["http"],
+                    "installed_grpc_codecs": capability_closure["grpc"],
+                    "installed_mcp_codecs": capability_closure["mcp"],
+                    "database": {
+                        "business_max_connections": 4,
+                        "critical_control_max_connections": 2,
+                        "process_connection_budget": 6,
+                        "acquire_timeout_milliseconds": 5000,
+                    },
+                    "egress": {
+                        "endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_metadata_bytes": 65536,
+                        "maximum_rpc_payload_bytes": 1048576,
+                    },
+                    "mcp_host": {
+                        "endpoint": format!("https://localhost:{}/", ports.mcp_host),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_message_bytes": 1048576,
+                    },
+                    "timing": {
+                        "initial_scan_delay_milliseconds": 0,
+                        "receipt_ttl_milliseconds": 60000,
+                        "safety_scan_milliseconds": 250,
+                        "claim_failure_backoff_milliseconds": 100,
+                        "drain_grace_milliseconds": 30000,
+                    },
+                }),
+            ),
+        ),
     ])
+}
+
+fn closed_local_digest(kind: &str) -> String {
+    canonical_digest(&json!({"schema_version": 1, "kind": kind}))
+        .expect("the closed local digest input is canonical JSON")
 }
 
 fn common_egress_limits(maximum_in_flight: usize) -> Value {
@@ -706,6 +924,218 @@ pub(crate) fn initial_process_launches(
             ],
             extra_environment: Vec::new(),
         },
+        ProcessLaunch {
+            role: "mcp-host",
+            binary: binary(INITIAL_BINARY_NAMES[6]),
+            ready_address: loopback_address(ports.mcp_host_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MCP_HOST_CONFIG",
+                    paths
+                        .configuration
+                        .join(MCP_HOST_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_CONFIG_DIGEST",
+                    config_digests["mcp-host"].clone(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_SERVER_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_HOST_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_SERVER_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_HOST_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_HOST_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "mcp-resource-host",
+            binary: binary(INITIAL_BINARY_NAMES[7]),
+            ready_address: loopback_address(ports.mcp_resource_host_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_CONFIG",
+                    paths
+                        .configuration
+                        .join(MCP_RESOURCE_HOST_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_CONFIG_DIGEST",
+                    config_digests["mcp-resource-host"].clone(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_SERVER_CLIENT_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_SERVER_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_RESOURCE_HOST_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_SERVER_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_RESOURCE_HOST_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_RESOURCE_HOST_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "capability-remote",
+            binary: binary(INITIAL_BINARY_NAMES[8]),
+            ready_address: loopback_address(ports.capability_remote_observability),
+            environment: vec![
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(CAPABILITY_REMOTE_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST",
+                    config_digests["capability-remote"].clone(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
     ]
 }
 
@@ -732,6 +1162,11 @@ mod tests {
             egress_broker_observability: 31_006,
             model_worker_observability: 31_007,
             remote_context_worker_observability: 31_008,
+            mcp_host: 31_009,
+            mcp_host_observability: 31_010,
+            mcp_resource_host: 31_011,
+            mcp_resource_host_observability: 31_012,
+            capability_remote_observability: 31_013,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -797,6 +1232,11 @@ mod tests {
             egress_broker_observability: 31_006,
             model_worker_observability: 31_007,
             remote_context_worker_observability: 31_008,
+            mcp_host: 31_009,
+            mcp_host_observability: 31_010,
+            mcp_resource_host: 31_011,
+            mcp_resource_host_observability: 31_012,
+            capability_remote_observability: 31_013,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -805,6 +1245,9 @@ mod tests {
             ("egress-broker".to_owned(), digest('d')),
             ("model-worker".to_owned(), digest('e')),
             ("context-remote".to_owned(), digest('f')),
+            ("mcp-host".to_owned(), digest('1')),
+            ("mcp-resource-host".to_owned(), digest('2')),
+            ("capability-remote".to_owned(), digest('3')),
         ]);
         let launches = initial_process_launches(
             ProcessPaths {
@@ -831,7 +1274,10 @@ mod tests {
                 "security-authority",
                 "egress-broker",
                 "model-worker",
-                "context-remote"
+                "context-remote",
+                "mcp-host",
+                "mcp-resource-host",
+                "capability-remote"
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
@@ -840,6 +1286,9 @@ mod tests {
         assert_eq!(launches[3].ready_address, "127.0.0.1:31006");
         assert_eq!(launches[4].ready_address, "127.0.0.1:31007");
         assert_eq!(launches[5].ready_address, "127.0.0.1:31008");
+        assert_eq!(launches[6].ready_address, "127.0.0.1:31010");
+        assert_eq!(launches[7].ready_address, "127.0.0.1:31012");
+        assert_eq!(launches[8].ready_address, "127.0.0.1:31013");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
@@ -865,6 +1314,15 @@ mod tests {
         assert!(launches[5].environment.iter().any(|(name, value)| *name
             == "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/context-worker-client.pem"));
+        assert!(launches[6].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MCP_HOST_EGRESS_CERT_PATH"
+            && value == "/project/runtime/tls/mcp-host-egress-client.pem"));
+        assert!(launches[7].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MCP_RESOURCE_HOST_SERVER_CERT_PATH"
+            && value == "/project/runtime/tls/mcp-resource-host.pem"));
+        assert!(launches[8].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH"
+            && value == "/project/runtime/tls/capability-remote-client.pem"));
     }
 
     #[test]
@@ -880,5 +1338,10 @@ mod tests {
         assert_eq!(ports.egress_broker_observability, 19_100);
         assert_eq!(ports.model_worker_observability, 19_101);
         assert_eq!(ports.remote_context_worker_observability, 19_102);
+        assert_eq!(ports.mcp_host, 19_103);
+        assert_eq!(ports.mcp_host_observability, 19_104);
+        assert_eq!(ports.mcp_resource_host, 19_105);
+        assert_eq!(ports.mcp_resource_host_observability, 19_106);
+        assert_eq!(ports.capability_remote_observability, 19_107);
     }
 }

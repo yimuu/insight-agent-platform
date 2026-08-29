@@ -132,6 +132,16 @@ PostgreSQL预算与动态 observability port；Model 还冻结两个现有 provi
 NATS dependency metrics 为 success=1/failure=0。探针没有伪造 Model/Context Job，因此 Egress operation counter 保持 0；
 这只证明进程配置、PostgreSQL schema、NATS transport 与 Egress TLS channel closure，不证明黄金场景的 provider dispatch。
 
+MCP Host、MCP Resource Host 与 Remote Capability Worker 已加入同一 full-only closure。CLI 为两个 Host 分配独立
+ServerAuth 证书，并为其 Egress 调用签发 exact MCP Host workload URI 的独立 ClientAuth 证书；Remote Capability 使用
+exact Capability Worker workload URI 的 ClientAuth 证书同时连接 Egress 与 MCP Host。三个进程的 closed config、动态
+RPC/observability port、PostgreSQL pool 和配置 digest 均由 profile 固定，Remote Capability 的 HTTP/gRPC/MCP builtin
+codec digest 直接复用 capability-worker 的 authority 函数，不在 CLI 手工复制常量。fresh PostgreSQL/LocalStack 探针按
+Security -> Egress -> MCP -> Capability 顺序启动后，两个 MCP Host 与 Remote Capability 均 ready；移除 MCP Host 后，
+Remote Capability 在发布 readiness 前立即以 `MCP Host is unavailable` 失败，恢复 exact mTLS Host 后才重新 ready。
+该探针证明启动依赖和身份边界闭合，但空 endpoint catalog 仍是 deny-all：尚未证明 remote Capability/MCP 实际 dispatch，
+MCP discovery/subscription worker、一次受监督 `full` journey 与 WASI 也仍未完成。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

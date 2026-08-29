@@ -2365,6 +2365,7 @@ dependencies = [
  "base64",
  "chrono",
  "insight-platform-api",
+ "insight-platform-capability-worker",
  "insight-platform-contracts",
  "jsonwebtoken",
  "rcgen",

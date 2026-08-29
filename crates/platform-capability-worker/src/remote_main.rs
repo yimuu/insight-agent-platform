@@ -528,7 +528,7 @@ async fn run() -> Result<(), ProcessError> {
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
     let mcp_host: Arc<dyn McpHostClient> = Arc::new(McpHostGrpcClient::new(
-        connect_mcp_host(&config)?,
+        connect_mcp_host(&config).await?,
         config.mcp_host_rpc_limits()?,
     ));
     let mcp_resolver: Arc<dyn McpExecutionContractResolver> =
@@ -707,7 +707,9 @@ async fn connect_egress(config: &ProcessConfig) -> Result<tonic::transport::Chan
         .map_err(|_| ProcessError::EgressUnavailable)
 }
 
-fn connect_mcp_host(config: &ProcessConfig) -> Result<tonic::transport::Channel, ProcessError> {
+async fn connect_mcp_host(
+    config: &ProcessConfig,
+) -> Result<tonic::transport::Channel, ProcessError> {
     let tls = ClientTlsConfig::new()
         .domain_name(config.mcp_host.tls_server_name.clone())
         .ca_certificate(Certificate::from_pem(read_bounded_file(
@@ -724,7 +726,7 @@ fn connect_mcp_host(config: &ProcessConfig) -> Result<tonic::transport::Channel,
                 MAX_TLS_FILE_BYTES,
             )?,
         ));
-    Ok(Endpoint::from_shared(config.mcp_host.endpoint.clone())
+    Endpoint::from_shared(config.mcp_host.endpoint.clone())
         .map_err(|_| ProcessError::InvalidConfiguration)?
         .connect_timeout(Duration::from_millis(
             config.mcp_host.connect_timeout_milliseconds,
@@ -734,7 +736,9 @@ fn connect_mcp_host(config: &ProcessConfig) -> Result<tonic::transport::Channel,
         ))
         .tls_config(tls)
         .map_err(|_| ProcessError::InvalidConfiguration)?
-        .connect_lazy())
+        .connect()
+        .await
+        .map_err(|_| ProcessError::McpHostUnavailable)
 }
 
 async fn shutdown_signal() -> Result<(), ProcessError> {
@@ -821,6 +825,7 @@ enum ProcessError {
     DatabaseUnavailable,
     SchemaMismatch,
     EgressUnavailable,
+    McpHostUnavailable,
     SignalUnavailable,
     WorkerFailed,
     WorkerExitedUnexpectedly,
@@ -841,6 +846,7 @@ impl fmt::Display for ProcessError {
                 formatter.write_str("PostgreSQL schema contract does not match")
             }
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
+            Self::McpHostUnavailable => formatter.write_str("MCP Host is unavailable"),
             Self::SignalUnavailable => {
                 formatter.write_str("shutdown signal handler is unavailable")
             }
