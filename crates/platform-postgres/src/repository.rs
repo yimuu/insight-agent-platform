@@ -1466,7 +1466,7 @@ impl PgRepository {
         let replay = sqlx::query(
             r#"
             SELECT receipt.request_digest, receipt.state, job.job_id,
-                   job.version, job.wake_generation
+                   receipt.payload_schema_version, receipt.payload, receipt.payload_digest
             FROM insight_platform.receipts AS receipt
             JOIN insight_platform.jobs AS job
               ON job.tenant_id = receipt.tenant_id AND job.job_id = receipt.scope_id
@@ -1499,7 +1499,27 @@ impl PgRepository {
             if row.try_get::<String, _>("state")? != "succeeded" {
                 return Err(RepositoryError::Conflict("Run signal receipt"));
             }
-            let target = orchestration_signal_target_from_row(row)?;
+            let stored =
+                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+            let evidence: OrchestrationWakeReceiptPayload =
+                decode_typed_payload(&stored, "orchestration wake Receipt")?;
+            let job_id = row.try_get::<String, _>("job_id")?;
+            if evidence.job_id.to_string() != job_id
+                || evidence.job_id.kind() != ResourceKind::Job
+                || evidence.expected_job_version <= 0
+                || evidence.expected_wake_generation == 0
+                || evidence.source != WakeSource::Signal.as_str()
+                || evidence.signal_key.as_deref() != Some(request.signal_key.as_str())
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "Run signal Receipt wake evidence is invalid".to_owned(),
+                ));
+            }
+            let target = OrchestrationSignalWakeTarget {
+                job_id: evidence.job_id,
+                job_version: evidence.expected_job_version,
+                wake_generation: evidence.expected_wake_generation,
+            };
             transaction.commit().await?;
             return Ok(target);
         }
@@ -11559,15 +11579,15 @@ impl PgSchedulerTransaction {
         });
         let receipt_payload = TypedPayload::with_limit(
             1,
-            &serde_json::json!({
-                "expected_job_version": command.expected_job_version,
-                "expected_wake_generation": command.expected_wake_generation,
-                "job_id": command.job_id,
-                "source": command.source.as_str(),
-                "signal_key": command.signal_key,
-                "signal_payload_evidence": signal_payload_evidence,
-                "signal_principal": signal_principal,
-            }),
+            &OrchestrationWakeReceiptPayload {
+                expected_job_version: command.expected_job_version,
+                expected_wake_generation: command.expected_wake_generation,
+                job_id: command.job_id.clone(),
+                source: command.source.as_str().to_owned(),
+                signal_key: command.signal_key.clone(),
+                signal_payload_evidence,
+                signal_principal,
+            },
             65_536,
         )?;
         if claim_job_wake_receipt(&mut transaction, &command, &receipt_payload).await? {
@@ -13029,7 +13049,13 @@ async fn lock_waiting_orchestration_job_parents(
     transaction: &mut Transaction<'_, Postgres>,
     job: &JobRecord,
 ) -> Result<LockedOrchestrationJobParents, RepositoryError> {
-    lock_orchestration_job_parents(transaction, job, "waiting").await
+    lock_orchestration_job_parents_matching(
+        transaction,
+        job,
+        "waiting",
+        &[RunState::Waiting, RunState::Running],
+    )
+    .await
 }
 
 async fn lock_orchestration_job_parents(
@@ -21236,11 +21262,31 @@ async fn mutate_yielded_orchestration_job(
     .await?
     .ok_or(RepositoryError::Conflict("orchestration Node"))?;
 
+    let mut current_snapshot = parents.run.current.clone();
+    if parents.run.active_work_count == 1 {
+        if let Some(wake) = wake_contract.as_ref() {
+            current_snapshot.waiting_reason = Some(wake.kind.as_str().to_owned());
+        }
+    }
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
     let run = sqlx::query(
         r#"
         UPDATE insight_platform.runs
-        SET version = version + 1, active_work_count = active_work_count - 1,
-            updated_at = $4
+        SET state = CASE
+                WHEN active_work_count = 1 AND $4 THEN 'waiting'
+                ELSE state
+            END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $5, current_payload = $6,
+            current_payload_digest = $7, updated_at = $8
         WHERE tenant_id = $1 AND run_id = $2 AND version = $3
           AND state = 'running' AND active_work_count > 0 AND terminal_at IS NULL
         RETURNING *
@@ -21249,6 +21295,10 @@ async fn mutate_yielded_orchestration_job(
     .bind(&parents.run.tenant_id)
     .bind(&parents.run.run_id)
     .bind(parents.run.version)
+    .bind(wake_contract.is_some())
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
     .bind(database_now)
     .fetch_optional(&mut **transaction)
     .await?
@@ -23949,7 +23999,41 @@ async fn mutate_woken_orchestration_job(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("waiting orchestration Node"))?;
+    let mut current_snapshot = parents.run.current.clone();
+    current_snapshot.waiting_reason = None;
+    let run_id: ResourceId = parents.run.run_id.parse().map_err(
+        |failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        },
+    )?;
+    current_snapshot
+        .validate(&run_id)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let current_payload = TypedPayload::from_versioned(1, &current_snapshot, 1_048_576)?;
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN state = 'waiting' THEN 'running' ELSE state END,
+            version = version + 1, current_schema_version = $4,
+            current_payload = $5, current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('waiting', 'running')
+          AND terminal_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&parents.run.tenant_id)
+    .bind(&parents.run.run_id)
+    .bind(parents.run.version)
+    .bind(current_payload.schema_version)
+    .bind(&current_payload.value)
+    .bind(&current_payload.digest)
+    .bind(database_now)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("waiting orchestration Run"))?;
     Ok(WokenOrchestrationJob {
+        run: run_from_row(run)?,
         job,
         node_id: parents.node_id.clone(),
         node_version,
@@ -25289,10 +25373,20 @@ async fn append_orchestration_wake_events(
     mutations: &OrchestrationWakeMutationIds,
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
-    let run_id =
-        woken.job.run_id.as_deref().ok_or_else(|| {
-            RepositoryError::CorruptRow("orchestration Job has no Run".to_owned())
-        })?;
+    let run_id = woken.run.run_id.as_str();
+    append_scheduler_event(
+        transaction,
+        &woken.run.tenant_id,
+        &mutations.run_event_id,
+        &mutations.run_outbox_id,
+        "run",
+        run_id,
+        woken.run.version,
+        Some(run_id),
+        "run.woken",
+        payload,
+    )
+    .await?;
     append_scheduler_event(
         transaction,
         &woken.job.tenant_id,
@@ -27447,7 +27541,23 @@ async fn load_woken_orchestration_job(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RepositoryError::Conflict("orchestration Node wake replay"))?;
+    let run_id: ResourceId = job
+        .run_id
+        .as_deref()
+        .ok_or_else(|| RepositoryError::CorruptRow("orchestration Job has no Run".to_owned()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+            RepositoryError::CorruptRow(failure.to_string())
+        })?;
+    let tenant_id: ResourceId =
+        tenant_id
+            .parse()
+            .map_err(|failure: insight_platform_contracts::ResourceIdError| {
+                RepositoryError::CorruptRow(failure.to_string())
+            })?;
+    let run = load_run(transaction, &tenant_id, &run_id).await?;
     Ok(WokenOrchestrationJob {
+        run,
         job,
         node_id,
         node_version,
@@ -33039,21 +33149,39 @@ impl DriveExpiredOrchestrationTasks {
 #[derive(Debug, Clone)]
 pub struct OrchestrationWakeMutationIds {
     pub receipt_id: ResourceId,
+    pub run_event_id: ResourceId,
+    pub run_outbox_id: ResourceId,
     pub node_event_id: ResourceId,
     pub node_outbox_id: ResourceId,
     pub job_event_id: ResourceId,
     pub job_outbox_id: ResourceId,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchestrationWakeReceiptPayload {
+    expected_job_version: i64,
+    expected_wake_generation: u64,
+    job_id: ResourceId,
+    source: String,
+    signal_key: Option<String>,
+    signal_payload_evidence: Option<Value>,
+    signal_principal: Option<PrincipalSnapshot>,
+}
+
 impl OrchestrationWakeMutationIds {
     fn validate(&self) -> Result<(), RepositoryError> {
         if self.receipt_id.kind() != ResourceKind::Receipt
-            || [&self.node_event_id, &self.job_event_id]
+            || [&self.run_event_id, &self.node_event_id, &self.job_event_id]
                 .into_iter()
                 .any(|identity| identity.kind() != ResourceKind::Event)
-            || [&self.node_outbox_id, &self.job_outbox_id]
-                .into_iter()
-                .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
+            || [
+                &self.run_outbox_id,
+                &self.node_outbox_id,
+                &self.job_outbox_id,
+            ]
+            .into_iter()
+            .any(|identity| identity.kind() != ResourceKind::OutboxEvent)
         {
             return Err(RepositoryError::InvalidInput(
                 "orchestration wake mutation identity is invalid".to_owned(),
@@ -33062,6 +33190,8 @@ impl OrchestrationWakeMutationIds {
         let mut unique = BTreeSet::new();
         for identity in [
             &self.receipt_id,
+            &self.run_event_id,
+            &self.run_outbox_id,
             &self.node_event_id,
             &self.node_outbox_id,
             &self.job_event_id,
@@ -33123,6 +33253,7 @@ pub struct WakeOrchestrationJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WokenOrchestrationJob {
+    pub run: RunRecord,
     pub job: JobRecord,
     pub node_id: String,
     pub node_version: i64,

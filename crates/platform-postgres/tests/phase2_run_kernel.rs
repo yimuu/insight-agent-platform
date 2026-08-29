@@ -1748,6 +1748,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(waited.job.state, "waiting");
+    assert_eq!(waited.run.state, "waiting");
+    assert_eq!(waited.run.current.waiting_reason.as_deref(), Some("timer"));
     assert_eq!(waited.run.active_work_count, 0);
     assert_eq!(waited.settled_quota_account_ids, vec![QUOTA_ACCOUNT_ID]);
     assert_eq!(waited.job.wake_kind.as_deref(), Some("timer"));
@@ -1775,6 +1777,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         signal_authority: None,
         mutations: OrchestrationWakeMutationIds {
             receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836791a"),
+            run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367918"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367918"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
             node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836791b"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836791c"),
@@ -1797,6 +1801,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             request_digest: digest('b'),
             mutations: OrchestrationWakeMutationIds {
                 receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28367940"),
+                run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836793e"),
+                run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836793e"),
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367941"),
                 node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28367941"),
                 job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28367942"),
@@ -1813,6 +1819,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(due_woken.len(), 1);
     let woken = &due_woken[0];
     assert_eq!(woken.job.state, "ready");
+    assert_eq!(woken.run.state, "running");
+    assert_eq!(woken.run.current.waiting_reason, None);
     assert!(woken.job.wake_kind.is_none());
     assert_eq!(
         sqlx::query_scalar::<_, Value>(
@@ -2124,6 +2132,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(signal_waited.job.wake_kind.as_deref(), Some("signal"));
+    assert_eq!(signal_waited.run.state, "waiting");
+    assert_eq!(
+        signal_waited.run.current.waiting_reason.as_deref(),
+        Some("signal")
+    );
     let signal_body = json!({"released": true});
     let signal_payload = RunInputValue {
         value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c28368119"),
@@ -2146,6 +2159,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         signal_authority: None,
         mutations: OrchestrationWakeMutationIds {
             receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c2836811a"),
+            run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368118"),
+            run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368118"),
             node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836811b"),
             node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836811b"),
             job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836811c"),
@@ -2244,6 +2259,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(signal_woken.job.state, "ready");
+    assert_eq!(signal_woken.run.state, "running");
+    assert_eq!(signal_woken.run.current.waiting_reason, None);
     let signal_node_payload: Value = sqlx::query_scalar(
         "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
     )
@@ -2285,6 +2302,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .await
         .unwrap();
     assert_eq!(replay_target.job_id, signal_wake.job_id);
+    assert_eq!(
+        replay_target.job_version,
+        signal_wake.expected_job_version
+    );
+    assert_eq!(
+        replay_target.wake_generation,
+        signal_wake.expected_wake_generation
+    );
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
@@ -2434,6 +2459,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             request_digest: digest('d'),
             mutations: OrchestrationWakeMutationIds {
                 receipt_id: id("rcp_0198f1c3-9a00-7c3e-b1f3-773c28368219"),
+                run_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c28368217"),
+                run_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c28368217"),
                 node_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836821a"),
                 node_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836821a"),
                 job_event_id: id("evt_0198f1c3-9a00-7c3e-b1f3-773c2836821b"),

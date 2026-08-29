@@ -85,6 +85,12 @@ profile/build state 字节与 build-state mtime 均未变化，证明没有 rele
 dependency project 但不删除卷，并保留 fresh project 供审计。显式 `--report-directory` 只允许 clean Git worktree，设置
 fresh-profile evidence 环境并运行 manifest-aware partial checker；脚本不会把缺失 Console 的 incomplete report 升级为 Passed。
 
+同一入口现已加入独立 Timer/Signal restart 子旅程：Run 以 Plan v5 先后进入 TimerWait 与 SignalWait，测试在确认第二个
+waiting projection version 后停止 Worker，通过认证 `/v1/runs/{run_id}/signals/release` 两次提交同一 Receipt，再启动 exact
+replacement Worker 并观察 terminal result。该 fresh P2 执行同时发现并闭合两个真实状态机缺口：最后一项 active work
+进入 Timer/Signal durable wake 时必须原子把 Run 置 `waiting`，Wake owner 消费必须清除 `waiting_reason`、恢复 `running` 并写 Run/Node/Job Event；Signal
+Receipt replay 必须读取 immutable Receipt 中冻结的原始 Job version/generation，不能读取消费后归零的当前 wake 字段。
+
 2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
 Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立
 role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探针同时发现并闭合 Agent public authoring P0：CR-203
@@ -248,8 +254,9 @@ Gateway/PostgreSQL 或 Gateway restart；正式部署、telemetry、慢依赖和
 fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 failure probe；缺失、skip、`not_run` 或未知字段
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
-`approval-task-resume` incomplete report。这不是 M4 完成证据，其余八条 fixture/report 与 full profile
-仍未交付。
+`approval-task-resume` incomplete report，Timer/Signal restart fixture 会产出第三份
+`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据，其余七条 fixture/report、同 authority 的真实
+Console entrypoint、Timer/Signal stale-fence probe 与 full profile 仍未交付。
 
 ### 7.1 工作项
 

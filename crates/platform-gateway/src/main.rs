@@ -1416,6 +1416,8 @@ impl RunApplication for PgRuns {
                 signal_authority: Some(signal_authority),
                 mutations: OrchestrationWakeMutationIds {
                     receipt_id: make_id(ResourceKind::Receipt)?,
+                    run_event_id: make_id(ResourceKind::Event)?,
+                    run_outbox_id: make_id(ResourceKind::OutboxEvent)?,
                     node_event_id: make_id(ResourceKind::Event)?,
                     node_outbox_id: make_id(ResourceKind::OutboxEvent)?,
                     job_event_id: make_id(ResourceKind::Event)?,

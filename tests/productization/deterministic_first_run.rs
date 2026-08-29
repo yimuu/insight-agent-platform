@@ -17,6 +17,8 @@ use tempfile::TempDir;
 
 #[path = "approval_task_resume.rs"]
 mod approval_task_resume;
+#[path = "timer_signal_restart_recovery.rs"]
+mod timer_signal_restart_recovery;
 
 const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
@@ -886,6 +888,14 @@ fn public_cli_deterministic_first_run() {
         &schema_digest,
         &agent_manifest,
     );
+    let (timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
+        insight,
+        project,
+        fixture.path(),
+        &schema_digest,
+        &agent_manifest,
+        replacement,
+    );
     let human_task_run_id = approval_evidence.run_id.as_str();
 
     // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business
@@ -1049,5 +1059,11 @@ fn public_cli_deterministic_first_run() {
                 .expect("approval scenario report is canonicalizable"),
         )
         .expect("approval scenario report is writable");
+        fs::write(
+            report_directory.join("timer-signal-restart-recovery.json"),
+            serde_jcs::to_vec(&timer_signal_evidence.report(&revision))
+                .expect("timer/signal scenario report is canonicalizable"),
+        )
+        .expect("timer/signal scenario report is writable");
     }
 }

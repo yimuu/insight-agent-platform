@@ -852,6 +852,8 @@ fn due_wait_slot(
         request_digest: identities.new_lease_token_digest()?,
         mutations: OrchestrationWakeMutationIds {
             receipt_id: new_id(identities, ResourceKind::Receipt)?,
+            run_event_id: new_id(identities, ResourceKind::Event)?,
+            run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
             node_event_id: new_id(identities, ResourceKind::Event)?,
             node_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
             job_event_id: new_id(identities, ResourceKind::Event)?,

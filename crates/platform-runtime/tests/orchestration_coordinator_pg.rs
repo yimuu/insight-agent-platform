@@ -1160,6 +1160,8 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 }),
                 mutations: OrchestrationWakeMutationIds {
                     receipt_id: new_id(ResourceKind::Receipt),
+                    run_event_id: new_id(ResourceKind::Event),
+                    run_outbox_id: new_id(ResourceKind::OutboxEvent),
                     node_event_id: new_id(ResourceKind::Event),
                     node_outbox_id: new_id(ResourceKind::OutboxEvent),
                     job_event_id: new_id(ResourceKind::Event),
