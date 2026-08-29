@@ -36,38 +36,93 @@ const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.wasi";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObservedExecutorProcessIdentity {
-    pub schema_version: u32,
-    pub node_uid: String,
-    pub pod_uid: String,
-    pub runtime_cgroup_locator: String,
-    pub boot_id: String,
-    pub pid_namespace_inode: u64,
-    pub host_process_id: u32,
-    pub host_user_id: u32,
-    pub host_group_id: u32,
-    pub process_start_ticks: u64,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObservedExecutorProcessIdentity {
+    LinuxProcfs {
+        schema_version: u32,
+        node_uid: String,
+        pod_uid: String,
+        runtime_cgroup_locator: String,
+        boot_id: String,
+        pid_namespace_inode: u64,
+        host_process_id: u32,
+        host_user_id: u32,
+        host_group_id: u32,
+        process_start_ticks: u64,
+    },
+    LocalUnix {
+        schema_version: u32,
+        local_instance_uid: String,
+        system_boot_identity: String,
+        host_process_id: u32,
+        host_user_id: u32,
+        host_group_id: u32,
+        process_start_identity: u64,
+    },
 }
 
 impl ObservedExecutorProcessIdentity {
+    fn peer(&self) -> WasiExecutorRegistrationPeer {
+        let (host_process_id, host_user_id, host_group_id) = match self {
+            Self::LinuxProcfs {
+                host_process_id,
+                host_user_id,
+                host_group_id,
+                ..
+            }
+            | Self::LocalUnix {
+                host_process_id,
+                host_user_id,
+                host_group_id,
+                ..
+            } => (*host_process_id, *host_user_id, *host_group_id),
+        };
+        WasiExecutorRegistrationPeer {
+            host_process_id,
+            host_user_id,
+            host_group_id,
+        }
+    }
+
     pub fn validate_for(
         &self,
         peer: WasiExecutorRegistrationPeer,
     ) -> Result<(), ProcessObservationError> {
         peer.validate()
             .map_err(|_| ProcessObservationError::Rejected)?;
-        if self.schema_version != 1
-            || self.host_process_id != peer.host_process_id
-            || self.host_user_id != peer.host_user_id
-            || self.host_group_id != peer.host_group_id
-            || self.pid_namespace_inode == 0
-            || self.process_start_ticks == 0
-            || !uuid_string(&self.node_uid)
-            || !uuid_string(&self.pod_uid)
-            || !uuid_string(&self.boot_id)
-            || !bounded_locator(&self.runtime_cgroup_locator)
-        {
+        let valid = match self {
+            Self::LinuxProcfs {
+                schema_version,
+                node_uid,
+                pod_uid,
+                runtime_cgroup_locator,
+                boot_id,
+                pid_namespace_inode,
+                process_start_ticks,
+                ..
+            } => {
+                *schema_version == 1
+                    && *pid_namespace_inode > 0
+                    && *process_start_ticks > 0
+                    && uuid_string(node_uid)
+                    && uuid_string(pod_uid)
+                    && uuid_string(boot_id)
+                    && bounded_locator(runtime_cgroup_locator)
+            }
+            Self::LocalUnix {
+                schema_version,
+                local_instance_uid,
+                system_boot_identity,
+                process_start_identity,
+                ..
+            } => {
+                *schema_version == 1
+                    && uuid_string(local_instance_uid)
+                    && bounded_boot_identity(system_boot_identity)
+                    && *process_start_identity > 0
+            }
+        };
+        if !valid || self.peer() != peer {
             return Err(ProcessObservationError::Rejected);
         }
         Ok(())
@@ -75,16 +130,7 @@ impl ObservedExecutorProcessIdentity {
 
     pub fn binding_digest(&self) -> Result<Sha256Digest, ProcessObservationError> {
         canonical_digest(&serde_json::json!({
-            "boot_id": self.boot_id,
-            "host_group_id": self.host_group_id,
-            "host_process_id": self.host_process_id,
-            "host_user_id": self.host_user_id,
-            "node_uid": self.node_uid,
-            "pid_namespace_inode": self.pid_namespace_inode,
-            "pod_uid": self.pod_uid,
-            "process_start_ticks": self.process_start_ticks,
-            "runtime_cgroup_locator": self.runtime_cgroup_locator,
-            "schema_version": self.schema_version,
+            "observed_process": self,
             "workload_identity": WASI_EXECUTOR_WORKLOAD_IDENTITY,
         }))
         .map_err(|_| ProcessObservationError::Rejected)?
@@ -150,7 +196,7 @@ impl LinuxProcfsExecutorProcessObserver {
         let pid_namespace_inode = parse_namespace_inode(&pid_namespace)?;
         let boot_id = read_uuid_file(&self.proc_root.join("sys/kernel/random/boot_id"))?;
         let node_uid = read_uuid_file(&self.node_uid_authority_path)?;
-        let observed = ObservedExecutorProcessIdentity {
+        let observed = ObservedExecutorProcessIdentity::LinuxProcfs {
             schema_version: 1,
             node_uid,
             pod_uid,
@@ -178,6 +224,171 @@ impl ExecutorProcessObserver for LinuxProcfsExecutorProcessObserver {
             .await
             .map_err(|_| ProcessObservationError::Unavailable)?
     }
+}
+
+/// Explicit non-production observer for the local CLI profile.
+///
+/// It binds the kernel-authenticated Unix peer to the host's real process start identity and boot
+/// identity. It deliberately does not synthesize Linux cgroup, Pod or PID-namespace evidence.
+#[derive(Debug, Clone)]
+pub struct LocalUnixExecutorProcessObserver {
+    local_instance_uid_authority_path: PathBuf,
+}
+
+impl LocalUnixExecutorProcessObserver {
+    pub fn new(
+        local_instance_uid_authority_path: PathBuf,
+    ) -> Result<Self, ProcessObservationError> {
+        if !closed_absolute_path(&local_instance_uid_authority_path) {
+            return Err(ProcessObservationError::Rejected);
+        }
+        Ok(Self {
+            local_instance_uid_authority_path,
+        })
+    }
+
+    fn observe_blocking(
+        &self,
+        peer: WasiExecutorRegistrationPeer,
+    ) -> Result<ObservedExecutorProcessIdentity, ProcessObservationError> {
+        peer.validate()
+            .map_err(|_| ProcessObservationError::Rejected)?;
+        let process = observe_local_unix_process(peer.host_process_id)?;
+        if process.user_id != peer.host_user_id || process.group_id != peer.host_group_id {
+            return Err(ProcessObservationError::Rejected);
+        }
+        let observed = ObservedExecutorProcessIdentity::LocalUnix {
+            schema_version: 1,
+            local_instance_uid: read_uuid_file(&self.local_instance_uid_authority_path)?,
+            system_boot_identity: process.system_boot_identity,
+            host_process_id: peer.host_process_id,
+            host_user_id: peer.host_user_id,
+            host_group_id: peer.host_group_id,
+            process_start_identity: process.start_identity,
+        };
+        observed.validate_for(peer)?;
+        Ok(observed)
+    }
+}
+
+#[async_trait]
+impl ExecutorProcessObserver for LocalUnixExecutorProcessObserver {
+    async fn observe(
+        &self,
+        peer: WasiExecutorRegistrationPeer,
+    ) -> Result<ObservedExecutorProcessIdentity, ProcessObservationError> {
+        let observer = self.clone();
+        tokio::task::spawn_blocking(move || observer.observe_blocking(peer))
+            .await
+            .map_err(|_| ProcessObservationError::Unavailable)?
+    }
+}
+
+struct LocalUnixProcessSnapshot {
+    user_id: u32,
+    group_id: u32,
+    start_identity: u64,
+    system_boot_identity: String,
+}
+
+#[cfg(target_os = "linux")]
+fn observe_local_unix_process(
+    process_id: u32,
+) -> Result<LocalUnixProcessSnapshot, ProcessObservationError> {
+    let process_root = PathBuf::from("/proc").join(process_id.to_string());
+    let stat = read_observation_file(&process_root.join("stat"), 32 * 1024)?;
+    let status = read_observation_file(&process_root.join("status"), 128 * 1024)?;
+    let (user_id, group_id) = parse_process_credentials(&status)?;
+    Ok(LocalUnixProcessSnapshot {
+        user_id,
+        group_id,
+        start_identity: parse_process_start_ticks(&stat)?,
+        system_boot_identity: format!(
+            "linux:{}",
+            read_uuid_file(Path::new("/proc/sys/kernel/random/boot_id"))?
+        ),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn observe_local_unix_process(
+    process_id: u32,
+) -> Result<LocalUnixProcessSnapshot, ProcessObservationError> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let size_i32 = i32::try_from(size).map_err(|_| ProcessObservationError::Unavailable)?;
+    let process_id = i32::try_from(process_id).map_err(|_| ProcessObservationError::Rejected)?;
+    // SAFETY: `info` points to a writable `proc_bsdinfo` buffer of the exact advertised size.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            process_id,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size_i32,
+        )
+    };
+    if read == 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ESRCH) {
+            Err(ProcessObservationError::Missing)
+        } else {
+            Err(ProcessObservationError::Unavailable)
+        };
+    }
+    if usize::try_from(read).ok() != Some(size) {
+        return Err(ProcessObservationError::Unavailable);
+    }
+    // SAFETY: `proc_pidinfo` returned the exact initialized structure size above.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != u32::try_from(process_id).unwrap_or_default() {
+        return Err(ProcessObservationError::Rejected);
+    }
+    let start_identity = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(info.pbi_start_tvusec))
+        .filter(|value| *value > 0)
+        .ok_or(ProcessObservationError::Rejected)?;
+    Ok(LocalUnixProcessSnapshot {
+        user_id: info.pbi_uid,
+        group_id: info.pbi_gid,
+        start_identity,
+        system_boot_identity: macos_boot_identity()?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_boot_identity() -> Result<String, ProcessObservationError> {
+    let name = c"kern.boottime";
+    let mut boot_time = std::mem::MaybeUninit::<libc::timeval>::zeroed();
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: the name is NUL-terminated and the output buffer and length are valid.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            boot_time.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size != std::mem::size_of::<libc::timeval>() {
+        return Err(ProcessObservationError::Unavailable);
+    }
+    // SAFETY: `sysctlbyname` initialized the exact timeval buffer above.
+    let boot_time = unsafe { boot_time.assume_init() };
+    if boot_time.tv_sec <= 0 || boot_time.tv_usec < 0 {
+        return Err(ProcessObservationError::Rejected);
+    }
+    Ok(format!("macos:{}:{}", boot_time.tv_sec, boot_time.tv_usec))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn observe_local_unix_process(
+    _process_id: u32,
+) -> Result<LocalUnixProcessSnapshot, ProcessObservationError> {
+    Err(ProcessObservationError::Unavailable)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,11 +438,7 @@ impl RegistrySnapshot {
                 .request
                 .validate()
                 .map_err(|_| NodeAttestorError::RegistryCorrupt)?;
-            let peer = WasiExecutorRegistrationPeer {
-                host_process_id: record.observed.host_process_id,
-                host_user_id: record.observed.host_user_id,
-                host_group_id: record.observed.host_group_id,
-            };
+            let peer = record.observed.peer();
             record
                 .observed
                 .validate_for(peer)
@@ -292,7 +499,7 @@ impl NodeAttestorConfig {
     }
 }
 
-pub struct NodeProcessAttestor<O> {
+pub struct NodeProcessAttestor<O: ?Sized> {
     observer: Arc<O>,
     config: NodeAttestorConfig,
     records: Mutex<BTreeMap<String, StoredRegistration>>,
@@ -300,7 +507,7 @@ pub struct NodeProcessAttestor<O> {
 
 impl<O> NodeProcessAttestor<O>
 where
-    O: ExecutorProcessObserver + 'static,
+    O: ExecutorProcessObserver + ?Sized + 'static,
 {
     pub fn open(observer: Arc<O>, config: NodeAttestorConfig) -> Result<Self, NodeAttestorError> {
         config.validate()?;
@@ -337,11 +544,7 @@ where
         &self,
         stored: &StoredRegistration,
     ) -> Result<ObservationDisposition, ProcessObservationError> {
-        let peer = WasiExecutorRegistrationPeer {
-            host_process_id: stored.observed.host_process_id,
-            host_user_id: stored.observed.host_user_id,
-            host_group_id: stored.observed.host_group_id,
-        };
+        let peer = stored.observed.peer();
         match self.observer.observe(peer).await {
             Ok(observed) if observed == stored.observed => Ok(ObservationDisposition::SameProcess),
             Ok(_) | Err(ProcessObservationError::Missing) => Ok(ObservationDisposition::Absent),
@@ -373,7 +576,7 @@ where
 #[async_trait]
 impl<O> WasiExecutorProcessAttestationAuthority for NodeProcessAttestor<O>
 where
-    O: ExecutorProcessObserver + 'static,
+    O: ExecutorProcessObserver + ?Sized + 'static,
 {
     async fn register_observed(
         &self,
@@ -452,7 +655,7 @@ where
 #[async_trait]
 impl<O> WasiExecutorProcessRegistrationVerifier for NodeProcessAttestor<O>
 where
-    O: ExecutorProcessObserver + 'static,
+    O: ExecutorProcessObserver + ?Sized + 'static,
 {
     async fn verify_registered(
         &self,
@@ -483,7 +686,7 @@ where
 #[async_trait]
 impl<O> SandboxProcessGenerationIsolation for NodeProcessAttestor<O>
 where
-    O: ExecutorProcessObserver + 'static,
+    O: ExecutorProcessObserver + ?Sized + 'static,
 {
     async fn prove_absent(
         &self,
@@ -796,6 +999,14 @@ fn bounded_locator(value: &str) -> bool {
     value.starts_with("0::/")
         && value.len() <= MAX_OBSERVED_STRING_BYTES
         && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn bounded_boot_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
 }
 
 fn uuid_string(value: &str) -> bool {

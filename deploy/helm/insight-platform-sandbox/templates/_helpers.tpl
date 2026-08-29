@@ -56,6 +56,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     "attestor_identity_digest" .Values.controller.attestor.identityDigest
     "maximum_cached_routes" (int .Values.controller.attestor.maximumCachedRoutes)
     "controller_port" (int .Values.attestor.controllerPort)
+    "allow_loopback_routes" false
     "allowed_node_cidrs" .Values.controller.attestor.allowedNodeCidrs)
   "connect_timeout_milliseconds" (int .Values.controller.connectTimeoutMilliseconds)
   "request_timeout_milliseconds" (int .Values.controller.requestTimeoutMilliseconds)
@@ -66,6 +67,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "insight-platform-sandbox.attestorConfig" -}}
 {{- dict
   "schema_version" 1
+  "process_observer" "linux_procfs"
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
   "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.observabilityPort))
@@ -108,6 +110,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "insight-platform-sandbox.gvisorAttestorConfig" -}}
 {{- dict
   "schema_version" 1
+  "process_observer" "linux_procfs"
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
   "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.gvisor.attestor.observabilityPort))

@@ -144,6 +144,7 @@ struct AttestorProcessConfig {
     attestor_identity_digest: Sha256Digest,
     maximum_cached_routes: usize,
     controller_port: u16,
+    allow_loopback_routes: bool,
     allowed_node_cidrs: Vec<String>,
 }
 
@@ -237,7 +238,11 @@ impl ControllerProcessConfig {
         cidrs.sort();
         cidrs.dedup();
         if cidrs.len() != self.process_isolation_attestor.allowed_node_cidrs.len()
-            || cidrs.iter().any(|network| !private_network(network))
+            || cidrs.iter().any(|network| {
+                !(private_network(network)
+                    || self.process_isolation_attestor.allow_loopback_routes
+                        && exact_loopback_network(network))
+            })
         {
             return Err(ProcessError::InvalidConfiguration);
         }
@@ -806,6 +811,14 @@ fn private_network(network: &IpNet) -> bool {
         })
 }
 
+fn exact_loopback_network(network: &IpNet) -> bool {
+    network
+        == &"127.0.0.1/32"
+            .parse::<IpNet>()
+            .expect("constant loopback CIDR")
+        || network == &"::1/128".parse::<IpNet>().expect("constant loopback CIDR")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessError {
     InvalidConfiguration,
@@ -869,6 +882,7 @@ mod tests {
                 "attestor_identity_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "maximum_cached_routes": 1024,
                 "controller_port": 7444,
+                "allow_loopback_routes": false,
                 "allowed_node_cidrs": ["10.0.0.0/8"]
             },
             "connect_timeout_milliseconds": 5000,

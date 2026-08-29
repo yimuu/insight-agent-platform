@@ -11,7 +11,8 @@ use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_sandbox_attestor::{
-    LinuxProcfsExecutorProcessObserver, NodeAttestorConfig, NodeProcessAttestor,
+    ExecutorProcessObserver, LinuxProcfsExecutorProcessObserver, LocalUnixExecutorProcessObserver,
+    NodeAttestorConfig, NodeProcessAttestor,
 };
 use insight_platform_sandbox_rpc::{
     proto::{
@@ -54,6 +55,7 @@ const REGISTRATION_SOCKET_MODE: u32 = 0o660;
 #[serde(deny_unknown_fields)]
 struct AttestorProcessConfig {
     schema_version: u32,
+    process_observer: ProcessObserverKind,
     registration_socket_path: String,
     controller_listen_address: String,
     observability_listen_address: String,
@@ -65,6 +67,13 @@ struct AttestorProcessConfig {
     attestor_identity_digest: Sha256Digest,
     tls_handshake_timeout_milliseconds: u64,
     shutdown_grace_milliseconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessObserverKind {
+    LinuxProcfs,
+    LocalUnix,
 }
 
 impl AttestorProcessConfig {
@@ -161,13 +170,19 @@ async fn run() -> Result<(), ProcessError> {
         controller_address.port(),
     )
     .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let observer = Arc::new(
-        LinuxProcfsExecutorProcessObserver::new(
-            PathBuf::from(&config.proc_root),
-            PathBuf::from(&config.node_uid_authority_path),
-        )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
-    );
+    let observer: Arc<dyn ExecutorProcessObserver> = match config.process_observer {
+        ProcessObserverKind::LinuxProcfs => Arc::new(
+            LinuxProcfsExecutorProcessObserver::new(
+                PathBuf::from(&config.proc_root),
+                PathBuf::from(&config.node_uid_authority_path),
+            )
+            .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ),
+        ProcessObserverKind::LocalUnix => Arc::new(
+            LocalUnixExecutorProcessObserver::new(PathBuf::from(&config.node_uid_authority_path))
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+        ),
+    };
     let authority = Arc::new(
         NodeProcessAttestor::open(
             observer,
@@ -491,6 +506,7 @@ mod tests {
     fn config() -> AttestorProcessConfig {
         AttestorProcessConfig {
             schema_version: 1,
+            process_observer: ProcessObserverKind::LinuxProcfs,
             registration_socket_path: "/run/insight-sandbox-attestor/registration.sock".into(),
             controller_listen_address: "127.0.0.1:7444".into(),
             observability_listen_address: "127.0.0.1:9090".into(),

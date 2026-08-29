@@ -34,7 +34,7 @@ fn peer() -> WasiExecutorRegistrationPeer {
 }
 
 fn observed(start_ticks: u64) -> ObservedExecutorProcessIdentity {
-    ObservedExecutorProcessIdentity {
+    ObservedExecutorProcessIdentity::LinuxProcfs {
         schema_version: 1,
         node_uid: "0198f1d0-32e4-75e1-a9e8-d95ca0f40001".to_owned(),
         pod_uid: "0198f1d0-32e4-75e1-a9e8-d95ca0f40002".to_owned(),
@@ -309,8 +309,14 @@ async fn linux_observer_tracks_a_real_process_start_identity_and_then_proves_it_
         host_group_id: group_id,
     };
     let observed = observer.observe(peer).await.unwrap();
-    assert_eq!(observed.host_process_id, process_id);
-    assert!(observed.process_start_ticks > 0);
+    assert!(matches!(
+        observed,
+        ObservedExecutorProcessIdentity::LinuxProcfs {
+            host_process_id,
+            process_start_ticks,
+            ..
+        } if host_process_id == process_id && process_start_ticks > 0
+    ));
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -318,4 +324,40 @@ async fn linux_observer_tracks_a_real_process_start_identity_and_then_proves_it_
         observer.observe(peer).await,
         Err(ProcessObservationError::Missing)
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn local_unix_observer_tracks_real_process_identity_without_linux_pod_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let instance_uid = directory.path().join("local-instance-uid");
+    std::fs::write(&instance_uid, "0198f1d0-32e4-75e1-a9e8-d95ca0f40004\n").unwrap();
+    let observer = LocalUnixExecutorProcessObserver::new(instance_uid).unwrap();
+    let peer = WasiExecutorRegistrationPeer {
+        host_process_id: std::process::id(),
+        // SAFETY: these read-only calls have no preconditions.
+        host_user_id: unsafe { libc::geteuid() },
+        // SAFETY: these read-only calls have no preconditions.
+        host_group_id: unsafe { libc::getegid() },
+    };
+    let observed = observer.observe(peer).await.unwrap();
+    assert!(matches!(
+        observed,
+        ObservedExecutorProcessIdentity::LocalUnix {
+            local_instance_uid,
+            host_process_id,
+            process_start_identity,
+            ..
+        } if local_instance_uid == "0198f1d0-32e4-75e1-a9e8-d95ca0f40004"
+            && host_process_id == std::process::id()
+            && process_start_identity > 0
+    ));
+    let missing = WasiExecutorRegistrationPeer {
+        host_process_id: i32::MAX as u32,
+        ..peer
+    };
+    assert!(matches!(
+        observer.observe(missing).await,
+        Err(ProcessObservationError::Missing | ProcessObservationError::Unavailable)
+    ));
 }

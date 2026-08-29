@@ -163,6 +163,15 @@ identity 完全一致。探针没有创建 OAuth authorization authority 或向�
 operation counter 为 0；这只关闭 Callback 的配置、密钥、身份、PostgreSQL 与 mTLS 启动闭包，不宣称 OAuth lifecycle
 黄金场景完成。Sandbox/WASI、实际 endpoint fixture 和一次由 `insight dev --profile full` 监督的整体 journey 仍未完成。
 
+Sandbox/WASI 的 macOS 前置不再把 Linux Pod 事实伪造为本地证据。node attestor 的内部 observed-process registry 现以
+closed variant 区分 production `linux_procfs` 与显式 non-production `local_unix`：前者仍绑定 node/pod UID、unified
+cgroup、boot ID、PID namespace 与 start ticks；后者只绑定 kernel-authenticated UDS peer credentials、macOS/Linux
+真实 process start identity、真实 system boot identity 和 project-local instance UID。两种 variant 都以完整观察值
+生成 executor instance binding digest，并在 verify/absence 时重新观察，从而拒绝 PID reuse。Controller 默认仍只接受
+private node CIDR；只有配置显式打开 local loopback 后才接受精确 `127.0.0.1/32` 或 `::1/128`。production Helm 明确固定
+`linux_procfs` 且关闭 loopback，Sandbox deployment checker、Attestor 全目标测试和 Controller 测试均通过。该前置只
+使 honest local composition 成为可能；CLI config、三进程启动与 WASI Job 尚未因此完成。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway
