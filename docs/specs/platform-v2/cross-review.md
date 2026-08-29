@@ -1,10 +1,29 @@
-# Platform v2 00～18 Cross-review（CR-200）
+# Platform v2 00～18 Cross-review（CR-201）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-200 Accepted |
-| 日期 | 2026-08-27 |
-| 输入 | 00～18 live tree、ADR-0001、ADR-0002、AGENTS.md、CR-200 Artifact storage authority closure feedback |
+| 状态 | Closed / CR-201 Verified |
+| 日期 | 2026-08-29 |
+| 输入 | 00～18 live tree、implementation-plan、completion audit、ADR-0001、ADR-0002、AGENTS.md、CR-201 completion-scope decision |
+
+### CR-201 repository completion scope impact review
+
+项目owner决定不以采购或维护真实多节点Kubernetes环境作为00～18关闭条件。该决定只改变资格证据的归属与状态语义，不放宽运行时
+安全合同：production topology仍要求exact digest、独立role/pool、`RuntimeClass=runsc`、admission/RBAC/NetworkPolicy、无runc fallback、
+容量隔舱、restore和GitOps回滚。真实环境门禁由“spec完成前置”改为“部署方声明production-ready前置”。
+
+| Spec | CR-201结论 |
+|---|---|
+| 00 | `Verified`定义收敛为仓库范围合同/实现证据；Archived仍只在clean cut与`docs/current`更新后使用 |
+| 01～17 | domain、authority、machine schema、error、transaction、event、permission与recovery合同不变；已有L1～L3/静态部署证据用于关闭 |
+| 18 | L4～L6实现保留为profile、validator、preflight、workflow和runbook；真实节点、soak、restore和promotion记录为未执行的release gate |
+| implementation-plan | Phase 1～4的仓库交付关闭；目标环境执行和clean cut移出实现backlog |
+| qualification docs | 保留可选production运行手册，状态明确为Not run，禁止伪造passed Evidence或CapacityProfile |
+
+复核覆盖state ownership、IDs/JSON/protobuf/OpenAPI schema、errors、transactions/events、permissions、capacity、failure recovery和fixtures。
+CR-201不新增或删除table、aggregate、route、ComponentRole、WorkClass、JobKind、Secret路径或runtime fallback；也不把OrbStack、Docker、
+静态Helm或CI candidate冒充为live L4～L6。基于commit `1efcbabc17af73bef9f21237eee65a5e6af78f19`，GitHub CI run
+`33182282744`与production-candidate run `33183969085`均成功，00～18推进Verified / CR-201，implementation plan的仓库范围关闭。
 
 ### CR-200 Artifact storage authority closure impact review
 
@@ -876,8 +895,8 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-200合同范围没有未关闭P0/P1。Acceptance 37与既有13～36形成单一闭包，00～18状态为Accepted。
+CR-201范围没有未关闭P0/P1或仓库实现任务。Acceptance 37与既有13～36形成单一闭包，00～18状态为Verified，implementation plan为Complete。
 
-实现计划仍有明确的发布资格未完成项：production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续
-soak与首个CapacityProfile、L6签名供应链/backup-restore/rollout-rollback以及经人工审批的GitOps clean cut。这些是18的外部证据门禁，
-不回退已闭合合同，但在实际通过前禁止宣称Phase 4、production capacity或Platform v2总体完成。
+production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续soak与首个CapacityProfile、L6
+backup-restore/rollout-rollback以及人工GitOps clean cut均未执行。它们保留为environment production-ready声明的门禁，不回退已关闭的
+spec/implementation状态；实际通过前禁止声称production capacity、SLO、HA、真实runsc/restore或该environment已完成clean cut。

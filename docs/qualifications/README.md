@@ -1,6 +1,6 @@
 # 活动资格验收
 
-本目录只跟踪已经定义正式门槛、但尚未取得有效完整证据的资格验收工作。资格文档描述待验证的能力
+本目录跟踪已定义、但尚未取得目标环境完整证据的资格验收工作。资格文档描述待验证的能力
 声明、固定工作负载、通过条件和证据要求，不是功能设计规范，也不改变
 [`docs/current`](../current/README.md) 描述的当前运行合同。
 
@@ -15,11 +15,11 @@
 | 验收 | 状态 | 目标 |
 |---|---|---|
 | [Durable Runtime 24 小时 RC](durable-runtime-24h-rc.md) | Pending / requires always-on runner | 补齐 50 active Run 能力的 release-candidate 级 24 小时稳定性证据 |
-| [Platform v2 Production L4～L6](platform-v2-production-l4-l6.md) | Pending / requires production-equivalent runner | 执行真实runsc拓扑、容量、恢复、供应链与GitOps clean cut门禁 |
+| [Platform v2 Production L4～L6](platform-v2-production-l4-l6.md) | Not run / optional deployment release gate | 部署方如需production-ready声明，执行真实runsc拓扑、容量、恢复与GitOps clean cut门禁 |
 
 Platform v2当前仓库实现与四阶段exit gate的逐项状态见
-[spec00～18完成度审计](platform-v2-completion-audit.md)。该审计同时列出仍需实现的production composition和observability，
-因此不能把L4～L6缺口全部归因于runner环境。
+[spec00～18完成度审计](platform-v2-completion-audit.md)。CR-201已关闭仓库实现范围；审计保留的L4～L6项目是未执行的环境资格，
+不是spec00～18或implementation plan的剩余任务。
 
 ## Platform v2 机器门禁
 
@@ -33,5 +33,5 @@ Evidence manifest只能引用content digest、媒体类型和长度，不保存S
 只读artifact root，读取每个link同名的普通文件并重算长度与SHA-256；缺失、symlink或内容漂移均fail closed。
 缺失、skip、错误layer、不同profile/candidate digest或任一failed gate都不能通过release evidence门禁。
 
-checked-in profile只是资格要求，不是通过报告、CapacityProfile或promotion授权；L4～L6未实际运行前，本目录和
-implementation plan继续保持Pending。
+checked-in profile只是资格要求，不是通过报告、CapacityProfile或promotion授权；L4～L6未实际运行前，本目录对应环境资格保持Not run，
+但不影响implementation plan与spec00～18的仓库范围关闭。

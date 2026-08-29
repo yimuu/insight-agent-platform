@@ -1,33 +1,35 @@
 # Platform v2 spec00～18 完成度审计
 
-状态：In Progress / repository qualification green; external production gaps remain
+状态：Closed / CR-201 repository scope verified; environment qualification not run
 
-日期：2026-08-28
+日期：2026-08-29
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
 它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
 
 ## 1. 结论
 
-00～18均已完成CR-197 cross-review（历史CR-173～196结论保留）并处于Accepted，但没有任何一份可以推进到Verified或Archived。Phase 1的仓库内
-实现与真实PostgreSQL门禁已闭合；Phase 2的production Orchestration、Model、Capability、Context与wait/Subagent主要L3链路已经闭合；
-Phase 3的MCP subscription真实HTTPS、OAuth Cleanup/Egress删除链、Callback/token exchange及production Artifact
-Discovery→S3/KMS→scan→owner finalize多进程L3已闭合，仍缺外部Sandbox资格与Artifact故障/轮换/恢复矩阵。Phase 4 public API和
-15-role/21-pool静态部署闭包已完成，仓库内业务队列与依赖观测闭包也已接线；production-equivalent L4～L6仍未交付。
+00～18已完成CR-201全量cross-review并推进为Verified。Phase 1的仓库实现与fresh PostgreSQL门禁、Phase 2/3的production process L3链路、
+Phase 4 public API、15-role/21-pool静态部署闭包、业务队列/依赖观测以及signed candidate producer均已闭合。commit
+`1efcbabc17af73bef9f21237eee65a5e6af78f19`的GitHub CI run `33182282744`与production-candidate run `33183969085`均成功。
+
+CR-201按项目owner决定将真实多节点Kubernetes/runsc、production telemetry、容量/故障/soak、restore和人工GitOps promotion移为部署方
+production release gate。本项目没有执行这些L4～L6环境门禁；Verified不表示production-ready，也不提供实测CapacityProfile、SLO、HA、
+真实runsc隔离或恢复声明。
 
 因此：
 
 - `docs/current`继续描述旧current behavior；
-- `implementation-plan.md`保持In Progress；
+- `implementation-plan.md`按仓库范围标记Complete；
 - 不生成通过的QualificationEvidenceManifest或production CapacityProfile；
-- 不执行GitOps clean cut、规范归档或状态升级。
+- 不执行GitOps clean cut或规范归档；00～18保持活动Verified文档，直至未来实际cutover后才Archived。
 
 ## 2. 已证明证据
 
 | 范围 | 当前证据 | 结论 |
 |---|---|---|
 | 合同 | 00～18 CR-197 cross-review闭合；Plan v4 external leaf、MCP subscription durable execution、OAuth token TLS trust及恢复安全trace identity/header边界均冻结；generated contracts checker与CR-197 machine projection通过 | 合同及trace实现闭合，不证明production资格完成 |
-| Persistence | schema contract v7、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
+| Persistence | schema contract v8、唯一`0001_platform_baseline.sql`；PG16/17 fresh baseline与事务/并发测试 | Phase 1 persistence闭合 |
 | Rust workspace | workspace all-target/all-feature tests与Clippy `-D warnings`通过 | L1～L3范围内有效 |
 | NATS/MCP | real NATS integration与外部TypeScript/Go MCP SDK interop通过 | 证明被执行的协议fixture，不证明production MCP Host部署 |
 | Public API | `/v1` OpenAPI/owner schema、route负向conformance与root public API baseline通过 | public contract实现闭合 |
@@ -353,7 +355,7 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 - commit-SHA pinned production candidate workflow、确定性Candidate/WorkerManifest生成器、exact runtime/guest image签名、SPDX SBOM、
   GitHub provenance及传递闭合的signed release-bundle index。
 
-### 仓库内缺口
+### 未执行的environment证据（不阻塞仓库关闭）
 
 1. 15个ComponentRole已由21个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
@@ -369,27 +371,27 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；GitHub private GitOps repository、
    main-only candidate Environment及跨仓库只读deploy key已配置，closed `environment.json`现在绑定exact application commit与canonical
-   QualificationProfile digest并由workflow fail closed验证；尚无实际registry run artifact或人工promotion证据。
+   QualificationProfile digest并由workflow fail closed验证；production-candidate run `33183969085`成功，仍无目标cluster或人工promotion证据。
 
-### 外部门禁
+### 可选production release门禁
 
 2026-08-28已创建private `yimuu/insight-agent-platform-environments`，生产闭包路径为
 `platform-v2/production/closure`；应用仓库的`platform-production-candidate` Environment只允许`main`，并通过只读deploy key Secret访问环境仓库。
-独立人工reviewer尚未配置，candidate workflow仍没有历史run；本机Kubernetes context为单节点OrbStack且`RuntimeClass/runsc`不存在。
-缺少production-equivalent多节点runsc环境时，不得以本机Docker替代L4～L6或执行clean cut。
+独立人工reviewer尚未配置；candidate workflow已有成功run `33183969085`。本机Kubernetes context为单节点OrbStack且
+`RuntimeClass/runsc`不存在，因此本审计明确记录L4～L6为Not run。不得以本机Docker替代真实环境证据，也不得把本次spec关闭解释为clean cut。
 
 - production-equivalent多节点Kubernetes、独立WASI/gVisor node pool、exact runsc与支持范围内kubectl/server版本；
 - L4 RBAC/mTLS/NetworkPolicy/admission与真实协议/故障矩阵；
 - L5 mixed load、lane saturation、SLO/error budget和不少于86,400秒soak后冻结CapacityProfile；
 - L6 signed supply chain、upgrade/rollback、backup/restore、GitOps rollout/rollback与人工promotion；
-- clean `/v1` replacement后更新`docs/current`，再将00～18推进Verified并归档。
+- clean `/v1` replacement后更新`docs/current`，再将00～18从Verified归档。
 
-## 7. 下一实现顺序
+## 7. 关闭结论与未来部署动作
 
-按上游到下游执行，且每批通过后提交：
+仓库范围没有剩余实现任务。若未来部署方需要production-ready声明，可执行以下独立release工作，但它不重开本实现计划：
 
-1. 在受保护CI environment实际运行signed candidate producer并把exact bundle交给GitOps environment repository；
-2. 外部L4～L6、GitOps clean cut、current文档与规范归档。
+1. 为目标环境准备production-equivalent多节点/runsc runner并执行适用L4～L6；
+2. 取得人工promotion后执行GitOps clean cut，更新`docs/current`并归档规范与资格报告。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。

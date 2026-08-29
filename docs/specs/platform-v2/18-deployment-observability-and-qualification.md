@@ -2,10 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-200 |
-| 日期 | 2026-08-27 |
+| 状态 | Verified / CR-201 |
+| 日期 | 2026-08-29 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
+> topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production
+> telemetry、mixed-load/soak、restore或人工promotion；这些项目是部署方声明production-ready前的release gate，不再阻塞00～18进入Verified。
+> 不得因为spec已Verified而把任何未执行门禁标记passed，或发布production CapacityProfile/SLO、真实隔离、HA和恢复能力声明。
 
 > CR-200 impact：Artifact Data Worker startup manifest必须登记bounded installed write storage binding digests；tenant v3 policy选择不受支持的
 > binding、错encryption domain kind、catalog drift或caller注入storage authority时，必须在object write前fail closed。L1～L4覆盖zero-I/O与rollout。
@@ -233,6 +238,10 @@ orphan reconciliation和新环境workload identity。RPO/RTO由CapacityProfile�
 code/image/schema digest、seed、topology、start/end time、tool version、result和artifact links，由CI artifact store保留，
 不写入运行时GateResult表。
 
+CR-201将“spec qualification”和“environment qualification”分开：L1～L3、机器合同、部署静态闭包及candidate producer属于仓库spec证据；
+需要目标集群或外部服务的L4～L6属于environment release evidence。后者未执行不阻塞spec关闭，但任何production发布声明仍必须明确列出
+未运行门禁，并由部署方决定是否在自己的目标环境执行。
+
 ## 13. 必须资格矩阵
 
 CR-181新增：L1验证Plan v1/v2/v3、wrong slot/port/schema/budget/route；L2 fresh PostgreSQL验证伪造selection evidence、集合外candidate、
@@ -308,7 +317,7 @@ fresh PostgreSQL 16 r244进一步以真实Orchestration/Model/Native Capability�
 TLS NATS跑通Run→Model tool intent→CapabilityInvocation→tool result→第二轮ModelTurn→Return。Provider严格调用2次，Model Job/Invocation
 各2个、Capability Job/Invocation各1个、唯一Return Node成功、无非terminal Job，Run output精确指向独立`model_structured_output`
 RunValue；完整canonical response保留为另一Inline RunValue而不冒充Agent output。该证据关闭Model tool-result production component L3；
-隔舱容量、L4 rollout及其余L4～L6仍是release blocker。
+隔舱容量、L4 rollout及其余L4～L6仍是environment production-ready声明的release blocker，不阻塞CR-201 spec关闭。
 
 r245新增上述live workload inventory preflight并接入production qualification入口；5个正负fixture覆盖完整15-role closure以及缺role、
 mutable/wrong image、rollout/replica、ServiceAccount、default-deny、restricted security/resource和HPA drift，连同既有4个真实node shape/
@@ -527,7 +536,8 @@ r299在全新PG16主/Model隔离baseline、真实NATS和当前production process
 退出码0；两个需要外部S3的测试仍显式ignored。OAuth callback/token endpoint/Egress/Cleanup Worker真实TLS与kill-recovery在最新代码上8/8，
 Scheduling、terminal retry、trace、timer、global queue与multi-process fixture边界同步收敛；workspace format、strict Clippy及doc tests通过。
 该证据不含Model TLS NATS process fixture、外部S3/KMS、production Prometheus scrape、telemetry backend、production-equivalent Kubernetes/runsc、
-L5 mixed load/soak/restore或L6 rollout/rollback，故L4～L6及clean cut继续为release blocker。
+L5 mixed load/soak/restore或L6 rollout/rollback，故L4～L6及clean cut继续为environment production-ready声明的release blocker，
+不阻塞CR-201仓库实现关闭。
 
 r300收紧最终release evidence门禁：`validate-release-evidence`除Profile、Candidate、Capacity与Evidence manifest外，必须接收只读artifact root；
 每个`artifact_links[].name`必须解析为root下同名的真实普通文件，CLI流式重算byte length和SHA-256并拒绝缺失、符号链接、长度或digest漂移。
@@ -766,7 +776,7 @@ r246将Management与Runtime API拆为两个startup role及独立Kubernetes ident
 调用前拒绝错role noun，Management不持有Runtime的Artifact mTLS或cursor Secret。unit、Helm正负render和静态权限证据通过，关闭这两个role
 的manifest隔舱偏差；其余role inventory与真实cluster mTLS/RBAC/NetworkPolicy矩阵仍必须由L4 preflight实际验证。
 
-每个production release至少覆盖：
+部署方要将某个environment声明为production-ready时，至少覆盖：
 
 - clean baseline migration、upgrade/rollback rehearsal和backup/restore；
 - concurrent Run admission/activation、Job claim/lease loss、Receipt replay、Event/Outbox recovery；
@@ -800,9 +810,9 @@ r246将Management与Runtime API拆为两个startup role及独立Kubernetes ident
 CI/CD流程：
 
 1. 可重现build，生成签名image、SBOM、provenance和migration artifact；
-2. 执行L1～L3开发门禁；
-3. 部署ephemeral/staging production-equivalent topology，执行L4～L6；
-4. 将通过的exact digest更新到GitOps environment repository，经人审批后promotion；
+2. 执行L1～L3开发门禁并生成仓库spec证据；
+3. 如部署方要求production-ready声明，部署ephemeral/staging production-equivalent topology并执行适用L4～L6；
+4. 只有实际通过相应environment门禁时，才将通过的exact digest更新到GitOps environment repository并经人审批promotion；
 5. 监视rollout SLI/error budget，失败时将GitOps指针回滚到上一个已资格闭包；
 6. 数据库仅执行已reviewed forward migration/runbook，不靠业务Release row决定当前环境版本。
 
@@ -810,13 +820,16 @@ Git、container registry、CI artifact store和Kubernetes rollout history是发�
 
 ## 15. 完成定义
 
-一个phase/release只能在以下条件全部成立时标记完成：
+spec/implementation phase在以下仓库条件成立时可以标记完成：
 
 - 上游规范是Reviewed/Accepted，cross-review无P0/P1冲突；
 - implementation、migration、manifests、runbooks和tests与合同同一commit/release闭包；
-- 适用的L1～L6门禁实际通过，证据可追溯到exact digest/profile/topology；
+- 仓库适用的L1～L3、静态部署、candidate producer和negative gates实际通过，证据可追溯到exact commit/digest；
 - 没有把Draft目标、fake adapter、单进程fixture或对象数量声明为production behavior；
-- known residual risk有owner、deadline和explicit release decision，不被隐藏在“稍后完成”中。
+- 未执行的真实L4～L6被明确标为Not run / environment release gate，且没有生成伪造的passed evidence或CapacityProfile。
+
+某一environment只有在其适用L4～L6实际通过、证据可追溯到exact digest/profile/topology，且known residual risk有明确release decision时，
+才可声明production-ready。spec Verified与environment production-ready是两个独立状态。
 
 ## 16. 明确推迟
 
@@ -828,7 +841,5 @@ Git、container registry、CI artifact store和Kubernetes rollout history是发�
 
 ## 17. 未决问题
 
-CR-181已确认L1～L3 executable qualification定义与04～17一致并恢复Accepted；证据尚未全部通过，L4～L6仍是release blocker。
-
-基础部署与资格流程无未决设计问题。首个production CapacityProfile的数值需要在实现完成后通过
-L4～L6测量冻结，Draft期间不声明为current capacity。
+CR-201后没有阻塞spec关闭的设计或实现问题。真实L4～L6在本项目中未执行；它们只在部署方选择声明production-ready时成为该次release的
+blocker。首个production CapacityProfile只能由目标环境实测冻结；当前仓库没有production capacity、SLO、HA、真实runsc或restore声明。

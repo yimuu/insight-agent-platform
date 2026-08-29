@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-186 |
+| 状态 | Verified / CR-201 |
 | 日期 | 2026-08-07 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) |
 | 直接下游 | 12、17、18 |
@@ -469,7 +469,8 @@ suspend 和 selection override。
 - package Artifact 丢失、suspension 与 selector crash 均 fail closed 并可恢复；
 - 端到端 fixture 证明 required、PlanSelected、PolicySelected、ModelProposed 四种模式。
 
-满足以上测试、公开 schema、数据库约束、runbook 和容量证据后，本规范才可进入 Verified。
+满足以上仓库测试、公开schema、数据库约束、runbook和capacity owner/limit证据后，本规范可进入Verified。真实production容量实测按
+18与CR-201作为environment release gate，不阻塞本规范关闭，也不得在未实测时产生容量/SLO声明。
 
 ## 22. 明确推迟的工作
 

@@ -1,12 +1,13 @@
 # Platform v2 Production L4～L6资格运行手册
 
-状态：Pending / requires production-equivalent runner
+状态：Not run / optional deployment release gate after CR-201
 
 仓库已提供`.github/workflows/platform-production-candidate.yml`，要求以exact commit读取GitOps environment closure并生成exact runtime/guest image、签名SBOM/provenance、
 CandidateManifest、baseline与测试报告的signed传递闭包。只有受保护CI environment的实际运行产物及后续目标环境验证可作为本手册输入；
-workflow存在或本地生成器通过不改变本页Pending状态。
+workflow存在或本地生成器通过不把本页Not run状态改为passed。
 
-本手册执行18的外部资格门禁，不改变产品合同，也不把静态Helm检查或development集群冒充为L4证据。
+本手册供未来部署方在需要production-ready声明时执行18的外部资格门禁，不改变产品合同，也不把静态Helm检查或development集群冒充为L4证据。
+CR-201明确这些真实环境门禁未在本项目中执行且不阻塞spec00～18或implementation plan关闭；只有实际执行本手册时才可生成passed evidence。
 
 ## 前置条件
 
@@ -62,8 +63,8 @@ cargo run --locked -p insight-platform-contracts --bin platform-qualification --
 `artifact_links[].name`必须逐一解析为artifact root下同名的普通文件；最终门禁会流式重算每个文件的byte length和SHA-256，拒绝缺失文件、
 符号链接、长度漂移或digest漂移，不能只提交自洽但没有实际证据bytes的manifest。
 
-只有该命令通过、GitOps environment repository收到同一exact digest且人工批准promotion后，才可归档通过报告并更新
-implementation plan。任何missing/failed gate、profile/candidate漂移或evidence digest无法解析都保持Pending。
+只有该命令通过、GitOps environment repository收到同一exact digest且人工批准promotion后，才可归档通过报告并声明该environment
+production-ready。任何missing/failed gate、profile/candidate漂移或evidence digest无法解析都保持Not run/failed，不回退已关闭的spec状态。
 
 依赖故障、PITR/Artifact一致性恢复、NATS重建与Secret/KMS轮换按照
 [`platform-v2-dependency-recovery.md`](../runbooks/platform-v2-dependency-recovery.md)执行；signed supply chain、

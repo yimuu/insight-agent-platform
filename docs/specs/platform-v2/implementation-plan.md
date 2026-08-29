@@ -1,10 +1,14 @@
-# Platform v2 四阶段实现计划（CR-200）
+# Platform v2 四阶段实现计划（CR-201）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / repository qualification green; external L4～L6 pending |
-| 日期 | 2026-08-28 |
-| 合同输入 | 00～18、cross-review CR-200、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | Complete / repository scope closed; external environment qualification not run |
+| 日期 | 2026-08-29 |
+| 合同输入 | 00～18、cross-review CR-201、ADR-0001、ADR-0002、AGENTS.md |
+
+> CR-201 completion decision：Phase 1～4按仓库交付范围关闭。真实多节点Kubernetes、`RuntimeClass=runsc`、production telemetry、
+> mixed-load/soak、backup/restore与人工GitOps promotion没有执行，也不再作为本实现计划的剩余任务。对应profile、validator、preflight、workflow
+> 与runbook保留给未来部署方；除非其在目标环境实际运行，不得声称production-ready或将L4～L6标记passed。
 
 > CR-200 implementation order：先把ArtifactIo Policy升级v3并更新registry/fixtures；再把exact write storage binding digest与encryption domain
 > 冻结进public/internal Artifact admission和waiting stage payload；随后让Data Worker按digest选择installed provider、写object并生成内部storage
@@ -1042,10 +1046,11 @@
 ## 1. 计划原则
 
 本计划只描述目标实现顺序，不宣称任一Draft API、schema、topology、capacity或runtime已是current behavior。
-只有当phase的code、migration、manifests、tests、runbooks和evidence同时通过适用门禁，才能标记完成。
+只有当phase的code、migration、manifests、tests、runbooks和仓库范围evidence同时通过适用门禁，才能标记完成。
 
 CR-173的恢复顺序已经完成到public route/schema与L1～L3开发门禁：closed Deployment matrix → exact binding/Run snapshot →
-public route/schema。production qualification与cutover仍必须继续执行L4～L6，不能用开发fixture、静态manifest检查或合同Accepted状态替代。
+public route/schema。CR-201将目标环境qualification与cutover移出spec实现范围；开发fixture或静态manifest仍不能冒充真实L4～L6，
+但未执行的L4～L6不再阻塞本计划关闭。
 
 CR-174进一步冻结Scheduler执行Branch/Map/Loop/Compute所需的closed typed expression IR、exact RunValue evidence与
 materialize/evaluate/first-winner提交边界。此前手工注入`ControllerObservation`的fixture不能计为production handler证据；Phase 2
@@ -1086,7 +1091,7 @@ Phase 4 public /v1、部署、资格与clean cut
 
 ## 2. 当前证据边界
 
-当前仓库有模块化Rust workspace、shared Job/Run/Artifact/MCP/Sandbox等候选实现、一个23表schema contract v7 baseline与大量
+当前仓库有模块化Rust workspace、shared Job/Run/Artifact/MCP/Sandbox等候选实现、一个23表schema contract v8 baseline与大量
 开发fixture；部分代码源自CR-171之前的candidate，曾包含已推迟的microVM、
 Managed stdio session、Model Artifact或过度Artifact role拆分。
 
@@ -1219,7 +1224,8 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
    - publication-time package/dependency/image/SBOM/provenance/scan freeze；
    - shared Job fenced Controller protocol、Executor无DB凭据；
    - real WASI ABI/fuel/memory/interrupt；
-   - 真实`RuntimeClass=runsc`、admission-locked single-Job Pod、受限Launcher RBAC、no-runc-fallback、filesystem/network/Secret/Artifact grant与cleanup；
+   - `RuntimeClass=runsc`、admission-locked single-Job Pod、受限Launcher RBAC、no-runc-fallback、filesystem/network/Secret/Artifact grant与cleanup的
+     manifests、preflight与negative qualification tooling；
    - process kill、Controller restart、timeout/cancel和orphan reconciliation。
 
 5. **Real Model/provider path**
@@ -1232,7 +1238,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 - real PostgreSQL + NATS + S3/KMS-compatible + fake/real protocol endpoints的端到端fixture通过；
 - Artifact三role权限矩阵、wrong tenant/owner/fence/digest/storage generation全部fail closed；
-- MCP protocol/OAuth/subscription、WASI ABI、gVisor escape/cleanup和Model adapter contract tests通过；
+- MCP protocol/OAuth/subscription、WASI ABI、gVisor admission/RBAC/cleanup合同和Model adapter tests通过；真实runsc/node-loss归environment gate；
 - Sandbox/Artifact/MCP/Model单lane饱和时其他lane与critical-control可用；
 - default artifact/image/runtime不包含microVM、Managed stdio、Model Artifact或dynamic installer。
 
@@ -1240,7 +1246,8 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ### 6.1 目标
 
-交付minimal public API、production-equivalent topology、observability/runbooks、完整资格和GitOps clean replacement。
+交付minimal public API、production topology manifests、observability/runbooks、资格执行工具和GitOps clean replacement流程；目标环境中的
+真实资格与clean cut由部署方按release decision执行。
 
 ### 6.2 实现批次
 
@@ -1259,23 +1266,24 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 3. **Observability 与qualification**
 
    - low-cardinality metrics、trace/log redaction、SLI/dashboard/alerts/runbooks；
-   - L1～L6 fixture manifests、mixed load、fault injection、security matrix、soak、restore和rollout/rollback rehearsal；
-   - 根据实测冻结首个production CapacityProfile，不使用Draft数字。
+   - L1～L6 fixture manifests、mixed load、fault injection、security matrix、soak、restore和rollout/rollback的profile、validator与runbook；
+   - 不在没有目标环境实测时冻结或发布production CapacityProfile。
 
 4. **GitOps cutover**
 
    - 生成signed image/SBOM/provenance/migration/test artifacts；
-   - 提交exact digest到GitOps environment repository，人工审批promotion；
-   - 执行clean `/v1` replacement，无dual write/fallback；
+   - 提供提交exact digest到GitOps environment repository及人工审批promotion的workflow/runbook；
+   - 提供clean `/v1` replacement步骤，无dual write/fallback；
    - 失败时GitOps回滚到上一已资格闭包，不读写Installation Release row。
 
-### 6.3 Exit gate
+### 6.3 Repository exit gate
 
 - 17的minimal OpenAPI与internal RPC正负conformance全部通过；
-- 18的L1～L6资格矩阵、backup/restore、rollout/rollback和soak通过；
-- 隔舱饱和、跨tenant、Secret/log、runc fallback、旧fence、重放和不确定outcome负向测试通过；
-- production GitOps只引用exact已签名digest与已资格profile；
-- 实现、规范、ADR、runbook、deployment和evidence对齐，无P0/P1遗留。
+- 18的qualification profile、candidate/evidence validator、topology/workload preflight、backup/restore、rollout/rollback和soak runbook完整；
+- 仓库可执行的跨tenant、Secret/log、runc fallback、旧fence、重放和不确定outcome负向测试通过；
+- production candidate/GitOps输入只接受exact已签名digest与closed profile；
+- 实现、规范、ADR、runbook、deployment和仓库evidence对齐，无P0/P1遗留；
+- 真实集群L4～L6明确记录为Not run，未生成passed evidence、production CapacityProfile或production-ready声明。
 
 ## 7. 跨Phase实现规则
 
@@ -1302,7 +1310,9 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ## 8. 总体完成标准
 
-Platform v2只在Phase 1～4全部exit gate通过、CR-171影响规范推进为Accepted、schema v8与migration实际发布、
-production CapacityProfile经L4～L6证明、GitOps clean cut完成后，才能宣称完成。
+Platform v2仓库实现已在Phase 1～4 repository exit gate、CR-201 cross-review、schema v8、部署/资格工具和CI candidate闭包通过后完成。
+证据基线为commit `1efcbabc17af73bef9f21237eee65a5e6af78f19`：GitHub CI run `33182282744`与production-candidate run
+`33183969085`均成功。
 
-本计划本身不完成任何phase；它只是Reviewed合同的执行顺序。
+这项完成结论不表示schema已在production首次发布、production CapacityProfile经L4～L6证明、GitOps clean cut已执行或目标环境已
+production-ready。未来部署方若需要这些声明，必须执行18与资格手册中的environment gate。

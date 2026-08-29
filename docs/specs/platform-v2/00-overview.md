@@ -2,11 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-200 |
-| 日期 | 2026-08-27 |
+| 状态 | Verified / CR-201 |
+| 日期 | 2026-08-29 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-08-29 completion-scope decision（CR-201）：00～18的规范关闭以仓库内可复现的合同、实现、fresh PostgreSQL、独立进程、
+> 静态部署闭包和候选供应链证据为准。真实多节点Kubernetes、`RuntimeClass=runsc`、production Prometheus、容量/混沌/恢复、持续soak
+> 与人工GitOps promotion没有在本项目中执行；它们保留为部署方启用production前的环境资格门禁，不再阻塞spec状态或实现计划关闭。
+> `Verified`只表示已验证checked-in实现符合00～18的仓库范围合同，不表示production-ready、已完成clean cut或取得任何实测容量/SLO声明。
 
 > 2026-08-27 implementation feedback（CR-200）：Artifact Data Worker stage接线发现，tenant exact `ArtifactIo` Policy v2未冻结
 > `write_storage_binding_digest`与`encryption_domain_id`，进程只能使用全局write binding且MCP caller又不得提交storage authority。CR-200将两者
@@ -181,25 +186,25 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Accepted / CR-199 | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-197 | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-199 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-198 | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-199 | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-186 | Agent Interface、Typed Plan、Model Loop |
-| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-197 | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-197 | Scheduler、Worker、Lease、背压和隔舱并发 |
-| 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-197 | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-188 | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-197 | 调用协议、幂等、同步快路径、异步恢复 |
-| 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-186 | Skill Package、发现、选择、绑定和依赖 |
-| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-197 | ContextSource、检索、引用和数据权限 |
-| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-199 | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-197 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-199 | S3、内容寻址、上传、生命周期和内容安全 |
-| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-197 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-199 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-199 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 00 | `00-overview.md` | Verified / CR-201 | 总体路线、规范模板、依赖和完成定义 |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Verified / CR-201 | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Verified / CR-201 | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Verified / CR-201 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Verified / CR-201 | 多租户、授权、Secret、Effect、Quota、Approval |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Verified / CR-201 | Agent Interface、Typed Plan、Model Loop |
+| 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Verified / CR-201 | Run、NodeExecution、暂停、重试、取消 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Verified / CR-201 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 08 | [`08-subagent.md`](08-subagent.md) | Verified / CR-201 | Child Run、父子通信、取消传播和循环限制 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Verified / CR-201 | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Verified / CR-201 | 调用协议、幂等、同步快路径、异步恢复 |
+| 11 | [`11-skill-system.md`](11-skill-system.md) | Verified / CR-201 | Skill Package、发现、选择、绑定和依赖 |
+| 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Verified / CR-201 | ContextSource、检索、引用和数据权限 |
+| 13 | [`13-mcp-host.md`](13-mcp-host.md) | Verified / CR-201 | MCP Transport、OAuth、投影、Task 和 Subscription |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Verified / CR-201 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Verified / CR-201 | S3、内容寻址、上传、生命周期和内容安全 |
+| 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Verified / CR-201 | Provider、Model Profile、ModelTurn、流式响应和预算 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Verified / CR-201 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Verified / CR-201 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
@@ -248,8 +253,8 @@ Draft
 - **Reviewed**：跨模块冲突已经检查，仍允许非破坏性修订；
 - **Accepted**：目标合同冻结，可以开始实现；
 - **Implementing**：至少一个实现任务已开始；
-- **Implemented**：代码和 schema 已交付，但资格证据尚未完整；
-- **Verified**：全部验收门槛已有可复现证据；
+- **Implemented**：代码和 schema 已交付，但规范范围内的仓库证据尚未完整；
+- **Verified**：规范范围内的合同、实现与仓库门禁已有可复现证据；不自动表示任何特定部署环境已通过production资格；
 - **Archived**：合同已经进入 `docs/current`，本文件只保留决策历史。
 
 ## 5. 规范写作模板
@@ -280,7 +285,7 @@ Draft
 
 ## 6. 统一完成定义
 
-一份规范进入 Verified 必须同时满足：
+一份规范进入 Verified 必须同时满足以下仓库范围条件：
 
 - 每个真实边界的权威机器合同、生成投影、数据库约束和文档语义一致；不要求未跨边界对象重复拥有Rust/protobuf/JSON Schema；
 - PostgreSQL real-process integration tests 覆盖正常、重复、乱序、超时、取消和崩溃恢复；
@@ -289,12 +294,16 @@ Draft
 - Secret value 不出现在数据库业务列、API 回读、错误、日志、trace、metric label 或 outbox；
 - 所有无界队列、集合、正文、Artifact、并发和等待都有硬限制；
 - 进程退出、消息丢失和迟到执行者不能破坏 durable authority；
-- 关键指标、告警、runbook、容量基线和故障注入证据已经提交；
-- `docs/current` 已更新，活动规范已归档。
+- 关键指标、告警、runbook、部署preflight与资格执行入口已经提交，并有静态/进程级负向证据；
+- 当前未执行的真实集群、容量、故障、soak、restore和promotion门禁已作为明确部署限制记录，不被写成已通过。
 
-## 7. 全平台验收门槛
+`docs/current`更新和活动规范归档发生在实际clean cut之后，不是spec进入Verified的前置条件。CR-201明确将L4～L6中的真实环境执行
+从仓库实现完成定义移至production release decision：部署方要声称production-ready、容量/SLO、真实runsc隔离或完成promotion时，仍必须在
+目标环境运行18定义的适用门禁；未运行可以关闭spec，但不得生成通过的release evidence或CapacityProfile。
 
-全部 v2 工作完成时至少需要以下端到端证据：
+## 7. 全平台发布门槛
+
+以下端到端证据用于production release，不阻塞CR-201仓库范围的spec关闭。部署方若不执行这些门禁，必须维持“未验证production部署”的声明：
 
 1. 在已资格CapacityProfile的混合并发负载下，Sandbox饱和不降低API、Model Worker和critical-control的准入能力；
 2. Runtime、MCP Host、Sandbox Executor 任一进程被终止后，已提交状态可恢复且无越权重放；
@@ -338,7 +347,7 @@ tenant/permission/quota、lease fence、Artifact content integrity及Sandbox物�
 
 ### 8.1 当前证据边界（非规范性）
 
-当前checked-in persistence baseline是23张总表/22张业务表、schema contract v7和单一`0001_platform_baseline.sql`。仓库有
+当前checked-in persistence baseline是23张总表/22张业务表、schema contract v8和单一`0001_platform_baseline.sql`。仓库有
 CR-171之前候选架构的多类functional fixture；只有已按CR-171重新对照且通过适用门禁的批次可计为实现证据，尚不能据此宣称全部phase完成。
 
 截至2026-08-25，Plan v4的ChildAgent、HumanTask、TimerWait与SignalWait已接入PostgreSQL owner transaction和durable Plan store。
@@ -682,10 +691,9 @@ storage与audit closure全部由服务端拥有；upload target是唯一显式Se
 CR-171把public Artifact使用的Retention与ArtifactIo default revision加入tenant current config exact slot；多条active Policy不再通过排序或
 隐式安装默认选择，绑定更新沿用Tenant CAS/Receipt/Event/Outbox且保留其他slot。
 
-仓库中已有的microVM/Firecracker、Managed stdio session和Model Artifact Producer候选代码不再构成首版目标证据；后续实现批次应先从
-registry、runtime manifest、RPC、Helm和测试入口中删除或隔离这些非目标路径，再补齐gVisor、三角色Artifact和最小`/v1`。切除旧候选不得
-恢复host execution、plain runc或第二持久状态权威。
+仓库中的microVM/Firecracker、Managed stdio session和Model Artifact Producer候选代码已从首版default/release composition、registry、runtime
+manifest、RPC、Helm和资格入口删除或隔离；首版闭包保持WASI/gVisor、三角色Artifact和最小`/v1`，且禁止恢复host execution、plain runc或
+第二持久状态权威。
 
-精确实施顺序只以[implementation-plan.md](implementation-plan.md)为准。本次受影响规范已经CR-171复核并Accepted，但Accepted
-本身不声明新的API、部署拓扑、容量数字或qualification结果是当前行为。cutover前当前行为继续以
-[docs/current](../../current/README.md)为准。
+[implementation-plan.md](implementation-plan.md)已按CR-201关闭仓库范围，00～18为Verified。该状态不声明production拓扑、容量/SLO、真实
+runsc、restore、promotion或clean cut已经通过；cutover前current behavior继续以[docs/current](../../current/README.md)为准。
