@@ -887,6 +887,7 @@ fn public_cli_deterministic_first_run() {
         fixture.path(),
         &schema_digest,
         &agent_manifest,
+        run_id,
     );
     let (timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
         insight,
@@ -1021,6 +1022,24 @@ fn public_cli_deterministic_first_run() {
             .to_owned();
         assert_eq!(revision.len(), 40, "Git revision is exact");
         let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
+        let deterministic_console = if approval_evidence.console_passed {
+            check(
+                "console",
+                "passed",
+                "the same real headless Chromium session read this exact deterministic Run ID from the fresh Gateway/PostgreSQL authority and verified its succeeded Inline result before completing the Human Task journey",
+            )
+        } else {
+            check(
+                "console",
+                "not_run",
+                "set PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true to read the exact deterministic Run through the real Console",
+            )
+        };
+        let deterministic_status = if approval_evidence.console_passed {
+            "passed"
+        } else {
+            "incomplete"
+        };
         let report = json!({
             "schema_version": 1,
             "report_kind": "insight.productization.scenario-report/v1",
@@ -1036,11 +1055,11 @@ fn public_cli_deterministic_first_run() {
             },
             "started_at": started_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "finished_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
-            "status": "incomplete",
+            "status": deterministic_status,
             "entrypoints": [
                 check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh base profile"),
                 check("http_fixture", "passed", "checked curl completed create/replay/conflict/validate/publish/deploy/activate and independent raw HTTP read the terminal Run through /v1"),
-                check("console", "not_run", "a real browser Console journey is not yet part of this P2 fixture"),
+                deterministic_console,
             ],
             "assertions": [
                 check("run_terminal", "passed", "deterministic, replacement-worker and Human Task runs reached succeeded"),

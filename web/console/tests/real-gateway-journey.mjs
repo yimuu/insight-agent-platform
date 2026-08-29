@@ -131,6 +131,7 @@ async function main() {
   const token = required('INSIGHT_CONSOLE_ACCESS_TOKEN')
   const runId = required('INSIGHT_CONSOLE_RUN_ID')
   const taskId = required('INSIGHT_CONSOLE_TASK_ID')
+  const deterministicRunId = process.env.INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const browser = [
@@ -197,6 +198,17 @@ async function main() {
     await evaluate(client, `document.querySelector('.connection-form').requestSubmit()`)
     await waitFor(client, `document.body.innerText.includes('Gateway is ready.')`, 'real Gateway readiness')
 
+    if (deterministicRunId) {
+      await evaluate(client, clickText('Runs'))
+      await evaluate(client, setInput('input[placeholder="run_…"]', deterministicRunId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await waitFor(
+        client,
+        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('hello')`,
+        'exact deterministic Run authority and Inline result',
+      )
+    }
+
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
     await evaluate(client, `document.querySelector('.search').requestSubmit()`)
@@ -243,7 +255,16 @@ async function main() {
       gateway_origin: gatewayOrigin,
       run_id: runId,
       task_id: taskId,
-      checks: ['gateway_ready', 'sse_task_discovery', 'task_mutation', 'terminal_run', 'reload_authority_read', 'memory_only_token'],
+      deterministic_run_id: deterministicRunId,
+      checks: [
+        'gateway_ready',
+        ...(deterministicRunId ? ['deterministic_run_read'] : []),
+        'sse_task_discovery',
+        'task_mutation',
+        'terminal_run',
+        'reload_authority_read',
+        'memory_only_token',
+      ],
     })}\n`)
   } finally {
     observer?.close()

@@ -60,6 +60,11 @@ Console，以及 Console/stale Job fence 的 `not_run`，因此继续 Incomplete
 摘要与 SHA-256 见 [`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余九条没有全部
 Passed 而失败。
 
+后续 runner 已把 exact deterministic Run ID 传入同一个真实 Console 会话；浏览器在 Task mutation 前必须从 public
+authority 读取该 Run 的 `succeeded` 与预期 Inline result，才允许将 `deterministic-first-run` 的 Console entrypoint
+记为 Passed。该增量已通过 stateful browser regression 和 Rust fixture 编译，但尚未取得新的 fresh remote report；
+因此上述 revision `591baf00...` 的 deterministic 报告仍保持 Incomplete，不能预先升级。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console

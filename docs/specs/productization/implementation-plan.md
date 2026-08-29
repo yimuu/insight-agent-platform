@@ -321,6 +321,11 @@ run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gat
 目标，因此 M1/M3/M4 继续 In Progress。完整摘要、artifact digest 与边界见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
+下一增量已要求同一真实 Console session 在 Human Task mutation 前按 exact ID 读取 deterministic Run，并核验其
+`succeeded` authority 与 Inline result；只有该浏览器检查实际运行时，deterministic report 才会把 Console entrypoint
+和顶层状态升级为 Passed。stateful browser regression、Console build/lint 与 Rust productization fixture 编译已通过，
+fresh remote evidence 尚待下一次 base journey，故当前已记录报告不变。
+
 ### 6.1 工作项
 
 1. 实现登录/tenant context 与平台 readiness 页面，不在浏览器持久化长期 Secret；
