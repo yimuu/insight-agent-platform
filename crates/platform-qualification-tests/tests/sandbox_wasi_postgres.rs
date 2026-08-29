@@ -2113,15 +2113,15 @@ fn commit_identity(
     }
 }
 
-fn audits(fixture: &Fixture, now: DateTime<Utc>) -> SandboxWorkerAuditBundle {
+fn audits(fixture: &Fixture, now: DateTime<Utc>, base_suffix: u16) -> SandboxWorkerAuditBundle {
     let expires = now + Duration::minutes(5);
     SandboxWorkerAuditBundle {
-        preparing: commit_identity(fixture, 80, '1', expires),
-        starting: commit_identity(fixture, 81, '2', expires),
-        running: commit_identity(fixture, 82, '3', expires),
-        collecting: commit_identity(fixture, 83, '4', expires),
-        cancelling: commit_identity(fixture, 84, '5', expires),
-        terminal: commit_identity(fixture, 85, '6', expires),
+        preparing: commit_identity(fixture, base_suffix, '1', expires),
+        starting: commit_identity(fixture, base_suffix + 1, '2', expires),
+        running: commit_identity(fixture, base_suffix + 2, '3', expires),
+        collecting: commit_identity(fixture, base_suffix + 3, '4', expires),
+        cancelling: commit_identity(fixture, base_suffix + 4, '5', expires),
+        terminal: commit_identity(fixture, base_suffix + 5, '6', expires),
     }
 }
 
@@ -2871,7 +2871,7 @@ async fn sandbox_fixture() {
             fence: claimed.fence.clone(),
             executor_identity_digest: sha('d'),
             attestor_route: "https://10.0.0.7:9443".parse().unwrap(),
-            audits: audits(&fixture, now),
+            audits: audits(&fixture, now, 80),
             usage_reservation_id: claimed.usage_reservation_id.clone(),
             quota_entry_ids: (90..94)
                 .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
@@ -3035,6 +3035,139 @@ async fn sandbox_fixture() {
     .await
     .unwrap();
     assert_eq!((receipt_count, event_count, outbox_count), (13, 13, 13));
+
+    let mut limit_request = fixture.command.request.clone();
+    limit_request.sandbox_job_id = id(ResourceKind::Job, 602);
+    limit_request.invocation_id = id(ResourceKind::CapabilityInvocation, 601);
+    limit_request.job_id = id(ResourceKind::Job, 602);
+    limit_request.output_value_id = id(ResourceKind::RunValue, 602);
+    limit_request.resources.result_bytes = 1;
+    limit_request.callback.sandbox_job_id = limit_request.sandbox_job_id.clone();
+    limit_request.callback.invocation_id = limit_request.invocation_id.clone();
+    limit_request.callback.binding_digest = sha('0');
+    limit_request.callback = limit_request.callback.seal().unwrap();
+    rebind_sandbox_input_grant(&mut limit_request, 606);
+    limit_request.request_digest = sha('0');
+    limit_request = limit_request.seal().unwrap();
+    insert_derived_sandbox_invocation(
+        &pool,
+        &fixture,
+        &limit_request,
+        id(ResourceKind::NodeExecution, 603),
+        4,
+    )
+    .await;
+    let mut limit_command = fixture.command.clone();
+    limit_command.request = limit_request.clone();
+    reidentify_accept_command(&mut limit_command, 610, 'b');
+    assert!(matches!(
+        repository
+            .accept_sandbox_execution(limit_command)
+            .await
+            .unwrap(),
+        CommandOutcome::Applied(ref accepted)
+            if accepted.payload.physical_state
+                == insight_platform_contracts::SandboxJobState::Accepted
+    ));
+    let limit_claim = repository
+        .claim_sandbox_jobs(ClaimSandboxJobs {
+            worker_process_generation_id: fixture.worker_id.clone(),
+            worker_manifest_digest: limit_request.executor_worker_manifest_digest.clone(),
+            isolation_backend_contract_digest: limit_request
+                .isolation_backend_contract_digest
+                .clone(),
+            executor_identity_digest: sha('d'),
+            attestor_route: "https://10.0.0.7:9443".parse().unwrap(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![sha('e')],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(limit_claim.request.job_id, limit_request.job_id);
+    let limit_terminal = match worker
+        .execute(ExecuteSandboxJob {
+            request: limit_claim.request.clone(),
+            fence: limit_claim.fence,
+            executor_identity_digest: sha('d'),
+            attestor_route: "https://10.0.0.7:9443".parse().unwrap(),
+            audits: audits(&fixture, now, 620),
+            usage_reservation_id: limit_claim.usage_reservation_id,
+            quota_entry_ids: (640..644)
+                .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                .collect(),
+        })
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(value) => value,
+        CommandOutcome::Replayed(_) => panic!("fresh WASI limit Job replayed"),
+    };
+    assert_eq!(
+        limit_terminal.payload.physical_state,
+        insight_platform_contracts::SandboxJobState::Failed
+    );
+    assert!(matches!(
+        limit_terminal.payload.outcome,
+        Some(SandboxExecutionOutcome::Failed(ref failure))
+            if failure.safe_code == "sandbox_wasi_result_too_large"
+                && failure.resource_violation.as_deref() == Some("result_bytes")
+    ));
+
+    let limit_pending = repository
+        .scan_pending_sandbox_capability_outcomes(ScanPendingSandboxCapabilityOutcomes {
+            shard: SafetyScanShard::whole(),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    let limit_source = limit_pending
+        .records
+        .iter()
+        .find(|candidate| candidate.sandbox_job_id == limit_request.sandbox_job_id)
+        .unwrap();
+    let mut limit_merge = MergeSandboxCapabilityOutcome {
+        audit: SandboxOutcomeMergeAudit {
+            tenant_id: fixture.tenant_id.clone(),
+            controller_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 650),
+            source_event_id: limit_source.source_event_id.clone(),
+            source_job_version: limit_source.source_job_version,
+            source_event_payload_digest: limit_source.source_event_payload_digest.clone(),
+            receipt_id: id(ResourceKind::Receipt, 651),
+            event_id: id(ResourceKind::Event, 652),
+            outbox_id: id(ResourceKind::OutboxEvent, 653),
+            idempotency_key_digest: sha('0'),
+            request_digest: sha('0'),
+            receipt_expires_at: now + Duration::minutes(5),
+        },
+        sandbox_job_id: limit_source.sandbox_job_id.clone(),
+        invocation_id: limit_source.invocation_id.clone(),
+        job_id: limit_source.job_id.clone(),
+        sandbox_request_digest: limit_source.sandbox_request_digest.clone(),
+        expected_invocation_version: limit_source.expected_invocation_version,
+    };
+    limit_merge.audit.idempotency_key_digest =
+        limit_merge.canonical_idempotency_key_digest().unwrap();
+    limit_merge.audit.request_digest = limit_merge.canonical_request_digest().unwrap();
+    assert!(matches!(
+        repository
+            .merge_sandbox_capability_outcome(limit_merge)
+            .await
+            .unwrap(),
+        CommandOutcome::Applied(ref invocation)
+            if invocation.state == InvocationState::Failed && invocation.version == 3
+    ));
+    let remaining_sandbox_reservations: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(reserved_value), 0)::bigint FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND work_class = 'sandbox'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_sandbox_reservations, 0);
 
     let replay = repository
         .accept_sandbox_execution(fixture.command.clone())
