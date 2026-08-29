@@ -2283,8 +2283,11 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         &first_callback_config,
     );
     wait_for_file(&first_callback_ready, StdDuration::from_secs(5));
-    wait_for_file(&token_store_marker, StdDuration::from_secs(10));
-    wait_for_file(&first_before_commit, StdDuration::from_secs(10));
+    // The callback-to-egress RPC contract permits a 30 second request. Keep the process
+    // supervision window aligned with that bound so a loaded qualification runner cannot report
+    // a missing crash marker while the bounded exchange is still legitimately in flight.
+    wait_for_file(&token_store_marker, StdDuration::from_secs(30));
+    wait_for_file(&first_before_commit, StdDuration::from_secs(30));
     kill(&mut first_callback);
     kill(&mut first_egress);
 
@@ -2324,7 +2327,7 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV,
         &second_callback_config,
     );
-    wait_for_file(&second_outcome, StdDuration::from_secs(10));
+    wait_for_file(&second_outcome, StdDuration::from_secs(30));
     assert!(std::fs::read_to_string(&second_outcome)
         .unwrap()
         .starts_with("ok:Authorized"));
