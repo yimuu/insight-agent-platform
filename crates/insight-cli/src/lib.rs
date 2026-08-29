@@ -1055,6 +1055,10 @@ fn valid_runtime_role(value: &str) -> bool {
             | "mcp-host"
             | "mcp-resource-host"
             | "capability-remote"
+            | "mcp-discovery"
+            | "mcp-subscription"
+            | "mcp-cleanup"
+            | "context-subscription"
     )
 }
 
@@ -1139,7 +1143,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(23);
+        let mut listeners = Vec::with_capacity(27);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1662,6 +1666,42 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     )?;
     write_local_leaf_certificate(
         &tls_directory,
+        full_profile::MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE,
+        full_profile::MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+        full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
+        full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+        full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
         full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
         full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
         &["localhost"],
@@ -2149,6 +2189,7 @@ fn prepare_runtime_profile_inner(
                         .join(full_profile::MCP_STATE_KEY_FILE),
                 )?))
             ),
+            artifact_data_worker_port: ports.artifact_data_controller,
         },
     ));
     let mut digests = BTreeMap::new();
@@ -2832,6 +2873,8 @@ fn ensure_runtime_binaries(
             "platform-context-worker",
             "--bin",
             "platform-remote-context-worker",
+            "--bin",
+            "platform-subscription-context-worker",
             "-p",
             "insight-platform-artifact-service",
             "--bin",
@@ -2854,6 +2897,14 @@ fn ensure_runtime_binaries(
             "platform-mcp-host",
             "--bin",
             "platform-mcp-resource-host",
+            "--bin",
+            "platform-mcp-discovery-worker",
+            "--bin",
+            "platform-mcp-subscription-worker",
+            "-p",
+            "insight-platform-mcp-cleanup-worker",
+            "--bin",
+            "platform-mcp-cleanup-worker",
             "-p",
             "insight-platform-capability-worker",
             "--bin",
@@ -5120,6 +5171,10 @@ mod tests {
             full_profile::MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE,
             full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
             full_profile::CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE,
+            full_profile::MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE,
+            full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+            full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
+            full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -5146,6 +5201,10 @@ mod tests {
                 full_profile::MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -5278,7 +5337,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 17);
+        assert_eq!(digests.len(), 21);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5320,6 +5379,16 @@ mod tests {
             (
                 "capability-remote",
                 full_profile::CAPABILITY_REMOTE_CONFIG_FILE,
+            ),
+            ("mcp-discovery", full_profile::MCP_DISCOVERY_CONFIG_FILE),
+            (
+                "mcp-subscription",
+                full_profile::MCP_SUBSCRIPTION_CONFIG_FILE,
+            ),
+            ("mcp-cleanup", full_profile::MCP_CLEANUP_CONFIG_FILE),
+            (
+                "context-subscription",
+                full_profile::CONTEXT_SUBSCRIPTION_CONFIG_FILE,
             ),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();

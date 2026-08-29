@@ -2367,6 +2367,7 @@ dependencies = [
  "insight-platform-api",
  "insight-platform-capability-worker",
  "insight-platform-contracts",
+ "insight-platform-egress-rpc",
  "jsonwebtoken",
  "rcgen",
  "reqwest",

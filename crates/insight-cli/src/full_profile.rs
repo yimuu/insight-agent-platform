@@ -14,6 +14,12 @@ use insight_platform_capability_worker::{
     BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
 };
 use insight_platform_contracts::{canonical_digest, ResourceKind};
+pub(crate) use insight_platform_egress_rpc::{
+    CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
+    MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY, MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
+    MCP_HOST_WORKLOAD_IDENTITY, MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
+    MODEL_WORKER_WORKLOAD_IDENTITY,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -30,6 +36,10 @@ pub(crate) const CONTEXT_REMOTE_CONFIG_FILE: &str = "context-remote.json";
 pub(crate) const MCP_HOST_CONFIG_FILE: &str = "mcp-host.json";
 pub(crate) const MCP_RESOURCE_HOST_CONFIG_FILE: &str = "mcp-resource-host.json";
 pub(crate) const CAPABILITY_REMOTE_CONFIG_FILE: &str = "capability-remote.json";
+pub(crate) const MCP_DISCOVERY_CONFIG_FILE: &str = "mcp-discovery-worker.json";
+pub(crate) const MCP_SUBSCRIPTION_CONFIG_FILE: &str = "mcp-subscription-worker.json";
+pub(crate) const MCP_CLEANUP_CONFIG_FILE: &str = "mcp-cleanup-worker.json";
+pub(crate) const CONTEXT_SUBSCRIPTION_CONFIG_FILE: &str = "subscription-context-worker.json";
 pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority.pem";
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
@@ -55,17 +65,20 @@ pub(crate) const MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE: &str =
 pub(crate) const CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE: &str = "capability-remote-client.pem";
 pub(crate) const CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE: &str =
     "capability-remote-client-key.pem";
+pub(crate) const MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE: &str = "mcp-discovery-client.pem";
+pub(crate) const MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE: &str = "mcp-discovery-client-key.pem";
+pub(crate) const MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE: &str = "mcp-subscription-client.pem";
+pub(crate) const MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE: &str = "mcp-subscription-client-key.pem";
+pub(crate) const MCP_CLEANUP_CLIENT_CERTIFICATE_FILE: &str = "mcp-cleanup-client.pem";
+pub(crate) const MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE: &str = "mcp-cleanup-client-key.pem";
+pub(crate) const CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE: &str =
+    "context-subscription-client.pem";
+pub(crate) const CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE: &str =
+    "context-subscription-client-key.pem";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
-pub(crate) const MODEL_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/model-worker";
-pub(crate) const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/context-worker";
-pub(crate) const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
-pub(crate) const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/capability-worker";
 
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 9] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 13] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
@@ -75,6 +88,10 @@ pub(crate) const INITIAL_BINARY_NAMES: [&str; 9] = [
     "platform-mcp-host",
     "platform-mcp-resource-host",
     "platform-capability-remote-worker",
+    "platform-mcp-discovery-worker",
+    "platform-mcp-subscription-worker",
+    "platform-mcp-cleanup-worker",
+    "platform-subscription-context-worker",
 ];
 
 pub(crate) struct ProcessLaunch {
@@ -100,6 +117,7 @@ pub(crate) struct EgressConfigInputs<'a> {
     pub(crate) mcp_state_key_root: &'a Path,
     pub(crate) mcp_state_key_path: &'a Path,
     pub(crate) mcp_state_key_reference_digest: &'a str,
+    pub(crate) artifact_data_worker_port: u16,
 }
 
 pub(crate) struct WorkerDigests<'a> {
@@ -134,6 +152,14 @@ pub(crate) struct PortBindings {
     pub(crate) mcp_resource_host_observability: u16,
     #[serde(default = "default_capability_remote_observability_port")]
     pub(crate) capability_remote_observability: u16,
+    #[serde(default = "default_mcp_discovery_observability_port")]
+    pub(crate) mcp_discovery_observability: u16,
+    #[serde(default = "default_mcp_subscription_observability_port")]
+    pub(crate) mcp_subscription_observability: u16,
+    #[serde(default = "default_mcp_cleanup_observability_port")]
+    pub(crate) mcp_cleanup_observability: u16,
+    #[serde(default = "default_context_subscription_observability_port")]
+    pub(crate) context_subscription_observability: u16,
 }
 
 impl PortBindings {
@@ -152,6 +178,10 @@ impl PortBindings {
             mcp_resource_host: next()?,
             mcp_resource_host_observability: next()?,
             capability_remote_observability: next()?,
+            mcp_discovery_observability: next()?,
+            mcp_subscription_observability: next()?,
+            mcp_cleanup_observability: next()?,
+            context_subscription_observability: next()?,
         })
     }
 
@@ -170,6 +200,10 @@ impl PortBindings {
             mcp_resource_host: default_mcp_resource_host_port(),
             mcp_resource_host_observability: default_mcp_resource_host_observability_port(),
             capability_remote_observability: default_capability_remote_observability_port(),
+            mcp_discovery_observability: default_mcp_discovery_observability_port(),
+            mcp_subscription_observability: default_mcp_subscription_observability_port(),
+            mcp_cleanup_observability: default_mcp_cleanup_observability_port(),
+            context_subscription_observability: default_context_subscription_observability_port(),
         }
     }
 }
@@ -208,6 +242,22 @@ const fn default_mcp_resource_host_observability_port() -> u16 {
 
 const fn default_capability_remote_observability_port() -> u16 {
     19_107
+}
+
+const fn default_mcp_discovery_observability_port() -> u16 {
+    19_108
+}
+
+const fn default_mcp_subscription_observability_port() -> u16 {
+    19_109
+}
+
+const fn default_mcp_cleanup_observability_port() -> u16 {
+    19_110
+}
+
+const fn default_context_subscription_observability_port() -> u16 {
+    19_111
 }
 
 impl Default for PortBindings {
@@ -601,6 +651,140 @@ pub(crate) fn initial_configs(
                         "safety_scan_milliseconds": 250,
                         "claim_failure_backoff_milliseconds": 100,
                         "drain_grace_milliseconds": 30000,
+                    },
+                }),
+            ),
+        ),
+        (
+            "mcp-discovery".to_owned(),
+            (
+                MCP_DISCOVERY_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.mcp_discovery_observability),
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "claim_batch_size": 4,
+                    "recovery_batch_size": 4,
+                    "maximum_concurrency": 4,
+                    "lease_milliseconds": 30000,
+                    "scan_interval_milliseconds": 500,
+                    "failure_backoff_milliseconds": 500,
+                    "heartbeat_interval_milliseconds": 5000,
+                    "retry_backoff_milliseconds": 1000,
+                    "receipt_ttl_milliseconds": 60000,
+                    "drain_grace_milliseconds": 30000,
+                    "egress": {
+                        "endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_metadata_bytes": 65536,
+                        "maximum_rpc_payload_bytes": 1048576,
+                    },
+                    "artifact_data_worker": {
+                        "endpoint": format!("https://localhost:{}/", egress.artifact_data_worker_port),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_read_request_bytes": 1048576,
+                        "maximum_chunk_bytes": 262144,
+                        "maximum_write_request_bytes": 67108864,
+                    },
+                }),
+            ),
+        ),
+        (
+            "mcp-subscription".to_owned(),
+            (
+                MCP_SUBSCRIPTION_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.mcp_subscription_observability),
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "claim_batch_size": 4,
+                    "recovery_batch_size": 4,
+                    "reconcile_batch_size": 4,
+                    "reconcile_minimum_idle_milliseconds": 60000,
+                    "maximum_concurrency": 4,
+                    "lease_milliseconds": 30000,
+                    "scan_interval_milliseconds": 500,
+                    "failure_backoff_milliseconds": 500,
+                    "heartbeat_interval_milliseconds": 5000,
+                    "receipt_ttl_milliseconds": 60000,
+                    "drain_grace_milliseconds": 30000,
+                    "notification": {
+                        "maximum_in_flight": 32,
+                        "maximum_wire_bytes": 1048576,
+                        "maximum_tracked_bindings": 4096,
+                        "maximum_events_per_window": 1000,
+                        "window_milliseconds": 60000,
+                    },
+                    "egress": {
+                        "endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_metadata_bytes": 65536,
+                        "maximum_rpc_payload_bytes": 1048576,
+                    },
+                }),
+            ),
+        ),
+        (
+            "mcp-cleanup".to_owned(),
+            (
+                MCP_CLEANUP_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.mcp_cleanup_observability),
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "egress_endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                    "egress_tls_server_name": "localhost",
+                    "egress_connect_timeout_milliseconds": 5000,
+                    "egress_request_timeout_milliseconds": 30000,
+                    "maximum_rpc_metadata_bytes": 65536,
+                    "maximum_rpc_payload_bytes": 1048576,
+                    "poll_interval_milliseconds": 1000,
+                    "maximum_batch": 64,
+                    "maximum_lease_milliseconds": 120000,
+                    "claim_batch": 16,
+                    "lease_milliseconds": 30000,
+                    "retry_base_milliseconds": 1000,
+                    "retry_maximum_milliseconds": 60000,
+                }),
+            ),
+        ),
+        (
+            "context-subscription".to_owned(),
+            (
+                CONTEXT_SUBSCRIPTION_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.context_subscription_observability),
+                    "worker_manifest": {
+                        "manifest_version": 1,
+                        "worker_role": "context-worker",
+                        "work_class": "context",
+                        "adapter_runtime_digest": digests.context_adapter,
+                        "protocol_version": 1,
+                        "max_concurrency": 4,
+                        "critical_control_reserved_slots": 1,
+                    },
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "receipt_ttl_seconds": 3600,
+                    "scan_interval_milliseconds": 500,
+                    "failure_backoff_milliseconds": 100,
+                    "drain_grace_milliseconds": 30000,
+                    "host": {
+                        "endpoint": format!("https://localhost:{}/", ports.mcp_resource_host),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_rpc_message_bytes": 1048576,
                     },
                 }),
             ),
@@ -1136,6 +1320,203 @@ pub(crate) fn initial_process_launches(
             ],
             extra_environment: Vec::new(),
         },
+        ProcessLaunch {
+            role: "mcp-discovery",
+            binary: binary(INITIAL_BINARY_NAMES[9]),
+            ready_address: loopback_address(ports.mcp_discovery_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(MCP_DISCOVERY_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_CONFIG_DIGEST",
+                    config_digests["mcp-discovery"].clone(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_DISCOVERY_WORKER_ARTIFACT_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "mcp-subscription",
+            binary: binary(INITIAL_BINARY_NAMES[10]),
+            ready_address: loopback_address(ports.mcp_subscription_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(MCP_SUBSCRIPTION_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG_DIGEST",
+                    config_digests["mcp-subscription"].clone(),
+                ),
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_SUBSCRIPTION_WORKER_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "mcp-cleanup",
+            binary: binary(INITIAL_BINARY_NAMES[11]),
+            ready_address: loopback_address(ports.mcp_cleanup_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MCP_CLEANUP_CONFIG",
+                    paths
+                        .configuration
+                        .join(MCP_CLEANUP_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST",
+                    config_digests["mcp-cleanup"].clone(),
+                ),
+                ("PLATFORM_MCP_CLEANUP_DATABASE_URL", database_url.to_owned()),
+                (
+                    "PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_CLEANUP_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MCP_CLEANUP_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MCP_CLEANUP_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "context-subscription",
+            binary: binary(INITIAL_BINARY_NAMES[12]),
+            ready_address: loopback_address(ports.context_subscription_observability),
+            environment: vec![
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(CONTEXT_SUBSCRIPTION_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_CONFIG_DIGEST",
+                    config_digests["context-subscription"].clone(),
+                ),
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
     ]
 }
 
@@ -1167,6 +1548,10 @@ mod tests {
             mcp_resource_host: 31_011,
             mcp_resource_host_observability: 31_012,
             capability_remote_observability: 31_013,
+            mcp_discovery_observability: 31_014,
+            mcp_subscription_observability: 31_015,
+            mcp_cleanup_observability: 31_016,
+            context_subscription_observability: 31_017,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -1188,6 +1573,7 @@ mod tests {
                 mcp_state_key_root: Path::new("/project/runtime/mcp-state-keys"),
                 mcp_state_key_path: Path::new("/project/runtime/mcp-state-keys/current"),
                 mcp_state_key_reference_digest: &digest('c'),
+                artifact_data_worker_port: 30_999,
             },
         );
 
@@ -1219,6 +1605,14 @@ mod tests {
             egress["mcp_state_keys"]["keys"][0]["key_material_path"],
             "/project/runtime/mcp-state-keys/current"
         );
+        assert_eq!(
+            configs["mcp-discovery"].1["artifact_data_worker"]["endpoint"],
+            "https://localhost:30999/"
+        );
+        assert_eq!(
+            configs["context-subscription"].1["host"]["endpoint"],
+            "https://localhost:31011/"
+        );
     }
 
     #[test]
@@ -1237,6 +1631,10 @@ mod tests {
             mcp_resource_host: 31_011,
             mcp_resource_host_observability: 31_012,
             capability_remote_observability: 31_013,
+            mcp_discovery_observability: 31_014,
+            mcp_subscription_observability: 31_015,
+            mcp_cleanup_observability: 31_016,
+            context_subscription_observability: 31_017,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -1248,6 +1646,10 @@ mod tests {
             ("mcp-host".to_owned(), digest('1')),
             ("mcp-resource-host".to_owned(), digest('2')),
             ("capability-remote".to_owned(), digest('3')),
+            ("mcp-discovery".to_owned(), digest('4')),
+            ("mcp-subscription".to_owned(), digest('5')),
+            ("mcp-cleanup".to_owned(), digest('6')),
+            ("context-subscription".to_owned(), digest('7')),
         ]);
         let launches = initial_process_launches(
             ProcessPaths {
@@ -1277,7 +1679,11 @@ mod tests {
                 "context-remote",
                 "mcp-host",
                 "mcp-resource-host",
-                "capability-remote"
+                "capability-remote",
+                "mcp-discovery",
+                "mcp-subscription",
+                "mcp-cleanup",
+                "context-subscription"
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
@@ -1289,6 +1695,10 @@ mod tests {
         assert_eq!(launches[6].ready_address, "127.0.0.1:31010");
         assert_eq!(launches[7].ready_address, "127.0.0.1:31012");
         assert_eq!(launches[8].ready_address, "127.0.0.1:31013");
+        assert_eq!(launches[9].ready_address, "127.0.0.1:31014");
+        assert_eq!(launches[10].ready_address, "127.0.0.1:31015");
+        assert_eq!(launches[11].ready_address, "127.0.0.1:31016");
+        assert_eq!(launches[12].ready_address, "127.0.0.1:31017");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
@@ -1323,6 +1733,18 @@ mod tests {
         assert!(launches[8].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH"
             && value == "/project/runtime/tls/capability-remote-client.pem"));
+        assert!(launches[9].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_CERT_PATH"
+            && value == "/project/runtime/tls/mcp-discovery-client.pem"));
+        assert!(launches[10].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_CERT_PATH"
+            && value == "/project/runtime/tls/mcp-subscription-client.pem"));
+        assert!(launches[11].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MCP_CLEANUP_EGRESS_CERT_PATH"
+            && value == "/project/runtime/tls/mcp-cleanup-client.pem"));
+        assert!(launches[12].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CERT_PATH"
+            && value == "/project/runtime/tls/context-subscription-client.pem"));
     }
 
     #[test]
@@ -1343,5 +1765,9 @@ mod tests {
         assert_eq!(ports.mcp_resource_host, 19_105);
         assert_eq!(ports.mcp_resource_host_observability, 19_106);
         assert_eq!(ports.capability_remote_observability, 19_107);
+        assert_eq!(ports.mcp_discovery_observability, 19_108);
+        assert_eq!(ports.mcp_subscription_observability, 19_109);
+        assert_eq!(ports.mcp_cleanup_observability, 19_110);
+        assert_eq!(ports.context_subscription_observability, 19_111);
     }
 }

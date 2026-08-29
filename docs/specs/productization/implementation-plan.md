@@ -142,6 +142,18 @@ Remote Capability 在发布 readiness 前立即以 `MCP Host is unavailable` 失
 该探针证明启动依赖和身份边界闭合，但空 endpoint catalog 仍是 deny-all：尚未证明 remote Capability/MCP 实际 dispatch，
 MCP discovery/subscription worker、一次受监督 `full` journey 与 WASI 也仍未完成。
 
+MCP 后台闭包随后加入 Discovery Worker、Subscription Worker、OAuth Cleanup Worker 与 Subscription Context Worker。
+四个进程各有 closed/digest-bound config、持久化 observability port 和独立 ClientAuth 证书：Discovery 使用 exact
+`mcp-discovery-worker` workload URI 连接 Egress 与 Artifact Data，Subscription 使用 exact
+`mcp-subscription-worker` URI 连接 Egress，Cleanup 使用专用 `mcp-cleanup-worker` URI 且只能调用 PKCE cleanup RPC，Subscription Context
+使用 exact `context-worker` URI 连接 MCP Resource Host。2026-08-30 fresh PostgreSQL/NATS/LocalStack 探针先启动 base、
+Security、Egress 与 Resource Host，再启动四个后台进程；四个 `/readyz` 均为 `ready`，其 PostgreSQL dependency counter
+均为 success>0/failure=0。独立 mTLS method-role fixture 同时证明通用 MCP Host 不能调用 cleanup、Cleanup 身份不能调用
+其他 MCP RPC；第二个 fresh profile 以证书 SAN `spiffe://insight.platform/workload/mcp-cleanup-worker` 启动 Cleanup 并 ready。
+由于探针没有伪造 Discovery、Subscription 或 Cleanup Job，Egress operation counter 保持 0；
+这不是 remote Streamable HTTP、OAuth callback 或 subscription lifecycle 的场景证据。Callback API、Sandbox/WASI、实际
+endpoint fixture 和一次由 `insight dev --profile full` 监督的整体 journey 仍未完成。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

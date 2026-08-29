@@ -74,6 +74,8 @@ pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-discovery-worker";
 pub const MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-subscription-worker";
+pub const MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/mcp-cleanup-worker";
 pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
@@ -543,6 +545,7 @@ pub enum EgressCallerRole {
     ContextWorker,
     McpDiscoveryWorker,
     McpSubscriptionWorker,
+    McpCleanupWorker,
     McpHost,
 }
 
@@ -554,6 +557,7 @@ impl EgressCallerRole {
             CONTEXT_WORKER_WORKLOAD_IDENTITY => Some(Self::ContextWorker),
             MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY => Some(Self::McpDiscoveryWorker),
             MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY => Some(Self::McpSubscriptionWorker),
+            MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY => Some(Self::McpCleanupWorker),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
             _ => None,
         }
@@ -1909,7 +1913,7 @@ where
         &self,
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
-        require_role(&request, EgressCallerRole::McpHost)?;
+        require_role(&request, EgressCallerRole::McpCleanupWorker)?;
         let trace = trace_context(&request)?;
         let cleaner = self
             .mcp_oauth_pkce_cleaner
@@ -3237,6 +3241,8 @@ mod tests {
         discovery_key_pem: String,
         subscription_certificate_pem: String,
         subscription_key_pem: String,
+        cleanup_certificate_pem: String,
+        cleanup_key_pem: String,
         context_certificate_pem: String,
         context_key_pem: String,
         unknown_certificate_pem: String,
@@ -3279,6 +3285,8 @@ mod tests {
             client(MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY);
         let (subscription_certificate_pem, subscription_key_pem) =
             client(MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY);
+        let (cleanup_certificate_pem, cleanup_key_pem) =
+            client(MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY);
         let (context_certificate_pem, context_key_pem) = client(CONTEXT_WORKER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
@@ -3296,6 +3304,8 @@ mod tests {
             discovery_key_pem,
             subscription_certificate_pem,
             subscription_key_pem,
+            cleanup_certificate_pem,
+            cleanup_key_pem,
             context_certificate_pem,
             context_key_pem,
             unknown_certificate_pem,
@@ -3531,11 +3541,26 @@ mod tests {
             &fixture.mcp_key_pem,
         )
         .await;
+        assert_eq!(
+            mcp.delete_mcp_o_auth_pkce_secret(traced_request(oauth_envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut cleanup = connect(
+            address,
+            &fixture,
+            &fixture.cleanup_certificate_pem,
+            &fixture.cleanup_key_pem,
+        )
+        .await;
         let outcome: UnaryOutcome<
             McpOAuthPkceSecretCleanupDisposition,
             McpOAuthPkceCleanupFailureWire,
         > = decode_metadata(
-            mcp.delete_mcp_o_auth_pkce_secret(traced_request(oauth_envelope))
+            cleanup
+                .delete_mcp_o_auth_pkce_secret(traced_request(oauth_envelope))
                 .await
                 .unwrap()
                 .into_inner(),
@@ -3556,6 +3581,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability
+                .execute_mcp_streamable_http(traced_request(mcp_operation_envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            cleanup
                 .execute_mcp_streamable_http(traced_request(mcp_operation_envelope.clone()))
                 .await
                 .unwrap_err()
