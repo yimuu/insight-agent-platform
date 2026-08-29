@@ -16,10 +16,17 @@ insight artifact read <artifact_id> --output <file> [--path <project>]
 ```
 
 `upload` 对 regular file 进行有界流式 SHA-256，使用 exact size/digest 构造 closed prepare request；prepare 返回的 URL
-和 completion proof 均为 secret-bearing，仅在进程内用于本次上传，不进入 stdout、report 或日志。对象 PUT 使用独立
+和 completion proof 均为 secret-bearing，仅保存在项目本地 `.insight/artifact-upload/` 的 `0600` crash-safe journal，
+不进入 stdout、report、日志或 Git。对象 PUT 使用独立
 no-proxy/no-redirect HTTPS client，且不设置 Runtime OIDC Authorization；只接受 exact `200 OK`。随后 CLI 以 prepare
 Artifact ETag 完成 complete-upload，等待同一 ArtifactVerify Operation terminal，并读取 Ready metadata 重验 purpose、
 classification、length、media type 和 digest。
+
+upload journal 在任何 mutation/effect 前固定 canonical prepare request、request digest、prepare/complete Receipt、If-Match
+和 authority identity，并按 `prepared -> object_uploaded -> completed -> result` 单调持久化。prepare 响应丢失由同一
+Receipt 恢复；complete 响应丢失只重放同一 complete，不再次执行已经成功的 object PUT；完成后再次运行只读取同一
+Artifact authority。尚未 PUT 且 target 临近过期时，CLI 只允许用原 prepare Receipt 刷新同一
+Artifact/Operation/Grant/generation，任一 identity 或 ETag 改变都 fail closed，绝不创建第二个 candidate 来隐藏恢复失败。
 
 `get` 输出 closed `ArtifactViewV1`。`read` 先从同一 Runtime Gateway 读取 metadata，只允许 Ready 且具有 exact
 `ArtifactRef` 的内容，再经 `/v1/artifacts/{artifact_id}/content` 流式下载。CLI 不读取 object locator、不获取 S3/KMS
@@ -41,7 +48,9 @@ classification、length、media type 和 digest。
 loopback HTTP fixture 覆盖 prepare -> isolated uploader -> complete -> Operation wait -> Ready metadata，并断言
 Authorization、Receipt、If-Match、Location、trace、exact Operation target 和最终 content closure；安全负向断言最终 report
 不含签名 URL、completion proof 或 token。另一 fixture 覆盖 metadata -> content、exact digest 和最终文件。命令 parser
-覆盖 upload/get/read 的必需参数。
+覆盖 upload/get/read 的必需参数。response-loss fixture 在 Artifact authority 已接受 complete 后主动断开连接；第二次
+调用复用同一 Receipt/If-Match 和 Artifact identity，object PUT 计数保持一次，成功后的第三次调用只读 Ready authority
+并返回相同报告。
 
 fresh deterministic first Run P2 journey 已通过真实 Artifact Gateway、Artifact Data Worker 与 HTTPS S3/KMS dependency
 上传 scheduler 所需 typed Plan、authoring 与 qualification Artifact；对 typed Plan 又通过公开 CLI 显式等待同一
@@ -51,7 +60,6 @@ publication 与 Run。该证据覆盖真实 upload/download 主路径，但不�
 
 以下仍未完成：
 
-- prepare/complete 的 request-before-send journal、过期 target 重新 prepare 与 response-loss 精确恢复；
 - 真实 HTTPS object PUT 的 redirect/proxy/token 泄露、非 200、TLS、expiry 和 digest mismatch 负向 fixture；
 - 409/412/429、quarantined/rejected/deleted、truncated/oversized stream。
 

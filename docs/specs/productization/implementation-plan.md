@@ -129,7 +129,7 @@ body 与 timeout，并重验 authority ID、tenant、ETag、trace、cache-contro
 create -> validate/wait -> read validated Draft -> publish -> create Deployment -> activate，并从 publish authority 响应
 填入 self Version binding；它不接受调用方伪造尚未创建的 Version ID。CLI 已为 canonical manifest 建立 bounded closed
 intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并通过 response-loss fixture 证明精确重放与完成后
-零网络恢复。Artifact upload、首次 Run、完整失败矩阵和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为
+零网络恢复。首次 Run 已由 fresh P2 journey 覆盖；完整失败矩阵和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为
 Verified。
 
 [`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result/watch 命令面，并严格区分 Runtime Gateway
@@ -148,8 +148,11 @@ Receipt 的 raw `/v1` mutation 被 closed 409 `invalid_state_transition` 拒绝�
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
 content；read 按 exact ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。
-upload response-loss journal 与完整负向矩阵尚未完成；fresh 真实 S3/KMS upload 已由 deterministic first Run P2
-journey 覆盖。
+upload 已使用 bounded `0600` crash-safe journal 固定 canonical request、prepare/complete Receipt、If-Match、同一
+Artifact/Operation/Grant identity 与单调 effect phase。loopback response-loss fixture 已证明 complete 已接受但响应丢失时，
+第二次命令只重放同一 complete、不会再次 PUT 或创建第二个 Artifact，完成后再次调用只读同一 Ready authority；临近过期
+target 只能通过同一 prepare Receipt 刷新同一 generation。完整负向矩阵尚未完成；fresh 真实 S3/KMS upload 已由
+deterministic first Run P2 journey 覆盖。
 
 ### 5.1 工作项
 

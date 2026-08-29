@@ -7,6 +7,7 @@
 mod apply;
 mod apply_journal;
 mod artifact;
+mod artifact_journal;
 mod public_client;
 mod run;
 mod run_journal;
@@ -4292,6 +4293,7 @@ fn upload_local_artifact(
             display_name,
             operation_timeout: Duration::from_secs(timeout_seconds),
         },
+        &root.join(PROJECT_DIRECTORY).join("artifact-upload"),
     )
     .map_err(CliError::Artifact)?;
     render_json(&report)
