@@ -45,6 +45,7 @@ INTERNAL_ROLES = {
     "insight-platform-orchestration-worker": "orchestration_worker",
     "insight-platform-orchestrator": "orchestrator_domain",
     "insight-platform-postgres": "platform_postgres",
+    "insight-platform-qualification-tests": "qualification_tests",
     "insight-platform-registry": "registry_domain",
     "insight-platform-registry-validation-worker": "registry_validation_worker",
     "insight-platform-rpc-trace": "rpc_trace",
@@ -124,6 +125,7 @@ ALLOWED_INTERNAL = {
     "security_rpc": {"contracts", "rpc_trace", "security_domain"},
     "tasks_domain": {"contracts"},
     "platform_postgres": {"artifact_broker", "artifacts_domain", "capability_adapters", "contracts", "context_domain", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "security_domain", "tasks_domain"},
+    "qualification_tests": set(),
     "platform_runtime": {"artifact_rpc", "artifacts_domain", "contracts", "invocations_domain", "jobs_domain", "models_domain", "orchestrator_domain", "platform_postgres", "platform_worker", "rpc_trace", "sandbox_domain", "sandbox_rpc", "security_domain", "tasks_domain"},
     "sandbox_domain": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     "sandbox_attestor": {"contracts", "observability", "sandbox_domain", "sandbox_rpc"},
@@ -145,6 +147,9 @@ ALLOWED_DEV_INTERNAL = {
     # reaches provider/MCP networks solely through the egress_rpc dependency.
     "mcp_service": {"capability_adapters", "model_adapters"},
     "platform_postgres": {"artifact_rpc", "egress_core", "egress_rpc"},
+    # Cross-plane qualification targets compose real durable authority with physical execution
+    # adapters. This package has no production targets or normal internal dependencies.
+    "qualification_tests": {"artifact_broker", "artifacts_domain", "contracts", "invocations_domain", "platform_postgres", "sandbox_domain", "sandbox_wasi_executor"},
     "cli": {"platform_api"},
 }
 

@@ -36,6 +36,7 @@ members = [
     "crates/platform-observability",
     "crates/platform-orchestration-worker",
     "crates/platform-postgres",
+    "crates/platform-qualification-tests",
     "crates/platform-orchestrator",
     "crates/platform-registry",
     "crates/platform-registry-validation-worker",

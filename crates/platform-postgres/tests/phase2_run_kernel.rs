@@ -10138,14 +10138,23 @@ async fn seed_authorities(repository: &PgRepository, pool: &PgPool) {
             .await
             .unwrap();
     }
-    for (principal_id, authority, subject) in
-        [(PRINCIPAL_ID, '1', '2'), (DENIED_PRINCIPAL_ID, '3', '4')]
-    {
+    for (principal_id, authority, subject) in [
+        (
+            PRINCIPAL_ID,
+            "phase2-run-kernel-authority",
+            "phase2-run-kernel-subject",
+        ),
+        (
+            DENIED_PRINCIPAL_ID,
+            "phase2-run-kernel-denied-authority",
+            "phase2-run-kernel-denied-subject",
+        ),
+    ] {
         repository
             .create_principal(NewPrincipal {
                 principal_id: id(principal_id),
-                authentication_authority_digest: digest(authority),
-                subject_digest: digest(subject),
+                authentication_authority_digest: digest_bytes(authority.as_bytes()),
+                subject_digest: digest_bytes(subject.as_bytes()),
                 installation_bindings: PrincipalBindingsPayload {
                     installation_bindings: vec![],
                 },

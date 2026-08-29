@@ -46,17 +46,20 @@ use insight_platform_sandbox::{
     InstalledSandboxBackendRegistry, MergeSandboxCapabilityOutcome, PreparedSandbox,
     RecoverExpiredSandboxLease, RevokeWasiSandboxGrants, RunningSandbox, SafeSandboxTraceContext,
     SandboxBackendFailure, SandboxCleanupDisposition, SandboxCleanupEvidence,
-    SandboxCompletedOutput, SandboxControlAuthority, SandboxControllerAudit,
-    SandboxExecutionAuthority, SandboxExecutionOutcome, SandboxExecutionPolicyClosure,
-    SandboxExecutorBackend, SandboxExecutorHost, SandboxExecutorWorker, SandboxGatewayAuthority,
+    SandboxControlAuthority, SandboxControllerAudit, SandboxExecutionAuthority,
+    SandboxExecutionOutcome, SandboxExecutionPolicyClosure, SandboxExecutorBackend,
+    SandboxExecutorHost, SandboxExecutorWorker, SandboxGatewayAuthority,
     SandboxIsolationBackendKind, SandboxLeaseRecoveryAction, SandboxLeaseRecoveryAuthority,
     SandboxLeaseRecoveryDisposition, SandboxNetworkMode, SandboxOutcomeMergeAudit,
     SandboxPrestartControlOutcome, SandboxRecoveryAudit, SandboxResourceEnvelope,
-    SandboxResourceUsage, SandboxStopReason, SandboxTerminationEvidence, SandboxUncertainty,
-    SandboxWorkerAudit, SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity, ScopedArtifactGrant,
+    SandboxStopReason, SandboxTerminationEvidence, SandboxUncertainty, SandboxWorkerAudit,
+    SandboxWorkerAuditBundle, SandboxWorkerCommitIdentity, ScopedArtifactGrant,
     ScopedSandboxCallback, StopUnclaimedSandboxJob, TerminateSandbox, WasiArtifactBroker,
     WasiArtifactBrokerError, WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevoker,
     WasiValueDirection, WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator,
+};
+use insight_platform_sandbox_wasi::{
+    SystemWasiExecutorClock, WasiExecutorBackendConfig, WasmtimeSandboxExecutorBackend,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
@@ -101,8 +104,30 @@ fn sha256_bytes(bytes: &[u8]) -> Sha256Digest {
     .unwrap()
 }
 
+const WASI_SUCCESS_OUTPUT: &str = r#"{"schema_version":1,"value":{"answer":42}}"#;
+
 fn runtime_bundle_bytes() -> Vec<u8> {
-    b"fixture-wasi-module-v1".to_vec()
+    let output = WASI_SUCCESS_OUTPUT;
+    let packed = (128_u64 << 32) | u64::try_from(output.len()).unwrap();
+    wat::parse_str(format!(
+        r#"(module
+          (memory (export "memory") 1 16)
+          (global $heap (mut i32) (i32.const 4096))
+          (func (export "insight_alloc") (param $length i32) (result i32)
+            (local $pointer i32)
+            global.get $heap
+            local.set $pointer
+            global.get $heap
+            local.get $length
+            i32.add
+            global.set $heap
+            local.get $pointer)
+          (func (export "run") (param i32 i32) (result i64)
+            i64.const {packed})
+          (data (i32.const 128) "{escaped}"))"#,
+        escaped = output.replace('"', "\\\"")
+    ))
+    .unwrap()
 }
 
 fn artifact(suffix: u16, character: char) -> ArtifactRef {
@@ -1684,40 +1709,6 @@ async fn insert_sandbox_input_reference(
     .unwrap();
 }
 
-fn usage() -> SandboxResourceUsage {
-    SandboxResourceUsage {
-        cpu_milliseconds: 1_500,
-        peak_memory_mebibytes: 16,
-        peak_pids: 1,
-        files_created: 1,
-        io_bytes: 1_024,
-        stdout_bytes: 4,
-        stderr_bytes: 0,
-        result_bytes: 32,
-        artifact_output_bytes: 0,
-        network_connections: 0,
-        network_request_bytes: 0,
-        network_response_bytes: 0,
-        wall_milliseconds: 25,
-        wasm_fuel_consumed: Some(1_000),
-    }
-}
-
-fn output(schema_digest: Sha256Digest) -> SandboxCompletedOutput {
-    let value = serde_json::json!({"answer": 42});
-    SandboxCompletedOutput {
-        value_id: id(ResourceKind::RunValue, 42),
-        classification: DataClassification::Internal,
-        schema_digest,
-        content_digest: canonical_digest(&value).unwrap().parse().unwrap(),
-        value: ValueRef::Inline { value },
-        artifact_link_ids: vec![],
-        artifact_outputs: vec![],
-        validation_evidence_digest: sha('5'),
-        usage: usage(),
-    }
-}
-
 struct FixtureArtifactUnsealer;
 
 #[async_trait]
@@ -1802,10 +1793,26 @@ impl InstalledArtifactObjectStore for FixtureArtifactStore {
 
 struct WasiBackend {
     descriptor: InstalledSandboxBackendDescriptor,
+    delegate: Arc<WasmtimeSandboxExecutorBackend>,
     artifact_broker: Arc<dyn WasiArtifactBroker>,
     validator: Arc<PgRepository>,
     grant_revoker: Arc<PgRepository>,
     worker_process_generation_id: ResourceId,
+}
+
+struct UnavailableProcessIsolation;
+
+#[async_trait]
+impl insight_platform_sandbox::SandboxProcessGenerationIsolation for UnavailableProcessIsolation {
+    async fn prove_absent(
+        &self,
+        _request: insight_platform_sandbox::ProveSandboxProcessGenerationAbsent,
+    ) -> Result<
+        insight_platform_sandbox::SandboxProcessGenerationAbsenceEvidence,
+        insight_platform_sandbox::SandboxProcessGenerationIsolationError,
+    > {
+        Err(insight_platform_sandbox::SandboxProcessGenerationIsolationError::Unavailable)
+    }
 }
 
 #[async_trait]
@@ -1959,25 +1966,15 @@ impl SandboxExecutorBackend for WasiBackend {
                 "sandbox_fixture_input_validation_failed",
             )
         })?;
-        Ok(PreparedSandbox {
-            provider_process_generation_id: None,
-            sandbox_identity_digest: sha('6'),
-            request_digest: request.request_digest,
-            attempt_no: request.attempt_no,
-            lease_generation: request.lease_generation,
-            prepare_evidence_digest: sha('7'),
-        })
+        self.delegate.prepare(request).await
     }
 
     async fn start(
         &self,
-        _request: insight_platform_sandbox::SandboxExecutionRequest,
+        request: insight_platform_sandbox::SandboxExecutionRequest,
         prepared: PreparedSandbox,
     ) -> Result<RunningSandbox, SandboxBackendFailure> {
-        Ok(RunningSandbox {
-            prepared,
-            start_evidence_digest: sha('8'),
-        })
+        self.delegate.start(request, prepared).await
     }
 
     async fn collect(
@@ -1985,7 +1982,10 @@ impl SandboxExecutorBackend for WasiBackend {
         request: insight_platform_sandbox::SandboxExecutionRequest,
         running: RunningSandbox,
     ) -> Result<CollectedSandbox, SandboxBackendFailure> {
-        let mut output = output(request.output_schema_digest.clone());
+        let collected = self.delegate.collect(request.clone(), running).await?;
+        let SandboxExecutionOutcome::Completed(output) = &collected.outcome else {
+            return Ok(collected);
+        };
         let ValueRef::Inline { value } = &output.value else {
             return Err(test_backend_failure(
                 insight_platform_sandbox::SandboxBackendFailureStage::Collecting,
@@ -2011,37 +2011,24 @@ impl SandboxExecutorBackend for WasiBackend {
             ));
         }
         validation.value = value.clone();
-        output.validation_evidence_digest =
-            self.validator.validate(validation).await.map_err(|_| {
-                test_backend_failure(
-                    insight_platform_sandbox::SandboxBackendFailureStage::Collecting,
-                )
-            })?;
-        Ok(CollectedSandbox {
-            running,
-            outcome: SandboxExecutionOutcome::Completed(Box::new(output)),
-            usage: usage(),
-            collection_evidence_digest: sha('9'),
-        })
+        self.validator.validate(validation).await.map_err(|_| {
+            test_backend_failure(insight_platform_sandbox::SandboxBackendFailureStage::Collecting)
+        })?;
+        Ok(collected)
     }
 
     async fn terminate(
         &self,
-        _command: TerminateSandbox,
+        command: TerminateSandbox,
     ) -> Result<SandboxTerminationEvidence, SandboxBackendFailure> {
-        Ok(SandboxTerminationEvidence {
-            evidence_digest: sha('a'),
-            guest_acknowledged: true,
-            process_tree_terminated: true,
-            grants_revoked: true,
-            external_effect_possible: false,
-        })
+        self.delegate.terminate(command).await
     }
 
     async fn destroy(
         &self,
         command: DestroySandbox,
     ) -> Result<SandboxCleanupEvidence, SandboxBackendFailure> {
+        let cleanup = self.delegate.destroy(command.clone()).await?;
         let revoke = RevokeWasiSandboxGrants {
             tenant_id: command.tenant_id.clone(),
             sandbox_job_id: command.sandbox_job_id.clone(),
@@ -2069,90 +2056,21 @@ impl SandboxExecutorBackend for WasiBackend {
                 insight_platform_sandbox::SandboxBackendFailureStage::Destroying,
             ));
         }
-        Ok(SandboxCleanupEvidence {
-            disposition: SandboxCleanupDisposition::Destroyed,
-            sandbox_identity_digest: command.sandbox_identity_digest,
-            grants_revoked: true,
-            ephemeral_storage_destroyed: true,
-            observed_at: Utc::now(),
-            evidence_digest: sha('b'),
-        })
+        Ok(cleanup)
     }
 
     async fn abort(
         &self,
         command: insight_platform_sandbox::AbortSandboxExecution,
     ) -> Result<insight_platform_sandbox::SandboxAbortEvidence, SandboxBackendFailure> {
-        Ok(insight_platform_sandbox::SandboxAbortEvidence {
-            reason: command.reason,
-            request_digest: command.request_digest,
-            attempt_no: command.attempt_no,
-            lease_generation: command.lease_generation,
-            sandbox_identity_digest: sha('1'),
-            termination: SandboxTerminationEvidence {
-                evidence_digest: sha('a'),
-                guest_acknowledged: true,
-                process_tree_terminated: true,
-                grants_revoked: true,
-                external_effect_possible: false,
-            },
-            cleanup: SandboxCleanupEvidence {
-                disposition: SandboxCleanupDisposition::Destroyed,
-                sandbox_identity_digest: sha('1'),
-                grants_revoked: true,
-                ephemeral_storage_destroyed: true,
-                observed_at: Utc::now(),
-                evidence_digest: sha('b'),
-            },
-            evidence_digest: sha('2'),
-        })
+        self.delegate.abort(command).await
     }
 
     async fn recover_expired_lease(
         &self,
         expired: insight_platform_sandbox::ExpiredSandboxLease,
     ) -> Result<insight_platform_sandbox::SandboxLeaseRecoveryEvidence, SandboxBackendFailure> {
-        let execution_may_have_started =
-            expired.physical_state != insight_platform_contracts::SandboxJobState::Preparing;
-        let external_effect_possible = execution_may_have_started
-            && (expired.request.effect.risk_rank() >= Effect::IdempotentWrite.risk_rank()
-                || expired.request.network_mode != SandboxNetworkMode::None);
-        let sandbox_identity_digest = sha('1');
-        insight_platform_sandbox::SandboxLeaseRecoveryEvidence {
-            schema_version: 1,
-            request_digest: expired.request.request_digest,
-            attempt_no: expired.request.attempt_no,
-            lease_generation: expired.observed_lease_generation,
-            physical_state: expired.physical_state,
-            executor_identity_digest: expired.executor_identity_digest.unwrap(),
-            uncertainty: SandboxUncertainty {
-                evidence_digest: sha('3'),
-                sandbox_identity_digest: sandbox_identity_digest.clone(),
-                execution_may_have_started,
-                external_effect_possible,
-                manual_reconciliation_required: external_effect_possible,
-            },
-            cleanup: SandboxCleanupEvidence {
-                disposition: SandboxCleanupDisposition::Destroyed,
-                sandbox_identity_digest,
-                grants_revoked: true,
-                ephemeral_storage_destroyed: true,
-                observed_at: Utc::now(),
-                evidence_digest: sha('4'),
-            },
-            evidence_digest: sha('0'),
-        }
-        .seal()
-        .map_err(|_| SandboxBackendFailure {
-            stage: insight_platform_sandbox::SandboxBackendFailureStage::Recovering,
-            safe_code: "sandbox_recovery_evidence_invalid".to_owned(),
-            safe_message: "Sandbox recovery evidence is invalid".to_owned(),
-            retryability: insight_platform_contracts::Retryability::Never,
-            evidence_digest: sha('5'),
-            sandbox_identity_digest: None,
-            execution_may_have_started,
-            external_effect_possible,
-        })
+        self.delegate.recover_expired_lease(expired).await
     }
 }
 
@@ -2911,10 +2829,22 @@ async fn sandbox_fixture() {
         )
         .unwrap(),
     );
+    let real_wasi_backend = Arc::new(
+        WasmtimeSandboxExecutorBackend::new(
+            WasiExecutorBackendConfig::production(descriptor.clone(), fixture.worker_id.clone()),
+            Arc::clone(&artifact_broker) as Arc<dyn WasiArtifactBroker>,
+            Arc::clone(&repository) as Arc<dyn WasiValueValidator>,
+            Arc::clone(&repository) as Arc<dyn WasiGrantRevoker>,
+            Arc::new(UnavailableProcessIsolation),
+            Arc::new(SystemWasiExecutorClock),
+        )
+        .unwrap(),
+    );
     let mut registry = InstalledSandboxBackendRegistry::default();
     registry
         .install(Arc::new(WasiBackend {
             descriptor,
+            delegate: real_wasi_backend,
             artifact_broker: Arc::clone(&artifact_broker) as Arc<dyn WasiArtifactBroker>,
             validator: Arc::clone(&repository),
             grant_revoker: Arc::clone(&repository),
@@ -2999,9 +2929,10 @@ async fn sandbox_fixture() {
     assert!(quota.iter().all(|(_, reserved, _)| *reserved == 0));
     assert!(quota
         .iter()
-        .any(|(metric, _, used)| { metric == "durable_quota.sandbox_cpu_seconds" && *used == 5 }));
+        .any(|(metric, _, used)| { metric == "durable_quota.sandbox_cpu_seconds" && *used == 1 }));
     assert!(quota.iter().any(|(metric, _, used)| {
-        metric == "durable_quota.sandbox_output_bytes" && *used == 1_050_660
+        metric == "durable_quota.sandbox_output_bytes"
+            && *used == i64::try_from(WASI_SUCCESS_OUTPUT.len()).unwrap()
     }));
     let pending = repository
         .scan_pending_sandbox_capability_outcomes(ScanPendingSandboxCapabilityOutcomes {
