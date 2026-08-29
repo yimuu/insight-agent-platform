@@ -984,6 +984,108 @@ pub fn doctor_report(probe: &dyn DoctorProbe) -> DoctorReport {
     }
 }
 
+fn doctor_report_at(
+    probe: &dyn DoctorProbe,
+    current_directory: &Path,
+    now: SystemTime,
+) -> DoctorReport {
+    let mut report = doctor_report(probe);
+    if let Some(check) = local_identity_doctor_check(current_directory, now) {
+        report.checks.push(check);
+        report.ready = report
+            .checks
+            .iter()
+            .all(|check| !check.required || check.status == DoctorStatus::Passed);
+    }
+    report
+}
+
+fn local_identity_doctor_check(root: &Path, now: SystemTime) -> Option<DoctorCheck> {
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    match state_directory.try_exists() {
+        Ok(false) => return None,
+        Err(_) => {
+            return Some(DoctorCheck::failed(
+                "local_identity",
+                true,
+                "cannot inspect local project state; fix its permissions or initialize a fresh project"
+                    .to_owned(),
+            ));
+        }
+        Ok(true) => {}
+    }
+    let state = match load_local_project_state(&state_directory).and_then(|state| {
+        validate_loaded_local_identity(&state_directory, &state.identity)?;
+        Ok(state)
+    }) {
+        Ok(state) => state,
+        Err(_) => {
+            return Some(DoctorCheck::failed(
+                "local_identity",
+                true,
+                "local identity state is invalid; initialize a fresh local project".to_owned(),
+            ));
+        }
+    };
+    let token_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_ACCESS_TOKEN_FILE);
+    let expires_at = read_bounded_identity_file(&token_path)
+        .ok()
+        .and_then(|token| cached_token_expiry(&token));
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
+    let Some(expires_at) = expires_at else {
+        return Some(DoctorCheck::failed(
+            "local_identity",
+            true,
+            "cached local token is unreadable; run `insight token`".to_owned(),
+        ));
+    };
+    let Some(now) = now else {
+        return Some(DoctorCheck::failed(
+            "local_identity",
+            true,
+            "local clock is before the Unix epoch".to_owned(),
+        ));
+    };
+    if expires_at <= now {
+        return Some(DoctorCheck::failed(
+            "local_identity",
+            true,
+            "cached local token has expired; run `insight token`".to_owned(),
+        ));
+    }
+    Some(DoctorCheck::passed(
+        "local_identity",
+        true,
+        format!(
+            "issuer={} jwks_digest={} bootstrap_config_digest={} token_expires_at_unix_seconds={expires_at}",
+            state.identity.issuer,
+            state.identity.jwks_digest,
+            state.identity.bootstrap_config_digest,
+        ),
+    ))
+}
+
+fn cached_token_expiry(token: &[u8]) -> Option<i64> {
+    let token = std::str::from_utf8(token).ok()?;
+    let mut sections = token.split('.');
+    let _header = sections.next()?;
+    let claims = sections.next()?;
+    let _signature = sections.next()?;
+    if sections.next().is_some() {
+        return None;
+    }
+    let claims = URL_SAFE_NO_PAD.decode(claims).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&claims)
+        .ok()?
+        .get("exp")?
+        .as_i64()
+}
+
 fn version_check(
     name: &str,
     required: bool,
@@ -1050,7 +1152,7 @@ pub fn execute(
     match command {
         CliCommand::Help => Ok(usage().to_owned()),
         CliCommand::Doctor { json } => {
-            let report = doctor_report(probe);
+            let report = doctor_report_at(probe, current_directory, SystemTime::now());
             let output = if json {
                 serde_json::to_string_pretty(&report).expect("doctor report is serializable") + "\n"
             } else {
@@ -1212,6 +1314,45 @@ mod tests {
         let report = doctor_report(&probe);
         assert!(!report.ready);
         assert!(render_doctor_report(&report).contains("docker_compose_v2"));
+    }
+
+    #[test]
+    fn doctor_reports_local_identity_without_sensitive_values() {
+        let directory = TempDir::new().unwrap();
+        let state = initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let report = doctor_report_at(&FakeProbe::ready(), directory.path(), SystemTime::now());
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "local_identity")
+            .unwrap();
+        assert_eq!(check.status, DoctorStatus::Passed);
+        assert!(check.detail.contains(&state.identity.issuer));
+        assert!(check.detail.contains(&state.identity.jwks_digest));
+        assert!(check
+            .detail
+            .contains(&state.identity.bootstrap_config_digest));
+        assert!(!check.detail.contains("PRIVATE KEY"));
+        assert!(!check.detail.contains("eyJ"));
+    }
+
+    #[test]
+    fn doctor_marks_an_expired_cached_token_as_actionable_failure() {
+        let directory = TempDir::new().unwrap();
+        initialize_project(directory.path(), Some("demo"), UNIX_EPOCH).unwrap();
+        let report = doctor_report_at(
+            &FakeProbe::ready(),
+            directory.path(),
+            UNIX_EPOCH + std::time::Duration::from_secs(LOCAL_ACCESS_TOKEN_TTL_SECONDS as u64 + 1),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "local_identity")
+            .unwrap();
+        assert_eq!(check.status, DoctorStatus::Failed);
+        assert!(check.detail.contains("insight token"));
+        assert!(!report.ready);
     }
 
     #[test]
