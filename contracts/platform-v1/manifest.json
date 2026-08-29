@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:3ceb58288e1b6a2b8f4cd6ca9a8873e703ead722fe9b634e79b1da55b937680f",
+  "contract_digest": "sha256:63a4f2eeb24704ce3c08b6477df69d77ab98d208e81dc8a08028884f5a678e09",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -75,16 +75,16 @@
       "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
     },
     {
-      "bytes": 2745,
+      "bytes": 2785,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
-      "sha256": "7616671f78c56ac682755e955ccc1be83b261d8b18cd376a3b56fde045ec12be"
+      "sha256": "7585fac2fcbd60760bffdee8a0e9844876afde56cca9a8f5e7df9430e11ebdc8"
     },
     {
-      "bytes": 8961,
+      "bytes": 9041,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/capacity-profile.schema.json",
-      "sha256": "b704fed88ad6754f79deada77071cc592d2cf7db7a83da9f6e5117310e54c749"
+      "sha256": "93005d4efdcfaa3ba4e91840d6117affbd41b85a82138ed5f32eefa7c2a8d8b3"
     },
     {
       "bytes": 2477,
