@@ -214,7 +214,9 @@ journey 覆盖。自签 HTTPS fixture 又证明 no-redirect/no-proxy/no-token、
 readiness、Agent/Deployment、Run timeline/control/result、Task resolve、Artifact metadata/download 与
 Operation safe projection。它只访问 public `/v1`，OIDC token 仅存在浏览器内存，mutation 携带 ETag/Receipt，
 SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。10 个 Node P0 test、严格 TypeScript build
-和 lint 已通过；真实浏览器 journey、restart/replay、敏感 fixture 与静态部署门禁仍未完成，详见
+和 lint 已通过；开发期 stateful fixture 上的真实浏览器 journey 已覆盖 Run/SSE -> Task mutation -> terminal Run、
+409/412/429、cursor reconnect、DOM/console 脱敏、刷新清理内存态 token 和基础键盘语义。该证据不包含真实
+Gateway/PostgreSQL 或 Gateway restart；正式部署、telemetry、慢依赖和 accessibility audit 仍未完成，详见
 [`m3-console.md`](m3-console.md)，故不得标记 M3 或 spec00～18 为 Verified。
 
 ### 6.1 工作项

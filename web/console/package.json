@@ -7,8 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "browser:fixture": "node tests/fixture-server.mjs",
     "lint": "oxlint",
-    "test": "node --test src/api/*.test.mjs",
+    "test": "node --check tests/fixture-server.mjs && node --test src/api/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -14,3 +14,18 @@ main { min-width: 0; padding: 30px 38px 64px; background: #f2f1ec; }.topbar { di
 .timeline { list-style: none; padding: 0; margin: 0; }.timeline li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 12px; position: relative; padding-bottom: 19px; }.timeline li:not(:last-child)::before { content: ''; position: absolute; left: 4px; top: 10px; bottom: 0; border-left: 1px solid #cdd2ca; }.timeline__dot { width: 9px; height: 9px; margin-top: 3px; border: 2px solid #597160; border-radius: 50%; background: #fcfcf8; z-index: 1; }.timeline__header { display: flex; justify-content: space-between; gap: 12px; color: #25332a; font-size: 12px; }.timeline__header code { color: #828a84; font-size: 9px; overflow-wrap: anywhere; }pre { max-height: 260px; overflow: auto; margin: 9px 0 0; padding: 13px; color: #b8e2c3; background: #152019; border: 1px solid #26362c; font: 500 10px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }.linked-tasks { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding-top: 16px; border-top: 1px solid #e0e1da; font-size: 11px; }.json-field { display: block; margin-top: 20px; }.receipt { color: #646e67; font-size: 11px; overflow-wrap: anywhere; }.receipt code { font-size: 10px; }.body-copy { color: #5f6961; font-size: 13px; line-height: 1.7; max-width: 68ch; }.muted { color: #828b84; font-size: 11px; }
 @media (max-width: 900px) { .shell { grid-template-columns: 1fr; }.sidebar { position: static; height: auto; }.sidebar nav { grid-template-columns: repeat(3, 1fr); }.session-summary { display: none; }main { padding: 24px 18px 48px; }.page-grid { grid-template-columns: 1fr; }.panel--wide { grid-column: auto; } }
 @media (max-width: 620px) { .sidebar nav { grid-template-columns: repeat(2, 1fr); }.topbar { align-items: start; }.contract { display: none; }.connection-form,.search { grid-template-columns: 1fr; }.secondary-field { max-width: 100%; }.metrics { grid-template-columns: 1fr 1fr; }.panel { padding: 18px; }.notice { align-items: start; flex-direction: column; } }
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  padding: 0.65rem 0.9rem;
+  border-radius: 0.4rem;
+  background: var(--ink);
+  color: white;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}

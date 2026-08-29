@@ -26,7 +26,7 @@ function Status({ value }: { value: string }) {
 
 function NoticeBox({ notice }: { notice: Notice | null }) {
   if (!notice) return null
-  return <div className={`notice notice--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}><span>{notice.text}</span>{notice.traceId && <code>trace {notice.traceId}</code>}</div>
+  return <div className={`notice notice--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'} aria-atomic="true"><span>{notice.text}</span>{notice.traceId && <code>trace {notice.traceId}</code>}</div>
 }
 
 function Metric({ label, value, mono = false }: { label: string; value: string | number | null | undefined; mono?: boolean }) {
@@ -54,8 +54,9 @@ function App() {
   }
 
   return <div className="shell">
-    <aside className="sidebar"><div className="brand" aria-label="Insight Agent Platform"><span className="brand__mark">IA</span><div><strong>Insight</strong><small>Agent Platform</small></div></div><nav aria-label="Console sections">{NAV.map((item) => <button key={item.id} className={view === item.id ? 'nav-item nav-item--active' : 'nav-item'} onClick={() => setView(item.id)}><span>{item.eyebrow}</span>{item.label}</button>)}</nav><div className="session-summary"><span className={`pulse ${ready ? 'pulse--ready' : ''}`} aria-hidden="true" /><div><strong>{ready === null ? 'Not checked' : ready ? 'Gateway ready' : 'Unavailable'}</strong><small>{tenant || 'Tenant context unset'}</small></div></div></aside>
-    <main><header className="topbar"><div><p className="kicker">OPERATIONS CONSOLE</p><h1>{NAV.find((item) => item.id === view)?.label}</h1></div><div className="contract"><span>CONTRACT</span><strong>insight.platform/v1</strong></div></header><NoticeBox notice={notice} />
+    <a className="skip-link" href="#console-main">Skip to content</a>
+    <aside className="sidebar"><div className="brand" aria-label="Insight Agent Platform"><span className="brand__mark">IA</span><div><strong>Insight</strong><small>Agent Platform</small></div></div><nav aria-label="Console sections">{NAV.map((item) => <button type="button" key={item.id} aria-current={view === item.id ? 'page' : undefined} className={view === item.id ? 'nav-item nav-item--active' : 'nav-item'} onClick={() => setView(item.id)}><span>{item.eyebrow}</span>{item.label}</button>)}</nav><div className="session-summary"><span className={`pulse ${ready ? 'pulse--ready' : ''}`} aria-hidden="true" /><div><strong>{ready === null ? 'Not checked' : ready ? 'Gateway ready' : 'Unavailable'}</strong><small>{tenant || 'Tenant context unset'}</small></div></div></aside>
+    <main id="console-main" tabIndex={-1}><header className="topbar"><div><p className="kicker">OPERATIONS CONSOLE</p><h1>{NAV.find((item) => item.id === view)?.label}</h1></div><div className="contract"><span>CONTRACT</span><strong>insight.platform/v1</strong></div></header><NoticeBox notice={notice} />
       {view === 'overview' && <Overview endpoint={endpoint} token={token} tenant={tenant} ready={ready} setEndpoint={setEndpoint} setToken={setToken} setTenant={setTenant} onConnect={connect} />}
       {view === 'agents' && <Agents client={client} report={setNotice} />}
       {view === 'runs' && <Runs client={client} report={setNotice} onTask={(id) => { setSelectedTask(id); setView('tasks') }} />}
