@@ -37,13 +37,13 @@ class CandidatePipelineTests(unittest.TestCase):
                 (second_path / "candidate-manifest.json").read_bytes(),
             )
             candidate = json.loads((first_path / "candidate-manifest.json").read_bytes())
-            self.assertEqual(15, len(candidate["component_images"]))
+            self.assertEqual(16, len(candidate["component_images"]))
             self.assertEqual({DIGEST_A}, set(candidate["component_images"].values()))
             guest = json.loads(
                 (first_path / "worker-manifests/sandbox-executor.gvisor.json").read_bytes()
             )
             self.assertEqual(DIGEST_B, guest["adapter_runtime_digest"])
-            self.assertEqual(7, len(candidate["worker_manifests"]))
+            self.assertEqual(8, len(candidate["worker_manifests"]))
 
     def test_invalid_mutable_subject_is_rejected(self):
         with tempfile.TemporaryDirectory() as output:
