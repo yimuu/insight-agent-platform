@@ -21,9 +21,9 @@ Sandbox 能力。
 
 > **Insight Agent Platform 是面向关键业务 Agent 的高保证 durable execution backend。**
 
-Python SDK、CLI 和控制台都是 `/v1` 客户端或静态产品界面，不成为新的业务状态 authority，不在可信
-Control/Orchestration Plane 内执行用户 Python，也不绕过 Resource -> ResourceVersion -> Deployment ->
-Binding 生命周期。
+CLI、HTTP 示例和控制台都是 `/v1` 客户端或静态产品界面，不成为新的业务状态 authority，不在可信
+Control/Orchestration Plane 内执行用户代码，也不绕过 Resource -> ResourceVersion -> Deployment -> Binding
+生命周期。
 
 ## 2. 为什么现在进入产品化收敛
 
@@ -31,7 +31,8 @@ Binding 生命周期。
 
 1. `docs/current` 和根 Quickstart 仍描述旧 DSL runtime，Platform v2 只是目标合同，用户面对两个“产品”；
 2. Platform v2 有多个隔离进程和依赖，却没有一个面向开发者的启动、诊断和停止入口；
-3. 没有薄 Python SDK，用户必须理解 Draft、Version、Deployment、Binding、Receipt 等底层 HTTP 步骤；
+3. 没有低摩擦的 CLI/HTTP authoring path，用户必须手工拼接 Draft、Version、Deployment、Binding、Receipt
+   等底层步骤；
 4. 没有可视化 Run、Task、Event、Trace 和 Artifact 的最小控制台；
 5. 验证证据以合同和基础设施门禁为中心，尚未由一组用户可运行的端到端场景证明产品闭环。
 
@@ -42,7 +43,7 @@ Binding 生命周期。
 
 ### 3.1 目标用户
 
-- **应用开发者**：使用 Python/HTTP 创建、发布和运行 Agent，不需要阅读 Rust workspace；
+- **应用开发者**：使用 CLI/HTTP 创建、发布和运行 Agent，不需要阅读 Rust workspace；
 - **平台工程师**：以本地 profile 评估能力，以 Kubernetes/GitOps 管理正式环境；
 - **运行值班人员**：从控制台定位 Run、Task、依赖、重试、Artifact 和安全拒绝原因。
 
@@ -55,7 +56,7 @@ Binding 生命周期。
 1. 运行 `insight doctor`，得到可操作的前置条件诊断；
 2. 运行 `insight init` 生成显式、可审查的本地项目和非生产配置；
 3. 运行 `insight dev` 启动同一套 `/v1` 合同的最小多进程平台；
-4. 运行不超过 30 行的 Python 示例，显式完成 Agent 发布、Deployment、Binding 和 Run；
+4. 运行 `insight apply` 与 `insight run`，显式完成 Agent 发布、Deployment、Binding 和 Run；
 5. 在终端接收流式结果，并在控制台查看同一个 Run 的状态、事件、Task、Trace 与 Artifact；
 6. 停止并重启本地平台后读取相同 durable Run，不依赖进程内存恢复业务事实。
 
@@ -73,14 +74,15 @@ Binding 生命周期。
   已有产物；
 - 启动失败必须指出具体进程、依赖、端口、schema 或凭据问题，不只返回聚合错误。
 
-### G2：交付薄 Python SDK
+### G2：交付稳定的 CLI/HTTP 开发者入口
 
-- 在 `sdk/python/` 交付版本化 SDK，底层类型尽量从 authoritative OpenAPI/JSON Schema 生成；
-- 首批覆盖 Resource lifecycle、Run/create/read/control/events/result、Task resolve、Artifact upload/read 和
-  Operation wait；
-- 提供 async-first 客户端和小型同步入口；所有重试遵守 Receipt/idempotency 与 effect-aware 合同；
-- ergonomics helper 只编排显式 API，不在本地执行工具、不推断 Secret、不自动改变 active head；
-- 北极星示例不超过 30 行，错误保留平台 `problem` code、request ID 和 retryability。
+- authoritative OpenAPI/JSON Schema 与实际 `/v1` route 具备自动 drift 检查；
+- `insight apply/run/watch/task/artifact/operation` 覆盖 Resource lifecycle、Run、Task、Artifact 与异步
+  Operation 的首次使用路径；
+- `apply` 只编排显式 `/v1` 请求并返回每一步 authority ID，不引入第二套 Agent DSL、不推断 Secret、
+  不静默覆盖 active head；
+- 为完整生命周期交付可复制的 curl/HTTP 示例和 closed request fixtures；
+- CLI 保留平台 `problem` code、request ID、Receipt、retryability 与 CAS 冲突，不把错误压缩成普通字符串。
 
 ### G3：交付最小运行控制台
 
@@ -119,7 +121,7 @@ Binding 生命周期。
 ### G6：降低反馈时间与维护成本
 
 - 普通 PR 的快速反馈 lane 目标不超过 10 分钟，workspace 全量验证目标不超过 30 分钟；
-- 文档、SDK 或控制台单独变化不触发 production candidate 镜像构建与 cosign 签名；
+- 文档、CLI 或控制台单独变化不触发 production candidate 镜像构建与 cosign 签名；
 - candidate 镜像只由手动发布、tag 或影响 runtime/deployment 的主干变更触发，同一 revision 的 Rust
   release binary 只编译一次并供镜像复用；
 - BuildKit/Cargo 缓存键、产物 digest 和失效原因可观察，缓存 miss 不能静默退化为每次全量重建；
@@ -143,6 +145,7 @@ Binding 生命周期。
   GitOps promotion；
 - 不宣称 production-ready 或发布 CapacityProfile；
 - 不提供与 Agno、LangGraph 等框架等量的 integrations/cookbook；
+- 本阶段不交付 Python、JavaScript 或 Go SDK；语言 SDK 在 `/v1`、CLI 和黄金场景稳定后单独评估；
 - 不把 Platform v2 改名为 `/v2`，不保留两个 public runtime；
 - 不为了演示而使用内存 repository、mock authority 或服务启动时自动建表替代 durable 路径；
 - 不在完成产品化退出门禁前修改 `docs/current`，使其描述尚不存在的产品行为。
@@ -153,7 +156,7 @@ Binding 生命周期。
 
 1. 北极星旅程在 fresh supported environment 中可按文档复现，并保存机器可读报告；
 2. 十条黄金场景均通过 public `/v1`，其中至少一条证明跨进程重启后的 durable resume；
-3. Python SDK、CLI、控制台和示例具备版本、测试、安装说明和安全负向用例；
+3. CLI、HTTP fixtures、控制台和示例具备版本、测试、安装说明和安全负向用例；
 4. 用户无需理解 Rust workspace 即可完成首次 Run、Task 操作和故障定位；
 5. CI/image/signing 触发策略满足 G6，普通改动不再无条件重建并签名全部 candidate；
 6. clean cut 审计确认 default build、根 README、`docs/current`、示例和发行物只指向新 `/v1` 产品；旧实现

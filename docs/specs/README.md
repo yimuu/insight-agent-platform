@@ -13,7 +13,7 @@
 
 - [产品化收敛阶段目标](productization/00-goals.md)及其
   [实施计划](productization/implementation-plan.md)：下一阶段停止横向扩展平台内核，交付一个命令的本地
-  平台、薄 Python SDK、最小运行控制台、十条黄金场景和最终仓库 clean cut。当前状态为 Proposed，尚未改变
+  平台、稳定的 CLI/HTTP 开发者入口、最小运行控制台、十条黄金场景和最终仓库 clean cut。当前状态为 Proposed，尚未改变
   `docs/current` 描述的产品行为；
 - [Platform v2 clean-cut 规范集合](platform-v2/00-overview.md)：重新定义 Agent、Skill、Capability、
   Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。00～18 与

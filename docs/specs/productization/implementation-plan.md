@@ -15,7 +15,7 @@
 untrusted execution plane 分离。
 
 任何实现反馈若要求改变 Platform v2 observable contract，先停止该批次，按 upstream -> downstream 修订
-受影响 spec 并完成 00～18 cross-review；CLI、SDK 和控制台不得自行创造第二套语义。
+受影响 spec 并完成 00～18 cross-review；CLI、HTTP 示例和控制台不得自行创造第二套语义。
 
 ## 2. 交付物布局
 
@@ -25,11 +25,10 @@ untrusted execution plane 分离。
 |---|---|
 | `crates/insight-cli/` / `insight` | 本地项目、依赖、进程、诊断与显式 provision 编排 |
 | `deploy/dev/` | digest 固定的本地 base/full profiles 与依赖清单 |
-| `sdk/python/` | `/v1` Python 客户端、生成类型、ergonomic lifecycle helper |
 | `web/console/` | 只访问 public `/v1` 的静态运行控制台 |
-| `examples/productization/` | 十条黄金场景及固定输入 |
+| `examples/productization/` | CLI/HTTP 首次使用路径、十条黄金场景及固定输入 |
 | `tests/productization/` | fresh environment、journey、restart 与安全 smoke |
-| `docs/current/` | clean cut 后的 Quickstart、SDK、Console、场景和运维文档 |
+| `docs/current/` | clean cut 后的 Quickstart、CLI/HTTP、Console、场景和运维文档 |
 
 控制台作为静态产物由现有 Gateway/Ingress 产品面承载，不新增 Console 业务服务或数据库。若静态托管需要
 独立 Web server，它只能托管不可变文件，不能拥有业务权限或状态。
@@ -43,7 +42,7 @@ untrusted execution plane 分离。
 2. 建立 current-vs-target cutover matrix，逐项列出根 README、`docs/current`、旧 binary、旧 schema、示例、
    CI 和发行物的最终归属；
 3. 记录首次 Run 与现有 CI/candidate pipeline 的 wall-clock、Cargo/BuildKit cache hit、镜像层和签名等待基线；
-4. 为 CLI packaging、Python 支持版本、Web 技术栈、静态托管和本地身份 profile 写短 ADR；
+4. 为 CLI packaging、CLI/HTTP authoring UX、Web 技术栈、静态托管和本地身份 profile 写短 ADR；
 5. 将十条黄金场景固化为 machine-readable manifest，包含所需 profile、能力、外部依赖、Secret、预期终态、
    restart point 和禁止 skip 的门禁；
 6. 在贡献检查中加入本阶段护栏：未经 cross-review 不允许新增 public version、kind、work class、表或 role。
@@ -80,25 +79,27 @@ untrusted execution plane 分离。
 - 停止一个 orchestration worker 后 Run 可由 durable authority 恢复；
 - `doctor` 对缺少 runsc 明确标为 production qualification unavailable，不伪装成 gVisor 已验证。
 
-## 5. Milestone M2：Python SDK 与 30 行首次 Run
+## 5. Milestone M2：CLI/HTTP authoring 与首次 Run
 
 ### 5.1 工作项
 
-1. 从 authoritative Platform `/v1` OpenAPI/JSON Schema 生成 wire models，生成过程可重复且检查 drift；
-2. 实现 transport、OIDC/dev auth、Problem、Receipt、cursor、SSE、Operation wait 和 retry policy；
-3. 提供以下显式领域客户端：`resources`、`deployments`、`runs`、`tasks`、`artifacts`、`operations`；
-4. 提供 `apply_agent(...)` ergonomic helper，把 Draft -> validate -> publish -> Deployment -> activate 的每一步
-   结果返回给调用者。helper 不覆盖 active version、不吞掉 If-Match 冲突、不用随机 retry 改变业务事实；
-5. 同步与异步示例共享同一生成模型和错误语义；日志默认不记录 token、Secret、prompt 或 Artifact 内容；
-6. 发布本地 install、editable development、版本兼容和 API drift 测试。
+1. 以 authoritative Platform `/v1` OpenAPI/JSON Schema 校验实际 route、request、response、Problem 与样例，
+   生成过程可重复且检查 drift；
+2. 扩展 CLI，提供 `insight apply`、`run create/watch/control/result`、`task resolve`、
+   `artifact upload/read` 与 `operation wait`；
+3. `insight apply` 接受 closed、版本化的 `/v1` request manifest，显式执行 Draft -> validate -> publish ->
+   Deployment -> activate 并逐步返回 authority ID。manifest 不是新的 Agent DSL，也不能携带自由 shell/URL/Secret；
+4. 实现 OIDC/dev auth、Problem、Receipt、cursor、SSE reconnect、Operation wait 和 effect-aware retry；
+5. 提供与 CLI 同路径的 curl/HTTP lifecycle 示例，固定 headers、Receipt、If-Match、请求正文和预期 Problem；
+6. 日志默认不记录 token、Secret、prompt 或 Artifact 内容，并增加 CLI 与 OpenAPI drift 测试。
 
 ### 5.2 退出门禁
 
-- 北极星 Python 示例不超过 30 行并只使用 public `/v1`；
-- SDK contract tests 覆盖正常、409/412 CAS、429 backpressure、Operation terminal、SSE reconnect、Task replay、
+- 北极星路径通过 CLI 完成并只使用 public `/v1`，相同生命周期具备可复制的原始 HTTP fixture；
+- CLI/HTTP contract tests 覆盖正常、409/412 CAS、429 backpressure、Operation terminal、SSE reconnect、Task replay、
   Artifact digest mismatch 与 closed Problem；
 - 同一 Receipt 重放返回相同 authority 结果，不会创建第二个 Run/Task/Artifact；
-- Python 客户端断开、平台 worker 重启后仍可按 Run ID 恢复观察。
+- CLI 断开、平台 worker 重启后仍可按 Run ID 恢复观察。
 
 ## 6. Milestone M3：最小运行控制台
 
@@ -124,7 +125,7 @@ untrusted execution plane 分离。
 ### 7.1 工作项
 
 1. 按 goals G4 顺序交付 scenario manifest、示例、自动 smoke、故障注入点和用户文档；
-2. 每条场景必须通过 SDK 和控制台可观察，并至少保留一种原始 HTTP fixture 用于证明 SDK 未改变合同；
+2. 每条场景必须通过 CLI 和控制台可观察，并保留原始 HTTP fixture 证明两者未改变合同；
 3. 为 Agno 与 LangGraph 各交付一个 remote Capability reference service：
    - 作为独立进程使用 typed HTTP/gRPC 或 MCP 合同；
    - 接收 bounded input，返回 Inline 或通过平台 Artifact port 交付大结果；
@@ -144,7 +145,7 @@ untrusted execution plane 分离。
 ### 8.1 CI 与供应链
 
 1. 将验证分为 path-aware quick、affected component、workspace full、candidate release 四类 lane；
-2. docs/SDK/console-only 变更不触发 runtime image build、registry push、cosign 或 provenance；
+2. docs/CLI/console-only 变更不触发 runtime image build、registry push、cosign 或 provenance；
 3. candidate workflow 只由显式发布、tag 或影响 runtime/deployment 的主干变更触发；
 4. 使用一次 `cargo build --locked --release --workspace --bins` 或等价构建图产出所需 binary，镜像阶段只复制
    已验证产物，不为每个 binary 启动独立 Cargo build；
@@ -168,7 +169,7 @@ untrusted execution plane 分离。
 
 - G6 的 CI wall-clock 与触发条件由连续主干 run 数据证明；
 - 普通 PR 不再无条件构建、推送和签名全部镜像；
-- 根 Quickstart、Python SDK、控制台与十条场景只走新 `/v1`；
+- 根 Quickstart、CLI/HTTP、控制台与十条场景只走新 `/v1`；
 - 旧、新 runtime 不同时出现在 default build、发行镜像或 current documentation；
 - workspace checks、public contract checks、fresh PostgreSQL、关键 L2/L3、journey suite 和 residual checker 全部通过。
 
@@ -176,21 +177,21 @@ untrusted execution plane 分离。
 
 | 前置 | 阻塞的工作 | 处理方式 |
 |---|---|---|
-| Platform OpenAPI 与实现 drift | SDK、Console | M0 建立生成/校验门禁，先修 owner contract 或实现 |
-| 本地身份和 Secret profile | CLI、SDK、Console | ADR 固定 non-production identity；禁止 production default fallback |
+| Platform OpenAPI 与实现 drift | CLI、Console | M0 建立生成/校验门禁，先修 owner contract 或实现 |
+| 本地身份和 Secret profile | CLI、Console | ADR 固定 non-production identity；禁止 production default fallback |
 | 最小 role closure 不清楚 | `insight dev` | 从黄金场景反推 required role，不合并 authority |
 | Artifact/S3/KMS 本地依赖过重 | full profile | base profile 不启用 Artifact；full 使用显式 pinned local dependencies |
 | gVisor 在 macOS/普通 CI 不可用 | Sandbox 场景 | 本地验证 WASI 和 runsc preflight；真实 gVisor 留给 L4～L6 |
 | 旧 current 与新 `/v1` 名称冲突 | README/发行 | M5 一次 clean cut；M1～M4 不提前声称 current |
 
 关键路径为 M0 -> M1 -> M2 -> M4 -> M5。M3 可在 M2 的稳定 OpenAPI 和 auth contract 完成后并行推进，
-但不得绕过 SDK/HTTP contract 单独发明 Console API。
+但不得绕过 public HTTP contract 单独发明 Console API。
 
 ## 10. 验证矩阵
 
 | 层级 | 证明内容 | 必须环境 |
 |---|---|---|
-| P0 | CLI/SDK/Console unit、schema generation、redaction | 普通 CI |
+| P0 | CLI/Console unit、schema generation、redaction | 普通 CI |
 | P1 | public `/v1` contract、Receipt/CAS/SSE/Problem | 真实进程 + fresh PostgreSQL |
 | P2 | base/full profile journey 与 restart recovery | 容器化本地/CI runner |
 | P3 | 十条黄金场景、remote framework、Artifact/WASI 负向 | 专用 integration runner |
@@ -201,20 +202,20 @@ P0～P4 是产品化门禁，不替代 Platform v2 production L4～L6。任何�
 ## 11. Commit 与评审策略
 
 - 每个 milestone 按“合同/ADR -> 最小实现 -> conformance -> 文档”形成多个单一目的 commit；
-- 每个可运行行为闭包通过相称检查后立即提交，不让 CLI、SDK、Console 和 clean cut 混成一个巨型 commit；
-- 生成代码与 owner schema 同 commit，禁止手工维护漂移副本；
+- 每个可运行行为闭包通过相称检查后立即提交，不让 CLI、Console 和 clean cut 混成一个巨型 commit；
+- OpenAPI/schema 与 checked fixtures 同 commit，禁止手工维护漂移副本；
 - 不提交 known failing、只支持 mock 或需要人工数据库修补的中间状态；
 - M5 的删除/归档必须单独提交并保留 residual report，不能混入功能实现。
 
 ## 12. 启动顺序
 
-owner 接受本计划后，第一实现批固定为 M0，不直接开始写控制台或 SDK：
+owner 接受本计划后，第一实现批固定为 M0，不直接开始写控制台：
 
 1. `/v1` product surface 与 required-role inventory；
 2. current-vs-target cutover matrix；
 3. 十条 scenario manifest；
 4. CI/candidate wall-clock baseline；
-5. CLI、Python、Web、本地身份四项 ADR。
+5. CLI、HTTP authoring、Web、本地身份四项 ADR。
 
 M0 退出门禁通过后才能开始 `insight` CLI。这样首次用户旅程、构建优化和最终 clean cut 使用同一组可测
 目标，不再形成第三套临时入口。
