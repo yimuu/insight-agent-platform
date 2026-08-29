@@ -71,8 +71,10 @@ M0 的已审查输入保存在：
    - `insight init`：生成 closed local config、project ID、非生产身份和 profile pin；
    - `insight dev`：显式 provision 后启动 base/full 多进程 profile；
    - `insight status/logs/stop`：按 role 显示 readiness、依赖和退出原因；
-2. `deploy/dev/base` 只覆盖 deterministic first Run；`full` 增加 Model、MCP、Context、Artifact 与 WASI 所需
-   现有 role。profile 不能用单进程 mock 替代 durable authority；
+2. `deploy/dev/base` 覆盖 deterministic first Run 的完整启动 closure：Management/Runtime Gateway、Artifact
+   Gateway、Artifact Data Worker、HTTPS S3/KMS-compatible test dependency、最小 Orchestration/Native Capability
+   role 与基础 authority。`full` 再按场景增加 Model、MCP、Context、Artifact Maintenance、Egress/Security 与 WASI
+   所需现有 role。profile 不能用单进程 mock 替代 durable authority；
 3. schema 安装作为可见的一次性 CLI step 调用现有 schema tool，服务进程继续保持零 DDL；
 4. 使用 source/lockfile/profile digest 决定构建，复用 Cargo target、OCI layer 或已发布 dev image；未变化时
    `insight dev` 不执行 release rebuild；
@@ -188,7 +190,7 @@ M0 的已审查输入保存在：
 | Platform OpenAPI 与实现 drift | CLI、Console | M0 建立生成/校验门禁，先修 owner contract 或实现 |
 | 本地身份和 Secret profile | CLI、Console | ADR 固定 non-production identity；禁止 production default fallback |
 | 最小 role closure 不清楚 | `insight dev` | 从黄金场景反推 required role，不合并 authority |
-| Artifact/S3/KMS 本地依赖过重 | full profile | base profile 不启用 Artifact；full 使用显式 pinned local dependencies |
+| Artifact/S3/KMS 本地依赖过重 | base profile | Runtime Gateway 和 Orchestration 的现有启动闭包要求 Artifact；base 使用显式 digest-pinned、真实 HTTPS-compatible local dependency，不能用 mock 或将失败隐藏为可运行 first Run |
 | gVisor 在 macOS/普通 CI 不可用 | Sandbox 场景 | 本地验证 WASI 和 runsc preflight；真实 gVisor 留给 L4～L6 |
 | 旧 current 与新 `/v1` 名称冲突 | README/发行 | M5 一次 clean cut；M1～M4 不提前声称 current |
 

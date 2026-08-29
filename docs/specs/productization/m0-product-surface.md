@@ -35,7 +35,7 @@ Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check
 | Durable orchestration | `platform-orchestration-worker` | Run admission 后的 scheduler、node、Task、Subagent、恢复闭环 |
 | Invocation lanes | `platform-model-worker`、`platform-capability-native-worker`、`platform-capability-remote-worker`、`platform-context-worker`、`platform-remote-context-worker` | 按黄金场景选择性启用；不能以 Gateway 内执行替代 |
 | MCP | `platform-mcp-host`、`platform-mcp-resource-host`、`platform-mcp-discovery-worker`、`platform-mcp-subscription-worker`、`platform-mcp-cleanup-worker`、`platform-subscription-context-worker` | 仅 `full` profile 的 remote MCP/Context 场景 |
-| Artifact | `platform-artifact-gateway`、`platform-artifact-data-worker`、`platform-artifact-maintenance` | Artifact 场景的三 role 闭环；不在 `base` 中伪造 object store |
+| Artifact | `platform-artifact-gateway`、`platform-artifact-data-worker`、`platform-artifact-maintenance` | Runtime Gateway 的 Artifact forwarder 与 Orchestration 的 Scheduler RPC 都在启动时强制连接前两者；因此它们以及真实 HTTPS S3/KMS-compatible dependency 属于 `base` closure。Maintenance 只在 `full` 的 Artifact lifecycle 场景启用；不在任一 profile 中伪造 object store。 |
 | Egress/security | `platform-egress-broker`、`platform-security-authority` | remote Capability、Model、MCP 的网络和 Secret authority |
 | Sandbox | `platform-sandbox-controller`、`platform-sandbox-attestor`、`platform-sandbox-executor`、`platform-sandbox-guest` | WASI 在专用 local/full 配置验证；gVisor 只做 preflight，真实 runsc 不在本地宣称通过 |
 
@@ -46,8 +46,8 @@ Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check
 
 | profile | 目标场景 | 必要依赖 | 现状与 M1 要求 |
 |---|---|---|---|
-| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Gateway、最小 Orchestration/Native Capability role、显式 local OIDC | **未实现**。M1 必须从实际 Scenario 01 的 exact Deployment closure 得出最小 role 集并执行 real-process smoke；不能假设 root binary 等价。 |
-| `full` | Model、remote Capability、MCP、Context、Artifact、WASI | `base` 加 Egress/Security、对应 worker、Artifact 三 role、object-store/KMS-compatible test dependency、mTLS/local CA | **未实现**。每个增量依赖只能由所需场景启用。 |
+| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **未实现**。这套 closure 来自已实现进程的强制启动依赖，而不只是 Scenario 01 的预期；M1 必须执行 real-process smoke，不能假设 root binary 等价。 |
+| `full` | Model、remote Capability、MCP、Context、Artifact maintenance、WASI | `base` 加 Egress/Security、对应 worker、Artifact Maintenance 与其所需 lifecycle configuration | **未实现**。每个增量依赖只能由所需场景启用。 |
 | `qualification` | gVisor preflight 与生产结构检查 | Kubernetes、`RuntimeClass=runsc`、restricted launcher RBAC、专用 node pool | 已有 static tooling；真实多节点 L4～L6 仍 Not run。 |
 
 ## 4. 当前启动与 bootstrap 事实

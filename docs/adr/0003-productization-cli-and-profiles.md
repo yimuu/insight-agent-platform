@@ -18,7 +18,9 @@ gRPC 或生成特权身份 header。
 `dev` 采用 Docker Compose v2 作为 macOS/Linux 的首批受支持依赖，并只编排现有独立 role：
 
 - `base` 为 deterministic first Run 所需的最小真实多进程 closure；
-- `full` 按场景追加 Model、remote Capability、MCP、Context、Artifact 与 WASI role；
+- `base` 也包括 Runtime Gateway 和 Orchestration 启动时强制连接的 Artifact Gateway、Artifact Data Worker 与
+  HTTPS S3/KMS-compatible local dependency；这是实际 process closure，不是把 Artifact 语义塞进 Gateway 的例外；
+- `full` 按场景追加 Model、remote Capability、MCP、Context、Artifact Maintenance、Egress/Security 与 WASI role；
 - `qualification` 只运行 runsc/Kubernetes preflight，不能声明 gVisor 实测通过。
 
 `init` 生成 project-local、gitignored 的 non-production state 和 digest 固定配置。schema provision 是可见的
