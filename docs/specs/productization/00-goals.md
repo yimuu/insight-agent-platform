@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M1–M2 |
+| 状态 | In Progress / M1–M3 |
 | 日期 | 2026-08-29 |
 | 阶段代号 | Productization Convergence |
 | 合同输入 | Platform v2 spec00～18（Accepted / In Progress）、AGENTS.md |

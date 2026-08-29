@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M1–M2 |
+| 状态 | In Progress / M1–M3 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
@@ -166,6 +166,13 @@ journey 覆盖。
 - CLI 断开、平台 worker 重启后仍可按 Run ID 恢复观察。
 
 ## 6. Milestone M3：最小运行控制台
+
+状态：**In Progress**。首批 [`web/console/`](../../../web/console/) React/Vite 静态客户端已经实现
+readiness、Agent/Deployment、Run timeline/control/result、Task resolve、Artifact metadata/download 与
+Operation safe projection。它只访问 public `/v1`，OIDC token 仅存在浏览器内存，mutation 携带 ETag/Receipt，
+SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。10 个 Node P0 test、严格 TypeScript build
+和 lint 已通过；真实浏览器 journey、restart/replay、敏感 fixture 与静态部署门禁仍未完成，详见
+[`m3-console.md`](m3-console.md)，故不得标记 M3 或 spec00～18 为 Verified。
 
 ### 6.1 工作项
 
