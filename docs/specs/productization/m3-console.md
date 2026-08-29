@@ -60,4 +60,10 @@ raw prompt 与 tool output 在 DOM 中均为 `[redacted]`，浏览器 console �
 4. 空状态、慢依赖的浏览器契约测试，以及正式 accessibility audit；
 5. 静态 bundle 由 Gateway/Ingress 同源承载的部署清单与 CI lane。
 
+真实 authority 自动化入口现已实现但尚未取得 fresh Passed evidence。
+`scripts/run-productization-base-journey.sh --console-browser` 会使用现有全局 Node/Corepack 构建静态 bundle，通过严格 loopback 透明代理连接同一次 fresh Runtime
+Gateway，并在独立 Human Task Run 上驱动浏览器 mutation；NVM 路径可用 `--node-bin` 显式传入，不把 Node 变成平台
+runtime 依赖。2026-08-30 首次 fresh 尝试被本机无响应的 OrbStack Docker API 阻断在 `doctor`，没有启动 Gateway，
+因此当前状态仍为 Not run。该尝试同时促成 `doctor` 外部命令的 5 秒 timeout 与可操作失败诊断。
+
 这些证据完成前，M3 与 Platform spec00～18 均不升级为 Verified。

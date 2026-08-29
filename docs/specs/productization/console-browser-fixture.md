@@ -40,3 +40,20 @@ pnpm run browser:fixture
 本报告不证明 PostgreSQL transaction、真实 Gateway authentication/authorization、进程重启恢复、Ingress
 同源承载或 telemetry sink 脱敏。因此它只关闭 M3 浏览器交互矩阵的一部分，不把 M3 或 Platform
 spec00～18 升级为 Verified。
+
+## 真实 Gateway 模式
+
+[`gateway-server.mjs`](../../../web/console/tests/gateway-server.mjs) 现提供仅用于开发/资格测试的静态同源入口：
+upstream 必须是 origin-only loopback HTTP，只有 `/readyz` 与 `/v1` 会透明转发，其余路径只读取已构建的
+`dist/`。代理不解码或记录 Authorization，不连接数据库或内部 RPC，也不进入生产 bundle。
+
+[`real-gateway-journey.mjs`](../../../web/console/tests/real-gateway-journey.mjs) 使用 headless Chromium 操作真实页面，
+检查 Gateway readiness、Run SSE Task 发现、typed Task mutation、terminal Run/result、刷新清除 token/Run projection，
+以及重新输入内存 token 后按同一 authority Run ID 读取终态。base runner 的显式 `--console-browser` 会在同一 fresh
+PostgreSQL/Gateway authority 中额外创建一条 Human Task Run；只有浏览器脚本返回 closed Passed evidence 时，
+`approval-task-resume` 报告才把 `console` 与顶层状态升级为 `passed`。
+
+2026-08-30 自动化和透明代理已对 stateful fixture 完整通过。随后 fresh real-Gateway 执行在进入 `init/dev` 前发现
+本机 OrbStack Docker API 无响应；旧 `doctor` 因无 timeout 挂起，该缺口已修复为每条外部命令 5 秒有界失败并由真实
+无响应 daemon 验证。由于没有到达 fresh Gateway/PostgreSQL，真实 Console 项仍是 **Not run**，不得把 stateful fixture
+结果替代为 M3 通过证据。

@@ -8,8 +8,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "browser:fixture": "node tests/fixture-server.mjs",
+    "browser:gateway": "node tests/gateway-server.mjs",
+    "browser:gateway:journey": "node tests/real-gateway-journey.mjs",
     "lint": "oxlint",
-    "test": "node --check tests/fixture-server.mjs && node --test src/api/*.test.mjs",
+    "test": "node --check tests/fixture-server.mjs && node --check tests/gateway-server.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

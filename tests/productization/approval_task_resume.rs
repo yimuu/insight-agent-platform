@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct ApprovalTaskEvidence {
     pub run_id: String,
+    console_passed: bool,
     started_at: chrono::DateTime<Utc>,
     finished_at: chrono::DateTime<Utc>,
 }
@@ -9,6 +10,24 @@ pub(super) struct ApprovalTaskEvidence {
 impl ApprovalTaskEvidence {
     pub fn report(&self, revision: &str) -> Value {
         let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
+        let console = if self.console_passed {
+            check(
+                "console",
+                "passed",
+                "a headless Chromium journey used the static Console through a transparent same-origin loopback proxy against the same fresh Gateway/PostgreSQL authority, discovered a waiting Task through SSE, submitted typed input, observed the terminal Run, and proved reload clears browser-only credentials and projections",
+            )
+        } else {
+            check(
+                "console",
+                "not_run",
+                "set PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true to run the real Gateway browser journey",
+            )
+        };
+        let status = if self.console_passed {
+            "passed"
+        } else {
+            "incomplete"
+        };
         json!({
             "schema_version": 1,
             "report_kind": "insight.productization.scenario-report/v1",
@@ -24,11 +43,11 @@ impl ApprovalTaskEvidence {
             },
             "started_at": self.started_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
-            "status": "incomplete",
+            "status": status,
             "entrypoints": [
                 check("cli", "passed", "public insight apply/run/watch/task/result commands completed against a fresh base profile"),
                 check("http_fixture", "passed", "an independent raw /v1 Task mutation exercised the stale ETag and distinct Receipt fence"),
-                check("console", "not_run", "a real browser Console journey is not yet part of this P2 fixture"),
+                console,
             ],
             "assertions": [
                 check("task_waiting", "passed", "the Run reached waiting and exposed one pending interaction_form Task with the exact owner and schema"),
@@ -265,11 +284,168 @@ pub(super) fn run(
     );
     assert_eq!(human_task_result["schema_digest"], schema_digest);
 
+    let console_passed =
+        if env::var("PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER").as_deref() == Ok("true") {
+            run_real_gateway_console_journey(
+                insight,
+                project,
+                fixture,
+                schema_digest,
+                human_task_agent["resource_id"]
+                    .as_str()
+                    .expect("Human Task Agent ID"),
+            );
+            true
+        } else {
+            false
+        };
+
     ApprovalTaskEvidence {
         run_id,
+        console_passed,
         started_at,
         finished_at: Utc::now(),
     }
+}
+
+fn run_real_gateway_console_journey(
+    insight: &Path,
+    project: &Path,
+    fixture: &Path,
+    schema_digest: &str,
+    agent_id: &str,
+) {
+    let request = json!({
+        "agent_id": agent_id,
+        "input": {
+            "classification": "internal",
+            "schema_digest": schema_digest,
+            "value": {"kind": "inline", "value": {"message": "before browser task"}},
+        },
+        "deadline": (Utc::now() + Duration::minutes(5))
+            .to_rfc3339_opts(SecondsFormat::Micros, true),
+    });
+    let request_path = write_canonical(fixture, "console-human-task-run.json", &request);
+    let created = run_json(
+        insight,
+        &[
+            "run",
+            "create",
+            "--file",
+            request_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    let run_id = created["run_id"]
+        .as_str()
+        .expect("Console Human Task Run ID")
+        .to_owned();
+    let mut watcher = Command::new(insight)
+        .args([
+            "run",
+            "watch",
+            &run_id,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("Console Human Task Run watcher starts");
+    let stdout = watcher
+        .stdout
+        .take()
+        .expect("Console watcher stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let mut watch_records = Vec::new();
+    let task_id = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("Console Run watch ended before interaction.required"))
+            .expect("Console Run watch line is readable");
+        let record: Value =
+            serde_json::from_str(&line).expect("Console Run watch line is closed JSON");
+        let task_id = (record["kind"] == "event"
+            && record["event"]["event_type"] == "interaction.required")
+            .then(|| record["event"]["data"]["source_id"].as_str())
+            .flatten()
+            .map(str::to_owned);
+        watch_records.push(record);
+        if let Some(task_id) = task_id {
+            break task_id;
+        }
+    };
+
+    let response = json!({
+        "classification": "internal",
+        "schema_digest": schema_digest,
+        "value": {"kind": "inline", "value": {"message": "after task"}},
+    });
+    let (_, gateway_origin, token) = raw_runtime_client(project);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
+    let output = Command::new(node)
+        .arg(workspace.join("web/console/tests/real-gateway-journey.mjs"))
+        .env("INSIGHT_CONSOLE_GATEWAY_ORIGIN", gateway_origin)
+        .env("INSIGHT_CONSOLE_ACCESS_TOKEN", token)
+        .env("INSIGHT_CONSOLE_RUN_ID", &run_id)
+        .env("INSIGHT_CONSOLE_TASK_ID", &task_id)
+        .env(
+            "INSIGHT_CONSOLE_TASK_RESPONSE",
+            serde_json::to_string(&response).expect("Console Task response is JSON"),
+        )
+        .output()
+        .expect("real Gateway Console browser journey starts");
+    assert!(
+        output.status.success(),
+        "real Gateway Console browser journey failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let browser_evidence: Value = serde_json::from_slice(&output.stdout)
+        .expect("real Gateway Console browser evidence is closed JSON");
+    assert_eq!(
+        browser_evidence["kind"],
+        "insight.console.real-gateway-journey/v1"
+    );
+    assert_eq!(browser_evidence["status"], "passed");
+    assert_eq!(browser_evidence["run_id"], run_id);
+    assert_eq!(browser_evidence["task_id"], task_id);
+
+    for line in lines {
+        watch_records.push(
+            serde_json::from_str(&line.expect("Console Run watch line is readable"))
+                .expect("Console Run watch line is closed JSON"),
+        );
+    }
+    assert!(
+        watcher
+            .wait()
+            .expect("Console Run watcher status is readable")
+            .success(),
+        "Console Human Task Run watch failed"
+    );
+    assert_eq!(
+        watch_records.last().expect("Console Run terminal record")["run"]["state"],
+        "succeeded"
+    );
+    let result = run_json(
+        insight,
+        &[
+            "run",
+            "result",
+            &run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        result["value"],
+        json!({"kind": "inline", "value": {"message": "after task"}})
+    );
 }
 
 fn prove_stale_task_fence(project: &Path, task_id: &str, stale_etag: &str, input: &Value) {

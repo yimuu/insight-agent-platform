@@ -6,6 +6,10 @@ project=""
 report_directory=""
 insight_bin="${PLATFORM_INSIGHT_BIN:-$workspace/target/release/insight}"
 keep_dependencies=false
+console_browser=false
+node_bin="${PLATFORM_PRODUCTIZATION_NODE_BIN:-}"
+browser_bin="${INSIGHT_CONSOLE_BROWSER_BIN:-}"
+corepack_bin=""
 
 usage() {
   cat <<'EOF'
@@ -18,6 +22,9 @@ Options:
   --report-directory <path>    Write and validate exact-revision scenario evidence.
   --insight-bin <path>         Use an existing insight binary (default: target/release/insight).
   --keep-dependencies          Leave the exact Docker Compose dependencies running.
+  --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
+  --node-bin <path>           Node.js executable for --console-browser (default: command -v node).
+  --browser-bin <path>        Chromium/Chrome executable for --console-browser.
   -h, --help                   Show this help.
 EOF
 }
@@ -43,6 +50,20 @@ while (($# > 0)); do
       keep_dependencies=true
       shift
       ;;
+    --console-browser)
+      console_browser=true
+      shift
+      ;;
+    --node-bin)
+      (($# >= 2)) || { echo "--node-bin requires a value" >&2; exit 2; }
+      node_bin=$2
+      shift 2
+      ;;
+    --browser-bin)
+      (($# >= 2)) || { echo "--browser-bin requires a value" >&2; exit 2; }
+      browser_bin=$2
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -66,6 +87,27 @@ fi
 if ! command -v pgrep >/dev/null 2>&1; then
   echo "pgrep is required to prove that no repository-local Platform process is already running" >&2
   exit 2
+fi
+if [[ "$console_browser" == true ]]; then
+  if [[ -z "$node_bin" ]]; then
+    node_bin="$(command -v node || true)"
+  fi
+  if [[ -z "$node_bin" || ! -x "$node_bin" ]]; then
+    echo "--console-browser requires an executable Node.js; pass --node-bin when Node is managed by NVM" >&2
+    exit 2
+  fi
+  corepack_bin="$(dirname "$node_bin")/corepack"
+  if [[ ! -x "$corepack_bin" ]]; then
+    echo "--console-browser requires corepack next to the selected Node.js executable" >&2
+    exit 2
+  fi
+  if [[ -z "$browser_bin" && "$(uname -s)" == "Darwin" ]]; then
+    browser_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  fi
+  if [[ -z "$browser_bin" || ! -x "$browser_bin" ]]; then
+    echo "--console-browser requires an executable Chromium/Chrome; pass --browser-bin" >&2
+    exit 2
+  fi
 fi
 orphaned_processes="$(pgrep -f "$workspace/target/release/platform-" || true)"
 if [[ -n "$orphaned_processes" ]]; then
@@ -117,6 +159,9 @@ trap cleanup EXIT
 
 cd "$workspace"
 cargo build --locked --release -p insight-cli --bin insight
+if [[ "$console_browser" == true ]]; then
+  PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm --dir "$workspace/web/console" run build
+fi
 if [[ ! -x "$insight_bin" ]]; then
   echo "insight binary is not executable: $insight_bin" >&2
   exit 2
@@ -131,6 +176,13 @@ test_environment=(
   "PLATFORM_INSIGHT_BIN=$insight_bin"
   "PLATFORM_PRODUCTIZATION_PROJECT=$project"
 )
+if [[ "$console_browser" == true ]]; then
+  test_environment+=(
+    "PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true"
+    "PLATFORM_PRODUCTIZATION_NODE_BIN=$node_bin"
+    "INSIGHT_CONSOLE_BROWSER_BIN=$browser_bin"
+  )
+fi
 if [[ -n "$report_directory" ]]; then
   test_environment+=(
     "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY=$report_directory"

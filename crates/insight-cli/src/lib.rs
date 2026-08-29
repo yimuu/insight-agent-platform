@@ -37,7 +37,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use x509_parser::{prelude::FromDer as _, public_key::PublicKey, x509::SubjectPublicKeyInfo};
@@ -93,6 +93,8 @@ const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
 const LOCAL_ACCESS_TOKEN_TTL_SECONDS: i64 = 900;
 const EXPECTED_RUSTC_PREFIX: &str = "rustc 1.94.1";
 const DEFAULT_PORTS: &[u16] = &[5432, 4222, 4566];
+const DOCTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const DOCTOR_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -4224,10 +4226,7 @@ pub struct SystemDoctorProbe;
 
 impl DoctorProbe for SystemDoctorProbe {
     fn command(&self, program: &str, arguments: &[&str]) -> Result<String, String> {
-        let output = ProcessCommand::new(program)
-            .args(arguments)
-            .output()
-            .map_err(|error| error.to_string())?;
+        let output = run_bounded_doctor_command(program, arguments, DOCTOR_COMMAND_TIMEOUT)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stdout
@@ -4247,6 +4246,41 @@ impl DoctorProbe for SystemDoctorProbe {
         TcpListener::bind(("127.0.0.1", port))
             .map(drop)
             .map_err(|error| error.to_string())
+    }
+}
+
+fn run_bounded_doctor_command(
+    program: &str,
+    arguments: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = ProcessCommand::new(program)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(DOCTOR_COMMAND_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "command timed out after {} milliseconds; verify the service is responsive and retry",
+                    timeout.as_millis()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
     }
 }
 
@@ -5197,6 +5231,17 @@ mod tests {
         let report = doctor_report(&probe);
         assert!(!report.ready);
         assert!(render_doctor_report(&report).contains("docker_compose_v2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_doctor_probe_times_out_an_unresponsive_command() {
+        let started = Instant::now();
+        let error =
+            run_bounded_doctor_command("/bin/sh", &["-c", "sleep 5"], Duration::from_millis(100))
+                .unwrap_err();
+        assert!(error.contains("timed out after 100 milliseconds"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

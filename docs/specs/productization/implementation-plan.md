@@ -293,6 +293,14 @@ SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。1
 Gateway/PostgreSQL 或 Gateway restart；正式部署、telemetry、慢依赖和 accessibility audit 仍未完成，详见
 [`m3-console.md`](m3-console.md)，故不得标记 M3 或 spec00～18 为 Verified。
 
+Console 的 fresh authority runner 已加入 base journey 的显式 `--console-browser` 模式：它从用户选定的全局 Node
+旁解析 Corepack，构建静态 bundle，以仅转发 `/readyz`/`/v1` 的 loopback 同源代理连接真实 Runtime Gateway，并在
+独立 Human Task Run 上由 headless Chromium 完成 SSE Task 发现、typed mutation、terminal result、刷新清空内存态
+凭据与 authority ID 重读。脚本对 stateful fixture 已通过；2026-08-30 fresh PostgreSQL/Gateway 尝试因本机 OrbStack
+Docker API 无响应而在 `doctor` 阶段终止，故真实项仍为 Not run。该失败暴露并闭合了 `doctor` 外部命令可无限等待的
+缺口：所有命令探针现在 5 秒 fail closed，真实无响应 daemon 在约 6 秒内返回 `docker_engine=failed` 的可操作 JSON，
+不再挂住 CLI。M3 的真实 Gateway、Gateway restart、telemetry、慢依赖、accessibility 与正式部署门禁仍未完成。
+
 ### 6.1 工作项
 
 1. 实现登录/tenant context 与平台 readiness 页面，不在浏览器持久化长期 Secret；
