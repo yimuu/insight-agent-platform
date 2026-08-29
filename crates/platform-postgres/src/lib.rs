@@ -95,6 +95,7 @@ pub struct SchemaVerification {
 #[derive(Debug)]
 pub enum AuthoritySchemaError {
     Database(sqlx::Error),
+    SchemaAlreadyProvisioned,
     UnsupportedPostgresVersion {
         actual: i32,
         minimum: i32,
@@ -129,6 +130,9 @@ impl fmt::Display for AuthoritySchemaError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(failure) => write!(formatter, "PostgreSQL schema operation failed: {failure}"),
+            Self::SchemaAlreadyProvisioned => formatter.write_str(
+                "insight_platform schema already exists; baseline provisioning requires a fresh target",
+            ),
             Self::UnsupportedPostgresVersion { actual, minimum } => write!(
                 formatter,
                 "PostgreSQL server version {actual} is unsupported; version {minimum} or newer is required"
@@ -177,6 +181,60 @@ impl From<sqlx::Error> for AuthoritySchemaError {
     fn from(failure: sqlx::Error) -> Self {
         Self::Database(failure)
     }
+}
+
+/// Installs the one checked-in Platform baseline on a fresh PostgreSQL authority.
+///
+/// This is deliberately a provisioning-only operation. Runtime services must use
+/// [`verify_schema`] and do not execute DDL. The existence check and all baseline
+/// statements share one transaction, so a concurrent or repeated provision attempt
+/// cannot leave a partial authority behind.
+pub async fn provision_schema(pool: &PgPool) -> Result<SchemaVerification, AuthoritySchemaError> {
+    ensure_postgres_version(pool).await?;
+    validate_checked_in_schema_contract()?;
+
+    let mut transaction = pool.begin().await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
+    )
+    .bind(AUTHORITY_SCHEMA)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if exists {
+        return Err(AuthoritySchemaError::SchemaAlreadyProvisioned);
+    }
+
+    sqlx::query("CREATE SCHEMA insight_platform")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE insight_platform.schema_migrations (
+            version bigint PRIMARY KEY CHECK (version > 0),
+            name text NOT NULL UNIQUE,
+            checksum text NOT NULL CHECK (checksum ~ '^sha256:[0-9a-f]{64}$'),
+            applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+        )
+        "#,
+    )
+    .execute(&mut *transaction)
+    .await?;
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration.sql)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO insight_platform.schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
+        )
+        .bind(migration.version)
+        .bind(migration.name)
+        .bind(migration.checksum())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+
+    verify_schema(pool).await
 }
 
 pub async fn verify_schema(pool: &PgPool) -> Result<SchemaVerification, AuthoritySchemaError> {

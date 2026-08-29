@@ -54,8 +54,9 @@ Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check
 
 - 根 README 的 `PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run` 启动的是当前旧 runtime，不可作为
   Platform `/v1` profile 的实现；
-- Platform schema 由 `scripts/provision-platform-postgres.sh` / `platform-schema verify` 管理。运行时进程在启动
-  时只验证 schema，不能执行 DDL；
+- Platform schema 由显式的 `platform-schema provision`（fresh target）或 CI 的
+  `scripts/provision-platform-postgres.sh` 安装，并由 `platform-schema verify` 校验。运行时进程在启动时只验证
+  schema，不能执行 DDL；重复 provision 会拒绝已有 authority，绝不尝试修补或覆盖它；
 - `platform-bootstrap-operator` 需要明确的数据库 URL、installation operator ID、request ID 和三个 digest。
   M1 的 `init` 必须生成或要求这些 non-production 输入，不能以静态 privileged header 绕过 OIDC/principal binding；
 - Gateway 需要 installed OIDC verifier、配置文件 digest、数据库连接和（runtime role）Artifact mTLS 资料。开发

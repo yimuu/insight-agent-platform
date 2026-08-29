@@ -1,4 +1,4 @@
-use insight_platform_postgres::{capture_schema_inventory, verify_schema};
+use insight_platform_postgres::{capture_schema_inventory, provision_schema, verify_schema};
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -6,10 +6,10 @@ async fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let valid = matches!(
         arguments.as_slice(),
-        [command] if matches!(command.as_str(), "verify" | "inventory")
+        [command] if matches!(command.as_str(), "provision" | "verify" | "inventory")
     );
     if !valid {
-        eprintln!("usage: platform-schema <verify|inventory>");
+        eprintln!("usage: platform-schema <provision|verify|inventory>");
         std::process::exit(2);
     }
     let command = arguments.first().map(String::as_str);
@@ -31,6 +31,22 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if command == Some("provision") {
+        match provision_schema(&pool).await {
+            Ok(verification) => println!(
+                "insight.platform/v1 schema contract {} provisioned (migrations {}, inventory {}, tables {})",
+                verification.contract_version,
+                verification.migration_set_digest,
+                verification.schema_inventory_digest,
+                verification.table_count
+            ),
+            Err(failure) => {
+                eprintln!("{failure}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if command == Some("inventory") {
         match capture_schema_inventory(&pool).await {
             Ok(inventory) => print!("{}", String::from_utf8_lossy(&inventory)),

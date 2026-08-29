@@ -22,8 +22,9 @@ gRPC 或生成特权身份 header。
 - `qualification` 只运行 runsc/Kubernetes preflight，不能声明 gVisor 实测通过。
 
 `init` 生成 project-local、gitignored 的 non-production state 和 digest 固定配置。schema provision 是可见的
-one-shot step；运行时进程继续只验证 schema，绝不持有 DDL 权限。源码、lockfile 与 profile digest 未变化时，
-`dev` 复用本地 build/image，不能无条件重新 build release workspace。
+one-shot step：既有 `platform-schema provision` 只接受 fresh PostgreSQL target，在一个 transaction 内安装唯一
+checked-in baseline，重复调用会 fail closed。运行时进程继续只验证 schema，绝不持有 DDL 权限。源码、lockfile 与
+profile digest 未变化时，`dev` 复用本地 build/image，不能无条件重新 build release workspace。
 
 ## 后果
 

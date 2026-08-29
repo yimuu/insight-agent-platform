@@ -147,6 +147,11 @@ jobs:
         run: |
           createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_model
           bash scripts/provision-platform-postgres.sh
+      - name: Create fresh schema-provisioning fixture
+        env:
+          PGPASSWORD: insight
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_provision
       - name: Provision Security Authority least-privilege role
         env:
           PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
@@ -166,6 +171,7 @@ jobs:
           bash scripts/provision-platform-artifact-roles.sh
       - name: Test
         env:
+          PLATFORM_TEST_PROVISION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_provision
           PLATFORM_SECURITY_AUTHORITY_TEST_ROLE: platform_security_authority_qualification
           PLATFORM_ARTIFACT_DATA_READER_TEST_ROLE: platform_artifact_data_reader_qualification
           PLATFORM_ARTIFACT_GATEWAY_TEST_ROLE: platform_artifact_gateway_qualification
