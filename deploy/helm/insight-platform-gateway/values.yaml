@@ -31,7 +31,6 @@ runEventCursorKey:
   key: cursor-key
   digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 artifactGateway:
-  endpoint: https://insight-platform-artifact-gateway.platform-artifacts.svc:8080/
   namespaceSelector: {insight.platform/artifact-namespace: "true"}
   podSelector: {app.kubernetes.io/component: artifact-gateway}
   tls:

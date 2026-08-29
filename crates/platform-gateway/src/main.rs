@@ -114,12 +114,9 @@ const CONFIG_DIGEST_ENV: &str = "PLATFORM_GATEWAY_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_GATEWAY_DATABASE_URL";
 const RUN_EVENT_CURSOR_KEY_PATH_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH";
 const RUN_EVENT_CURSOR_KEY_DIGEST_ENV: &str = "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST";
-const ARTIFACT_GATEWAY_ENDPOINT_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_ENDPOINT";
 const ARTIFACT_GATEWAY_CA_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_CA_PATH";
 const ARTIFACT_GATEWAY_CERT_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH";
 const ARTIFACT_GATEWAY_KEY_PATH_ENV: &str = "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH";
-const ARTIFACT_GATEWAY_TLS_AUDIENCE: &str =
-    "insight-platform-artifact-gateway.platform-artifacts.svc";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_RUN_EVENT_CURSOR_KEY_BYTES: usize = 64;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
@@ -271,6 +268,13 @@ struct ProcessConfig {
     registry_validator_digest: Sha256Digest,
     registry_validation_profile_digest: Sha256Digest,
     oidc: InstalledOidcVerifierConfig,
+    artifact_gateway: Option<ArtifactGatewayConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactGatewayConfig {
+    endpoint: String,
 }
 
 impl ProcessConfig {
@@ -316,6 +320,32 @@ impl ProcessConfig {
             || self.database_acquire_timeout_milliseconds > 30_000
             || self.shutdown_grace_milliseconds == 0
             || self.shutdown_grace_milliseconds > 60_000
+        {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        match (self.role, self.artifact_gateway.as_ref()) {
+            (ProcessRole::ManagementApi, None) => {}
+            (ProcessRole::RuntimeApi, Some(artifact_gateway)) => {
+                artifact_gateway.validate()?;
+            }
+            _ => return Err(ProcessError::InvalidConfiguration),
+        }
+        Ok(())
+    }
+}
+
+impl ArtifactGatewayConfig {
+    fn validate(&self) -> Result<(), ProcessError> {
+        let endpoint =
+            reqwest::Url::parse(&self.endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
+        if endpoint.scheme() != "https"
+            || endpoint.host_str().is_none()
+            || endpoint.port().is_none()
+            || endpoint.username() != ""
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || endpoint.path() != "/"
         {
             return Err(ProcessError::InvalidConfiguration);
         }
@@ -469,21 +499,8 @@ struct MtlsArtifactMutationForwarder {
 }
 
 impl MtlsArtifactMutationForwarder {
-    fn install() -> Result<Self, ProcessError> {
-        let endpoint = required(ARTIFACT_GATEWAY_ENDPOINT_ENV)?;
-        let parsed =
-            reqwest::Url::parse(&endpoint).map_err(|_| ProcessError::InvalidConfiguration)?;
-        if parsed.scheme() != "https"
-            || parsed.host_str() != Some(ARTIFACT_GATEWAY_TLS_AUDIENCE)
-            || parsed.port() != Some(8080)
-            || parsed.username() != ""
-            || parsed.password().is_some()
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-            || parsed.path() != "/"
-        {
-            return Err(ProcessError::InvalidConfiguration);
-        }
+    fn install(config: &ArtifactGatewayConfig) -> Result<Self, ProcessError> {
+        config.validate()?;
         let ca = read_bounded_file(
             &required_absolute_path(ARTIFACT_GATEWAY_CA_PATH_ENV)?,
             MAX_TLS_FILE_BYTES,
@@ -515,7 +532,7 @@ impl MtlsArtifactMutationForwarder {
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         Ok(Self {
             client,
-            endpoint: endpoint.trim_end_matches('/').to_owned(),
+            endpoint: config.endpoint.trim_end_matches('/').to_owned(),
         })
     }
 
@@ -2816,8 +2833,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ProcessRole::ManagementApi => (None, None),
         ProcessRole::RuntimeApi => (
             Some(load_run_event_cursor_codec()?),
-            Some(Arc::new(MtlsArtifactMutationForwarder::install()?)
-                as Arc<dyn ArtifactMutationForwarder>),
+            Some(Arc::new(MtlsArtifactMutationForwarder::install(
+                config
+                    .artifact_gateway
+                    .as_ref()
+                    .expect("runtime config validation requires an Artifact Gateway target"),
+            )?) as Arc<dyn ArtifactMutationForwarder>),
         ),
     };
     let database_url = required(DATABASE_URL_ENV)?;
@@ -2999,11 +3020,53 @@ mod tests {
             registry_validator_digest: fixed_digest('1'),
             registry_validation_profile_digest: fixed_digest('2'),
             oidc: oidc_config(),
+            artifact_gateway: Some(ArtifactGatewayConfig {
+                endpoint: "https://localhost:8081/".to_owned(),
+            }),
         };
         assert!(config.validate().is_ok());
         config.database_max_connections = 1_000;
         assert!(matches!(
             config.validate(),
+            Err(ProcessError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn runtime_artifact_target_is_digest_bound_https_and_role_scoped() {
+        let mut runtime = ProcessConfig {
+            schema_version: 1,
+            role: ProcessRole::RuntimeApi,
+            listen_address: "127.0.0.1:8080".to_owned(),
+            database_max_connections: 8,
+            database_acquire_timeout_milliseconds: 1_000,
+            shutdown_grace_milliseconds: 5_000,
+            registry_validator_digest: fixed_digest('1'),
+            registry_validation_profile_digest: fixed_digest('2'),
+            oidc: oidc_config(),
+            artifact_gateway: Some(ArtifactGatewayConfig {
+                endpoint: "https://localhost:8081/".to_owned(),
+            }),
+        };
+        assert!(runtime.validate().is_ok());
+        runtime.artifact_gateway.as_mut().unwrap().endpoint = "http://localhost:8081/".to_owned();
+        assert!(matches!(
+            runtime.validate(),
+            Err(ProcessError::InvalidConfiguration)
+        ));
+        runtime.artifact_gateway = None;
+        assert!(matches!(
+            runtime.validate(),
+            Err(ProcessError::InvalidConfiguration)
+        ));
+
+        runtime.role = ProcessRole::ManagementApi;
+        assert!(runtime.validate().is_ok());
+        runtime.artifact_gateway = Some(ArtifactGatewayConfig {
+            endpoint: "https://localhost:8081/".to_owned(),
+        });
+        assert!(matches!(
+            runtime.validate(),
             Err(ProcessError::InvalidConfiguration)
         ));
     }

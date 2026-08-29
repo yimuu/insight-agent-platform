@@ -34,8 +34,8 @@
 {{- if or (empty .Values.runEventCursorKey.existingSecret) (empty .Values.runEventCursorKey.key) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest)) }}
 {{- fail "Runtime API Run event cursor key closure is invalid" }}
 {{- end }}
-{{- if or (not (hasPrefix "https://" .Values.artifactGateway.endpoint)) (empty .Values.artifactGateway.tls.existingSecret) (empty .Values.artifactGateway.tls.keys.ca) (empty .Values.artifactGateway.tls.keys.certificate) (empty .Values.artifactGateway.tls.keys.privateKey) }}
-{{- fail "Runtime API to Artifact Gateway requires an HTTPS endpoint and exact mTLS Secret keys" }}
+{{- if or (empty .Values.artifactGateway.tls.existingSecret) (empty .Values.artifactGateway.tls.keys.ca) (empty .Values.artifactGateway.tls.keys.certificate) (empty .Values.artifactGateway.tls.keys.privateKey) }}
+{{- fail "Runtime API to Artifact Gateway requires exact mTLS Secret keys" }}
 {{- end }}
 {{- if empty .Values.networkPolicy.postgresCidrs }}
 {{- fail "networkPolicy.postgresCidrs is required" }}

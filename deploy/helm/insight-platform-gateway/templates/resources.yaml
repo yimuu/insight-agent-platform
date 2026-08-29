@@ -61,7 +61,6 @@ spec:
             {{- if eq $role "runtime-api" }}
             - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH, value: /etc/insight/run-event-cursor/key}
             - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST, value: {{ $root.Values.runEventCursorKey.digest | quote }}}
-            - {name: PLATFORM_GATEWAY_ARTIFACT_ENDPOINT, value: {{ $root.Values.artifactGateway.endpoint | quote }}}
             - {name: PLATFORM_GATEWAY_ARTIFACT_CA_PATH, value: /etc/insight/artifact-tls/ca.pem}
             - {name: PLATFORM_GATEWAY_ARTIFACT_CERT_PATH, value: /etc/insight/artifact-tls/client.pem}
             - {name: PLATFORM_GATEWAY_ARTIFACT_KEY_PATH, value: /etc/insight/artifact-tls/client-key.pem}

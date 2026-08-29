@@ -75,7 +75,6 @@ for required in (
     "PLATFORM_GATEWAY_DATABASE_URL",
     "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
     "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST",
-    "PLATFORM_GATEWAY_ARTIFACT_ENDPOINT",
     "PLATFORM_GATEWAY_ARTIFACT_CA_PATH",
     "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH",
     "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH",
@@ -113,7 +112,6 @@ if not management or not runtime:
     failures.append("Management and Runtime API Deployment identities are incomplete")
 for runtime_only in (
     "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
-    "PLATFORM_GATEWAY_ARTIFACT_ENDPOINT",
     "artifact-tls",
 ):
     if runtime_only in management:
