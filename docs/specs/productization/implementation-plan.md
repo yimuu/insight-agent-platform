@@ -70,6 +70,12 @@ M0 的已审查输入保存在：
 authoring、重启后的 durable Run 恢复和本里程碑的全部退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
 Verified。
 
+2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
+Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立
+role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探针同时发现 Agent public authoring P0：当前 typed
+Plan 在 publish 前要求不可知的 server-generated Agent Interface Revision ID，阻断首次 Run。该问题必须按上游合同修订、
+00～18 cross-review 和实现修复闭合，不能以预写数据库或固定测试 ID 绕过。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

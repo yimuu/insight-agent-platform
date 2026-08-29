@@ -1215,6 +1215,10 @@ pub fn initialize_project(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CliError::InvalidClock)?
         .as_secs();
+    fs::create_dir_all(root).map_err(|source| CliError::InitializeProject {
+        path: root.display().to_string(),
+        source,
+    })?;
     fs::create_dir(&state_directory).map_err(|source| CliError::InitializeProject {
         path: state_directory.display().to_string(),
         source,
@@ -4644,6 +4648,19 @@ mod tests {
             initialize_project(directory.path(), Some("demo"), UNIX_EPOCH),
             Err(CliError::ProjectAlreadyInitialized(_))
         ));
+    }
+
+    #[test]
+    fn init_creates_a_missing_project_root() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().join("fresh-project");
+        assert!(!root.exists());
+        let state = initialize_project(&root, None, UNIX_EPOCH).unwrap();
+        assert_eq!(state.project_name, "fresh-project");
+        assert!(root
+            .join(PROJECT_DIRECTORY)
+            .join(PROJECT_STATE_FILE)
+            .is_file());
     }
 
     #[test]
