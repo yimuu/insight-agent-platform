@@ -5,7 +5,13 @@
 //! lifecycle; those self references are filled from the publish response before Deployment
 //! creation. No Plan, tool, URL, shell, Secret value, or execution semantics are invented here.
 
-use crate::public_client::{PublicClientError, PublicHttpClient, PublicJsonResponse};
+use crate::{
+    apply_journal::{
+        self, ApplyJournalError, ApplyJournalV1, JournalDeployment, JournalIntent,
+        JournalPublishResult, JournalPublishedVersion, JournalResource,
+    },
+    public_client::{PublicClientError, PublicHttpClient, PublicJsonResponse},
+};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, AdministrativeGate, AgentDeploymentClosure, ArtifactRef,
     CapabilityBackendBinding, CapabilityDeploymentClosure, ClosedJsonValue, ContextBackendBinding,
@@ -18,7 +24,7 @@ use insight_platform_contracts::{
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{collections::BTreeMap, fmt, path::Path, time::Duration};
 
 const APPLY_MANIFEST_KIND: &str = "insight.platform.apply/v1";
 const MAX_APPLY_MANIFEST_BYTES: usize = 1_048_576;
@@ -27,6 +33,7 @@ const MAX_APPLY_MANIFEST_BYTES: usize = 1_048_576;
 pub enum ApplyError {
     InvalidManifest(String),
     Public(PublicClientError),
+    Journal(ApplyJournalError),
     InvalidResponse(String),
     OperationTerminal {
         operation_id: String,
@@ -42,6 +49,7 @@ impl fmt::Display for ApplyError {
                 write!(formatter, "apply manifest is invalid: {detail}")
             }
             Self::Public(error) => write!(formatter, "{error}"),
+            Self::Journal(error) => write!(formatter, "{error}"),
             Self::InvalidResponse(detail) => {
                 write!(
                     formatter,
@@ -64,6 +72,7 @@ impl std::error::Error for ApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Public(error) => Some(error),
+            Self::Journal(error) => Some(error),
             _ => None,
         }
     }
@@ -72,6 +81,12 @@ impl std::error::Error for ApplyError {
 impl From<PublicClientError> for ApplyError {
     fn from(value: PublicClientError) -> Self {
         Self::Public(value)
+    }
+}
+
+impl From<ApplyJournalError> for ApplyError {
+    fn from(value: ApplyJournalError) -> Self {
+        Self::Journal(value)
     }
 }
 
@@ -454,7 +469,7 @@ pub struct ApplyReportV1 {
     pub deployment_id: String,
     pub active_deployment_id: String,
     pub final_resource_etag: String,
-    pub step_trace_ids: BTreeMap<&'static str, String>,
+    pub step_trace_ids: BTreeMap<String, String>,
 }
 
 pub fn apply_manifest(
@@ -462,142 +477,272 @@ pub fn apply_manifest(
     expected_tenant_id: &ResourceId,
     manifest_bytes: &[u8],
     operation_timeout: Duration,
+    journal_directory: &Path,
 ) -> Result<ApplyReportV1, ApplyError> {
     let (manifest, manifest_digest) = parse_manifest(manifest_bytes)?;
     let noun = manifest.resource_noun;
     let kind = noun.resource_kind();
     let base_path = format!("/v1/{}", noun.as_path());
-    let mut traces = BTreeMap::new();
+    let journal_path = apply_journal::journal_path(journal_directory, &manifest_digest);
+    let mut journal = match apply_journal::load(&journal_path)? {
+        Some(journal) => journal,
+        None => {
+            let journal = ApplyJournalV1::new(
+                manifest_digest.clone(),
+                receipt_key(&manifest_digest, "create"),
+            );
+            apply_journal::save(&journal_path, &journal)?;
+            journal
+        }
+    };
+    journal.validate(&manifest_digest)?;
+    validate_resume_journal(&journal, &manifest)?;
 
-    let create: PublicJsonResponse<ResourceViewV1> = client.post_json(
-        &base_path,
-        &manifest.create,
-        StatusCode::CREATED,
-        &receipt_key(&manifest_digest, "create"),
-        None,
-    )?;
-    validate_resource_response(&create, kind, None)?;
-    require_location(&create, &format!("{base_path}/{}", create.body.resource_id))?;
-    traces.insert("create", create.trace_id.to_string());
-    let resource_id = create.body.resource_id.clone();
+    if journal.resource.is_none() {
+        let create: PublicJsonResponse<ResourceViewV1> = client.post_json(
+            &base_path,
+            &manifest.create,
+            StatusCode::CREATED,
+            &journal.create_intent.receipt,
+            None,
+        )?;
+        validate_resource_response(&create, kind, None)?;
+        require_location(&create, &format!("{base_path}/{}", create.body.resource_id))?;
+        journal
+            .step_trace_ids
+            .insert("create".to_owned(), create.trace_id);
+        journal.resource = Some(JournalResource {
+            resource_id: create.body.resource_id,
+            etag: create.etag,
+            version: create.body.version,
+        });
+        apply_journal::save(&journal_path, &journal)?;
+    }
+    let resource = journal.resource.clone().ok_or_else(|| {
+        ApplyError::InvalidResponse("apply journal omitted the created Resource".to_owned())
+    })?;
+    let resource_id = resource.resource_id;
 
     let validate_path = format!("{base_path}/{resource_id}/draft:validate");
-    let validation: PublicJsonResponse<OperationViewV1> = client.post_empty(
-        &validate_path,
-        StatusCode::ACCEPTED,
-        &receipt_key(&manifest_digest, "validate"),
-        &create.etag,
+    let validation_intent = JournalIntent {
+        receipt: receipt_key(&manifest_digest, "validate"),
+        if_match: Some(resource.etag.clone()),
+    };
+    persist_intent(
+        &journal_path,
+        &mut journal,
+        JournalStep::Validation,
+        validation_intent,
     )?;
-    validation.body.validate().map_err(|_| {
-        ApplyError::InvalidResponse("validation Operation violates its contract".to_owned())
+    if journal.validation_operation_id.is_none() {
+        let intent = require_intent(journal.validation_intent.as_ref(), "validation")?;
+        let validation: PublicJsonResponse<OperationViewV1> = client.post_empty(
+            &validate_path,
+            StatusCode::ACCEPTED,
+            &intent.receipt,
+            intent.if_match.as_deref().ok_or_else(|| {
+                ApplyError::InvalidResponse("validation intent omitted If-Match".to_owned())
+            })?,
+        )?;
+        validation.body.validate().map_err(|_| {
+            ApplyError::InvalidResponse("validation Operation violates its contract".to_owned())
+        })?;
+        if validation.body.tenant_id != *expected_tenant_id
+            || validation.body.etag != validation.etag
+            || validation.body.kind != PublicJobKind::ResourceValidation
+            || !matches!(
+                &validation.body.target,
+                PublicJobTarget::ResourceVersion {
+                    resource_id: target_resource_id,
+                    resource_version,
+                } if target_resource_id == &resource_id && *resource_version == resource.version
+            )
+        {
+            return Err(ApplyError::InvalidResponse(
+                "validation Operation identity differs from the exact Draft request".to_owned(),
+            ));
+        }
+        require_location(
+            &validation,
+            &format!("/v1/operations/{}", validation.body.operation_id),
+        )?;
+        journal
+            .step_trace_ids
+            .insert("validate".to_owned(), validation.trace_id);
+        journal.validation_operation_id = Some(validation.body.operation_id);
+        apply_journal::save(&journal_path, &journal)?;
+    }
+    let validation_operation_id = journal.validation_operation_id.clone().ok_or_else(|| {
+        ApplyError::InvalidResponse("apply journal omitted validation Operation".to_owned())
     })?;
-    if validation.body.tenant_id != *expected_tenant_id
-        || validation.body.etag != validation.etag
-        || validation.body.kind != PublicJobKind::ResourceValidation
-        || !matches!(
-            &validation.body.target,
-            PublicJobTarget::ResourceVersion {
-                resource_id: target_resource_id,
-                resource_version,
-            } if target_resource_id == &resource_id && *resource_version == create.body.version
-        )
-    {
-        return Err(ApplyError::InvalidResponse(
-            "validation Operation identity differs from the exact Draft request".to_owned(),
-        ));
+    if journal.validated_resource_etag.is_none() {
+        let terminal = client.wait_operation(
+            &validation_operation_id,
+            expected_tenant_id,
+            operation_timeout,
+        )?;
+        require_succeeded_operation(&terminal)?;
+
+        let validated: PublicJsonResponse<ResourceViewV1> =
+            client.get_json(&format!("{base_path}/{resource_id}"), StatusCode::OK)?;
+        validate_resource_response(&validated, kind, Some(&resource_id))?;
+        if validated.body.draft.validation.is_none() {
+            return Err(ApplyError::InvalidResponse(
+                "validation Operation succeeded without an exact Draft validation summary"
+                    .to_owned(),
+            ));
+        }
+        journal
+            .step_trace_ids
+            .insert("read_validated".to_owned(), validated.trace_id);
+        journal.validated_resource_etag = Some(validated.etag);
+        apply_journal::save(&journal_path, &journal)?;
     }
-    require_location(
-        &validation,
-        &format!("/v1/operations/{}", validation.body.operation_id),
-    )?;
-    traces.insert("validate", validation.trace_id.to_string());
-    let validation_operation_id = validation.body.operation_id.clone();
-    let terminal = client.wait_operation(
-        &validation_operation_id,
-        expected_tenant_id,
-        operation_timeout,
-    )?;
-    require_succeeded_operation(&terminal)?;
+    let validated_etag = journal.validated_resource_etag.clone().ok_or_else(|| {
+        ApplyError::InvalidResponse("apply journal omitted validated Resource ETag".to_owned())
+    })?;
 
-    let validated: PublicJsonResponse<ResourceViewV1> =
-        client.get_json(&format!("{base_path}/{resource_id}"), StatusCode::OK)?;
-    validate_resource_response(&validated, kind, Some(&resource_id))?;
-    if validated.body.draft.validation.is_none() {
-        return Err(ApplyError::InvalidResponse(
-            "validation Operation succeeded without an exact Draft validation summary".to_owned(),
-        ));
+    let publish_intent = JournalIntent {
+        receipt: receipt_key(&manifest_digest, "publish"),
+        if_match: Some(validated_etag),
+    };
+    persist_intent(
+        &journal_path,
+        &mut journal,
+        JournalStep::Publish,
+        publish_intent,
+    )?;
+    if journal.publish.is_none() {
+        let intent = require_intent(journal.publish_intent.as_ref(), "publish")?;
+        let publish: PublicJsonResponse<PublishResourceDraftResponseV1> = client.post_json(
+            &format!("{base_path}/{resource_id}/draft:publish"),
+            &manifest.publish,
+            StatusCode::OK,
+            &intent.receipt,
+            intent.if_match.as_deref(),
+        )?;
+        validate_publish_response(&publish, noun, &resource_id, &manifest.publish)?;
+        journal
+            .step_trace_ids
+            .insert("publish".to_owned(), publish.trace_id);
+        journal.publish = Some(JournalPublishResult {
+            resource_etag: publish.etag,
+            versions: publish
+                .body
+                .published_versions
+                .into_iter()
+                .map(JournalPublishedVersion::from)
+                .collect(),
+        });
+        apply_journal::save(&journal_path, &journal)?;
     }
-    traces.insert("read_validated", validated.trace_id.to_string());
-
-    let publish: PublicJsonResponse<PublishResourceDraftResponseV1> = client.post_json(
-        &format!("{base_path}/{resource_id}/draft:publish"),
-        &manifest.publish,
-        StatusCode::OK,
-        &receipt_key(&manifest_digest, "publish"),
-        Some(&validated.etag),
-    )?;
-    validate_publish_response(&publish, noun, &resource_id, &manifest.publish)?;
-    traces.insert("publish", publish.trace_id.to_string());
-
-    let primary_version = publish
-        .body
-        .published_versions
+    let publish = journal.publish.clone().ok_or_else(|| {
+        ApplyError::InvalidResponse("apply journal omitted publish authority result".to_owned())
+    })?;
+    let published_versions = publish
+        .versions
+        .iter()
+        .cloned()
+        .map(PublishedResourceVersionSummaryV1::from)
+        .collect::<Vec<_>>();
+    let primary_version = published_versions
         .iter()
         .find(|version| version.resource_version_id.kind() == noun.primary_version_kind())
         .ok_or_else(|| {
             ApplyError::InvalidResponse("publish response omitted the primary Version".to_owned())
         })?;
-    let deployment_closure = manifest
-        .deployment
-        .closure
-        .resolve(&publish.body.published_versions)?;
+    let deployment_closure = manifest.deployment.closure.resolve(&published_versions)?;
     let deployment_request = CreateDeploymentRequestV1 {
         resource_version_id: &primary_version.resource_version_id,
         environment: &manifest.deployment.environment,
         closure: &deployment_closure,
     };
-    let deployment: PublicJsonResponse<DeploymentViewV1> = client.post_json(
-        &format!("{base_path}/{resource_id}/deployments"),
-        &deployment_request,
-        StatusCode::CREATED,
-        &receipt_key(&manifest_digest, "deploy"),
-        Some(&publish.etag),
+    let deployment_intent = JournalIntent {
+        receipt: receipt_key(&manifest_digest, "deploy"),
+        if_match: Some(publish.resource_etag.clone()),
+    };
+    persist_intent(
+        &journal_path,
+        &mut journal,
+        JournalStep::Deployment,
+        deployment_intent,
     )?;
-    validate_deployment_response(
-        &deployment,
-        kind,
-        &resource_id,
-        &primary_version.resource_version_id,
-        &manifest.deployment.environment,
-        &deployment_closure,
-    )?;
-    require_location(
-        &deployment,
-        &format!(
-            "{base_path}/{resource_id}/deployments/{}",
-            deployment.body.deployment_id
-        ),
-    )?;
-    traces.insert("deploy", deployment.trace_id.to_string());
-    let deployment_id = deployment.body.deployment_id.clone();
-
-    let activated: PublicJsonResponse<ResourceViewV1> = client.post_empty(
-        &format!("{base_path}/{resource_id}/deployments/{deployment_id}:activate"),
-        StatusCode::OK,
-        &receipt_key(&manifest_digest, "activate"),
-        &publish.etag,
-    )?;
-    validate_resource_response(&activated, kind, Some(&resource_id))?;
-    if activated.body.gate_state != AdministrativeGate::Enabled {
-        return Err(ApplyError::InvalidResponse(
-            "activation did not leave the Resource gate enabled".to_owned(),
-        ));
+    if journal.deployment.is_none() {
+        let intent = require_intent(journal.deployment_intent.as_ref(), "deployment")?;
+        let deployment: PublicJsonResponse<DeploymentViewV1> = client.post_json(
+            &format!("{base_path}/{resource_id}/deployments"),
+            &deployment_request,
+            StatusCode::CREATED,
+            &intent.receipt,
+            intent.if_match.as_deref(),
+        )?;
+        validate_deployment_response(
+            &deployment,
+            kind,
+            &resource_id,
+            &primary_version.resource_version_id,
+            &manifest.deployment.environment,
+            &deployment_closure,
+        )?;
+        require_location(
+            &deployment,
+            &format!(
+                "{base_path}/{resource_id}/deployments/{}",
+                deployment.body.deployment_id
+            ),
+        )?;
+        journal
+            .step_trace_ids
+            .insert("deploy".to_owned(), deployment.trace_id);
+        journal.deployment = Some(JournalDeployment {
+            deployment_id: deployment.body.deployment_id,
+            etag: deployment.etag,
+        });
+        apply_journal::save(&journal_path, &journal)?;
     }
-    traces.insert("activate", activated.trace_id.to_string());
+    let deployment_id = journal
+        .deployment
+        .as_ref()
+        .ok_or_else(|| {
+            ApplyError::InvalidResponse("apply journal omitted Deployment result".to_owned())
+        })?
+        .deployment_id
+        .clone();
 
-    let published_versions = publish
-        .body
-        .published_versions
+    let activation_intent = JournalIntent {
+        receipt: receipt_key(&manifest_digest, "activate"),
+        if_match: Some(publish.resource_etag.clone()),
+    };
+    persist_intent(
+        &journal_path,
+        &mut journal,
+        JournalStep::Activation,
+        activation_intent,
+    )?;
+    if journal.final_resource_etag.is_none() {
+        let intent = require_intent(journal.activation_intent.as_ref(), "activation")?;
+        let activated: PublicJsonResponse<ResourceViewV1> = client.post_empty(
+            &format!("{base_path}/{resource_id}/deployments/{deployment_id}:activate"),
+            StatusCode::OK,
+            &intent.receipt,
+            intent.if_match.as_deref().ok_or_else(|| {
+                ApplyError::InvalidResponse("activation intent omitted If-Match".to_owned())
+            })?,
+        )?;
+        validate_resource_response(&activated, kind, Some(&resource_id))?;
+        if activated.body.gate_state != AdministrativeGate::Enabled {
+            return Err(ApplyError::InvalidResponse(
+                "activation did not leave the Resource gate enabled".to_owned(),
+            ));
+        }
+        journal
+            .step_trace_ids
+            .insert("activate".to_owned(), activated.trace_id);
+        journal.final_resource_etag = Some(activated.etag);
+        apply_journal::save(&journal_path, &journal)?;
+    }
+
+    let published_version_report = published_versions
         .iter()
         .map(|version| ApplyPublishedVersionReport {
             resource_version_id: version.resource_version_id.to_string(),
@@ -608,18 +753,24 @@ pub fn apply_manifest(
     Ok(ApplyReportV1 {
         schema_version: 1,
         kind: "insight.platform.apply-report/v1",
-        manifest_digest,
+        manifest_digest: manifest_digest.to_string(),
         resource_id: resource_id.to_string(),
         validation_operation_id: validation_operation_id.to_string(),
-        published_versions,
+        published_versions: published_version_report,
         deployment_id: deployment_id.to_string(),
         active_deployment_id: deployment_id.to_string(),
-        final_resource_etag: activated.etag,
-        step_trace_ids: traces,
+        final_resource_etag: journal.final_resource_etag.clone().ok_or_else(|| {
+            ApplyError::InvalidResponse("apply journal omitted final Resource ETag".to_owned())
+        })?,
+        step_trace_ids: journal
+            .step_trace_ids
+            .iter()
+            .map(|(step, trace_id)| (step.clone(), trace_id.to_string()))
+            .collect(),
     })
 }
 
-fn parse_manifest(bytes: &[u8]) -> Result<(ApplyManifestV1, String), ApplyError> {
+fn parse_manifest(bytes: &[u8]) -> Result<(ApplyManifestV1, Sha256Digest), ApplyError> {
     if bytes.is_empty() || bytes.len() > MAX_APPLY_MANIFEST_BYTES {
         return Err(ApplyError::InvalidManifest(
             "size is outside 1..=1048576 bytes".to_owned(),
@@ -636,8 +787,10 @@ fn parse_manifest(bytes: &[u8]) -> Result<(ApplyManifestV1, String), ApplyError>
         },
     )
     .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?;
-    let digest =
-        canonical_digest(&value).map_err(|error| ApplyError::InvalidManifest(error.to_string()))?;
+    let digest = canonical_digest(&value)
+        .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?
+        .parse::<Sha256Digest>()
+        .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?;
     let manifest = serde_json::from_value::<ApplyManifestV1>(value)
         .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?;
     validate_manifest(&manifest)?;
@@ -703,13 +856,222 @@ fn validate_manifest(manifest: &ApplyManifestV1) -> Result<(), ApplyError> {
     Ok(())
 }
 
-fn receipt_key(manifest_digest: &str, step: &str) -> String {
+fn receipt_key(manifest_digest: &Sha256Digest, step: &str) -> String {
+    let manifest_digest = manifest_digest.to_string();
     format!(
         "insight-apply-v1-{}-{step}",
         manifest_digest
             .strip_prefix("sha256:")
-            .unwrap_or(manifest_digest)
+            .unwrap_or(&manifest_digest)
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JournalStep {
+    Validation,
+    Publish,
+    Deployment,
+    Activation,
+}
+
+fn persist_intent(
+    path: &Path,
+    journal: &mut ApplyJournalV1,
+    step: JournalStep,
+    expected: JournalIntent,
+) -> Result<(), ApplyError> {
+    let slot = match step {
+        JournalStep::Validation => &mut journal.validation_intent,
+        JournalStep::Publish => &mut journal.publish_intent,
+        JournalStep::Deployment => &mut journal.deployment_intent,
+        JournalStep::Activation => &mut journal.activation_intent,
+    };
+    match slot {
+        Some(existing) if existing != &expected => {
+            return Err(ApplyError::InvalidResponse(
+                "persisted apply intent differs from the deterministic request".to_owned(),
+            ));
+        }
+        Some(_) => return Ok(()),
+        None => *slot = Some(expected),
+    }
+    apply_journal::save(path, journal)?;
+    Ok(())
+}
+
+fn require_intent<'a>(
+    intent: Option<&'a JournalIntent>,
+    step: &str,
+) -> Result<&'a JournalIntent, ApplyError> {
+    intent.ok_or_else(|| {
+        ApplyError::InvalidResponse(format!("apply journal omitted the {step} intent"))
+    })
+}
+
+fn validate_resume_journal(
+    journal: &ApplyJournalV1,
+    manifest: &ApplyManifestV1,
+) -> Result<(), ApplyError> {
+    let digest = &journal.manifest_digest;
+    if journal.create_intent
+        != (JournalIntent {
+            receipt: receipt_key(digest, "create"),
+            if_match: None,
+        })
+    {
+        return Err(ApplyError::InvalidResponse(
+            "persisted create intent is not deterministic".to_owned(),
+        ));
+    }
+    let Some(resource) = &journal.resource else {
+        return Ok(());
+    };
+    let noun = manifest.resource_noun;
+    if resource.resource_id.kind() != noun.resource_kind().id_kind() {
+        return Err(ApplyError::InvalidResponse(
+            "journal Resource kind differs from the manifest".to_owned(),
+        ));
+    }
+    validate_optional_intent(
+        journal.validation_intent.as_ref(),
+        receipt_key(digest, "validate"),
+        &resource.etag,
+    )?;
+    if journal
+        .validation_operation_id
+        .as_ref()
+        .is_some_and(|id| id.kind() != ResourceKind::Job)
+    {
+        return Err(ApplyError::InvalidResponse(
+            "journal validation Operation has the wrong ID kind".to_owned(),
+        ));
+    }
+    if let Some(validated_etag) = &journal.validated_resource_etag {
+        validate_optional_intent(
+            journal.publish_intent.as_ref(),
+            receipt_key(digest, "publish"),
+            validated_etag,
+        )?;
+    }
+    if let Some(publish) = &journal.publish {
+        validate_journal_publish(publish, noun, &manifest.publish)?;
+        validate_optional_intent(
+            journal.deployment_intent.as_ref(),
+            receipt_key(digest, "deploy"),
+            &publish.resource_etag,
+        )?;
+        validate_optional_intent(
+            journal.activation_intent.as_ref(),
+            receipt_key(digest, "activate"),
+            &publish.resource_etag,
+        )?;
+    }
+    if journal.deployment.as_ref().is_some_and(|deployment| {
+        noun.resource_kind().deployment_kind() != Some(deployment.deployment_id.kind())
+    }) {
+        return Err(ApplyError::InvalidResponse(
+            "journal Deployment kind differs from the manifest".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_intent(
+    actual: Option<&JournalIntent>,
+    expected_receipt: String,
+    expected_if_match: &str,
+) -> Result<(), ApplyError> {
+    if actual.is_some_and(|intent| {
+        intent.receipt != expected_receipt || intent.if_match.as_deref() != Some(expected_if_match)
+    }) {
+        return Err(ApplyError::InvalidResponse(
+            "persisted apply intent differs from the manifest closure".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_journal_publish(
+    publish: &JournalPublishResult,
+    noun: ApplyResourceNoun,
+    request: &ApplyPublishResourceRequestV1,
+) -> Result<(), ApplyError> {
+    let expected_count = if noun == ApplyResourceNoun::Agents {
+        2
+    } else {
+        1
+    };
+    let mut kinds = std::collections::BTreeSet::new();
+    let versions_match = publish.versions.iter().all(|version| {
+        if !noun
+            .resource_kind()
+            .allows_version_kind(version.resource_version_id.kind())
+            || !kinds.insert(version.resource_version_id.kind())
+        {
+            return false;
+        }
+        match request {
+            ApplyPublishResourceRequestV1::Single {
+                revision_no,
+                content_digest,
+                artifact_id,
+            } => {
+                version.revision_no == *revision_no
+                    && &version.content_digest == content_digest
+                    && &version.artifact_id == artifact_id
+            }
+            ApplyPublishResourceRequestV1::Agent {
+                revision_no,
+                interface_content_digest,
+                plan_content_digest,
+                artifact_id,
+            } => {
+                let expected_digest = match version.resource_version_id.kind() {
+                    ResourceKind::AgentInterfaceRevision => interface_content_digest,
+                    ResourceKind::AgentPlanRevision => plan_content_digest,
+                    _ => return false,
+                };
+                version.revision_no == *revision_no
+                    && &version.content_digest == expected_digest
+                    && &version.artifact_id == artifact_id
+            }
+        }
+    });
+    if publish.versions.len() != expected_count
+        || !versions_match
+        || !kinds.contains(&noun.primary_version_kind())
+        || (noun == ApplyResourceNoun::Agents
+            && !kinds.contains(&ResourceKind::AgentInterfaceRevision))
+    {
+        return Err(ApplyError::InvalidResponse(
+            "journal publish result differs from the manifest Version matrix".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+impl From<PublishedResourceVersionSummaryV1> for JournalPublishedVersion {
+    fn from(value: PublishedResourceVersionSummaryV1) -> Self {
+        Self {
+            resource_version_id: value.resource_version_id,
+            revision_no: value.revision_no,
+            content_digest: value.content_digest,
+            artifact_id: value.artifact_id,
+            etag: value.etag,
+        }
+    }
+}
+
+impl From<JournalPublishedVersion> for PublishedResourceVersionSummaryV1 {
+    fn from(value: JournalPublishedVersion) -> Self {
+        Self {
+            resource_version_id: value.resource_version_id,
+            revision_no: value.revision_no,
+            content_digest: value.content_digest,
+            artifact_id: value.artifact_id,
+            etag: value.etag,
+        }
+    }
 }
 
 fn require_location<T>(response: &PublicJsonResponse<T>, expected: &str) -> Result<(), ApplyError> {
@@ -912,6 +1274,7 @@ mod tests {
         net::{TcpListener, TcpStream},
         thread,
     };
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     fn id(kind: ResourceKind) -> ResourceId {
@@ -1298,7 +1661,15 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
-            for response in responses {
+            let (mut dropped, _) = listener.accept().unwrap();
+            let (dropped_head, _) = read_request(&mut dropped);
+            assert!(dropped_head.starts_with("POST /v1/policies HTTP/1.1"));
+            let dropped_receipt = header_value(&dropped_head, "idempotency-key")
+                .unwrap()
+                .to_owned();
+            drop(dropped);
+
+            for (index, response) in responses.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (head, body) = read_request(&mut stream);
                 assert!(
@@ -1313,8 +1684,12 @@ mod tests {
                     response.expected_if_match.as_deref()
                 );
                 let trace_id = if response.method == "POST" {
-                    assert!(header_value(&head, "idempotency-key")
-                        .is_some_and(|value| value.starts_with("insight-apply-v1-")));
+                    let receipt = header_value(&head, "idempotency-key")
+                        .filter(|value| value.starts_with("insight-apply-v1-"))
+                        .expect("bounded deterministic Receipt");
+                    if index == 0 {
+                        assert_eq!(receipt, dropped_receipt);
+                    }
                     request_trace_id(&head)
                 } else {
                     "33333333333333333333333333333333".to_owned()
@@ -1336,8 +1711,26 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
-        let report =
-            apply_manifest(&client, &tenant_id, &manifest_bytes, Duration::from_secs(2)).unwrap();
+        let journals = TempDir::new().unwrap();
+        let interrupted = apply_manifest(
+            &client,
+            &tenant_id,
+            &manifest_bytes,
+            Duration::from_secs(2),
+            journals.path(),
+        );
+        assert!(matches!(
+            interrupted,
+            Err(ApplyError::Public(PublicClientError::Transport(_)))
+        ));
+        let report = apply_manifest(
+            &client,
+            &tenant_id,
+            &manifest_bytes,
+            Duration::from_secs(2),
+            journals.path(),
+        )
+        .unwrap();
         assert_eq!(report.resource_id, resource_id.to_string());
         assert_eq!(report.validation_operation_id, operation_id.to_string());
         assert_eq!(report.deployment_id, deployment_id.to_string());
@@ -1349,5 +1742,15 @@ mod tests {
             version_id.to_string()
         );
         server.join().unwrap();
+
+        let resumed = apply_manifest(
+            &client,
+            &tenant_id,
+            &manifest_bytes,
+            Duration::from_secs(2),
+            journals.path(),
+        )
+        .unwrap();
+        assert_eq!(resumed, report);
     }
 }

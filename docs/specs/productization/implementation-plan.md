@@ -108,8 +108,10 @@ smoke 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 本地 profile 生成的 loopback Management Gateway，使用短期 OIDC token，禁止 redirect/proxy，限制 request/response
 body 与 timeout，并重验 authority ID、tenant、ETag、trace、cache-control 及 closed `ApiProblem`。`apply` 已执行
 create -> validate/wait -> read validated Draft -> publish -> create Deployment -> activate，并从 publish authority 响应
-填入 self Version binding；它不接受调用方伪造尚未创建的 Version ID。断线 journal/effect-aware resume、Artifact
-upload、首次 Run 和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为 Verified。
+填入 self Version binding；它不接受调用方伪造尚未创建的 Version ID。CLI 已为 canonical manifest 建立 bounded closed
+intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并通过 response-loss fixture 证明精确重放与完成后
+零网络恢复。Artifact upload、首次 Run、完整失败矩阵和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为
+Verified。
 
 ### 5.1 工作项
 

@@ -5,6 +5,7 @@
 //! mutations must use the public Gateway `/v1` contract.
 
 mod apply;
+mod apply_journal;
 mod public_client;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -3459,6 +3460,7 @@ fn apply_local_manifest(
         &tenant_id,
         &bytes,
         Duration::from_secs(timeout_seconds),
+        &root.join(PROJECT_DIRECTORY).join("apply"),
     )
     .map_err(CliError::Apply)?;
     serde_json::to_string_pretty(&report)

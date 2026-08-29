@@ -67,16 +67,22 @@ Version matrix、content digest、Deployment closure digest 和最终 gate。最
 `insight.platform.apply-report/v1`，包含 Resource、validation Operation、published Version、Deployment、最终 ETag 和
 每一步 trace ID。
 
+CLI 在 `.insight/apply/<canonical-manifest-digest>.json` 持久化 bounded、closed、原子替换的
+`insight.platform.apply-journal/v1`。每个 mutation 在发出请求前先写入确定性的 Receipt 与原始 If-Match，收到并校验
+authority 响应后再写入 Resource、Operation、Version、Deployment、ETag 与 trace ID。journal 不保存 access token、
+Secret、Resource document、Deployment closure 或 Artifact body。相同 manifest 再次执行时复用原始 intent；若响应在
+服务端提交后丢失，则由服务端 Receipt authority 返回同一 effect，CLI 校验后从最近完成步骤继续。已完成 journal 可在
+Gateway 不可用时直接重建同一 machine-readable report。
+
 ## 4. 当前证据与剩余门禁
 
 当前 loopback HTTP fixture 已覆盖七步 Policy lifecycle，并断言 Authorization、Receipt、If-Match、trace、Location、
-Operation terminal、publish digest 以及 Deployment self Version resolution；单独 fixture 覆盖成功 Operation envelope 和
-429 closed Problem 的 retry/trace 字段保留。
+Operation terminal、publish digest 以及 Deployment self Version resolution。fixture 还会在首个 mutation 已被接收后主动
+丢弃响应，确认重试复用同一 Receipt 并完成剩余 lifecycle；关闭 HTTP server 后再次 apply 会从完整 journal 返回相同
+report 且不访问网络。单独 fixture 覆盖成功 Operation envelope 和 429 closed Problem 的 retry/trace 字段保留。
 
 以下仍是 M2 未完成项：
 
-- 请求发出但响应丢失时的 checked-in apply journal 与 effect-aware resume；当前确定性 Receipt 已存在，但尚不能把
-  每一步原始 If-Match/authority result 跨 CLI 进程恢复；
 - Agent/其他七种 closure 的 checked fixture，以及 409/412/429、Operation failure/timeout 的完整 contract matrix；
 - Artifact upload/read、Run create/watch/control/result、Task resolve 及原始 curl lifecycle fixture；
 - fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 P1 journey，以及 worker restart 后的恢复观察。
