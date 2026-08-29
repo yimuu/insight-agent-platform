@@ -7,7 +7,10 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use rcgen::{KeyPair, PublicKeyData, PKCS_RSA_SHA256};
+use rcgen::{
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, PublicKeyData, SanType, PKCS_RSA_SHA256,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -31,6 +34,20 @@ const IDENTITY_PRIVATE_KEY_FILE: &str = "local-issuer-private-key.pem";
 const IDENTITY_JWKS_FILE: &str = "local-issuer-jwks.json";
 const IDENTITY_BOOTSTRAP_CONFIG_FILE: &str = "development-bootstrap.json";
 const IDENTITY_ACCESS_TOKEN_FILE: &str = "developer-access-token.jwt";
+const RUNTIME_DIRECTORY: &str = "runtime";
+const RUNTIME_TLS_DIRECTORY: &str = "tls";
+const RUNTIME_CA_CERTIFICATE_FILE: &str = "ca.pem";
+const RUNTIME_CA_PRIVATE_KEY_FILE: &str = "ca-key.pem";
+const RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE: &str = "artifact-gateway.pem";
+const RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE: &str = "artifact-gateway-key.pem";
+const RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE: &str = "artifact-data.pem";
+const RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE: &str = "artifact-data-key.pem";
+const RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE: &str = "gateway-client.pem";
+const RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE: &str = "gateway-client-key.pem";
+const RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE: &str = "orchestration-client.pem";
+const RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE: &str = "orchestration-client-key.pem";
+const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
+const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
 const LOCAL_ACCESS_TOKEN_TTL_SECONDS: i64 = 900;
 const EXPECTED_RUSTC_PREFIX: &str = "rustc 1.94.1";
@@ -335,6 +352,10 @@ pub fn initialize_project(
             return Err(error);
         }
     };
+    if let Err(error) = initialize_local_runtime_identity(&state_directory) {
+        let _ = fs::remove_dir_all(&state_directory);
+        return Err(error);
+    }
     let state = LocalProjectState {
         schema_version: 1,
         kind: PROJECT_KIND.to_owned(),
@@ -520,6 +541,129 @@ fn initialize_local_identity(
         issued_at_unix_seconds,
     )?;
     Ok(identity)
+}
+
+fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliError> {
+    let tls_directory = state_directory
+        .join(RUNTIME_DIRECTORY)
+        .join(RUNTIME_TLS_DIRECTORY);
+    fs::create_dir_all(&tls_directory).map_err(|source| CliError::InitializeProject {
+        path: tls_directory.display().to_string(),
+        source,
+    })?;
+
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).map_err(|_| {
+        invalid_local_identity(
+            &tls_directory,
+            "cannot construct local development certificate CA",
+        )
+    })?;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca_key = KeyPair::generate().map_err(|_| {
+        invalid_local_identity(
+            &tls_directory,
+            "cannot generate local development certificate CA",
+        )
+    })?;
+    let ca_certificate = ca_params.self_signed(&ca_key).map_err(|_| {
+        invalid_local_identity(
+            &tls_directory,
+            "cannot sign local development certificate CA",
+        )
+    })?;
+    write_new(
+        &tls_directory.join(RUNTIME_CA_CERTIFICATE_FILE),
+        ca_certificate.pem().as_bytes(),
+    )?;
+    write_sensitive_new(
+        &tls_directory.join(RUNTIME_CA_PRIVATE_KEY_FILE),
+        ca_key.serialize_pem().as_bytes(),
+    )?;
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
+        RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
+        RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
+        RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(PUBLIC_GATEWAY_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+        RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(SCHEDULER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )
+}
+
+fn write_local_leaf_certificate(
+    tls_directory: &Path,
+    certificate_name: &str,
+    private_key_name: &str,
+    dns_names: &[&str],
+    workload_identity: Option<&str>,
+    usage: ExtendedKeyUsagePurpose,
+    issuer: &Issuer<'_, KeyPair>,
+) -> Result<(), CliError> {
+    let mut params = CertificateParams::new(
+        dns_names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| invalid_local_identity(tls_directory, "cannot construct local TLS certificate"))?;
+    if let Some(workload_identity) = workload_identity {
+        params
+            .subject_alt_names
+            .push(SanType::URI(workload_identity.try_into().map_err(
+                |_| invalid_local_identity(tls_directory, "local workload identity is invalid"),
+            )?));
+    }
+    params.use_authority_key_identifier_extension = true;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![usage];
+    let key = KeyPair::generate().map_err(|_| {
+        invalid_local_identity(tls_directory, "cannot generate local TLS certificate key")
+    })?;
+    let certificate = params
+        .signed_by(&key, issuer)
+        .map_err(|_| invalid_local_identity(tls_directory, "cannot sign local TLS certificate"))?;
+    write_new(
+        &tls_directory.join(certificate_name),
+        certificate.pem().as_bytes(),
+    )?;
+    write_sensitive_new(
+        &tls_directory.join(private_key_name),
+        key.serialize_pem().as_bytes(),
+    )
 }
 
 fn fresh_resource_id(kind: ResourceKind) -> ResourceId {
@@ -1395,6 +1539,38 @@ mod tests {
             &fs::read(root.join(IDENTITY_DIRECTORY).join(IDENTITY_JWKS_FILE)).unwrap(),
         )
         .unwrap();
+        let tls = root.join(RUNTIME_DIRECTORY).join(RUNTIME_TLS_DIRECTORY);
+        for certificate in [
+            RUNTIME_CA_CERTIFICATE_FILE,
+            RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
+            RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
+            RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
+            RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+        ] {
+            let bytes = fs::read(tls.join(certificate)).unwrap();
+            assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            for private_key in [
+                RUNTIME_CA_PRIVATE_KEY_FILE,
+                RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE,
+                RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE,
+                RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE,
+                RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
+            ] {
+                assert_eq!(
+                    fs::metadata(tls.join(private_key))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o077,
+                    0
+                );
+            }
+        }
         let verifier = InstalledOidcVerifierConfig {
             issuer: persisted.identity.issuer.clone(),
             audience: persisted.identity.audience.clone(),

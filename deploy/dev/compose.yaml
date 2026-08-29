@@ -1,0 +1,44 @@
+# Local dependencies for the Platform `/v1` development profile. Platform roles remain separate
+# host processes supervised by `insight`; this file never replaces them with a mock runtime.
+services:
+  postgres:
+    image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_DB: insight_platform
+      POSTGRES_USER: insight
+      POSTGRES_PASSWORD: insight
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insight -d insight_platform"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  nats:
+    image: nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+    command: ["-js"]
+    ports:
+      - "127.0.0.1:4222:4222"
+
+  localstack:
+    image: localstack/localstack@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      EAGER_SERVICE_LOADING: "1"
+      SERVICES: s3,kms
+    ports:
+      - "127.0.0.1:4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal s3api list-buckets >/dev/null 2>&1 && awslocal kms list-keys >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+volumes:
+  postgres-data:
+  localstack-data:
