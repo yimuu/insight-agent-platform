@@ -1,10 +1,33 @@
-# Platform v2 00～18 Cross-review（CR-201）
+# Platform v2 00～18 Cross-review（CR-202）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Closed / CR-201 Verified |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-29 |
-| 输入 | 00～18 live tree、implementation-plan、completion audit、ADR-0001、ADR-0002、AGENTS.md、CR-201 completion-scope decision |
+| 输入 | 00～18 live tree、implementation-plan、CR-202 Registry Validation closure review、ADR-0001、ADR-0002、AGENTS.md |
+
+### CR-202 Registry Validation closure impact review
+
+实现检查发现 Management Gateway 已能创建`RegistryValidation` Job，但15个现有`ComponentRole`没有任何一个合法claim
+该WorkClass，且已有generic `commit_job`不能同一事务写入Resource validation。这不是CLI或本地profile可以填补的缺口：
+否则会出现由CLI伪造summary、Gateway内联执行，或Job/Resource只完成一半的状态。
+
+| Spec | CR-202 结论 |
+|---|---|
+| 00 | 撤回`Verified`状态；00～18保持Accepted/In Progress，L4～L6与production宣称仍未通过 |
+| 01 | control/durable/untrusted plane边界不变；新增的是trusted durable Registry Validation physical role，不执行代码或外部I/O |
+| 02 | 新增closed `RegistryValidationWorker` ComponentRole（16个实际部署role），Resource仍是Draft/summary唯一current-state authority |
+| 03 | validation summary、Job terminal、Event/Outbox/Receipt必须同一fenced transaction，不新增table、aggregate或projection |
+| 04 | 用已有`ServiceIdentity` tenant binding作受限completion actor；不能用InstallationOperator、原author冒充workload或跨tenant查找权限 |
+| 05～06、08～16 | Plan、Run、Capability、Skill、Context、MCP、Sandbox、Artifact、Model数据/公开合同不变；它们不取得RegistryValidation owner权限 |
+| 07 | WorkClass映射补齐为RegistryValidation -> dedicated worker，独立pool/manifest/claim/recovery，不复用Scheduler或API |
+| 17 | validate继续返回同一个Job Operation；handler/CLI不提供或提交summary，terminal语义绑定atomic owner commit |
+| 18 | candidate/profile/Helm/GitOps必须登记第16个role；增加L1-L3 worker transaction/process evidence，L4-L6仍为未执行外部门禁 |
+
+复核覆盖state ownership、IDs/JSON schema、errors、transactions/events、permissions、capacity、failure recovery和fixtures。
+CR-202不新增table、ResourceVersion、Deployment variant、public route、JobKind、WorkClass、Secret路径或runtime fallback。受影响
+合同已由Architecture Revision回到Accepted，因而可以生成实现；实现、fresh PostgreSQL transaction tests、独立进程L3和
+manifest/preflight仍是当前产品化工作，未执行L4～L6也不因该交叉复核变为passed。
 
 ### CR-201 repository completion scope impact review
 

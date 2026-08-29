@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-27 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -11,6 +11,11 @@
 > 预分配的`ArtifactScan`验证Job以typed payload互相引用；stage/verify完成只通过committed Event/Outbox wake恢复owner。最终owner事务必须
 > 同时重验两个latest fence、Artifact/Blob verification evidence和quota closure，再原子创建业务结果并结算；RPC completion、内存future或
 > message delivery均不能代替该事务，也不产生新的aggregate或当前状态投影。
+
+> CR-202 impact：`RegistryValidation` success/failure使用shared Job的同一lease/fence和JobCommit Receipt；不能先generic
+> `commit_job`再分开写Resource，也不能先写`ValidationSummary`后假定Job最终会终结。Resource validation、Job terminal、
+> Event、Outbox与Receipt必须同一事务first-winner；崩溃、重复wake、过期lease、Draft CAS失败或validator/profile drift均不得留下
+> “已验证但Operation仍运行”或“Operation成功但Draft未验证”的可见中间态。
 
 > CR-197 impact：定义恢复安全的trace identity。Run admission或非Run command admission拥有一个`TraceIdentityV1`；由其创建的Job、Task、
 > Event和Outbox snapshot复制同一trace ID。lease/attempt/Worker变化不改变trace ID，每个实际执行/RPC hop只生成新的span ID。trace字段不进入

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-26 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
@@ -48,7 +48,14 @@ authorization是`principal + tenant binding + resource/action + exact Run/Deploy
 ## 2. Principal 与tenant binding
 
 ```rust
-enum PrincipalKind { Human, ServiceIdentity }
+enum PrincipalKind {
+    InstallationOperator,
+    TenantAdmin,
+    AgentAuthor,
+    AgentRunner,
+    HumanApprover,
+    ServiceIdentity,
+}
 
 enum TenantRole {
     TenantAdmin,
@@ -133,6 +140,15 @@ audit.read
 每个command先认证、确定tenant、解析nominal target，再评估RBAC + published Policy + resource security gate。
 list/query在repository predicate层应用tenant与可见性，不在读取后内存过滤。`not_found`/`forbidden`映射避免
 成为cross-tenant存在性oracle。
+
+`PrincipalKind`表示经认证后选择的exact tenant binding，而不是把所有人类身份折叠为一个wire value。
+`InstallationOperator`只能用于installation bootstrap，不能形成tenant command audit；其余kind都必须命中
+`(tenant_id, principal_id, principal_kind)`的active binding和其闭合PermissionSet。
+
+CR-202增加受限的Registry Validation workload identity：`RegistryValidationWorker`只可用其配置中固定的
+`ServiceIdentity`完成自己tenant binding已授权的`resource.write` validation commit。它不得替换原始author的validate
+request audit、搜索其他principal/role、跨tenant提交、调用普通Resource publish/deploy/activate命令或获得Secret、Sandbox、
+Egress权限。请求者的Event/Receipt保留请求事实，worker terminal Event保留workload action与fenced Job correlation。
 
 authorization decision的缓存key必须包含tenant、principal binding version、permission、target kind/ID/version、policy digest、
 security gate generation和auth strength，并有短TTL。revocation/suspension不依赖缓存自然过期，而通过version/gate使旧key失效。

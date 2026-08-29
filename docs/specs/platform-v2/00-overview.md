@@ -2,13 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | In Progress / CR-202 |
 | 日期 | 2026-08-29 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
-> 2026-08-29 completion-scope decision（CR-201）：00～18的规范关闭以仓库内可复现的合同、实现、fresh PostgreSQL、独立进程、
+> 2026-08-29 status correction（CR-202）：此前将00～18标作`Verified / CR-201`不够诚实；真实多节点Kubernetes、
+> `RuntimeClass=runsc`、production telemetry、容量/混沌/恢复、持续soak与人工GitOps promotion仍未执行，且
+> `RegistryValidation` Job 尚未拥有可部署的执行/提交闭环。所有00～18保持`Accepted`或`In Progress`，不得把仓库静态
+> evidence、Docker 本地 profile 或 CI candidate 冒充为已完成的 L4～L6 或 production-ready 声明。
+
+> 2026-08-29 historical completion-scope decision（CR-201）：00～18的规范关闭曾以仓库内可复现的合同、实现、fresh PostgreSQL、独立进程、
 > 静态部署闭包和候选供应链证据为准。真实多节点Kubernetes、`RuntimeClass=runsc`、production Prometheus、容量/混沌/恢复、持续soak
 > 与人工GitOps promotion没有在本项目中执行；它们保留为部署方启用production前的环境资格门禁，不再阻塞spec状态或实现计划关闭。
 > `Verified`只表示已验证checked-in实现符合00～18的仓库范围合同，不表示production-ready、已完成clean cut或取得任何实测容量/SLO声明。

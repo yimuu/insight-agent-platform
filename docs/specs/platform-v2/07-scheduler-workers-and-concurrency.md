@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-26 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
@@ -72,6 +72,8 @@ WorkClass是closed machine registry，由03拥有。backend映射固定如下：
   subscription refresh类型，普通MCP Job仍使用`Mcp -> McpOperation`，两者不得互相claim；
 - WASI或gVisor代码 → `Sandbox`；
 - Artifact stage/read/verify/maintenance → `Artifact`。
+- Resource Draft validation → `RegistryValidation`，且只由`RegistryValidationWorker` claim；它不复用
+  `ManagementApi`、`SchedulerRecovery`或其他Worker的pool/manifest。
 
 一次Sandbox物理执行只有一个shared Job，不先建CapabilityRemote Job再建Sandbox Job。
 
@@ -120,6 +122,13 @@ Worker：
 - 读取immutable binding并执行exact `(JobId, lease_generation)`；
 - heartbeat、提交有界progress和closed outcome；
 - 不决定下游Plan控制流。
+
+`RegistryValidationWorker`对每个claim先以shared Job fence `start`，从current PostgreSQL authority加载
+`RegistryValidationJobPayload`及Resource Draft；它只能运行versioned closed validator、重算draft/dependency/security evidence，
+并调用Registry owner的atomic validation commit。它不信任NATS payload、CLI summary、Gateway进程内结果或active-head默认值。
+它不能把失败/漂移降格为warnings或generic success；可以重试的内部依赖失败遵循Job attempt/deadline，Draft/lease/CAS不一致则
+first-winner failure/reclaim而非覆盖新Draft。role有独立queue、business permit、DB pool、ServiceAccount和claim/lease/terminal metrics，
+其饱和不得影响Management API、Scheduler或其他worker的ready/critical-control reserve。
 
 Worker manifest v1只包含exact WorkClass、ComponentRole、CanonicalRegion、runtime/protocol digest、
 业务并发上限和critical-control reserve。Model首版Inline-only，因而manifest没有Model output

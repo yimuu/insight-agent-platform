@@ -5,7 +5,7 @@
 | 状态 | In Progress / M0 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
-| 合同基线 | Platform v2 spec00～18（Verified / CR-201） |
+| 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-202 Registry Validation architecture revision） |
 | 当前行为 | 不变；每个批次完成并取得 conformance evidence 后才可更新 `docs/current` |
 
 ## 1. 实施原则

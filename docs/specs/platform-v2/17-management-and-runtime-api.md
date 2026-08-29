@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-27 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -122,6 +122,12 @@ Published Version和Deployment immutable。activate/suspend都必须携带Resour
 Resource active binding并使gate为`Enabled`，suspend仅在path Deployment仍为active binding时将Resource gate设为`Suspended`。
 它们只影响未来Run；已存Run使用冻结binding，Deployment row不被修改。validate/discovery/build返回Job
 Operation，不建业务Operation aggregate。首版不暴露mutable Draft Version identity，也不提供尚未发布Version的GET route。
+
+CR-202明确`POST .../draft:validate`只在Gateway 的tenant authorization transaction内创建一个
+`RegistryValidation` Job并返回它的Operation projection；HTTP handler、CLI和Operation polling不得生成或提交
+`ValidationSummary`。Operation进入`succeeded`仅表示RegistryValidationWorker在同一fenced owner transaction已写入与
+该Job payload精确匹配的summary；Draft后续更新会使该summary失效，必须重新请求validation。Operation失败保持closed safe
+failure projection，细节只在授权的audit Event中可见；没有第二个validation result或ManagementOperation aggregate。
 
 首版不提供Installation release/promote/rollback、Candidate、GateResult、ReleaseManifest、dynamic storage/KMS binding、
 arbitrary runtime installer或generic plugin execution API。发布/回滚由GitOps/Kubernetes负责。

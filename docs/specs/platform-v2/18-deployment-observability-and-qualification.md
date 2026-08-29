@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-29 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -73,6 +73,7 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 |---|---|
 | Management API | Deployment、ServiceAccount、DB role/pool、rate limit |
 | Runtime API | Deployment、ServiceAccount、DB role/pool、SSE budget |
+| Registry Validation Worker | queue、独立DB pool、ServiceAccount、tenant-scoped validator identity、permit |
 | Scheduler/Recovery | Deployment、critical-control pool、lease/scan budget |
 | Model Worker | queue、DB pool、provider client、permit/rate limit |
 | Capability Worker | Native/Remote role、DB pool、permit |
@@ -88,6 +89,13 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 
 可以在同一Rust workspace编译多个binary，但上表声明的物理隔舱不得因代码复用而合并运行时权限。
 一个role饱和不得使其他role的readiness失败或占用critical-control reserve。
+
+`registry_validation_worker`是candidate manifest、CapacityProfile、startup manifest、Helm/GitOps与workload
+preflight共同承认的第16个`ComponentRole`。其image可以与其他trusted Rust role共享同一runtime image digest，但必须使用独立
+Deployment、ServiceAccount、NetworkPolicy、DB pool和WorkerManifest（唯一`WorkClass=RegistryValidation`）。L1覆盖
+payload/validator/profile/draft/dependency闭包与summary canonicalization；L2覆盖tenant permission、CAS、stale fence、
+Job/Resource/Event/Outbox/Receipt原子回滚与replay；L3覆盖独立进程claim/start/kill/reclaim及Draft update race。L4～L6的
+mTLS/RBAC/NetworkPolicy、lane saturation、rollout/restore与GitOps evidence仍为未执行的environment gate，不能标作passed。
 
 Scheduler到Artifact Data Worker的Typed Plan listener必须有独立mTLS route与NetworkPolicy，只允许Scheduler ServiceAccount/workload
 URI；Sandbox Controller与Model Worker identity不能调用该service。Scheduler表达式求值使用自己的有界CPU/memory/permit和exact

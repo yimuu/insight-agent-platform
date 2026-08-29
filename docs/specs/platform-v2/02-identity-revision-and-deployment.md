@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Verified / CR-201 |
+| 状态 | Accepted / CR-202 |
 | 日期 | 2026-08-26 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
@@ -73,8 +73,11 @@ ContextDataset是唯一例外：它不是可调用definition，root的`active_ve
 `CanonicalRegion`长度1～63，只允许小写ASCII字母、数字和单中划线，首尾必须字母数字。空值、
 大写、下划线、Unicode、连续/首尾中划线和超长值fail closed。
 
-`ComponentRole`是closed enum，只包含18实际部署的role。Artifact只有Gateway/DataWorker/Maintenance，Sandbox只有
-Controller/WasiExecutor/GvisorExecutor；无MicroVM、ManagedStdio或ModelArtifact role。
+`ComponentRole`是closed enum。CR-202 的当前闭包包含16个实际部署的role：既有Management/Runtime API、
+Scheduler/Recovery、Model、Native/Remote Capability、Context、MCP、Sandbox Controller/WASI/gVisor、
+Artifact Gateway/DataWorker/Maintenance、Egress/Secret Broker，另加`RegistryValidationWorker`。Artifact仍只有
+Gateway/DataWorker/Maintenance，Sandbox仍只有Controller/WasiExecutor/GvisorExecutor；无MicroVM、ManagedStdio或
+ModelArtifact role。
 
 ## 4. Resource
 
@@ -170,6 +173,13 @@ ResourceVersion/Deployment引用必须使用exact typed ID + digest + allowed-ki
 
 validation/discovery/build等异步工作使用shared Job。成功Job事务创建immutable evidence/derived version并推进owner；
 public Operation只是Job projection。
+
+`RegistryValidation`由独立`RegistryValidationWorker`执行，而非Management API、CLI、Scheduler或通用后台代理。它只
+消费`RegistryValidation` WorkClass、当前Job payload固定的validator/profile digest与当前Draft的exact version/digest；不执行用户代码、
+不调用任意网络端点，也不把process configuration当作租户业务输入。成功必须在一个fenced owner transaction中同时重验Job lease、
+Resource version/draft digest、tenant-scoped validator ServiceIdentity与闭合依赖/安全证据，写入`ValidationSummary`、终结Job并写
+Job/Resource Event、Outbox及JobCommit Receipt。Draft在执行期间变更、lease失效、validator/profile漂移或依赖闭包不成立时，不得写入
+ValidationSummary；只按shared Job failure/recovery合同终结或重试。该闭环不增加表、ResourceVersion、Operation aggregate或public route。
 
 ## 8. RunBindingsSnapshot
 
