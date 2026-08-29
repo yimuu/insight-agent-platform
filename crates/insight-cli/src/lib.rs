@@ -10,6 +10,8 @@ mod artifact;
 mod public_client;
 mod run;
 mod run_journal;
+mod task;
+mod task_journal;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{
@@ -138,6 +140,16 @@ pub enum CliCommand {
         run_id: String,
         timeout_seconds: u64,
     },
+    TaskGet {
+        root: PathBuf,
+        task_id: String,
+    },
+    TaskResolve {
+        root: PathBuf,
+        task_id: String,
+        action: CliTaskAction,
+        file: Option<PathBuf>,
+    },
     ArtifactGet {
         root: PathBuf,
         artifact_id: String,
@@ -163,6 +175,14 @@ pub enum CliCommand {
 pub enum CliRunControlAction {
     Pause,
     Resume,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliTaskAction {
+    SubmitInput,
+    Approve,
+    Reject,
     Cancel,
 }
 
@@ -203,6 +223,10 @@ pub enum CliError {
         path: String,
         source: std::io::Error,
     },
+    ReadTaskInput {
+        path: String,
+        source: std::io::Error,
+    },
     InvalidLocalIdentity {
         path: String,
     },
@@ -217,6 +241,7 @@ pub enum CliError {
     PublicClient(public_client::PublicClientError),
     Apply(apply::ApplyError),
     Run(run::RunClientError),
+    Task(task::TaskClientError),
     Artifact(artifact::ArtifactClientError),
     OperationTerminal {
         operation_id: String,
@@ -276,6 +301,9 @@ impl std::fmt::Display for CliError {
             Self::ReadRunRequest { path, source } => {
                 write!(formatter, "cannot read Run request at {path}: {source}")
             }
+            Self::ReadTaskInput { path, source } => {
+                write!(formatter, "cannot read Task input at {path}: {source}")
+            }
             Self::InvalidLocalIdentity { path } => {
                 write!(formatter, "local identity state at {path} is invalid")
             }
@@ -300,6 +328,7 @@ impl std::fmt::Display for CliError {
             Self::PublicClient(error) => write!(formatter, "{error}"),
             Self::Apply(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
+            Self::Task(error) => write!(formatter, "{error}"),
             Self::Artifact(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
@@ -326,10 +355,12 @@ impl std::error::Error for CliError {
             Self::ReadLocalIdentity { source, .. }
             | Self::RotateLocalAccessToken { source, .. }
             | Self::ReadApplyManifest { source, .. }
-            | Self::ReadRunRequest { source, .. } => Some(source),
+            | Self::ReadRunRequest { source, .. }
+            | Self::ReadTaskInput { source, .. } => Some(source),
             Self::PublicClient(source) => Some(source),
             Self::Apply(source) => Some(source),
             Self::Run(source) => Some(source),
+            Self::Task(source) => Some(source),
             Self::Artifact(source) => Some(source),
             _ => None,
         }
@@ -353,6 +384,7 @@ impl CliError {
             | Self::ReadLocalIdentity { .. }
             | Self::ReadApplyManifest { .. }
             | Self::ReadRunRequest { .. }
+            | Self::ReadTaskInput { .. }
             | Self::InvalidLocalIdentity { .. }
             | Self::RotateLocalAccessToken { .. }
             | Self::InvalidClock => 1,
@@ -362,6 +394,7 @@ impl CliError {
             | Self::PublicClient(_)
             | Self::Apply(_)
             | Self::Run(_)
+            | Self::Task(_)
             | Self::Artifact(_)
             | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
@@ -392,6 +425,7 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "apply" => parse_apply(&arguments[1..]),
         "operation" => parse_operation(&arguments[1..]),
         "run" => parse_run(&arguments[1..]),
+        "task" => parse_task(&arguments[1..]),
         "artifact" => parse_artifact(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
@@ -719,6 +753,63 @@ fn parse_run(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         }),
         _ => Err(CliError::UnknownCommand(format!("run {action}"))),
     }
+}
+
+fn parse_task(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let Some(action) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    let Some(task_id) = arguments.get(1).and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    if action == "get" {
+        return Ok(CliCommand::TaskGet {
+            root: parse_path_only(&arguments[2..])?,
+            task_id: task_id.to_owned(),
+        });
+    }
+    let task_action = match action {
+        "submit-input" => CliTaskAction::SubmitInput,
+        "approve" => CliTaskAction::Approve,
+        "reject" => CliTaskAction::Reject,
+        "cancel" => CliTaskAction::Cancel,
+        _ => return Err(CliError::UnknownCommand(format!("task {action}"))),
+    };
+    let mut root = None;
+    let mut file = None;
+    let mut cursor = 2;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" if root.is_none() => {
+                let value = arguments
+                    .get(cursor + 1)
+                    .ok_or(CliError::MissingValue("--path"))?;
+                root = Some(PathBuf::from(value));
+            }
+            "--file" if file.is_none() && task_action == CliTaskAction::SubmitInput => {
+                let value = arguments
+                    .get(cursor + 1)
+                    .ok_or(CliError::MissingValue("--file"))?;
+                file = Some(PathBuf::from(value));
+            }
+            "--path" => return Err(CliError::DuplicateOption("--path")),
+            "--file" if task_action == CliTaskAction::SubmitInput => {
+                return Err(CliError::DuplicateOption("--file"));
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+        cursor += 2;
+    }
+    if task_action == CliTaskAction::SubmitInput && file.is_none() {
+        return Err(CliError::MissingValue("--file"));
+    }
+    Ok(CliCommand::TaskResolve {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        task_id: task_id.to_owned(),
+        action: task_action,
+        file,
+    })
 }
 
 fn parse_path_and_timeout(
@@ -3772,6 +3863,20 @@ pub fn execute(
             String::from_utf8(output)
                 .map_err(|_| CliError::RuntimeState("Run watch output is not UTF-8".to_owned()))
         }
+        CliCommand::TaskGet { root, task_id } => {
+            let root = resolve_root(current_directory, root);
+            read_local_task(&root, &task_id)
+        }
+        CliCommand::TaskResolve {
+            root,
+            task_id,
+            action,
+            file,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let file = file.map(|path| resolve_root(current_directory, path));
+            resolve_local_task(&root, &task_id, action, file.as_deref())
+        }
         CliCommand::ArtifactGet { root, artifact_id } => {
             let root = resolve_root(current_directory, root);
             read_local_artifact(&root, &artifact_id)
@@ -3840,7 +3945,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight task get <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run`, `task`, and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
 fn apply_local_manifest(
@@ -4015,6 +4120,44 @@ fn watch_local_run<W: Write>(
     .map_err(CliError::Run)
 }
 
+fn read_local_task(root: &Path, task_id: &str) -> Result<String, CliError> {
+    let task_id = parse_task_id(task_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = task::read_task(&client, &task_id).map_err(CliError::Task)?;
+    render_json(&view)
+}
+
+fn resolve_local_task(
+    root: &Path,
+    task_id: &str,
+    action: CliTaskAction,
+    file: Option<&Path>,
+) -> Result<String, CliError> {
+    let task_id = parse_task_id(task_id)?;
+    let action = match action {
+        CliTaskAction::SubmitInput => task::TaskAction::SubmitInput,
+        CliTaskAction::Approve => task::TaskAction::Approve,
+        CliTaskAction::Reject => task::TaskAction::Reject,
+        CliTaskAction::Cancel => task::TaskAction::Cancel,
+    };
+    let bytes = file.map(read_bounded_task_input).transpose()?;
+    let input = bytes
+        .as_deref()
+        .map(task::parse_submit_input)
+        .transpose()
+        .map_err(CliError::Task)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = task::resolve_task(
+        &client,
+        &task_id,
+        action,
+        input.as_ref(),
+        &root.join(PROJECT_DIRECTORY).join("task-control"),
+    )
+    .map_err(CliError::Task)?;
+    render_json(&view)
+}
+
 fn read_local_artifact(root: &Path, artifact_id: &str) -> Result<String, CliError> {
     let artifact_id = parse_artifact_id(artifact_id)?;
     let (client, _) = local_runtime_http_client(root)?;
@@ -4083,6 +4226,22 @@ fn parse_run_id(value: &str) -> Result<ResourceId, CliError> {
     })
 }
 
+fn parse_task_id(value: &str) -> Result<ResourceId, CliError> {
+    value
+        .parse::<ResourceId>()
+        .ok()
+        .filter(|id| {
+            matches!(
+                id.kind(),
+                ResourceKind::Interaction | ResourceKind::ApprovalTask
+            )
+        })
+        .ok_or_else(|| CliError::InvalidOptionValue {
+            option: "task_id",
+            value: value.to_owned(),
+        })
+}
+
 fn parse_artifact_id(value: &str) -> Result<ResourceId, CliError> {
     ResourceId::parse_expected(value, ResourceKind::Artifact).map_err(|_| {
         CliError::InvalidOptionValue {
@@ -4109,6 +4268,28 @@ fn read_bounded_run_request(file: &Path) -> Result<Vec<u8>, CliError> {
         });
     }
     fs::read(file).map_err(|source| CliError::ReadRunRequest {
+        path: file.display().to_string(),
+        source,
+    })
+}
+
+fn read_bounded_task_input(file: &Path) -> Result<Vec<u8>, CliError> {
+    const MAX_TASK_INPUT_BYTES: u64 = 65_536;
+
+    let metadata = fs::metadata(file).map_err(|source| CliError::ReadTaskInput {
+        path: file.display().to_string(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TASK_INPUT_BYTES {
+        return Err(CliError::ReadTaskInput {
+            path: file.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "input size must be within 1..=65536 bytes",
+            ),
+        });
+    }
+    fs::read(file).map_err(|source| CliError::ReadTaskInput {
         path: file.display().to_string(),
         source,
     })
@@ -4828,5 +5009,62 @@ mod tests {
                 timeout_seconds: 90,
             }
         );
+    }
+
+    #[test]
+    fn command_parser_accepts_closed_task_actions() {
+        let task_id = format!("int_{}", Uuid::now_v7());
+        assert_eq!(
+            parse_command(&[
+                OsString::from("task"),
+                OsString::from("get"),
+                OsString::from(&task_id),
+                OsString::from("--path"),
+                OsString::from("demo"),
+            ])
+            .unwrap(),
+            CliCommand::TaskGet {
+                root: PathBuf::from("demo"),
+                task_id: task_id.clone(),
+            }
+        );
+        assert_eq!(
+            parse_command(&[
+                OsString::from("task"),
+                OsString::from("submit-input"),
+                OsString::from(&task_id),
+                OsString::from("--file"),
+                OsString::from("input.json"),
+            ])
+            .unwrap(),
+            CliCommand::TaskResolve {
+                root: PathBuf::from("."),
+                task_id: task_id.clone(),
+                action: CliTaskAction::SubmitInput,
+                file: Some(PathBuf::from("input.json")),
+            }
+        );
+        assert_eq!(
+            parse_command(&[
+                OsString::from("task"),
+                OsString::from("approve"),
+                OsString::from(&task_id),
+            ])
+            .unwrap(),
+            CliCommand::TaskResolve {
+                root: PathBuf::from("."),
+                task_id,
+                action: CliTaskAction::Approve,
+                file: None,
+            }
+        );
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("task"),
+                OsString::from("submit-input"),
+                OsString::from(format!("int_{}", Uuid::now_v7())),
+            ]),
+            Err(CliError::MissingValue("--file"))
+        ));
     }
 }

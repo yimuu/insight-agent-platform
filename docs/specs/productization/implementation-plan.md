@@ -119,6 +119,11 @@ content digest 或 Artifact digest/classification 做重验；watch 按 opaque L
 输出和 flush，直到 Run authority terminal。control 已在 mutation 前持久化 exact Receipt/If-Match，并由 response-loss
 fixture 证明跨调用精确重放。SSE/Problem 负向矩阵、真实 first Run 和 restart recovery 仍未完成。
 
+[`insight task`](m2-cli-task.md) 已增加 get/submit-input/approve/reject/cancel，只通过 Runtime Gateway 读取和提交
+Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt 和 bounded closed intent/result journal；
+response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成后只读 authority state。Task 的完整冲突/权限/过期矩阵
+与 waiting Task -> Run resume 真实 P1 journey 尚未完成。
+
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
 content；read 按 exact ArtifactRef 校验长度、media type、SHA-256 和 content ETag，最后 no-clobber 原子落盘。
