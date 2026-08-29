@@ -76,6 +76,8 @@ pub const MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-subscription-worker";
 pub const MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-cleanup-worker";
+pub const MCP_CALLBACK_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/mcp-callback-api";
 pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
@@ -546,6 +548,7 @@ pub enum EgressCallerRole {
     McpDiscoveryWorker,
     McpSubscriptionWorker,
     McpCleanupWorker,
+    McpCallback,
     McpHost,
 }
 
@@ -558,6 +561,7 @@ impl EgressCallerRole {
             MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY => Some(Self::McpDiscoveryWorker),
             MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY => Some(Self::McpSubscriptionWorker),
             MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY => Some(Self::McpCleanupWorker),
+            MCP_CALLBACK_WORKLOAD_IDENTITY => Some(Self::McpCallback),
             MCP_HOST_WORKLOAD_IDENTITY => Some(Self::McpHost),
             _ => None,
         }
@@ -1869,7 +1873,7 @@ where
         &self,
         request: Request<ClosedEgressEnvelope>,
     ) -> Result<Response<ClosedEgressEnvelope>, Status> {
-        require_role(&request, EgressCallerRole::McpHost)?;
+        require_role(&request, EgressCallerRole::McpCallback)?;
         let trace = trace_context(&request)?;
         let broker = self
             .mcp_oauth
@@ -3243,6 +3247,8 @@ mod tests {
         subscription_key_pem: String,
         cleanup_certificate_pem: String,
         cleanup_key_pem: String,
+        callback_certificate_pem: String,
+        callback_key_pem: String,
         context_certificate_pem: String,
         context_key_pem: String,
         unknown_certificate_pem: String,
@@ -3287,6 +3293,7 @@ mod tests {
             client(MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY);
         let (cleanup_certificate_pem, cleanup_key_pem) =
             client(MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY);
+        let (callback_certificate_pem, callback_key_pem) = client(MCP_CALLBACK_WORKLOAD_IDENTITY);
         let (context_certificate_pem, context_key_pem) = client(CONTEXT_WORKER_WORKLOAD_IDENTITY);
         let (unknown_certificate_pem, unknown_key_pem) =
             client("spiffe://insight.platform/workload/api");
@@ -3306,6 +3313,8 @@ mod tests {
             subscription_key_pem,
             cleanup_certificate_pem,
             cleanup_key_pem,
+            callback_certificate_pem,
+            callback_key_pem,
             context_certificate_pem,
             context_key_pem,
             unknown_certificate_pem,
@@ -3573,6 +3582,47 @@ mod tests {
             UnaryOutcome::Succeeded(McpOAuthPkceSecretCleanupDisposition::Deleted)
         ));
 
+        let oauth_exchange_envelope = encode_metadata(
+            &serde_json::json!({"schema_version": 1}),
+            EXCHANGE_MCP_OAUTH_AUTHORIZATION_CODE,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(
+            mcp.exchange_mcp_o_auth_authorization_code(traced_request(
+                oauth_exchange_envelope.clone()
+            ))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            cleanup
+                .exchange_mcp_o_auth_authorization_code(traced_request(
+                    oauth_exchange_envelope.clone()
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut callback = connect(
+            address,
+            &fixture,
+            &fixture.callback_certificate_pem,
+            &fixture.callback_key_pem,
+        )
+        .await;
+        assert_eq!(
+            callback
+                .exchange_mcp_o_auth_authorization_code(traced_request(oauth_exchange_envelope))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
         let mcp_operation_envelope = encode_metadata(
             &serde_json::json!({"schema_version": 1}),
             EXECUTE_MCP_STREAMABLE_HTTP,
@@ -3732,6 +3782,7 @@ mod tests {
         drop(model);
         drop(mcp);
         drop(discovery);
+        drop(callback);
         drop(unknown);
         let _ = shutdown_sender.send(());
         tokio::time::timeout(std::time::Duration::from_secs(5), server)

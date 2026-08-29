@@ -1059,6 +1059,7 @@ fn valid_runtime_role(value: &str) -> bool {
             | "mcp-subscription"
             | "mcp-cleanup"
             | "context-subscription"
+            | "callback-api"
     )
 }
 
@@ -1143,7 +1144,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(27);
+        let mut listeners = Vec::with_capacity(28);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1693,6 +1694,15 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     )?;
     write_local_leaf_certificate(
         &tls_directory,
+        full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
+        full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::MCP_CALLBACK_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
         full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
         full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
         &[],
@@ -1718,6 +1728,17 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     })?;
     write_sensitive_new(
         &mcp_state_directory.join(full_profile::MCP_STATE_KEY_FILE),
+        &Sha256::digest(Uuid::now_v7().as_bytes()),
+    )?;
+    let mcp_oauth_state_directory = state_directory
+        .join(RUNTIME_DIRECTORY)
+        .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY);
+    fs::create_dir(&mcp_oauth_state_directory).map_err(|source| CliError::InitializeProject {
+        path: mcp_oauth_state_directory.display().to_string(),
+        source,
+    })?;
+    write_sensitive_new(
+        &mcp_oauth_state_directory.join(full_profile::MCP_OAUTH_STATE_KEY_FILE),
         &Sha256::digest(Uuid::now_v7().as_bytes()),
     )
 }
@@ -2187,6 +2208,37 @@ fn prepare_runtime_profile_inner(
                     &runtime
                         .join(full_profile::MCP_STATE_KEY_DIRECTORY)
                         .join(full_profile::MCP_STATE_KEY_FILE),
+                )?))
+            ),
+            mcp_oauth_state_key_root: &fs::canonicalize(
+                runtime.join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY),
+            )
+            .map_err(|source| CliError::InitializeProject {
+                path: runtime
+                    .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
+                    .display()
+                    .to_string(),
+                source,
+            })?,
+            mcp_oauth_state_key_path: &fs::canonicalize(
+                runtime
+                    .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
+                    .join(full_profile::MCP_OAUTH_STATE_KEY_FILE),
+            )
+            .map_err(|source| CliError::InitializeProject {
+                path: runtime
+                    .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
+                    .join(full_profile::MCP_OAUTH_STATE_KEY_FILE)
+                    .display()
+                    .to_string(),
+                source,
+            })?,
+            mcp_oauth_state_key_reference_digest: &format!(
+                "sha256:{}",
+                lower_hex(&Sha256::digest(read_bounded_identity_file(
+                    &runtime
+                        .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
+                        .join(full_profile::MCP_OAUTH_STATE_KEY_FILE),
                 )?))
             ),
             artifact_data_worker_port: ports.artifact_data_controller,
@@ -2909,6 +2961,10 @@ fn ensure_runtime_binaries(
             "insight-platform-capability-worker",
             "--bin",
             "platform-capability-remote-worker",
+            "-p",
+            "insight-platform-callback-api",
+            "--bin",
+            "platform-callback-api",
         ]);
     }
     run_external(command, "build the changed local Platform role closure")?;
@@ -5175,6 +5231,7 @@ mod tests {
             full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
             full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
             full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+            full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -5205,6 +5262,7 @@ mod tests {
                 full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -5227,6 +5285,24 @@ mod tests {
 
             assert_eq!(
                 fs::metadata(mcp_state_key).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+        let mcp_oauth_state_key = root
+            .join(RUNTIME_DIRECTORY)
+            .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
+            .join(full_profile::MCP_OAUTH_STATE_KEY_FILE);
+        assert_eq!(fs::read(&mcp_oauth_state_key).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(mcp_oauth_state_key)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
                 0
             );
         }
@@ -5337,7 +5413,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 21);
+        assert_eq!(digests.len(), 22);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5390,6 +5466,7 @@ mod tests {
                 "context-subscription",
                 full_profile::CONTEXT_SUBSCRIPTION_CONFIG_FILE,
             ),
+            ("callback-api", full_profile::CALLBACK_API_CONFIG_FILE),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

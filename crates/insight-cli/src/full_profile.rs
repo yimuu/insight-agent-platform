@@ -16,9 +16,9 @@ use insight_platform_capability_worker::{
 use insight_platform_contracts::{canonical_digest, ResourceKind};
 pub(crate) use insight_platform_egress_rpc::{
     CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
-    MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY, MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
-    MCP_HOST_WORKLOAD_IDENTITY, MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
-    MODEL_WORKER_WORKLOAD_IDENTITY,
+    MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
+    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
+    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +40,7 @@ pub(crate) const MCP_DISCOVERY_CONFIG_FILE: &str = "mcp-discovery-worker.json";
 pub(crate) const MCP_SUBSCRIPTION_CONFIG_FILE: &str = "mcp-subscription-worker.json";
 pub(crate) const MCP_CLEANUP_CONFIG_FILE: &str = "mcp-cleanup-worker.json";
 pub(crate) const CONTEXT_SUBSCRIPTION_CONFIG_FILE: &str = "subscription-context-worker.json";
+pub(crate) const CALLBACK_API_CONFIG_FILE: &str = "callback-api.json";
 pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority.pem";
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
@@ -48,6 +49,8 @@ pub(crate) const EGRESS_BROKER_CERTIFICATE_FILE: &str = "egress-broker.pem";
 pub(crate) const EGRESS_BROKER_PRIVATE_KEY_FILE: &str = "egress-broker-key.pem";
 pub(crate) const MCP_STATE_KEY_DIRECTORY: &str = "mcp-state-keys";
 pub(crate) const MCP_STATE_KEY_FILE: &str = "current";
+pub(crate) const MCP_OAUTH_STATE_KEY_DIRECTORY: &str = "mcp-oauth-state-keys";
+pub(crate) const MCP_OAUTH_STATE_KEY_FILE: &str = "current";
 pub(crate) const MODEL_WORKER_CLIENT_CERTIFICATE_FILE: &str = "model-worker-client.pem";
 pub(crate) const MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "model-worker-client-key.pem";
 pub(crate) const CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE: &str = "context-worker-client.pem";
@@ -75,10 +78,12 @@ pub(crate) const CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE: &str =
     "context-subscription-client.pem";
 pub(crate) const CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE: &str =
     "context-subscription-client-key.pem";
+pub(crate) const CALLBACK_CLIENT_CERTIFICATE_FILE: &str = "callback-client.pem";
+pub(crate) const CALLBACK_CLIENT_PRIVATE_KEY_FILE: &str = "callback-client-key.pem";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
 
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 13] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 14] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
@@ -92,6 +97,7 @@ pub(crate) const INITIAL_BINARY_NAMES: [&str; 13] = [
     "platform-mcp-subscription-worker",
     "platform-mcp-cleanup-worker",
     "platform-subscription-context-worker",
+    "platform-callback-api",
 ];
 
 pub(crate) struct ProcessLaunch {
@@ -117,6 +123,9 @@ pub(crate) struct EgressConfigInputs<'a> {
     pub(crate) mcp_state_key_root: &'a Path,
     pub(crate) mcp_state_key_path: &'a Path,
     pub(crate) mcp_state_key_reference_digest: &'a str,
+    pub(crate) mcp_oauth_state_key_root: &'a Path,
+    pub(crate) mcp_oauth_state_key_path: &'a Path,
+    pub(crate) mcp_oauth_state_key_reference_digest: &'a str,
     pub(crate) artifact_data_worker_port: u16,
 }
 
@@ -160,6 +169,8 @@ pub(crate) struct PortBindings {
     pub(crate) mcp_cleanup_observability: u16,
     #[serde(default = "default_context_subscription_observability_port")]
     pub(crate) context_subscription_observability: u16,
+    #[serde(default = "default_callback_api_port")]
+    pub(crate) callback_api: u16,
 }
 
 impl PortBindings {
@@ -182,6 +193,7 @@ impl PortBindings {
             mcp_subscription_observability: next()?,
             mcp_cleanup_observability: next()?,
             context_subscription_observability: next()?,
+            callback_api: next()?,
         })
     }
 
@@ -204,6 +216,7 @@ impl PortBindings {
             mcp_subscription_observability: default_mcp_subscription_observability_port(),
             mcp_cleanup_observability: default_mcp_cleanup_observability_port(),
             context_subscription_observability: default_context_subscription_observability_port(),
+            callback_api: default_callback_api_port(),
         }
     }
 }
@@ -258,6 +271,10 @@ const fn default_mcp_cleanup_observability_port() -> u16 {
 
 const fn default_context_subscription_observability_port() -> u16 {
     19_111
+}
+
+const fn default_callback_api_port() -> u16 {
+    19_112
 }
 
 impl Default for PortBindings {
@@ -786,6 +803,38 @@ pub(crate) fn initial_configs(
                         "request_timeout_milliseconds": 30000,
                         "maximum_rpc_message_bytes": 1048576,
                     },
+                }),
+            ),
+        ),
+        (
+            "callback-api".to_owned(),
+            (
+                CALLBACK_API_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "listen_address": loopback_address(ports.callback_api),
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "egress_endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                    "egress_tls_server_name": "localhost",
+                    "egress_connect_timeout_milliseconds": 5000,
+                    "egress_request_timeout_milliseconds": 30000,
+                    "maximum_rpc_metadata_bytes": 65536,
+                    "maximum_rpc_payload_bytes": 1048576,
+                    "callback_binding_digest": closed_local_digest("mcp-oauth-callback-binding"),
+                    "callback_receipt_ttl_seconds": 3600,
+                    "oauth_state": {
+                        "active_key_id": "local-current",
+                        "maximum_lifetime_seconds": 600,
+                        "clock_skew_seconds": 30,
+                        "key_directory": egress.mcp_oauth_state_key_root.display().to_string(),
+                        "keys": [{
+                            "key_id": "local-current",
+                            "key_material_digest": egress.mcp_oauth_state_key_reference_digest,
+                            "key_material_path": egress.mcp_oauth_state_key_path.display().to_string(),
+                        }],
+                    },
+                    "shutdown_grace_milliseconds": 30000,
                 }),
             ),
         ),
@@ -1517,6 +1566,54 @@ pub(crate) fn initial_process_launches(
             ],
             extra_environment: Vec::new(),
         },
+        ProcessLaunch {
+            role: "callback-api",
+            binary: binary(INITIAL_BINARY_NAMES[13]),
+            ready_address: loopback_address(ports.callback_api),
+            environment: vec![
+                (
+                    "PLATFORM_CALLBACK_API_CONFIG",
+                    paths
+                        .configuration
+                        .join(CALLBACK_API_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CALLBACK_API_CONFIG_DIGEST",
+                    config_digests["callback-api"].clone(),
+                ),
+                (
+                    "PLATFORM_CALLBACK_API_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_CALLBACK_API_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CALLBACK_API_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CALLBACK_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CALLBACK_API_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CALLBACK_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
     ]
 }
 
@@ -1552,6 +1649,7 @@ mod tests {
             mcp_subscription_observability: 31_015,
             mcp_cleanup_observability: 31_016,
             context_subscription_observability: 31_017,
+            callback_api: 31_018,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -1573,6 +1671,11 @@ mod tests {
                 mcp_state_key_root: Path::new("/project/runtime/mcp-state-keys"),
                 mcp_state_key_path: Path::new("/project/runtime/mcp-state-keys/current"),
                 mcp_state_key_reference_digest: &digest('c'),
+                mcp_oauth_state_key_root: Path::new("/project/runtime/mcp-oauth-state-keys"),
+                mcp_oauth_state_key_path: Path::new(
+                    "/project/runtime/mcp-oauth-state-keys/current",
+                ),
+                mcp_oauth_state_key_reference_digest: &digest('9'),
                 artifact_data_worker_port: 30_999,
             },
         );
@@ -1613,6 +1716,14 @@ mod tests {
             configs["context-subscription"].1["host"]["endpoint"],
             "https://localhost:31011/"
         );
+        assert_eq!(
+            configs["callback-api"].1["oauth_state"]["key_directory"],
+            "/project/runtime/mcp-oauth-state-keys"
+        );
+        assert_eq!(
+            configs["callback-api"].1["listen_address"],
+            "127.0.0.1:31018"
+        );
     }
 
     #[test]
@@ -1635,6 +1746,7 @@ mod tests {
             mcp_subscription_observability: 31_015,
             mcp_cleanup_observability: 31_016,
             context_subscription_observability: 31_017,
+            callback_api: 31_018,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -1650,6 +1762,7 @@ mod tests {
             ("mcp-subscription".to_owned(), digest('5')),
             ("mcp-cleanup".to_owned(), digest('6')),
             ("context-subscription".to_owned(), digest('7')),
+            ("callback-api".to_owned(), digest('8')),
         ]);
         let launches = initial_process_launches(
             ProcessPaths {
@@ -1683,7 +1796,8 @@ mod tests {
                 "mcp-discovery",
                 "mcp-subscription",
                 "mcp-cleanup",
-                "context-subscription"
+                "context-subscription",
+                "callback-api"
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
@@ -1699,6 +1813,7 @@ mod tests {
         assert_eq!(launches[10].ready_address, "127.0.0.1:31015");
         assert_eq!(launches[11].ready_address, "127.0.0.1:31016");
         assert_eq!(launches[12].ready_address, "127.0.0.1:31017");
+        assert_eq!(launches[13].ready_address, "127.0.0.1:31018");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
@@ -1745,6 +1860,9 @@ mod tests {
         assert!(launches[12].environment.iter().any(|(name, value)| *name
             == "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CERT_PATH"
             && value == "/project/runtime/tls/context-subscription-client.pem"));
+        assert!(launches[13].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_CALLBACK_API_EGRESS_CERT_PATH"
+            && value == "/project/runtime/tls/callback-client.pem"));
     }
 
     #[test]
@@ -1769,5 +1887,6 @@ mod tests {
         assert_eq!(ports.mcp_subscription_observability, 19_109);
         assert_eq!(ports.mcp_cleanup_observability, 19_110);
         assert_eq!(ports.context_subscription_observability, 19_111);
+        assert_eq!(ports.callback_api, 19_112);
     }
 }

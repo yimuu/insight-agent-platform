@@ -151,8 +151,17 @@ Security、Egress 与 Resource Host，再启动四个后台进程；四个 `/rea
 均为 success>0/failure=0。独立 mTLS method-role fixture 同时证明通用 MCP Host 不能调用 cleanup、Cleanup 身份不能调用
 其他 MCP RPC；第二个 fresh profile 以证书 SAN `spiffe://insight.platform/workload/mcp-cleanup-worker` 启动 Cleanup 并 ready。
 由于探针没有伪造 Discovery、Subscription 或 Cleanup Job，Egress operation counter 保持 0；
-这不是 remote Streamable HTTP、OAuth callback 或 subscription lifecycle 的场景证据。Callback API、Sandbox/WASI、实际
-endpoint fixture 和一次由 `insight dev --profile full` 监督的整体 journey 仍未完成。
+这不是 remote Streamable HTTP、OAuth callback 或 subscription lifecycle 的场景证据。
+
+Callback API 随后进入同一 full-only closure：CLI 生成独立 32-byte OAuth state key、受 exact directory containment
+约束的 closed config、持久化动态 HTTP port，以及 SAN 为
+`spiffe://insight.platform/workload/mcp-callback-api` 的专用 Egress ClientAuth 证书。Egress Broker 的 authorization-code
+exchange 不再接受通用 MCP Host 身份；真实 mTLS method-role fixture 证明 MCP Host/Cleanup 均被拒绝，只有 Callback
+身份能越过 role gate。2026-08-30 fresh PostgreSQL/NATS/LocalStack 探针按 base -> Security -> Egress -> Callback 启动，
+Callback `/readyz` 为 `ready`，process-ready 为 1，PostgreSQL dependency success=3/failure=0，证书 SAN 与专用 workload
+identity 完全一致。探针没有创建 OAuth authorization authority 或向外部 token endpoint 发送 code，所以 Egress OAuth
+operation counter 为 0；这只关闭 Callback 的配置、密钥、身份、PostgreSQL 与 mTLS 启动闭包，不宣称 OAuth lifecycle
+黄金场景完成。Sandbox/WASI、实际 endpoint fixture 和一次由 `insight dev --profile full` 监督的整体 journey 仍未完成。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、

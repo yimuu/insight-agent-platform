@@ -57,7 +57,6 @@ const EGRESS_CERT_PATH_ENV: &str = "PLATFORM_CALLBACK_API_EGRESS_CERT_PATH";
 const EGRESS_KEY_PATH_ENV: &str = "PLATFORM_CALLBACK_API_EGRESS_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
-const OAUTH_STATE_KEY_DIRECTORY: &str = "/etc/insight/oauth-state-keys";
 const CALLBACK_HTTP_OPERATIONS: &[&str] = &["live", "ready", "metrics", "oauth_callback", "other"];
 
 fn callback_operation(path: &str) -> &'static str {
@@ -165,6 +164,7 @@ struct OAuthStateProcessConfig {
     active_key_id: String,
     maximum_lifetime_seconds: i64,
     clock_skew_seconds: i64,
+    key_directory: String,
     keys: Vec<OAuthStateKeyFile>,
 }
 
@@ -181,12 +181,16 @@ impl OAuthStateProcessConfig {
         &self,
         callback_binding_digest: Sha256Digest,
     ) -> Result<AeadMcpOAuthStateCodec, ProcessError> {
+        let key_directory = PathBuf::from(&self.key_directory);
+        if !valid_absolute_directory(&key_directory) {
+            return Err(ProcessError::InvalidConfiguration);
+        }
         let keys = self
             .keys
             .iter()
             .map(|key| {
                 let path = PathBuf::from(&key.key_material_path);
-                if !valid_projected_key_path(&path) {
+                if !valid_projected_key_path(&key_directory, &path) {
                     return Err(ProcessError::InvalidConfiguration);
                 }
                 let mut material = read_exact_projected_file(&path, MCP_OAUTH_STATE_KEY_BYTES)?;
@@ -495,10 +499,27 @@ fn required_absolute_path(name: &'static str) -> Result<PathBuf, ProcessError> {
     Ok(path)
 }
 
-fn valid_projected_key_path(path: &Path) -> bool {
+fn valid_absolute_directory(path: &Path) -> bool {
     path.is_absolute()
-        && path.parent() == Some(Path::new(OAUTH_STATE_KEY_DIRECTORY))
         && path.file_name().is_some()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+}
+
+fn valid_projected_key_path(key_directory: &Path, path: &Path) -> bool {
+    path.is_absolute()
+        && path.parent() == Some(key_directory)
+        && path.file_name().is_some()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
 }
 
 fn read_exact_projected_file(path: &Path, exact_size: usize) -> Result<Vec<u8>, ProcessError> {
@@ -594,13 +615,18 @@ mod tests {
 
     #[test]
     fn oauth_state_key_paths_are_confined() {
-        assert!(valid_projected_key_path(Path::new(
-            "/etc/insight/oauth-state-keys/current"
-        )));
-        assert!(!valid_projected_key_path(Path::new(
-            "/etc/insight/oauth-state-keys/../other/current"
-        )));
-        assert!(!valid_projected_key_path(Path::new("current")));
+        let root = Path::new("/etc/insight/oauth-state-keys");
+        assert!(valid_absolute_directory(root));
+        assert!(valid_projected_key_path(
+            root,
+            Path::new("/etc/insight/oauth-state-keys/current")
+        ));
+        assert!(!valid_projected_key_path(
+            root,
+            Path::new("/etc/insight/oauth-state-keys/../other/current")
+        ));
+        assert!(!valid_projected_key_path(root, Path::new("current")));
+        assert!(!valid_absolute_directory(Path::new("relative/keys")));
     }
 
     #[test]
