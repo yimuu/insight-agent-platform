@@ -79,6 +79,8 @@ for marker in (
     'node-version: "24"',
     "pnpm@11.19.0",
     "timeout-minutes: 60",
+    "type: choice",
+    "--profile \"${{ inputs.profile }}\"",
 ):
     if marker not in base_journey:
         failures.append(f"base journey qualification misses {marker!r}")

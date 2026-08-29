@@ -4,6 +4,7 @@ set -euo pipefail
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project=""
 report_directory=""
+profile="base"
 insight_bin="${PLATFORM_INSIGHT_BIN:-$workspace/target/release/insight}"
 keep_dependencies=false
 console_browser=false
@@ -15,11 +16,12 @@ usage() {
   cat <<'EOF'
 Usage: scripts/run-productization-base-journey.sh [options]
 
-Runs the fresh base-profile productization journey against real local Platform roles.
+Runs a fresh selected-profile productization journey against real local Platform roles.
 
 Options:
   --project <new-path>          Use this not-yet-existing project path instead of mktemp.
   --report-directory <path>    Write and validate exact-revision scenario evidence.
+  --profile <base|full>        Start the selected closed local profile (default: base).
   --insight-bin <path>         Use an existing insight binary (default: target/release/insight).
   --keep-dependencies          Leave the exact Docker Compose dependencies running.
   --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
@@ -39,6 +41,11 @@ while (($# > 0)); do
     --report-directory)
       (($# >= 2)) || { echo "--report-directory requires a value" >&2; exit 2; }
       report_directory=$2
+      shift 2
+      ;;
+    --profile)
+      (($# >= 2)) || { echo "--profile requires a value" >&2; exit 2; }
+      profile=$2
       shift 2
       ;;
     --insight-bin)
@@ -76,6 +83,14 @@ while (($# > 0)); do
   esac
 done
 
+if [[ "$profile" != "base" && "$profile" != "full" ]]; then
+  echo "--profile must be base or full" >&2
+  exit 2
+fi
+if [[ "$profile" != "base" && -n "$report_directory" ]]; then
+  echo "--report-directory currently describes base-profile scenarios only" >&2
+  exit 2
+fi
 if [[ -n "$project" && -e "$project" ]]; then
   echo "--project must name a path that does not already exist: $project" >&2
   exit 2
@@ -169,13 +184,14 @@ if [[ ! -x "$insight_bin" ]]; then
 fi
 
 "$insight_bin" doctor --json
-"$insight_bin" init --path "$project" --name productization-base
-"$insight_bin" dev --path "$project" --profile base
+"$insight_bin" init --path "$project" --name "productization-$profile"
+"$insight_bin" dev --path "$project" --profile "$profile"
 "$insight_bin" status --path "$project"
 
 test_environment=(
   "PLATFORM_INSIGHT_BIN=$insight_bin"
   "PLATFORM_PRODUCTIZATION_PROJECT=$project"
+  "PLATFORM_PRODUCTIZATION_PROFILE=$profile"
 )
 if [[ "$console_browser" == true ]]; then
   test_environment+=(

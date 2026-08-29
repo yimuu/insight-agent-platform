@@ -22,8 +22,9 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
     def test_help_describes_fresh_real_profile_and_evidence(self) -> None:
         result = self.run_runner("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("fresh base-profile", result.stdout)
+        self.assertIn("fresh selected-profile", result.stdout)
         self.assertIn("--report-directory", result.stdout)
+        self.assertIn("--profile <base|full>", result.stdout)
         self.assertIn("--keep-dependencies", result.stdout)
 
     def test_console_path_installs_exact_dependencies_before_build(self) -> None:
@@ -44,6 +45,20 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         result = self.run_runner("--project", str(ROOT))
         self.assertEqual(result.returncode, 2)
         self.assertIn("does not already exist", result.stderr)
+        self.assertNotIn("Compiling", result.stderr)
+
+    def test_unknown_profile_is_rejected_before_build(self) -> None:
+        result = self.run_runner("--profile", "expanded")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--profile must be base or full", result.stderr)
+        self.assertNotIn("Compiling", result.stderr)
+
+    def test_full_profile_cannot_emit_base_scenario_reports(self) -> None:
+        result = self.run_runner(
+            "--profile", "full", "--report-directory", "/tmp/productization-reports"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("describes base-profile scenarios only", result.stderr)
         self.assertNotIn("Compiling", result.stderr)
 
 

@@ -937,11 +937,17 @@ fn public_cli_deterministic_first_run() {
         String::from_utf8_lossy(&stopped.stdout),
         String::from_utf8_lossy(&stopped.stderr)
     );
+    let selected_profile =
+        env::var("PLATFORM_PRODUCTIZATION_PROFILE").unwrap_or_else(|_| "base".to_owned());
+    assert!(
+        matches!(selected_profile.as_str(), "base" | "full"),
+        "productization profile must be closed"
+    );
     let restarted = Command::new(insight)
         .args([
             "dev",
             "--profile",
-            "base",
+            &selected_profile,
             "--path",
             project.to_str().unwrap(),
         ])

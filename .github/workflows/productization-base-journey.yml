@@ -2,6 +2,15 @@ name: Productization base journey
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Closed local profile to qualify
+        required: true
+        default: base
+        type: choice
+        options:
+          - base
+          - full
 
 permissions:
   contents: read
@@ -18,7 +27,7 @@ env:
 
 jobs:
   fresh-base-console:
-    name: Fresh base CLI and real Console journey
+    name: Fresh ${{ inputs.profile }} CLI and real Console journey
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -40,14 +49,19 @@ jobs:
           corepack install --global pnpm@11.19.0
       - name: Run fresh public CLI and real Gateway Console journey
         run: |
-          scripts/run-productization-base-journey.sh \
-            --project "$RUNNER_TEMP/insight-productization-base" \
-            --report-directory "$RUNNER_TEMP/productization-reports" \
-            --console-browser \
-            --node-bin "$(command -v node)" \
+          arguments=(
+            --project "$RUNNER_TEMP/insight-productization-${{ inputs.profile }}"
+            --profile "${{ inputs.profile }}"
+            --console-browser
+            --node-bin "$(command -v node)"
             --browser-bin "$(command -v google-chrome)"
+          )
+          if [[ "${{ inputs.profile }}" == "base" ]]; then
+            arguments+=(--report-directory "$RUNNER_TEMP/productization-reports")
+          fi
+          scripts/run-productization-base-journey.sh "${arguments[@]}"
       - name: Preserve exact-revision scenario reports
-        if: always()
+        if: ${{ always() && inputs.profile == 'base' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: productization-base-scenario-reports-${{ github.sha }}
