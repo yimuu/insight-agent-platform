@@ -68,7 +68,7 @@ use ring::{
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use std::{
     collections::BTreeMap,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -1486,6 +1486,28 @@ fn wait_for_file(path: &Path, timeout: StdDuration) {
     }
 }
 
+fn wait_for_process_file(path: &Path, child: &mut Child, timeout: StdDuration) {
+    let started = Instant::now();
+    while !path.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut stream) = child.stderr.take() {
+                let _ = stream.read_to_string(&mut stderr);
+            }
+            panic!(
+                "fixture process exited with {status} before creating {}: {stderr}",
+                path.display()
+            );
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "fixture process did not create {} within {timeout:?}",
+            path.display()
+        );
+        std::thread::sleep(StdDuration::from_millis(10));
+    }
+}
+
 fn spawn_oauth_cleanup_egress(config_path: &Path) -> Child {
     std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
@@ -2207,7 +2229,7 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_TOKEN_ENDPOINT_CONFIG_ENV,
         &token_config_path,
     );
-    wait_for_file(&token_ready, StdDuration::from_secs(5));
+    wait_for_process_file(&token_ready, &mut token_process, StdDuration::from_secs(5));
 
     let rpc_tls = oauth_cleanup_tls_fixture();
     let egress_address = available_address();
@@ -2265,7 +2287,11 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_EXCHANGE_EGRESS_CONFIG_ENV,
         &first_egress_config,
     );
-    wait_for_file(&first_egress_ready, StdDuration::from_secs(5));
+    wait_for_process_file(
+        &first_egress_ready,
+        &mut first_egress,
+        StdDuration::from_secs(5),
+    );
     let first_callback_ready = temporary.join("callback-first-ready");
     let first_before_commit = temporary.join("callback-first-before-commit");
     let first_outcome = temporary.join("callback-first-outcome");
@@ -2282,12 +2308,25 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV,
         &first_callback_config,
     );
-    wait_for_file(&first_callback_ready, StdDuration::from_secs(5));
-    // The callback-to-egress RPC contract permits a 30 second request. Keep the process
-    // supervision window aligned with that bound so a loaded qualification runner cannot report
-    // a missing crash marker while the bounded exchange is still legitimately in flight.
-    wait_for_file(&token_store_marker, StdDuration::from_secs(30));
-    wait_for_file(&first_before_commit, StdDuration::from_secs(30));
+    wait_for_process_file(
+        &first_callback_ready,
+        &mut first_callback,
+        StdDuration::from_secs(5),
+    );
+    // The callback-to-egress RPC contract permits a 30 second request. Process supervision needs
+    // a separate bounded scheduler margin beyond that protocol deadline; otherwise a loaded
+    // runner can race the RPC timeout at exactly 30 seconds. An early child exit is surfaced with
+    // its stderr instead of being misreported as an absent marker.
+    wait_for_process_file(
+        &token_store_marker,
+        &mut first_callback,
+        StdDuration::from_secs(45),
+    );
+    wait_for_process_file(
+        &first_before_commit,
+        &mut first_callback,
+        StdDuration::from_secs(45),
+    );
     kill(&mut first_callback);
     kill(&mut first_egress);
 
@@ -2310,7 +2349,11 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_EXCHANGE_EGRESS_CONFIG_ENV,
         &second_egress_config,
     );
-    wait_for_file(&second_egress_ready, StdDuration::from_secs(5));
+    wait_for_process_file(
+        &second_egress_ready,
+        &mut second_egress,
+        StdDuration::from_secs(5),
+    );
     let second_callback_ready = temporary.join("callback-second-ready");
     let second_before_commit = temporary.join("callback-second-before-commit");
     let second_outcome = temporary.join("callback-second-outcome");
@@ -2327,7 +2370,11 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         OAUTH_EXCHANGE_CALLBACK_CONFIG_ENV,
         &second_callback_config,
     );
-    wait_for_file(&second_outcome, StdDuration::from_secs(30));
+    wait_for_process_file(
+        &second_outcome,
+        &mut second_callback,
+        StdDuration::from_secs(45),
+    );
     assert!(std::fs::read_to_string(&second_outcome)
         .unwrap()
         .starts_with("ok:Authorized"));
