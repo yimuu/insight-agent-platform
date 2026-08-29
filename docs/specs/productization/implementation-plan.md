@@ -100,8 +100,10 @@ restart recovery 后续已由上述 P2 journey 补齐，但其余 M1/M2 门禁�
 与收束流程在该边界下再次通过；这只证明 base dependency transport closure，不代表 `full` profile 或 M1 已完成。
 
 `full` 的增量闭包已开始从 CLI 主文件抽入独立模块：首批生成 Context Native 与 Artifact Maintenance 的 closed、
-digest-bound 配置及持久化动态端口，并复用 exact Artifact provider catalog。生成器测试与两个目标进程自己的严格配置/
-进程单元测试已通过；二进制构建、进程启动以及其余 full roles 尚未接通，因此 `insight dev --profile full` 继续 fail closed。
+digest-bound 配置及持久化动态端口，并复用 exact Artifact provider catalog。Context Native、Artifact Maintenance 与
+Security Authority 现已加入 profile-aware release build 集合和受监督进程启动规格；base 集合不包含这些二进制，避免
+无关 rebuild。生成器、launch-spec、CLI 全量单元测试和 Clippy 已通过；尚未在一次 `full` journey 中启动这三个角色，
+其余 full roles 也未接通，因此 `insight dev --profile full` 继续 fail closed。
 
 Security/Egress 前置身份随后已按独立 authority owner 扩展：development bootstrap 现在接受 bounded service-principal
 集合，新建 profile 使用 schema v2 同时创建 Registry Validator 与独立 Egress Broker `ServiceIdentity`，旧 schema v1

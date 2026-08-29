@@ -1042,6 +1042,9 @@ fn valid_runtime_role(value: &str) -> bool {
             | "orchestration"
             | "capability-native"
             | "registry-validation"
+            | "context-native"
+            | "artifact-maintenance"
+            | "security-authority"
     )
 }
 
@@ -2249,13 +2252,17 @@ fn run_development_profile(
                 .to_owned(),
         )
     })?;
-    ensure_runtime_binaries(&workspace, &runtime, &fingerprint)?;
+    ensure_runtime_binaries(&workspace, &runtime, &fingerprint, profile)?;
     provision_and_bootstrap_authority(&workspace, &runtime, &project.identity, &profile_state)?;
-    let processes = start_base_processes(&workspace, &runtime, &profile_state)?;
+    let processes = start_profile_processes(&workspace, &runtime, &profile_state, profile)?;
     let state = RuntimeProcessState {
         schema_version: 1,
         kind: "insight.dev.process-state/v1".to_owned(),
-        profile: "base".to_owned(),
+        profile: match profile {
+            DevProfile::Base => "base",
+            DevProfile::Full => "full",
+        }
+        .to_owned(),
         compose_project,
         source_fingerprint: fingerprint,
         processes,
@@ -2526,8 +2533,9 @@ fn ensure_runtime_binaries(
     workspace: &Path,
     runtime: &Path,
     fingerprint: &str,
+    profile: DevProfile,
 ) -> Result<(), CliError> {
-    let binaries = runtime_binary_paths(workspace);
+    let binaries = runtime_binary_paths(workspace, profile);
     let cached = read_runtime_json::<RuntimeBuildState>(&runtime.join(RUNTIME_BUILD_STATE_FILE))?
         .is_some_and(|state| state.schema_version == 1 && state.source_fingerprint == fingerprint);
     if cached && binaries.values().all(|path| path.is_file()) {
@@ -2567,6 +2575,22 @@ fn ensure_runtime_binaries(
         "--bin",
         "platform-capability-native-worker",
     ]);
+    if profile == DevProfile::Full {
+        command.args([
+            "-p",
+            "insight-platform-context-worker",
+            "--bin",
+            "platform-context-worker",
+            "-p",
+            "insight-platform-artifact-service",
+            "--bin",
+            "platform-artifact-maintenance",
+            "-p",
+            "insight-platform-security-authority",
+            "--bin",
+            "platform-security-authority",
+        ]);
+    }
     run_external(command, "build the changed local Platform role closure")?;
     if !binaries.values().all(|path| path.is_file()) {
         return Err(CliError::RuntimeUnavailable(
@@ -2580,7 +2604,7 @@ fn ensure_runtime_binaries(
     write_runtime_json_replace(&runtime.join(RUNTIME_BUILD_STATE_FILE), &state)
 }
 
-fn runtime_binary_paths(workspace: &Path) -> BTreeMap<&'static str, PathBuf> {
+fn base_runtime_binary_paths(workspace: &Path) -> BTreeMap<&'static str, PathBuf> {
     let suffix = std::env::consts::EXE_SUFFIX;
     BTreeMap::from([
         (
@@ -2634,6 +2658,19 @@ fn runtime_binary_paths(workspace: &Path) -> BTreeMap<&'static str, PathBuf> {
     ])
 }
 
+fn runtime_binary_paths(workspace: &Path, profile: DevProfile) -> BTreeMap<&'static str, PathBuf> {
+    let mut binaries = base_runtime_binary_paths(workspace);
+    if profile == DevProfile::Full {
+        let release = workspace.join("target/release");
+        let suffix = std::env::consts::EXE_SUFFIX;
+        binaries.extend(
+            full_profile::INITIAL_BINARY_NAMES
+                .map(|name| (name, release.join(format!("{name}{suffix}")))),
+        );
+    }
+    binaries
+}
+
 fn provision_and_bootstrap_authority(
     workspace: &Path,
     runtime: &Path,
@@ -2641,7 +2678,7 @@ fn provision_and_bootstrap_authority(
     profile: &RuntimeProfileState,
 ) -> Result<(), CliError> {
     let database_url = "postgres://insight:insight@127.0.0.1:5432/insight_platform";
-    let binaries = runtime_binary_paths(workspace);
+    let binaries = base_runtime_binary_paths(workspace);
     let schema = binaries
         .get("platform-schema")
         .ok_or_else(|| CliError::RuntimeState("schema binary path is unavailable".to_owned()))?;
@@ -2699,12 +2736,13 @@ fn provision_and_bootstrap_authority(
     Ok(())
 }
 
-fn start_base_processes(
+fn start_profile_processes(
     workspace: &Path,
     runtime: &Path,
     profile: &RuntimeProfileState,
+    selected_profile: DevProfile,
 ) -> Result<BTreeMap<String, RuntimeProcessRecord>, CliError> {
-    let binaries = runtime_binary_paths(workspace);
+    let binaries = runtime_binary_paths(workspace, selected_profile);
     let logs = runtime.join(RUNTIME_LOG_DIRECTORY);
     fs::create_dir_all(&logs).map_err(|source| CliError::InitializeProject {
         path: logs.display().to_string(),
@@ -2718,7 +2756,7 @@ fn start_base_processes(
         ("AWS_SECRET_ACCESS_KEY", "test"),
         ("AWS_EC2_METADATA_DISABLED", "true"),
     ];
-    let specs = vec![
+    let mut specs = vec![
         RuntimeLaunchSpec::new(
             "artifact-data",
             binaries["platform-artifact-data-worker"].clone(),
@@ -2940,6 +2978,15 @@ fn start_base_processes(
             Vec::new(),
         ),
     ];
+    if selected_profile == DevProfile::Full {
+        specs.extend(full_profile_launch_specs(
+            workspace,
+            runtime,
+            profile,
+            database_url,
+            &common_aws,
+        ));
+    }
     let mut started: BTreeMap<String, RuntimeProcessRecord> = BTreeMap::new();
     for spec in specs {
         let record = match spawn_runtime_process(&logs, &spec) {
@@ -2961,6 +3008,38 @@ fn start_base_processes(
         started.insert(spec.role.to_owned(), record);
     }
     Ok(started)
+}
+
+fn full_profile_launch_specs(
+    workspace: &Path,
+    runtime: &Path,
+    profile: &RuntimeProfileState,
+    database_url: &str,
+    common_aws: &[(&str, &str)],
+) -> Vec<RuntimeLaunchSpec> {
+    let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
+    let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
+    full_profile::initial_process_launches(
+        full_profile::ProcessPaths {
+            release: &workspace.join("target/release"),
+            configuration: &configuration,
+            tls: &tls,
+            ca_certificate_file: RUNTIME_CA_CERTIFICATE_FILE,
+        },
+        &profile.ports.full,
+        &profile.config_digests,
+        database_url,
+        common_aws,
+    )
+    .into_iter()
+    .map(|launch| RuntimeLaunchSpec {
+        role: launch.role,
+        binary: launch.binary,
+        ready_address: launch.ready_address,
+        environment: launch.environment,
+        extra_environment: launch.extra_environment,
+    })
+    .collect()
 }
 
 struct RuntimeLaunchSpec {
@@ -4982,6 +5061,17 @@ mod tests {
             ),
             Err(CliError::ProjectAlreadyInitialized(_))
         ));
+    }
+
+    #[test]
+    fn full_profile_adds_only_its_closed_binary_set() {
+        let workspace = Path::new("/workspace");
+        let base = runtime_binary_paths(workspace, DevProfile::Base);
+        let full = runtime_binary_paths(workspace, DevProfile::Full);
+        for binary in full_profile::INITIAL_BINARY_NAMES {
+            assert!(!base.contains_key(binary));
+            assert!(full.contains_key(binary));
+        }
     }
 
     #[test]

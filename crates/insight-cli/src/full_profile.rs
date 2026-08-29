@@ -6,7 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub(crate) const CONTEXT_NATIVE_CONFIG_FILE: &str = "context-native.json";
 pub(crate) const ARTIFACT_MAINTENANCE_CONFIG_FILE: &str = "artifact-maintenance.json";
@@ -17,6 +20,27 @@ pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-cl
 pub(crate) const EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE: &str = "egress-broker-client-key.pem";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
+
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 3] = [
+    "platform-context-worker",
+    "platform-artifact-maintenance",
+    "platform-security-authority",
+];
+
+pub(crate) struct ProcessLaunch {
+    pub(crate) role: &'static str,
+    pub(crate) binary: PathBuf,
+    pub(crate) ready_address: String,
+    pub(crate) environment: Vec<(&'static str, String)>,
+    pub(crate) extra_environment: Vec<(String, String)>,
+}
+
+pub(crate) struct ProcessPaths<'a> {
+    pub(crate) release: &'a Path,
+    pub(crate) configuration: &'a Path,
+    pub(crate) tls: &'a Path,
+    pub(crate) ca_certificate_file: &'a str,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PortBindings {
@@ -144,6 +168,121 @@ pub(crate) fn initial_configs(
     ])
 }
 
+pub(crate) fn initial_process_launches(
+    paths: ProcessPaths<'_>,
+    ports: &PortBindings,
+    config_digests: &BTreeMap<String, String>,
+    database_url: &str,
+    common_aws: &[(&str, &str)],
+) -> Vec<ProcessLaunch> {
+    let binary = |name: &str| {
+        paths
+            .release
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    };
+    vec![
+        ProcessLaunch {
+            role: "context-native",
+            binary: binary(INITIAL_BINARY_NAMES[0]),
+            ready_address: loopback_address(ports.context_native_observability),
+            environment: vec![
+                (
+                    "PLATFORM_CONTEXT_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(CONTEXT_NATIVE_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_WORKER_CONFIG_DIGEST",
+                    config_digests["context-native"].clone(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "artifact-maintenance",
+            binary: binary(INITIAL_BINARY_NAMES[1]),
+            ready_address: loopback_address(ports.artifact_maintenance_observability),
+            environment: vec![
+                (
+                    "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG",
+                    paths
+                        .configuration
+                        .join(ARTIFACT_MAINTENANCE_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST",
+                    config_digests["artifact-maintenance"].clone(),
+                ),
+                (
+                    "PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+            ],
+            extra_environment: common_aws
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        },
+        ProcessLaunch {
+            role: "security-authority",
+            binary: binary(INITIAL_BINARY_NAMES[2]),
+            ready_address: loopback_address(ports.security_authority_observability),
+            environment: vec![
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_CONFIG",
+                    paths
+                        .configuration
+                        .join(SECURITY_AUTHORITY_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_CONFIG_DIGEST",
+                    config_digests["security-authority"].clone(),
+                ),
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_CERT_PATH",
+                    paths
+                        .tls
+                        .join(SECURITY_AUTHORITY_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_SECURITY_AUTHORITY_KEY_PATH",
+                    paths
+                        .tls
+                        .join(SECURITY_AUTHORITY_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+    ]
+}
+
 fn loopback_address(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
@@ -186,5 +325,58 @@ mod tests {
         assert_eq!(security["listen_address"], "127.0.0.1:31003");
         assert_eq!(security["observability_listen_address"], "127.0.0.1:31004");
         assert_eq!(security["service_principal_id"], principal);
+    }
+
+    #[test]
+    fn initial_processes_are_profile_scoped_and_digest_bound() {
+        let ports = PortBindings {
+            context_native_observability: 31_001,
+            artifact_maintenance_observability: 31_002,
+            security_authority: 31_003,
+            security_authority_observability: 31_004,
+        };
+        let digests = BTreeMap::from([
+            ("context-native".to_owned(), digest('a')),
+            ("artifact-maintenance".to_owned(), digest('b')),
+            ("security-authority".to_owned(), digest('c')),
+        ]);
+        let launches = initial_process_launches(
+            ProcessPaths {
+                release: Path::new("/workspace/target/release"),
+                configuration: Path::new("/project/runtime/config"),
+                tls: Path::new("/project/runtime/tls"),
+                ca_certificate_file: "ca.pem",
+            },
+            &ports,
+            &digests,
+            "postgres://local-authority",
+            &[("AWS_ACCESS_KEY_ID", "test")],
+        );
+        assert_eq!(
+            launches
+                .iter()
+                .map(|launch| launch.role)
+                .collect::<Vec<_>>(),
+            vec![
+                "context-native",
+                "artifact-maintenance",
+                "security-authority"
+            ]
+        );
+        assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
+        assert_eq!(launches[1].ready_address, "127.0.0.1:31002");
+        assert_eq!(launches[2].ready_address, "127.0.0.1:31004");
+        assert!(launches
+            .iter()
+            .all(|launch| launch.environment.iter().any(|(name, value)| name
+                .ends_with("CONFIG_DIGEST")
+                && value.starts_with("sha256:"))));
+        assert_eq!(
+            launches[1].extra_environment,
+            vec![("AWS_ACCESS_KEY_ID".to_owned(), "test".to_owned())]
+        );
+        assert!(launches[2].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH"
+            && value == "/project/runtime/tls/ca.pem"));
     }
 }
