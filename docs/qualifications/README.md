@@ -35,3 +35,6 @@ Evidence manifest只能引用content digest、媒体类型和长度，不保存S
 
 checked-in profile只是资格要求，不是通过报告、CapacityProfile或promotion授权；L4～L6未实际运行前，本目录对应环境资格保持Not run，
 但不影响implementation plan与spec00～18的仓库范围关闭。
+
+当前成功candidate已在GitOps环境仓库以`built_not_promoted`记录绑定exact制品，并由独立CI验证；该记录保持
+`production_ready=false`、`clean_cut_completed=false`，不创建qualified release或`production/current`，因此不能作为clean cut证据。

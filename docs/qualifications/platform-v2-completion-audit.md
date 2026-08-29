@@ -371,7 +371,9 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    mTLS与live identity enforcement仍须production-equivalent L4验证。
 5. 可重现的signed image/SBOM/provenance candidate producer已实现并由CI静态/合同测试约束；GitHub private GitOps repository、
    main-only candidate Environment及跨仓库只读deploy key已配置，closed `environment.json`现在绑定exact application commit与canonical
-   QualificationProfile digest并由workflow fail closed验证；production-candidate run `33183969085`成功，仍无目标cluster或人工promotion证据。
+   QualificationProfile digest并由workflow fail closed验证；production-candidate run `33183969085`成功。GitOps commit
+   `5c69ee3111871b148ac0e840dffbc5fa622b0be7`进一步保存不可变`built_not_promoted`候选记录，绑定该run、environment commit、两个OCI
+   subject、CandidateManifest与release-bundle digest，并由run `33225217079`自动验证候选/发布边界；仍无目标cluster或人工promotion证据。
 
 ### 可选production release门禁
 
@@ -379,6 +381,9 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 `platform-v2/production/closure`；应用仓库的`platform-production-candidate` Environment只允许`main`，并通过只读deploy key Secret访问环境仓库。
 独立人工reviewer尚未配置；candidate workflow已有成功run `33183969085`。本机Kubernetes context为单节点OrbStack且
 `RuntimeClass/runsc`不存在，因此本审计明确记录L4～L6为Not run。不得以本机Docker替代真实环境证据，也不得把本次spec关闭解释为clean cut。
+该候选的GitOps记录显式保持`production_ready=false`和`clean_cut_completed=false`，并列出CapacityProfile、QualificationEvidence、人工批准、
+controller reconciliation、rollout observation、rollback、current pointer与traffic switch八项未完成环境门禁；环境仓库没有
+`production/current`或qualified release记录。
 
 - production-equivalent多节点Kubernetes、独立WASI/gVisor node pool、exact runsc与支持范围内kubectl/server版本；
 - L4 RBAC/mTLS/NetworkPolicy/admission与真实协议/故障矩阵；
