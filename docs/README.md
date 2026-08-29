@@ -35,7 +35,7 @@
 下一活动阶段为 [产品化收敛目标](specs/productization/00-goals.md)及其
 [实施计划](specs/productization/implementation-plan.md)：停止横向扩展平台内核，集中交付本地开发入口、
 稳定的 CLI/HTTP 开发者入口、最小运行控制台、十条黄金场景和仓库 clean cut。本阶段明确延期语言 SDK；
-该计划当前为 Proposed，尚未改变
+当前正在执行 M0，尚未改变
 `docs/current`。
 
 [Platform v2 clean-cut 规范集合](specs/platform-v2/00-overview.md)的 00～18 与

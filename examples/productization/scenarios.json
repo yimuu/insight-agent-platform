@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "manifest_kind": "insight.productization.scenarios/v1",
+  "contract_profile": "insight.platform/v1",
+  "scenarios": [
+    {
+      "id": "deterministic-first-run",
+      "owner": "cli-and-orchestration",
+      "profile": "base",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
+      "fixture": "tests/productization/deterministic_first_run.rs",
+      "automation_layer": "P2",
+      "capabilities": ["resource_lifecycle", "run_events", "deterministic_native_capability"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["run_terminal", "stream_replay", "exact_binding_visible"],
+      "failure_probes": ["invalid_receipt_conflict", "gateway_unavailable"]
+    },
+    {
+      "id": "exact-model-streaming-chat",
+      "owner": "model-worker",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_model_worker", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/exact_model_streaming_chat.rs",
+      "automation_layer": "P3",
+      "capabilities": ["model_binding", "streaming", "budget"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["exact_model_binding", "inline_result", "usage_projection"],
+      "failure_probes": ["model_timeout", "output_limit"]
+    },
+    {
+      "id": "native-and-remote-capability",
+      "owner": "capability-workers",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker", "platform_capability_remote_worker", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/native_and_remote_capability.rs",
+      "automation_layer": "P3",
+      "capabilities": ["native_capability", "remote_http_grpc_capability", "egress_policy"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["typed_result", "exact_deployment", "remote_effect_key"],
+      "failure_probes": ["remote_unknown_outcome", "egress_rejection"]
+    },
+    {
+      "id": "remote-mcp-tool-and-resource",
+      "owner": "mcp-host",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "platform_mcp_host", "platform_mcp_resource_host", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/remote_mcp_tool_and_resource.rs",
+      "automation_layer": "P3",
+      "capabilities": ["mcp_streamable_http", "mcp_tool", "mcp_resource"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["discovery_snapshot", "bounded_projection", "mcp_result"],
+      "failure_probes": ["mcp_tls_rejection", "mcp_remote_error"]
+    },
+    {
+      "id": "context-retrieval-and-citation",
+      "owner": "context-and-artifact",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_context_worker", "platform_remote_context_worker", "platform_artifact_gateway", "platform_artifact_data_worker", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/context_retrieval_and_citation.rs",
+      "automation_layer": "P3",
+      "capabilities": ["context_dataset", "context_query", "citation"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["dataset_generation", "citation_projection", "exact_context_binding"],
+      "failure_probes": ["dataset_build_failure", "citation_policy_rejection"]
+    },
+    {
+      "id": "approval-task-resume",
+      "owner": "tasks-and-orchestration",
+      "profile": "base",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
+      "fixture": "tests/productization/approval_task_resume.rs",
+      "automation_layer": "P2",
+      "capabilities": ["human_task", "task_receipt", "durable_resume"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["task_waiting", "first_winner", "run_resumed"],
+      "failure_probes": ["task_replay", "stale_task_fence"]
+    },
+    {
+      "id": "timer-signal-restart-recovery",
+      "owner": "orchestration-recovery",
+      "profile": "base",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
+      "fixture": "tests/productization/timer_signal_restart_recovery.rs",
+      "automation_layer": "P2",
+      "capabilities": ["timer", "signal", "worker_recovery"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["restart_resume", "event_sequence", "no_duplicate_effect"],
+      "failure_probes": ["worker_kill_before_commit", "stale_job_fence"]
+    },
+    {
+      "id": "subagent-quota-and-cancel",
+      "owner": "orchestration-and-quota",
+      "profile": "base",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
+      "fixture": "tests/productization/subagent_quota_and_cancel.rs",
+      "automation_layer": "P2",
+      "capabilities": ["subagent", "quota", "cancel_propagation"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["typed_child_run", "quota_reservation", "cancel_propagated"],
+      "failure_probes": ["child_late_result", "quota_exhaustion"]
+    },
+    {
+      "id": "artifact-lifecycle-and-rejection",
+      "owner": "artifact-service",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_artifact_gateway", "platform_artifact_data_worker", "platform_artifact_maintenance"],
+      "fixture": "tests/productization/artifact_lifecycle_and_rejection.rs",
+      "automation_layer": "P3",
+      "capabilities": ["artifact_prepare", "artifact_verify", "artifact_read"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["artifact_ready", "typed_link", "controlled_download"],
+      "failure_probes": ["digest_mismatch", "wrong_tenant_read"]
+    },
+    {
+      "id": "wasi-and-remote-framework-capability",
+      "owner": "sandbox-and-capability",
+      "profile": "full",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "platform_sandbox_controller", "platform_sandbox_attestor", "platform_sandbox_executor", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/wasi_and_remote_framework_capability.rs",
+      "automation_layer": "P3",
+      "capabilities": ["restricted_wasi", "remote_framework_capability", "framework_isolation"],
+      "entrypoints": ["cli", "http_fixture", "console"],
+      "assertions": ["wasi_limit", "remote_framework_result", "no_platform_database_access"],
+      "failure_probes": ["wasi_limit_rejection", "framework_network_rejection"]
+    }
+  ]
+}

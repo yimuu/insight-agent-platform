@@ -34,6 +34,8 @@ jobs:
           cache-on-failure: "false"
       - name: Check DSL cutover residuals
         run: bash scripts/check-cutover-residuals.sh
+      - name: Check Productization M0 golden-scenario manifest
+        run: python3 scripts/check-productization-m0.py
       - name: Check Platform v1 machine contracts and fixtures
         run: |
           python3 scripts/check-platform-v1-contracts.py

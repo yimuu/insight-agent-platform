@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Proposed / owner review |
+| 状态 | In Progress / M0 |
 | 日期 | 2026-08-29 |
 | 阶段代号 | Productization Convergence |
 | 合同输入 | Platform v2 spec00～18（Verified / CR-201）、AGENTS.md |

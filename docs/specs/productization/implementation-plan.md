@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Proposed / owner review |
+| 状态 | In Progress / M0 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Verified / CR-201） |
@@ -34,6 +34,14 @@ untrusted execution plane 分离。
 独立 Web server，它只能托管不可变文件，不能拥有业务权限或状态。
 
 ## 3. Milestone M0：基线、决策与扩张冻结
+
+M0 的已审查输入保存在：
+
+- [产品面与进程 inventory](m0-product-surface.md)；
+- [current-to-target cutover matrix](m0-cutover-matrix.md)；
+- [CI 与候选构建基线](m0-ci-baseline.md)；
+- [`examples/productization/scenarios.json`](../../../examples/productization/scenarios.json)；
+- ADR-0003～0006（CLI/profile、HTTP authoring、Console、local identity）。
 
 ### 3.1 工作项
 

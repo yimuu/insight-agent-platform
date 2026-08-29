@@ -1,0 +1,32 @@
+# ADR-0003：产品化 CLI 与本地 profile
+
+| 属性 | 值 |
+|---|---|
+| 状态 | Accepted |
+| 日期 | 2026-08-29 |
+| 影响阶段 | Productization M1、M2、M4 |
+
+## 决策
+
+新增 workspace crate `crates/insight-cli/`，发布单一 `insight` binary。它是用户操作 target Platform 的
+客户端和本地进程 supervisor，不是新的 Gateway、Scheduler、repository 或 Sandbox。
+
+首批命令固定为 `doctor`、`init`、`dev`、`status`、`logs`、`stop`；M2 增加 `apply`、`run`、`watch`、
+`task`、`artifact` 和 `operation`。所有业务 mutation 通过 public `/v1`，不允许 CLI 直连数据库、内部
+gRPC 或生成特权身份 header。
+
+`dev` 采用 Docker Compose v2 作为 macOS/Linux 的首批受支持依赖，并只编排现有独立 role：
+
+- `base` 为 deterministic first Run 所需的最小真实多进程 closure；
+- `full` 按场景追加 Model、remote Capability、MCP、Context、Artifact 与 WASI role；
+- `qualification` 只运行 runsc/Kubernetes preflight，不能声明 gVisor 实测通过。
+
+`init` 生成 project-local、gitignored 的 non-production state 和 digest 固定配置。schema provision 是可见的
+one-shot step；运行时进程继续只验证 schema，绝不持有 DDL 权限。源码、lockfile 与 profile digest 未变化时，
+`dev` 复用本地 build/image，不能无条件重新 build release workspace。
+
+## 后果
+
+用户获得单一入口，而 durable authority 仍在 PostgreSQL 和现有 workers。Docker Compose 仅用于开发；生产
+部署仍由 Kubernetes/GitOps 管理。缺少 Docker Compose、端口、磁盘、schema、OIDC 或 role readiness 必须由
+`doctor/status` 指出具体原因。
