@@ -16,6 +16,14 @@ use insight_platform_capability_adapters::{
     InstalledNativeAdapter, InstalledNativeRegistry, McpToolCapabilityCodec,
     NativeCapabilityAdapter, SafeHttpHeader,
 };
+pub use insight_platform_contracts::{
+    builtin_json_codec_module_digest, builtin_json_grpc_error_mapping_digest,
+    builtin_json_grpc_protobuf_contract_digest, builtin_json_grpc_request_mapping_digest,
+    builtin_json_grpc_response_mapping_digest, builtin_json_http_error_mapping_digest,
+    builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
+    builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
+    BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
+};
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile, parse_strict_json, ClosedJsonValue,
     HardLimitProfile, JsonLimits, ResourceId, ResourceIdError, ResourceKind, Sha256Digest,
@@ -51,49 +59,6 @@ pub const CAPABILITY_REMOTE_WORKER_ROLE: &str = "capability.remote";
 pub const BUILTIN_ECHO_ADAPTER_ID: &str = "builtin.echo";
 pub const BUILTIN_ECHO_ADAPTER_VERSION: &str = "1.0.0";
 pub const BUILTIN_ECHO_ENTRYPOINT_ID: &str = "echo.inline";
-pub const BUILTIN_JSON_CODEC_ID: &str = "platform.json";
-pub const BUILTIN_JSON_CODEC_VERSION: &str = "1.0.0";
-
-pub fn builtin_json_codec_module_digest() -> Sha256Digest {
-    domain_digest("builtin-json-codec-module")
-}
-
-pub fn builtin_json_http_protocol_contract_digest() -> Sha256Digest {
-    domain_digest("builtin-json-http-protocol-contract")
-}
-
-pub fn builtin_json_http_request_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-http-request-mapping")
-}
-
-pub fn builtin_json_http_response_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-http-response-mapping")
-}
-
-pub fn builtin_json_http_error_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-http-error-mapping")
-}
-
-pub fn builtin_json_grpc_protobuf_contract_digest() -> Sha256Digest {
-    domain_digest("builtin-json-grpc-protobuf-contract")
-}
-
-pub fn builtin_json_grpc_request_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-grpc-request-mapping")
-}
-
-pub fn builtin_json_grpc_response_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-grpc-response-mapping")
-}
-
-pub fn builtin_json_grpc_error_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-grpc-error-mapping")
-}
-
-pub fn builtin_json_mcp_output_mapping_digest() -> Sha256Digest {
-    domain_digest("builtin-json-mcp-output-mapping")
-}
-
 #[derive(Debug, Clone)]
 pub struct BuiltinJsonHttpCapabilityCodec {
     descriptor: InstalledHttpCodecDescriptor,

@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+pub use insight_platform_contracts::WASI_ABI_V1_RUNTIME_VERSION;
 use insight_platform_contracts::{
     canonical_digest, canonical_json, parse_strict_json, ArtifactGrantOperation, ArtifactRef,
     Effect, JsonLimits, ResourceId, Retryability, SandboxAbiVersion, SandboxEntrypointKind,
@@ -43,7 +44,6 @@ use wasmtime::{
     ValType, WasmFeatures,
 };
 
-pub const WASI_ABI_V1_RUNTIME_VERSION: &str = "wasmtime-46.0.2";
 pub const WASI_ABI_V1_ENTRYPOINT: &str = "run";
 pub const WASI_ABI_V1_ALLOCATOR: &str = "insight_alloc";
 pub const WASI_ABI_V1_MEMORY: &str = "memory";

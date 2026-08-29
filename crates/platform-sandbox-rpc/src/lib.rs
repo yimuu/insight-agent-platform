@@ -80,20 +80,16 @@ type TracedSandboxExecutorProcessRegistrationServiceClient =
     >;
 
 pub const SANDBOX_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
-pub const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-executor.wasi";
-pub const GVISOR_EXECUTOR_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-executor.gvisor";
-pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-controller";
+pub use insight_platform_contracts::{
+    EGRESS_BROKER_WORKLOAD_IDENTITY, GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
+    SANDBOX_CONTROLLER_WORKLOAD_IDENTITY, WASI_EXECUTOR_WORKLOAD_IDENTITY,
+};
 #[cfg(any())]
 pub const MICROVM_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.microvm";
 #[cfg(any())]
 pub const MICROVM_PROVIDER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-provider.microvm";
-pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/egress-broker";
 const SANDBOX_ARTIFACT_CHUNK_BYTES: usize = 1024 * 1024;
 const SANDBOX_ARTIFACT_MESSAGE_OVERHEAD_BYTES: usize = 1024;
 const MAX_IN_FLIGHT_ARTIFACT_RESPONSES_HARD: usize = 4;

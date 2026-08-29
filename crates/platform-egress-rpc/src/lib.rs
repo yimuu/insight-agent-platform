@@ -66,20 +66,12 @@ use proto::{
 };
 
 pub const EGRESS_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
-pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/model-worker";
-pub const CAPABILITY_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/capability-worker";
-pub const MCP_HOST_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/mcp-host";
-pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/mcp-discovery-worker";
-pub const MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/mcp-subscription-worker";
-pub const MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/mcp-cleanup-worker";
-pub const MCP_CALLBACK_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/mcp-callback-api";
-pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/context-worker";
+pub use insight_platform_contracts::{
+    CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
+    MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
+    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
+    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
+};
 pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
 pub const MAX_EGRESS_PAYLOAD_BYTES_HARD: usize = 64 * 1_048_576;
 pub const MAX_EGRESS_RPC_MESSAGE_BYTES_HARD: usize =

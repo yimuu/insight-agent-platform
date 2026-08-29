@@ -39,6 +39,10 @@ Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check
 | Egress/security | `platform-egress-broker`、`platform-security-authority` | remote Capability、Model、MCP 的网络和 Secret authority |
 | Sandbox | `platform-sandbox-controller`、`platform-sandbox-attestor`、`platform-sandbox-executor`、`platform-sandbox-guest` | WASI 在专用 local/full 配置验证；gVisor 只做 preflight，真实 runsc 不在本地宣称通过 |
 
+`insight` 只从无执行能力的 `platform-contracts` 读取 full 配置所需的 closed workload identity、内置 codec
+摘要和 WASI ABI 版本；它不得依赖 Worker、RPC broker 或 Wasmtime adapter。独立进程仍负责消费并验证配置，
+crate-boundary 全图门禁禁止这些执行依赖回流到 CLI。
+
 所有 role 必须继续使用自己的配置、连接池、permit 和 credential。不允许把多个 authority 合并进
 `insight` CLI、Gateway 或 Docker Compose helper。
 

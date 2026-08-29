@@ -184,6 +184,12 @@ production Helm 仍固定 `linux_procfs`、`allow_loopback_advertised_route=fals
 本证据只关闭 full 进程 composition 与空队列 claim/readiness；尚未提交一个真实 WASI Job，也未证明 WASI limit 负向场景、
 remote fixture dispatch 或 OAuth lifecycle，因此仍不得标记 M1/M4 或 spec 00–18 为 Verified。
 
+2026-08-30 full 配置生成器的 dependency audit 进一步闭合了执行面边界：`insight` 不再为读取配置常量而链接
+Capability Worker、Egress RPC、Sandbox RPC 或 Wasmtime adapter。跨进程必须一致的 workload identity、内置 JSON
+codec 描述摘要和 WASI ABI runtime version 由无执行能力的 `platform-contracts` 统一拥有，各独立 Worker/RPC/Executor
+消费并重新验证；crate-boundary 全图检查、CLI/Contracts 163 项 unit test、四个消费 crate 38 项测试和严格 Clippy 已通过。
+这证明 CLI 只是进程配置与监督入口，不能执行用户代码；它仍不是上述真实 WASI Job 的完成证据。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

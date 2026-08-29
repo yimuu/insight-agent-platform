@@ -20,6 +20,7 @@ pub mod operation;
 pub mod qualification;
 pub mod registry;
 pub mod resource;
+pub mod runtime_config;
 pub mod sandbox_policy;
 pub mod schema;
 pub mod security;
@@ -84,6 +85,7 @@ pub use registry::{
     WakeContractKind, WorkClass,
 };
 pub use resource::*;
+pub use runtime_config::*;
 pub use sandbox_policy::*;
 pub use schema::{
     validate_capability_interface_schema, validate_closed_schema, ClosedJsonSchema,

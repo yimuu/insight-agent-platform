@@ -5,25 +5,23 @@
 //! revalidated by the corresponding independent Platform process.
 
 use super::fresh_resource_id;
-use insight_platform_capability_worker::{
+use insight_platform_contracts::{
     builtin_json_codec_module_digest, builtin_json_grpc_error_mapping_digest,
     builtin_json_grpc_protobuf_contract_digest, builtin_json_grpc_request_mapping_digest,
     builtin_json_grpc_response_mapping_digest, builtin_json_http_error_mapping_digest,
     builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
     builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
-    BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
+    canonical_digest, ResourceKind, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
+    WASI_ABI_V1_RUNTIME_VERSION,
 };
-use insight_platform_contracts::{canonical_digest, ResourceKind};
-pub(crate) use insight_platform_egress_rpc::{
+pub(crate) use insight_platform_contracts::{
     CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
-    MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
-    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
-    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
+    EGRESS_BROKER_WORKLOAD_IDENTITY, MCP_CALLBACK_WORKLOAD_IDENTITY,
+    MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY, MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
+    MCP_HOST_WORKLOAD_IDENTITY, MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
+    MODEL_WORKER_WORKLOAD_IDENTITY, SANDBOX_CONTROLLER_WORKLOAD_IDENTITY,
+    WASI_EXECUTOR_WORKLOAD_IDENTITY,
 };
-pub(crate) use insight_platform_sandbox_rpc::{
-    SANDBOX_CONTROLLER_WORKLOAD_IDENTITY, WASI_EXECUTOR_WORKLOAD_IDENTITY,
-};
-use insight_platform_sandbox_wasi::WASI_ABI_V1_RUNTIME_VERSION;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -100,9 +98,6 @@ pub(crate) const SANDBOX_STATE_DIRECTORY: &str = "sandbox-attestor";
 pub(crate) const SANDBOX_REGISTRATION_SOCKET_FILE: &str = "registration.sock";
 pub(crate) const SANDBOX_REGISTRY_FILE: &str = "registrations.json";
 pub(crate) const SANDBOX_LOCAL_INSTANCE_UID_FILE: &str = "sandbox-local-instance-uid";
-pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/egress-broker";
-
 pub(crate) const INITIAL_BINARY_NAMES: [&str; 17] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
