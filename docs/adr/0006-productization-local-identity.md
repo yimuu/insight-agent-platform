@@ -24,3 +24,14 @@ Git 或 container image。`doctor` 必须显示 issuer/JWKS/config digest 和到
 
 本地 first Run 可真实经过 public authentication/principal binding，而不用牺牲生产边界。M1 必须补齐 local issuer
 container、bootstrap 顺序、短 token rotate 和泄漏负向测试；在此之前不能声称 local profile 已经实现。
+
+## 当前实现边界
+
+仓库提供 `platform-dev-bootstrap` 作为一次性的开发数据库引导工具。它只接受绝对路径的、严格解析且
+digest 固定的 development JSON config，并在已 provision 和通过 schema verification 的 PostgreSQL authority
+中创建 installation operator、development tenant 及最小 developer bindings。它拒绝 production environment
+class、installation/developer principal 复用、非 canonical config 和未提供的显式环境变量；服务进程仍不执行
+DDL，`insight` CLI 也不直接连接数据库。
+
+该工具尚未由 `insight init`/`insight dev` 编排，也尚未提供 local issuer 或 token rotation；因此这不是已完成的
+local profile，M1 仍保持 In Progress。

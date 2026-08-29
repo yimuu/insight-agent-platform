@@ -21,6 +21,10 @@ path = "src/bin/check_platform_schema_contract.rs"
 name = "platform-bootstrap-operator"
 path = "src/bin/platform_bootstrap_operator.rs"
 
+[[bin]]
+name = "platform-dev-bootstrap"
+path = "src/bin/platform_dev_bootstrap.rs"
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
