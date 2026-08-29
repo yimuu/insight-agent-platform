@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M0 |
+| 状态 | In Progress / M1–M2 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-202 Registry Validation architecture revision） |
@@ -112,6 +112,11 @@ create -> validate/wait -> read validated Draft -> publish -> create Deployment 
 intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并通过 response-loss fixture 证明精确重放与完成后
 零网络恢复。Artifact upload、首次 Run、完整失败矩阵和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为
 Verified。
+
+[`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result 初始命令面，并严格区分 Runtime Gateway
+与 Management Gateway。create 使用 canonical request Receipt，control 使用 current ETag + Receipt，result 对 Inline
+content digest 或 Artifact digest/classification 做重验。SSE watch、control response-loss journal、真实 first Run 和
+restart recovery 仍未完成。
 
 ### 5.1 工作项
 

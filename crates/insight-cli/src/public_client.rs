@@ -91,6 +91,11 @@ pub struct PublicJsonResponse<T> {
     pub trace_id: TraceId,
 }
 
+#[derive(Debug)]
+pub struct PublicBodyResponse<T> {
+    pub body: T,
+}
+
 impl PublicHttpClient {
     pub fn new(
         base_url: String,
@@ -209,6 +214,22 @@ impl PublicHttpClient {
         decode_json_response(response, expected_status, None)
     }
 
+    pub fn get_body_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        expected_status: StatusCode,
+    ) -> Result<PublicBodyResponse<T>, PublicClientError> {
+        validate_public_path(path)?;
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .header(ACCEPT, JSON_CONTENT_TYPE)
+            .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token))
+            .send()
+            .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+        decode_body_response(response, expected_status)
+    }
+
     pub fn post_json<Request: Serialize, ResponseBody: DeserializeOwned>(
         &self,
         path: &str,
@@ -271,6 +292,35 @@ impl PublicHttpClient {
             .map_err(|error| PublicClientError::Transport(error.to_string()))?;
         decode_json_response(response, expected_status, Some(expected_trace_id))
     }
+}
+
+fn decode_body_response<T: DeserializeOwned>(
+    response: Response,
+    expected_status: StatusCode,
+) -> Result<PublicBodyResponse<T>, PublicClientError> {
+    let status = response.status();
+    let trace_id = required_header(&response, "trace-id")?
+        .parse::<TraceId>()
+        .map_err(|_| PublicClientError::InvalidResponse("trace-id is invalid".to_owned()))?;
+    require_json_content_type(&response)?;
+    if status != expected_status {
+        if !status.is_client_error() && !status.is_server_error() {
+            return Err(PublicClientError::InvalidResponse(format!(
+                "unexpected HTTP status {status}"
+            )));
+        }
+        return decode_problem(response, status, trace_id);
+    }
+    if required_header(&response, CACHE_CONTROL.as_str())? != OPERATION_CACHE_CONTROL {
+        return Err(PublicClientError::InvalidResponse(
+            "success cache-control is not the closed private no-store value".to_owned(),
+        ));
+    }
+    let body = read_bounded_body(response)?;
+    let body = serde_json::from_slice::<T>(&body).map_err(|_| {
+        PublicClientError::InvalidResponse("response body is not closed JSON".to_owned())
+    })?;
+    Ok(PublicBodyResponse { body })
 }
 
 fn is_loopback_http_base(value: &str) -> bool {

@@ -7,6 +7,7 @@
 mod apply;
 mod apply_journal;
 mod public_client;
+mod run;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{canonical_digest, PublicJobState, ResourceId, ResourceKind};
@@ -111,7 +112,31 @@ pub enum CliCommand {
         operation_id: String,
         timeout_seconds: u64,
     },
+    RunCreate {
+        root: PathBuf,
+        file: PathBuf,
+    },
+    RunGet {
+        root: PathBuf,
+        run_id: String,
+    },
+    RunControl {
+        root: PathBuf,
+        run_id: String,
+        action: CliRunControlAction,
+    },
+    RunResult {
+        root: PathBuf,
+        run_id: String,
+    },
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliRunControlAction {
+    Pause,
+    Resume,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +172,10 @@ pub enum CliError {
         path: String,
         source: std::io::Error,
     },
+    ReadRunRequest {
+        path: String,
+        source: std::io::Error,
+    },
     InvalidLocalIdentity {
         path: String,
     },
@@ -160,6 +189,7 @@ pub enum CliError {
     RuntimeState(String),
     PublicClient(public_client::PublicClientError),
     Apply(apply::ApplyError),
+    Run(run::RunClientError),
     OperationTerminal {
         operation_id: String,
         state: String,
@@ -215,6 +245,9 @@ impl std::fmt::Display for CliError {
             Self::ReadApplyManifest { path, source } => {
                 write!(formatter, "cannot read apply manifest at {path}: {source}")
             }
+            Self::ReadRunRequest { path, source } => {
+                write!(formatter, "cannot read Run request at {path}: {source}")
+            }
             Self::InvalidLocalIdentity { path } => {
                 write!(formatter, "local identity state at {path} is invalid")
             }
@@ -238,6 +271,7 @@ impl std::fmt::Display for CliError {
             ),
             Self::PublicClient(error) => write!(formatter, "{error}"),
             Self::Apply(error) => write!(formatter, "{error}"),
+            Self::Run(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
                 state,
@@ -262,9 +296,11 @@ impl std::error::Error for CliError {
             Self::InitializeProject { source, .. } => Some(source),
             Self::ReadLocalIdentity { source, .. }
             | Self::RotateLocalAccessToken { source, .. }
-            | Self::ReadApplyManifest { source, .. } => Some(source),
+            | Self::ReadApplyManifest { source, .. }
+            | Self::ReadRunRequest { source, .. } => Some(source),
             Self::PublicClient(source) => Some(source),
             Self::Apply(source) => Some(source),
+            Self::Run(source) => Some(source),
             _ => None,
         }
     }
@@ -286,6 +322,7 @@ impl CliError {
             | Self::InitializeProject { .. }
             | Self::ReadLocalIdentity { .. }
             | Self::ReadApplyManifest { .. }
+            | Self::ReadRunRequest { .. }
             | Self::InvalidLocalIdentity { .. }
             | Self::RotateLocalAccessToken { .. }
             | Self::InvalidClock => 1,
@@ -294,6 +331,7 @@ impl CliError {
             | Self::RuntimeState(_)
             | Self::PublicClient(_)
             | Self::Apply(_)
+            | Self::Run(_)
             | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
@@ -322,6 +360,7 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "stop" => parse_stop(&arguments[1..]),
         "apply" => parse_apply(&arguments[1..]),
         "operation" => parse_operation(&arguments[1..]),
+        "run" => parse_run(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
 }
@@ -605,6 +644,76 @@ fn parse_apply(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         root: root.unwrap_or_else(|| PathBuf::from(".")),
         file: file.ok_or(CliError::MissingValue("--file"))?,
         timeout_seconds: timeout_seconds.unwrap_or(30),
+    })
+}
+
+fn parse_run(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let Some(action) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    if action == "create" {
+        return parse_run_create(&arguments[1..]);
+    }
+    let Some(run_id) = arguments.get(1).and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    let root = parse_path_only(&arguments[2..])?;
+    match action {
+        "get" => Ok(CliCommand::RunGet {
+            root,
+            run_id: run_id.to_owned(),
+        }),
+        "result" => Ok(CliCommand::RunResult {
+            root,
+            run_id: run_id.to_owned(),
+        }),
+        "pause" | "resume" | "cancel" => Ok(CliCommand::RunControl {
+            root,
+            run_id: run_id.to_owned(),
+            action: match action {
+                "pause" => CliRunControlAction::Pause,
+                "resume" => CliRunControlAction::Resume,
+                "cancel" => CliRunControlAction::Cancel,
+                _ => unreachable!(),
+            },
+        }),
+        _ => Err(CliError::UnknownCommand(format!("run {action}"))),
+    }
+}
+
+fn parse_run_create(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let mut root = None;
+    let mut file = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--path"));
+                };
+                root = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            "--file" => {
+                if file.is_some() {
+                    return Err(CliError::DuplicateOption("--file"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--file"));
+                };
+                file = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    Ok(CliCommand::RunCreate {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        file: file.ok_or(CliError::MissingValue("--file"))?,
     })
 }
 
@@ -3415,6 +3524,27 @@ pub fn execute(
             let root = resolve_root(current_directory, root);
             wait_local_operation(&root, &operation_id, timeout_seconds)
         }
+        CliCommand::RunCreate { root, file } => {
+            let root = resolve_root(current_directory, root);
+            let file = resolve_root(current_directory, file);
+            create_local_run(&root, &file)
+        }
+        CliCommand::RunGet { root, run_id } => {
+            let root = resolve_root(current_directory, root);
+            read_local_run(&root, &run_id)
+        }
+        CliCommand::RunControl {
+            root,
+            run_id,
+            action,
+        } => {
+            let root = resolve_root(current_directory, root);
+            control_local_run(&root, &run_id, action)
+        }
+        CliCommand::RunResult { root, run_id } => {
+            let root = resolve_root(current_directory, root);
+            read_local_run_result(&root, &run_id)
+        }
     }
 }
 
@@ -3427,7 +3557,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle and emits a machine-readable authority report. `operation wait` reads only the public management `/v1` endpoint and preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` uses only the Runtime Gateway `/v1` authority and emits closed machine-readable views. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
 fn apply_local_manifest(
@@ -3468,8 +3598,27 @@ fn apply_local_manifest(
         .map_err(|error| CliError::RuntimeState(error.to_string()))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LocalGatewaySurface {
+    Management,
+    Runtime,
+}
+
 fn local_public_http_client(
     root: &Path,
+) -> Result<(public_client::PublicHttpClient, ResourceId), CliError> {
+    local_public_http_client_for(root, LocalGatewaySurface::Management)
+}
+
+fn local_runtime_http_client(
+    root: &Path,
+) -> Result<(public_client::PublicHttpClient, ResourceId), CliError> {
+    local_public_http_client_for(root, LocalGatewaySurface::Runtime)
+}
+
+fn local_public_http_client_for(
+    root: &Path,
+    surface: LocalGatewaySurface,
 ) -> Result<(public_client::PublicHttpClient, ResourceId), CliError> {
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
@@ -3509,13 +3658,89 @@ fn local_public_http_client(
             "the cached local token has expired; run `insight token` and retry".to_owned(),
         ));
     }
+    let port = match surface {
+        LocalGatewaySurface::Management => profile.ports.gateway_management,
+        LocalGatewaySurface::Runtime => profile.ports.gateway_runtime,
+    };
     let client = public_client::PublicHttpClient::new(
-        format!("http://127.0.0.1:{}", profile.ports.gateway_management),
+        format!("http://127.0.0.1:{port}"),
         token,
         Duration::from_secs(5),
     )
     .map_err(CliError::PublicClient)?;
     Ok((client, expected_tenant_id))
+}
+
+fn create_local_run(root: &Path, file: &Path) -> Result<String, CliError> {
+    let bytes = read_bounded_run_request(file)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = run::create_run(&client, &bytes).map_err(CliError::Run)?;
+    render_json(&view)
+}
+
+fn read_local_run(root: &Path, run_id: &str) -> Result<String, CliError> {
+    let run_id = parse_run_id(run_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = run::read_run(&client, &run_id).map_err(CliError::Run)?;
+    render_json(&view)
+}
+
+fn control_local_run(
+    root: &Path,
+    run_id: &str,
+    action: CliRunControlAction,
+) -> Result<String, CliError> {
+    let run_id = parse_run_id(run_id)?;
+    let action = match action {
+        CliRunControlAction::Pause => run::RunControlAction::Pause,
+        CliRunControlAction::Resume => run::RunControlAction::Resume,
+        CliRunControlAction::Cancel => run::RunControlAction::Cancel,
+    };
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = run::control_run(&client, &run_id, action).map_err(CliError::Run)?;
+    render_json(&view)
+}
+
+fn read_local_run_result(root: &Path, run_id: &str) -> Result<String, CliError> {
+    let run_id = parse_run_id(run_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let view = run::read_run_result(&client, &run_id).map_err(CliError::Run)?;
+    render_json(&view)
+}
+
+fn parse_run_id(value: &str) -> Result<ResourceId, CliError> {
+    ResourceId::parse_expected(value, ResourceKind::Run).map_err(|_| CliError::InvalidOptionValue {
+        option: "run_id",
+        value: value.to_owned(),
+    })
+}
+
+fn read_bounded_run_request(file: &Path) -> Result<Vec<u8>, CliError> {
+    const MAX_RUN_REQUEST_BYTES: u64 = 1_048_576;
+
+    let metadata = fs::metadata(file).map_err(|source| CliError::ReadRunRequest {
+        path: file.display().to_string(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_RUN_REQUEST_BYTES {
+        return Err(CliError::ReadRunRequest {
+            path: file.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "request size must be within 1..=1048576 bytes",
+            ),
+        });
+    }
+    fs::read(file).map_err(|source| CliError::ReadRunRequest {
+        path: file.display().to_string(),
+        source,
+    })
+}
+
+fn render_json<T: Serialize>(value: &T) -> Result<String, CliError> {
+    serde_json::to_string_pretty(value)
+        .map(|value| value + "\n")
+        .map_err(|error| CliError::RuntimeState(error.to_string()))
 }
 
 fn wait_local_operation(
@@ -4086,6 +4311,57 @@ mod tests {
         );
         assert!(matches!(
             parse_command(&[OsString::from("apply")]),
+            Err(CliError::MissingValue("--file"))
+        ));
+    }
+
+    #[test]
+    fn command_parser_accepts_closed_run_actions() {
+        let run_id = format!("run_{}", Uuid::now_v7());
+        assert_eq!(
+            parse_command(&[
+                OsString::from("run"),
+                OsString::from("create"),
+                OsString::from("--file"),
+                OsString::from("run.json"),
+                OsString::from("--path"),
+                OsString::from("demo"),
+            ])
+            .unwrap(),
+            CliCommand::RunCreate {
+                root: PathBuf::from("demo"),
+                file: PathBuf::from("run.json"),
+            }
+        );
+        assert_eq!(
+            parse_command(&[
+                OsString::from("run"),
+                OsString::from("pause"),
+                OsString::from(&run_id),
+                OsString::from("--path"),
+                OsString::from("demo"),
+            ])
+            .unwrap(),
+            CliCommand::RunControl {
+                root: PathBuf::from("demo"),
+                run_id: run_id.clone(),
+                action: CliRunControlAction::Pause,
+            }
+        );
+        assert_eq!(
+            parse_command(&[
+                OsString::from("run"),
+                OsString::from("result"),
+                OsString::from(&run_id),
+            ])
+            .unwrap(),
+            CliCommand::RunResult {
+                root: PathBuf::from("."),
+                run_id,
+            }
+        );
+        assert!(matches!(
+            parse_command(&[OsString::from("run"), OsString::from("create"),]),
             Err(CliError::MissingValue("--file"))
         ));
     }
