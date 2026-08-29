@@ -103,6 +103,12 @@ smoke 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 
 ## 5. Milestone M2：CLI/HTTP authoring 与首次 Run
 
+状态：**In Progress**。CLI 已增加 bounded native public HTTP client 与
+`insight operation wait <job_id>`：它只连接本地 profile 生成的 loopback Management Gateway，使用短期 OIDC
+token，禁止 redirect/proxy，限制 response body 与 request timeout，并重验 Operation ID、tenant、ETag、trace、
+cache-control 及 closed `ApiProblem`。该命令是 validation、Artifact 等异步生命周期的公共前置，不表示
+`insight apply`、首次 Run 或 M2 退出门禁已经完成。
+
 ### 5.1 工作项
 
 1. 以 authoritative Platform `/v1` OpenAPI/JSON Schema 校验实际 route、request、response、Problem 与样例，

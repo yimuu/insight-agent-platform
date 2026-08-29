@@ -183,7 +183,9 @@ FORBIDDEN_DIRECT = {
     # shared pinned/SSRF-restricted client from insight-mcp for issuer/JWKS
     # discovery. Direct SQL remains forbidden.
     "api": {"sqlx"},
-    "cli": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    # The CLI is a public `/v1` client. Its bounded native HTTP dependency is the only
+    # business mutation channel and does not grant SQL or server authority.
+    "cli": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
     "artifacts_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "artifact_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "artifact_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
