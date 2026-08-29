@@ -475,8 +475,8 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id(ResourceKind::AgentInterfaceRevision, "9910"),
+            plan_version: 5,
+            interface_contract_digest: digest('5'),
             entry_node_id: key("branch"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([

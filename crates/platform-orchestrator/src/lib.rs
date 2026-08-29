@@ -472,7 +472,7 @@ impl PlanLimits {
 #[serde(deny_unknown_fields)]
 pub struct RuntimePlan {
     pub plan_version: u32,
-    pub interface_revision_id: ResourceId,
+    pub interface_contract_digest: Sha256Digest,
     pub entry_node_id: PlanNodeKey,
     pub dependency_slots: BTreeMap<String, RuntimeDependencySlot>,
     pub nodes: BTreeMap<PlanNodeKey, RuntimeNode>,
@@ -480,8 +480,7 @@ pub struct RuntimePlan {
 
 impl RuntimePlan {
     pub fn validate(&self, limits: PlanLimits) -> Result<(), OrchestratorError> {
-        if self.plan_version != 4
-            || self.interface_revision_id.kind() != ResourceKind::AgentInterfaceRevision
+        if self.plan_version != 5
             || limits.maximum_nodes == 0
             || limits.maximum_edges == 0
             || limits.maximum_fan_out == 0
@@ -3055,8 +3054,8 @@ mod tests {
     #[test]
     fn runtime_plan_is_closed_bounded_and_digestible() {
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("start"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
@@ -3086,6 +3085,11 @@ mod tests {
             obsolete.validate(limits()),
             Err(OrchestratorError::InvalidPlan)
         );
+        obsolete.plan_version = 4;
+        assert_eq!(
+            obsolete.validate(limits()),
+            Err(OrchestratorError::InvalidPlan)
+        );
         assert_eq!(
             plan.canonical_digest(limits()),
             plan.canonical_digest(limits())
@@ -3102,8 +3106,8 @@ mod tests {
         };
         let output = exact_port("call", "result");
         let mut plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("call"),
             dependency_slots: BTreeMap::from([(
                 "primary_capability".to_owned(),
@@ -3213,8 +3217,8 @@ mod tests {
     fn terminal_ports_are_exact_declared_and_reachable() {
         let output = exact_port("compute", "result");
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("compute"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
@@ -3289,8 +3293,8 @@ mod tests {
             next_iteration_port: exact_port("loop", "carried"),
         };
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("loop"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
@@ -3362,8 +3366,8 @@ mod tests {
         )
         .unwrap();
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("compute"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
@@ -3385,8 +3389,8 @@ mod tests {
         let mut forged = literal_program(serde_json::json!(true));
         forged.semantic_digest = digest('f');
         let branch = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: key("branch"),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([
@@ -3575,8 +3579,8 @@ mod tests {
         let start = key("start");
         let finish = key("finish");
         let plan = RuntimePlan {
-            plan_version: 4,
-            interface_revision_id: id("aif_0198f1c5-0787-75e1-a9e8-d95ca0f37001"),
+            plan_version: 5,
+            interface_contract_digest: digest('a'),
             entry_node_id: start.clone(),
             dependency_slots: BTreeMap::new(),
             nodes: BTreeMap::from([

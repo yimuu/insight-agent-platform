@@ -261,8 +261,8 @@ fn runtime_plan() -> RuntimePlan {
     let signal_timeout = PlanNodeKey::new("signal_timeout".to_owned()).unwrap();
     let raise = PlanNodeKey::new("raise".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 4,
-        interface_revision_id: id(AGENT_INTERFACE_ID),
+        plan_version: 5,
+        interface_contract_digest: digest('f'),
         entry_node_id: entry.clone(),
         dependency_slots: BTreeMap::from([(
             "child_worker".to_owned(),
@@ -610,8 +610,8 @@ fn child_runtime_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 4,
-        interface_revision_id: id(CHILD_AGENT_INTERFACE_ID),
+        plan_version: 5,
+        interface_contract_digest: digest('e'),
         entry_node_id: entry.clone(),
         dependency_slots: BTreeMap::new(),
         nodes: BTreeMap::from([
@@ -1500,6 +1500,16 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             job_outbox_id: id("obx_0198f1c3-9a00-7c3e-b1f3-773c2836782a"),
         },
     };
+    let mut contract_drifted = complete.clone();
+    contract_drifted.plan.interface_contract_digest = digest('0');
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(matches!(
+        scheduler.commit_plan_terminal(contract_drifted).await,
+        Err(RepositoryError::Conflict(
+            "runtime Plan Agent interface contract digest"
+        ))
+    ));
+    scheduler.rollback().await.unwrap();
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler

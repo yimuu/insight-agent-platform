@@ -1203,7 +1203,7 @@ struct Fixture {
 }
 
 fn model_runtime_plan(
-    interface_revision_id: ResourceId,
+    interface_contract_digest: Sha256Digest,
     output_schema: &ClosedJsonSchema,
 ) -> RuntimePlan {
     let start = PlanNodeKey::new("start".to_owned()).unwrap();
@@ -1215,8 +1215,8 @@ fn model_runtime_plan(
         schema_digest: output_schema.canonical_digest.clone(),
     };
     let plan = RuntimePlan {
-        plan_version: 4,
-        interface_revision_id,
+        plan_version: 5,
+        interface_contract_digest,
         entry_node_id: start.clone(),
         dependency_slots: BTreeMap::from([
             (
@@ -1267,12 +1267,12 @@ fn model_runtime_plan(
     plan
 }
 
-fn return_run_input_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
+fn return_run_input_runtime_plan(interface_contract_digest: Sha256Digest) -> RuntimePlan {
     let start = PlanNodeKey::new("start".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     let plan = RuntimePlan {
-        plan_version: 4,
-        interface_revision_id,
+        plan_version: 5,
+        interface_contract_digest,
         entry_node_id: start.clone(),
         dependency_slots: BTreeMap::new(),
         nodes: BTreeMap::from([
@@ -1310,7 +1310,7 @@ async fn seed_production_artifact_run(
     artifact_provider: &ProductionArtifactFixture,
 ) -> ProductionArtifactRun {
     let interface = version(ResourceKind::AgentInterfaceRevision, 0xc01, '3');
-    let plan = return_run_input_runtime_plan(interface.revision_id.clone());
+    let plan = return_run_input_runtime_plan(digest('5'));
     let plan_digest = plan
         .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
@@ -1340,7 +1340,7 @@ async fn seed_production_artifact_run(
         typed_plan_artifact_id: plan_artifact.artifact_id().clone(),
         typed_plan_digest: plan_digest.clone(),
     });
-    for (exact, revision_no) in [(&interface, 3), (&plan_revision, 4)] {
+    for (exact, revision_no) in [(&interface, 3), (&plan_revision, 3)] {
         insert_version(
             pool,
             &fixture.tenant_id,
@@ -2369,7 +2369,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     }
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x38, '8');
-    let runtime_plan = model_runtime_plan(agent_interface.revision_id.clone(), &output_schema);
+    let runtime_plan = model_runtime_plan(digest('b'), &output_schema);
     let runtime_plan_digest = runtime_plan
         .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
@@ -2390,7 +2390,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa6),
         typed_plan_digest: runtime_plan_digest.clone(),
     });
-    for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {
+    for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 1)] {
         insert_version(
             pool,
             &tenant_id,

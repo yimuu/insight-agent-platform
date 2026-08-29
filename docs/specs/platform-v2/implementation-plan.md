@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-203 implementation authorized |
+| 状态 | In Progress / CR-203 contract implemented; fresh public first-Run pending |
 | 日期 | 2026-08-29 |
 | 合同输入 | 00～18、cross-review CR-203、ADR-0001、ADR-0002、AGENTS.md |
 
@@ -10,6 +10,13 @@
 > identity/digest/owner/batch/error/transaction/permission/recovery/fixture cross-review并恢复实现授权。实现必须升级Plan v5，
 > 以Agent Draft contract digest消环，同时在Deployment/materialization重验exact Interface/Plan同owner与同publish batch；禁止
 > caller-selected Version ID、预写数据库、placeholder ID或兼容旧Plan wire。
+
+> 2026-08-29 CR-203 implementation evidence：`RuntimePlan` clean-cut升级为v5，以
+> `interface_contract_digest`替代pre-publication Interface Revision ID；Agent Deployment拒绝非同Agent或非同publish batch
+> 的Interface/Plan，runtime materialization再次重验同owner、同batch、合同digest、Plan digest与terminal schema。真实
+> PostgreSQL Resource lifecycle、Run kernel、Context、Model Turn、Capability Invocation和独立Orchestration Coordinator
+> 路径通过，且owner/batch/digest漂移均fail closed。该证据关闭CR-203实现子项，不证明fresh public first-Run、restart
+> recovery或Platform L4～L6。
 
 > CR-201 historical completion decision：Phase 1～4曾按仓库交付范围关闭；该状态已被CR-202/CR-203撤回，当前Plan v5与
 > fresh public first-Run仍需实现。真实多节点Kubernetes、`RuntimeClass=runsc`、production telemetry、

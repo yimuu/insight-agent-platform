@@ -5,7 +5,7 @@
 | 状态 | In Progress / M1–M2 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
-| 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-202 Registry Validation architecture revision） |
+| 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
 | 当前行为 | 不变；每个批次完成并取得 conformance evidence 后才可更新 `docs/current` |
 
 ## 1. 实施原则
@@ -72,15 +72,18 @@ Verified。
 
 2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
 Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立
-role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探针同时发现 Agent public authoring P0：当前 typed
-Plan 在 publish 前要求不可知的 server-generated Agent Interface Revision ID，阻断首次 Run。该问题必须按上游合同修订、
-00～18 cross-review 和实现修复闭合，不能以预写数据库或固定测试 ID 绕过。
+role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探针同时发现并闭合 Agent public authoring P0：CR-203
+将 typed Plan clean-cut 升级为 v5，以 Draft 已知的 `interface_contract_digest` 取代 publish 前不可知的 server-generated
+Interface Revision ID；Deployment 与 materialization 分别重验 exact Interface/Plan 同 Agent、同 publish batch 和合同 digest。
+真实 PostgreSQL 已覆盖 Resource lifecycle、Run kernel、Context、Model Turn、Capability Invocation 与独立 Orchestration
+Coordinator，并包含 owner/batch/digest 漂移 fail-closed 断言。该闭环只解除首次 Run 的合同阻塞；public first Run 本身和
+restart recovery 尚未完成，不能据此关闭 M1/M2。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway
-内联验证或伪造 `ValidationSummary` 绕过 authority。仍缺 `insight apply` 的 public authoring/lifecycle 入口、真实进程
-smoke 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
+内联验证或伪造 `ValidationSummary` 绕过 authority。`insight apply` 已提供 public authoring/lifecycle 入口；仍缺 Agent
+首次 Run fixture、真实进程 journey、restart recovery 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 
 ### 4.1 工作项
 

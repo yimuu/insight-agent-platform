@@ -63,6 +63,8 @@ const AGENT_INTERFACE_ID: &str = "aif_0198f1c3-8f49-7c3e-b1f3-773c28367cd1";
 const AGENT_PLAN_ID: &str = "arev_0198f1c3-8f49-7c3e-b1f3-773c28367cd2";
 const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd3";
 const AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd4";
+const AGENT_DEPLOYMENT_BAD_BATCH_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd5";
+const AGENT_DEPLOYMENT_BAD_OWNER_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd6";
 const POLICY_VERSION_2_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce1";
 const POLICY_VERSION_3_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce2";
 const POLICY_VERSION_4_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce3";
@@ -242,24 +244,8 @@ async fn prove_sandbox_package_runtime_bundle_publication(
         CommandOutcome::Applied(_)
     ));
     let draft_digest = draft.document_digest().unwrap();
-    let validator_digest = digest('7');
     let now = Utc::now();
-    registry_command!(
-        repository,
-        request_resource_validation,
-        RequestResourceValidation {
-            audit: audit(TENANT_ID, PRINCIPAL_ID, "8a20", '3', '4'),
-            resource_id: package_resource_id.clone(),
-            expected_resource_version: 1,
-            job_id: sandbox_id(ResourceKind::Job, 8),
-            validator_digest: validator_digest.clone(),
-            validation_profile_digest: digest('8'),
-            attempt_limit: 1,
-            scheduled_at: now,
-            deadline: now + Duration::minutes(5),
-        }
-    )
-    .unwrap();
+    let validator_digest = digest('7');
     let validation = ValidationSummary {
         validator_digest,
         validated_draft_digest: draft_digest.clone(),
@@ -1455,6 +1441,68 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         policies: vec![policy_binding.clone()],
         execution_profile: policy_binding,
     };
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET revision_no = 2 WHERE tenant_id = $1 AND resource_version_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(AGENT_INTERFACE_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7ce0", '1', '2'),
+                deployment_id: id(AGENT_DEPLOYMENT_BAD_BATCH_ID),
+                resource_id: id(AGENT_ID),
+                resource_version_id: id(AGENT_PLAN_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::Agent(closure.clone()),
+                expected_resource_version: 3,
+            }
+        ),
+        Err(RepositoryError::Conflict(
+            "Agent Deployment Interface/Plan publish batch"
+        ))
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET revision_no = 1, resource_id = $1 WHERE tenant_id = $2 AND resource_version_id = $3",
+    )
+    .bind(RESOURCE_ID)
+    .bind(TENANT_ID)
+    .bind(AGENT_INTERFACE_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        registry_command!(
+            repository,
+            create_deployment,
+            CreateDeployment {
+                audit: audit(TENANT_ID, PRINCIPAL_ID, "7ce1", '3', '4'),
+                deployment_id: id(AGENT_DEPLOYMENT_BAD_OWNER_ID),
+                resource_id: id(AGENT_ID),
+                resource_version_id: id(AGENT_PLAN_ID),
+                environment: "test".to_owned(),
+                closure: DeploymentClosure::Agent(closure.clone()),
+                expected_resource_version: 3,
+            }
+        ),
+        Err(RepositoryError::Conflict(
+            "Agent Deployment Interface/Plan publish batch"
+        ))
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.resource_versions SET resource_id = $1 WHERE tenant_id = $2 AND resource_version_id = $3",
+    )
+    .bind(AGENT_ID)
+    .bind(TENANT_ID)
+    .bind(AGENT_INTERFACE_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
     let deployment_audit = audit(TENANT_ID, PRINCIPAL_ID, "7cd7", 'c', 'd');
     let deployment = applied(
         registry_command!(

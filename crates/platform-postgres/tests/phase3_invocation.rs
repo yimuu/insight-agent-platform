@@ -5130,8 +5130,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         schema_digest: output_schema.canonical_digest.clone(),
     };
     let plan = RuntimePlan {
-        plan_version: 4,
-        interface_revision_id: agent_interface.clone(),
+        plan_version: 5,
+        interface_contract_digest: digest('b'),
         entry_node_id: PlanNodeKey::new("start".to_owned()).unwrap(),
         dependency_slots: BTreeMap::from([(
             "writer".to_owned(),
@@ -5178,7 +5178,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         typed_plan_artifact_id: package.artifact.artifact_id().clone(),
         typed_plan_digest: plan_digest,
     });
-    for (exact, revision) in [(&agent_interface_exact, 1), (&agent_plan_exact, 2)] {
+    for (exact, revision) in [(&agent_interface_exact, 1), (&agent_plan_exact, 1)] {
         insert_version(
             pool,
             &tenant_id,

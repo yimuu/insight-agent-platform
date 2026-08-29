@@ -159,8 +159,8 @@ fn fixture_plan() -> RuntimePlan {
     let child = PlanNodeKey::new("child".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 4,
-        interface_revision_id: id(INTERFACE_ID),
+        plan_version: 5,
+        interface_contract_digest: digest('5'),
         entry_node_id: entry.clone(),
         dependency_slots: BTreeMap::from([(
             "child_worker".to_owned(),
@@ -245,8 +245,8 @@ fn child_fixture_plan() -> RuntimePlan {
     let entry = PlanNodeKey::new("entry".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
     RuntimePlan {
-        plan_version: 4,
-        interface_revision_id: id(CHILD_INTERFACE_ID),
+        plan_version: 5,
+        interface_contract_digest: digest('5'),
         entry_node_id: entry.clone(),
         dependency_slots: BTreeMap::new(),
         nodes: BTreeMap::from([

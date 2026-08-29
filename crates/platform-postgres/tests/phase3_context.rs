@@ -604,7 +604,7 @@ struct Fixture {
     runtime_plan: RuntimePlan,
 }
 
-fn context_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
+fn context_runtime_plan(interface_contract_digest: Sha256Digest) -> RuntimePlan {
     let start = PlanNodeKey::new("start".to_owned()).unwrap();
     let catalog = PlanNodeKey::new("catalog".to_owned()).unwrap();
     let finish = PlanNodeKey::new("finish".to_owned()).unwrap();
@@ -617,8 +617,8 @@ fn context_runtime_plan(interface_revision_id: ResourceId) -> RuntimePlan {
         schema_digest: named_digest("observation-schema"),
     };
     let plan = RuntimePlan {
-        plan_version: 4,
-        interface_revision_id,
+        plan_version: 5,
+        interface_contract_digest,
         entry_node_id: start.clone(),
         dependency_slots: BTreeMap::from([(
             "catalog".to_owned(),
@@ -1289,7 +1289,7 @@ async fn seed_fixture_with_backend(
     .unwrap();
 
     let agent_interface = version(ResourceKind::AgentInterfaceRevision, 0x40);
-    let runtime_plan = context_runtime_plan(agent_interface.revision_id.clone());
+    let runtime_plan = context_runtime_plan(named_digest("agent-contract"));
     let runtime_plan_digest = runtime_plan
         .canonical_digest(PlanLimits::from_profile(&checked_in_hard_limit_profile()).unwrap())
         .unwrap();
@@ -1310,7 +1310,7 @@ async fn seed_fixture_with_backend(
         typed_plan_artifact_id: id(ResourceKind::Artifact, 0xa5),
         typed_plan_digest: runtime_plan_digest.clone(),
     });
-    for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 2)] {
+    for (exact, revision_no) in [(&agent_interface, 1), (&agent_plan, 1)] {
         insert_version(
             pool,
             &tenant_id,

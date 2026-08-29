@@ -7,9 +7,9 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, is_job_kind_work_owner_triple,
-    ActiveTarget, AdministrativeGate, AgentResourceSpec, ArtifactRef, AuthoringPackage,
-    CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue, CommandAudit,
-    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
+    ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
+    AuthoringPackage, CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue,
+    CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
     ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
     FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
     InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
@@ -4220,6 +4220,13 @@ impl PgRegistryTransaction {
             ));
         }
         if let DeploymentClosure::Agent(closure) = &command.closure {
+            validate_agent_deployment_publish_pair(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.resource_id,
+                closure,
+            )
+            .await?;
             for slot in &closure.slots {
                 if let FrozenSlotTarget::Context { binding } = &slot.target {
                     if binding.owner_agent_deployment_id != command.deployment_id {
@@ -4943,7 +4950,6 @@ impl PgRepository {
             1,
             &serde_json::json!({
                 "job_id": command.fence.job_id,
-                "schema_version": 1,
                 "validator_principal_id": command.validator_principal_id,
             }),
         )?;
@@ -13542,6 +13548,49 @@ async fn load_controller_remainder_requirements(
         .collect()
 }
 
+async fn validate_agent_deployment_publish_pair(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    agent_id: &ResourceId,
+    closure: &AgentDeploymentClosure,
+) -> Result<(), RepositoryError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT resource_version_id, resource_id, resource_version_kind, revision_no
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND (
+            (resource_version_id = $2 AND resource_version_kind = 'agent_interface_revision') OR
+            (resource_version_id = $3 AND resource_version_kind = 'agent_plan_revision')
+        )
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(closure.interface.revision_id.to_string())
+    .bind(closure.plan.revision_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != 2 {
+        return Err(RepositoryError::NotFound(
+            "exact Agent Interface/Plan revision pair",
+        ));
+    }
+    let expected_agent_id = agent_id.to_string();
+    let mut revision_no = None;
+    for row in rows {
+        let resource_id: String = row.try_get("resource_id")?;
+        let row_revision_no: i64 = row.try_get("revision_no")?;
+        if resource_id != expected_agent_id
+            || revision_no.is_some_and(|expected| expected != row_revision_no)
+        {
+            return Err(RepositoryError::Conflict(
+                "Agent Deployment Interface/Plan publish batch",
+            ));
+        }
+        revision_no = Some(row_revision_no);
+    }
+    Ok(())
+}
+
 fn validate_failure_mutation_shape(
     mutations: &ControllerStepMutationIds,
     structured_exit: bool,
@@ -13584,14 +13633,9 @@ async fn require_exact_runtime_plan(
     plan: &RuntimePlan,
     plan_digest: &Sha256Digest,
 ) -> Result<(), RepositoryError> {
-    if plan.interface_revision_id != run.bindings.agent_interface.revision_id {
-        return Err(RepositoryError::Conflict(
-            "runtime Plan Agent interface binding",
-        ));
-    }
     let row = sqlx::query(
         r#"
-        SELECT payload_schema_version, payload, payload_digest
+        SELECT resource_id, revision_no, payload_schema_version, payload, payload_digest
         FROM insight_platform.resource_versions
         WHERE tenant_id = $1 AND resource_version_id = $2
           AND resource_version_kind = 'agent_plan_revision' AND content_digest = $3
@@ -13604,6 +13648,28 @@ async fn require_exact_runtime_plan(
     .await?
     .ok_or(RepositoryError::NotFound("exact Agent Plan revision"))?;
     let payload = payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+    let plan_resource_id: String = row.try_get("resource_id")?;
+    let plan_revision_no: i64 = row.try_get("revision_no")?;
+    let interface_row = sqlx::query(
+        r#"
+        SELECT resource_id, revision_no
+        FROM insight_platform.resource_versions
+        WHERE tenant_id = $1 AND resource_version_id = $2
+          AND resource_version_kind = 'agent_interface_revision'
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(run.bindings.agent_interface.revision_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("exact Agent Interface revision"))?;
+    let interface_resource_id: String = interface_row.try_get("resource_id")?;
+    let interface_revision_no: i64 = interface_row.try_get("revision_no")?;
+    if plan_resource_id != interface_resource_id || plan_revision_no != interface_revision_no {
+        return Err(RepositoryError::Conflict(
+            "runtime Plan and Agent Interface publish batch",
+        ));
+    }
     let published = decode_published_version_payload(&payload)?;
     published
         .validate_for(RegistryResourceKind::Agent, &run.bindings.plan.revision_id)
@@ -13613,6 +13679,11 @@ async fn require_exact_runtime_plan(
             "Agent Plan revision contains a non-Agent document".to_owned(),
         ));
     };
+    if plan.interface_contract_digest != agent.contract_digest {
+        return Err(RepositoryError::Conflict(
+            "runtime Plan Agent interface contract digest",
+        ));
+    }
     plan.validate_terminal_schema_digests(
         &agent.output_schema.canonical_digest,
         &agent.error_schema.canonical_digest,
