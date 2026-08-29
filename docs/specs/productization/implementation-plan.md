@@ -170,7 +170,19 @@ cgroup、boot ID、PID namespace 与 start ticks；后者只绑定 kernel-authen
 生成 executor instance binding digest，并在 verify/absence 时重新观察，从而拒绝 PID reuse。Controller 默认仍只接受
 private node CIDR；只有配置显式打开 local loopback 后才接受精确 `127.0.0.1/32` 或 `::1/128`。production Helm 明确固定
 `linux_procfs` 且关闭 loopback，Sandbox deployment checker、Attestor 全目标测试和 Controller 测试均通过。该前置只
-使 honest local composition 成为可能；CLI config、三进程启动与 WASI Job 尚未因此完成。
+使 honest local composition 成为可能。
+
+2026-08-30 随后的 fresh `insight dev --profile full` 探针已把 Attestor、Controller 与 restricted-WASI Executor
+接入 CLI 的 closed/digest-bound 配置、project-local CA/mTLS、持久化动态端口、单次 release build closure 和受监督
+启动顺序；与 base/full 其余角色合计 24 个进程持续报告 `ready`。Attestor registry 的最新记录为真实
+`local_unix` variant，包含 kernel-authenticated UID/GID/PID、macOS boot identity、process start identity 与
+project-local instance UID，没有伪造 Pod/cgroup 字段；Controller PostgreSQL dependency observations 为
+success=71/failure=0，Executor NATS observations 为 success=2/failure=0。探针同时暴露并修复了三个真实重启/传输问题：
+继承 setgid 目录 group 的 stale UDS socket 恢复、显式 local loopback route 与 production private-node route 的隔离，
+以及 Executor authority interceptor 必须在 workload URI authorization 后安装 required internal trace context。
+production Helm 仍固定 `linux_procfs`、`allow_loopback_advertised_route=false` 与 `allow_loopback_routes=false`。
+本证据只关闭 full 进程 composition 与空队列 claim/readiness；尚未提交一个真实 WASI Job，也未证明 WASI limit 负向场景、
+remote fixture dispatch 或 OAuth lifecycle，因此仍不得标记 M1/M4 或 spec 00–18 为 Verified。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、

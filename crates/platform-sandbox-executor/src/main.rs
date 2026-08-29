@@ -660,7 +660,7 @@ fn map_driver_join(
 ) -> Result<(), ProcessError> {
     match result {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(_)) => Err(ProcessError::ExecutorFailed),
+        Ok(Err(error)) => Err(ProcessError::ExecutorFailed(error)),
         Err(_) => Err(ProcessError::ExecutorPanicked),
     }
 }
@@ -698,7 +698,7 @@ enum ProcessError {
     KubernetesUnavailable,
     NatsUnavailable,
     SignalUnavailable,
-    ExecutorFailed,
+    ExecutorFailed(insight_platform_sandbox_executor::SandboxExecutorDriverError),
     ExecutorPanicked,
     ExecutorExitedUnexpectedly,
     ControlExitedUnexpectedly,
@@ -730,7 +730,9 @@ impl fmt::Display for ProcessError {
             Self::SignalUnavailable => {
                 formatter.write_str("process signal handling is unavailable")
             }
-            Self::ExecutorFailed => formatter.write_str("Sandbox Executor driver failed"),
+            Self::ExecutorFailed(error) => {
+                write!(formatter, "Sandbox Executor driver failed: {error}")
+            }
             Self::ExecutorPanicked => {
                 formatter.write_str("Sandbox Executor task did not complete safely")
             }

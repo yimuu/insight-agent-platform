@@ -1060,6 +1060,9 @@ fn valid_runtime_role(value: &str) -> bool {
             | "mcp-cleanup"
             | "context-subscription"
             | "callback-api"
+            | "sandbox-attestor"
+            | "sandbox-controller"
+            | "sandbox-executor"
     )
 }
 
@@ -1144,7 +1147,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(28);
+        let mut listeners = Vec::with_capacity(33);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1703,6 +1706,42 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     )?;
     write_local_leaf_certificate(
         &tls_directory,
+        full_profile::SANDBOX_ATTESTOR_CERTIFICATE_FILE,
+        full_profile::SANDBOX_ATTESTOR_PRIVATE_KEY_FILE,
+        &["sandbox-attestor.local"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::SANDBOX_CONTROLLER_CERTIFICATE_FILE,
+        full_profile::SANDBOX_CONTROLLER_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE,
+        full_profile::SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::SANDBOX_CONTROLLER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE,
+        full_profile::SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::WASI_EXECUTOR_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
         full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
         full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
         &[],
@@ -1740,6 +1779,19 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     write_sensitive_new(
         &mcp_oauth_state_directory.join(full_profile::MCP_OAUTH_STATE_KEY_FILE),
         &Sha256::digest(Uuid::now_v7().as_bytes()),
+    )?;
+    let sandbox_state_directory = state_directory
+        .join(RUNTIME_DIRECTORY)
+        .join(full_profile::SANDBOX_STATE_DIRECTORY);
+    fs::create_dir(&sandbox_state_directory).map_err(|source| CliError::InitializeProject {
+        path: sandbox_state_directory.display().to_string(),
+        source,
+    })?;
+    write_sensitive_new(
+        &state_directory
+            .join(RUNTIME_DIRECTORY)
+            .join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE),
+        Uuid::now_v7().hyphenated().to_string().as_bytes(),
     )
 }
 
@@ -2243,6 +2295,23 @@ fn prepare_runtime_profile_inner(
             ),
             artifact_data_worker_port: ports.artifact_data_controller,
         },
+        full_profile::SandboxConfigInputs {
+            runtime: &fs::canonicalize(&runtime).map_err(|source| CliError::InitializeProject {
+                path: runtime.display().to_string(),
+                source,
+            })?,
+            local_instance_uid_path: &fs::canonicalize(
+                runtime.join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE),
+            )
+            .map_err(|source| CliError::InitializeProject {
+                path: runtime
+                    .join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE)
+                    .display()
+                    .to_string(),
+                source,
+            })?,
+            artifact_data_worker_port: ports.artifact_data_controller,
+        },
     ));
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
@@ -2486,12 +2555,6 @@ fn run_development_profile(
     root: &Path,
     profile: DevProfile,
 ) -> Result<String, CliError> {
-    if profile == DevProfile::Full {
-        return Err(CliError::RuntimeUnavailable(
-            "the full profile is not available until its Model, remote Capability, MCP, Context, Egress/Security, Artifact Maintenance and WASI role closure is implemented; use `insight dev --profile base` for the implemented base profile"
-                .to_owned(),
-        ));
-    }
     let workspace = workspace_root(workspace)?;
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
@@ -2965,6 +3028,18 @@ fn ensure_runtime_binaries(
             "insight-platform-callback-api",
             "--bin",
             "platform-callback-api",
+            "-p",
+            "insight-platform-sandbox-attestor",
+            "--bin",
+            "platform-sandbox-attestor",
+            "-p",
+            "insight-platform-sandbox-controller",
+            "--bin",
+            "platform-sandbox-controller",
+            "-p",
+            "insight-platform-sandbox-executor",
+            "--bin",
+            "platform-sandbox-executor",
         ]);
     }
     run_external(command, "build the changed local Platform role closure")?;
@@ -4585,7 +4660,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight task get <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run`, `task`, and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight task get <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run`, `task`, and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. `base` starts the deterministic first-Run closure; `full` adds the independent Model, remote Capability, MCP, Context, Security/Egress, Artifact Maintenance, Callback and local restricted-WASI roles.\n"
 }
 
 fn apply_local_manifest(
@@ -5232,6 +5307,10 @@ mod tests {
             full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
             full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
             full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
+            full_profile::SANDBOX_ATTESTOR_CERTIFICATE_FILE,
+            full_profile::SANDBOX_CONTROLLER_CERTIFICATE_FILE,
+            full_profile::SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE,
+            full_profile::SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -5263,6 +5342,10 @@ mod tests {
                 full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::SANDBOX_ATTESTOR_PRIVATE_KEY_FILE,
+                full_profile::SANDBOX_CONTROLLER_PRIVATE_KEY_FILE,
+                full_profile::SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -5299,6 +5382,32 @@ mod tests {
 
             assert_eq!(
                 fs::metadata(mcp_oauth_state_key)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+        }
+        let sandbox_local_instance_uid = root
+            .join(RUNTIME_DIRECTORY)
+            .join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE);
+        Uuid::parse_str(
+            fs::read_to_string(&sandbox_local_instance_uid)
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert!(root
+            .join(RUNTIME_DIRECTORY)
+            .join(full_profile::SANDBOX_STATE_DIRECTORY)
+            .is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(sandbox_local_instance_uid)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -5413,7 +5522,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 22);
+        assert_eq!(digests.len(), 25);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5467,6 +5576,18 @@ mod tests {
                 full_profile::CONTEXT_SUBSCRIPTION_CONFIG_FILE,
             ),
             ("callback-api", full_profile::CALLBACK_API_CONFIG_FILE),
+            (
+                "sandbox-attestor",
+                full_profile::SANDBOX_ATTESTOR_CONFIG_FILE,
+            ),
+            (
+                "sandbox-controller",
+                full_profile::SANDBOX_CONTROLLER_CONFIG_FILE,
+            ),
+            (
+                "sandbox-executor",
+                full_profile::SANDBOX_EXECUTOR_CONFIG_FILE,
+            ),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

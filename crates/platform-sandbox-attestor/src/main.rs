@@ -67,6 +67,7 @@ struct AttestorProcessConfig {
     attestor_identity_digest: Sha256Digest,
     tls_handshake_timeout_milliseconds: u64,
     shutdown_grace_milliseconds: u64,
+    allow_loopback_advertised_route: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -158,9 +159,12 @@ async fn main() {
 
 async fn run() -> Result<(), ProcessError> {
     let config = AttestorProcessConfig::load()?;
-    let advertised_ip = required(ADVERTISED_IP_ENV)?
+    let advertised_ip: std::net::IpAddr = required(ADVERTISED_IP_ENV)?
         .parse()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
+    if advertised_ip.is_loopback() && !config.allow_loopback_advertised_route {
+        return Err(ProcessError::InvalidConfiguration);
+    }
     let controller_address: SocketAddr = config
         .controller_listen_address
         .parse()
@@ -378,11 +382,11 @@ fn remove_exact_stale_socket(path: &Path) -> Result<(), ProcessError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(ProcessError::RegistrationSocketUnavailable),
     };
-    // SAFETY: geteuid/getegid are side-effect-free process identity queries.
-    let (effective_uid, effective_gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    // SAFETY: geteuid is a side-effect-free process identity query. The socket group may be
+    // inherited from a setgid project directory, so ownership authority is the exact user ID.
+    let effective_uid = unsafe { libc::geteuid() };
     if !metadata.file_type().is_socket()
         || metadata.uid() != effective_uid
-        || metadata.gid() != effective_gid
         || metadata.permissions().mode() & 0o777 != REGISTRATION_SOCKET_MODE
         || std::os::unix::net::UnixStream::connect(path).is_ok()
     {
@@ -518,6 +522,7 @@ mod tests {
             attestor_identity_digest: digest('a'),
             tls_handshake_timeout_milliseconds: 5000,
             shutdown_grace_milliseconds: 10_000,
+            allow_loopback_advertised_route: false,
         }
     }
 

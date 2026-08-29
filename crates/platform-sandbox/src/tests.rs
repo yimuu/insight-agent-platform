@@ -39,8 +39,13 @@ fn attestor_route() -> NodeAttestorRoute {
 }
 
 #[test]
-fn node_attestor_route_is_private_exact_and_closed_on_decode() {
-    for valid in ["https://10.0.0.7:9443", "https://[fd00::7]:9443"] {
+fn node_attestor_route_is_node_local_exact_and_closed_on_decode() {
+    for valid in [
+        "https://10.0.0.7:9443",
+        "https://[fd00::7]:9443",
+        "https://127.0.0.1:9443",
+        "https://[::1]:9443",
+    ] {
         let route: NodeAttestorRoute = valid.parse().unwrap();
         assert_eq!(
             serde_json::to_string(&route).unwrap(),

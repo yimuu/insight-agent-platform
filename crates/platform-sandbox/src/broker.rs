@@ -75,22 +75,23 @@ impl FromStr for NodeAttestorRoute {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let route = Url::parse(value).map_err(|_| Self::Err::Rejected)?;
-        let private_node_address = match route.host() {
+        let node_local_address = match route.host() {
             Some(Host::Ipv4(address)) => {
                 let octets = address.octets();
-                octets[0] == 10
+                address.is_loopback()
+                    || octets[0] == 10
                     || (octets[0] == 172 && (16..=31).contains(&octets[1]))
                     || (octets[0] == 192 && octets[1] == 168)
             }
             Some(Host::Ipv6(address)) => {
                 let first = address.segments()[0];
-                first & 0xfe00 == 0xfc00
+                address.is_loopback() || first & 0xfe00 == 0xfc00
             }
             _ => false,
         };
         if value.len() > 128
             || route.scheme() != "https"
-            || !private_node_address
+            || !node_local_address
             || route.port().is_none()
             || !route.username().is_empty()
             || route.password().is_some()

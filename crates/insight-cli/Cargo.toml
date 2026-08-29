@@ -16,6 +16,8 @@ chrono.workspace = true
 insight-platform-capability-worker.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true
+insight-platform-sandbox-rpc.workspace = true
+insight-platform-sandbox-wasi.workspace = true
 jsonwebtoken.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 reqwest.workspace = true

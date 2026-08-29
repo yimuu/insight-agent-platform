@@ -68,6 +68,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- dict
   "schema_version" 1
   "process_observer" "linux_procfs"
+  "allow_loopback_advertised_route" false
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
   "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.observabilityPort))
@@ -111,6 +112,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- dict
   "schema_version" 1
   "process_observer" "linux_procfs"
+  "allow_loopback_advertised_route" false
   "registration_socket_path" "/run/insight-sandbox-attestor/registration.sock"
   "controller_listen_address" (printf "0.0.0.0:%d" (int .Values.attestor.controllerPort))
   "observability_listen_address" (printf "0.0.0.0:%d" (int .Values.gvisor.attestor.observabilityPort))

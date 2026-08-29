@@ -211,7 +211,7 @@ impl tonic::service::Interceptor for SandboxExecutorAuthorityWorkloadIdentity {
                 GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
             ],
         )?;
-        Ok(request)
+        require_trace_interceptor(request)
     }
 }
 
