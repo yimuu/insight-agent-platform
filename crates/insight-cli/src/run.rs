@@ -3,6 +3,7 @@
 use crate::public_client::{
     PublicClientError, PublicHttpClient, PublicJsonResponse, PublicSseFrame,
 };
+use crate::run_journal::{self, RunControlJournalV1, RunJournalError};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, DataClassification, EventDurability, JsonLimits,
     PublicRunEvent, ResourceId, ResourceKind, RunState, Sha256Digest, UtcTimestamp, ValueRef,
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     io::Write,
+    path::Path,
     str::FromStr as _,
     thread,
     time::{Duration, Instant},
@@ -29,6 +31,7 @@ pub enum RunClientError {
         timeout_seconds: u64,
     },
     Output(String),
+    Journal(RunJournalError),
 }
 
 impl fmt::Display for RunClientError {
@@ -47,6 +50,7 @@ impl fmt::Display for RunClientError {
                 "Run {run_id} did not become terminal within {timeout_seconds} seconds"
             ),
             Self::Output(detail) => write!(formatter, "cannot write Run watch output: {detail}"),
+            Self::Journal(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -55,6 +59,7 @@ impl std::error::Error for RunClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Public(error) => Some(error),
+            Self::Journal(error) => Some(error),
             _ => None,
         }
     }
@@ -63,6 +68,12 @@ impl std::error::Error for RunClientError {
 impl From<PublicClientError> for RunClientError {
     fn from(value: PublicClientError) -> Self {
         Self::Public(value)
+    }
+}
+
+impl From<RunJournalError> for RunClientError {
+    fn from(value: RunJournalError) -> Self {
+        Self::Journal(value)
     }
 }
 
@@ -183,30 +194,104 @@ pub fn control_run(
     client: &PublicHttpClient,
     run_id: &ResourceId,
     action: RunControlAction,
+    journal_directory: &Path,
 ) -> Result<RunViewV1, RunClientError> {
-    let current = read_run(client, run_id)?;
+    require_run_id(run_id)?;
+    let path = run_journal::journal_path(journal_directory, run_id, action.as_str());
+    let mut journal = match run_journal::load(&path)? {
+        Some(journal) => {
+            validate_control_journal(&journal, run_id, action)?;
+            if let Some(result) = &journal.result {
+                validate_run_view(result, Some(run_id), &result.etag)?;
+                let current = read_run(client, run_id)?;
+                if control_effect_is_current(action, result, &current) {
+                    return Ok(current);
+                }
+                new_control_journal(run_id, action, &current.etag)?
+            } else {
+                journal
+            }
+        }
+        None => {
+            let current = read_run(client, run_id)?;
+            new_control_journal(run_id, action, &current.etag)?
+        }
+    };
+    run_journal::save(&path, &journal)?;
+    let response: PublicJsonResponse<RunViewV1> = client.post_empty(
+        &format!("/v1/runs/{run_id}:{}", action.as_str()),
+        StatusCode::OK,
+        &journal.receipt,
+        &journal.if_match,
+    )?;
+    validate_run_response(&response, Some(run_id))?;
+    journal.result = Some(response.body.clone());
+    run_journal::save(&path, &journal)?;
+    Ok(response.body)
+}
+
+fn new_control_journal(
+    run_id: &ResourceId,
+    action: RunControlAction,
+    if_match: &str,
+) -> Result<RunControlJournalV1, RunClientError> {
+    let receipt = control_receipt(run_id, action, if_match)?;
+    Ok(RunControlJournalV1::new(
+        run_id.clone(),
+        action.as_str().to_owned(),
+        receipt,
+        if_match.to_owned(),
+    ))
+}
+
+fn control_receipt(
+    run_id: &ResourceId,
+    action: RunControlAction,
+    if_match: &str,
+) -> Result<String, RunClientError> {
     let receipt_digest = canonical_digest(&serde_json::json!({
         "schema_version": 1,
         "operation": format!("run.{}", action.as_str()),
         "run_id": run_id,
-        "if_match": current.etag,
+        "if_match": if_match,
     }))
     .map_err(|error| RunClientError::InvalidRequest(error.to_string()))?;
-    let receipt = format!(
+    Ok(format!(
         "insight-run-v1-{}-{}",
         receipt_digest
             .strip_prefix("sha256:")
             .unwrap_or(&receipt_digest),
         action.as_str()
-    );
-    let response: PublicJsonResponse<RunViewV1> = client.post_empty(
-        &format!("/v1/runs/{run_id}:{}", action.as_str()),
-        StatusCode::OK,
-        &receipt,
-        &current.etag,
-    )?;
-    validate_run_response(&response, Some(run_id))?;
-    Ok(response.body)
+    ))
+}
+
+fn validate_control_journal(
+    journal: &RunControlJournalV1,
+    run_id: &ResourceId,
+    action: RunControlAction,
+) -> Result<(), RunClientError> {
+    if &journal.run_id != run_id
+        || journal.action != action.as_str()
+        || journal.receipt != control_receipt(run_id, action, &journal.if_match)?
+    {
+        return Err(RunClientError::InvalidResponse(
+            "Run control journal differs from the deterministic command".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn control_effect_is_current(
+    action: RunControlAction,
+    result: &RunViewV1,
+    current: &RunViewV1,
+) -> bool {
+    match action {
+        RunControlAction::Pause | RunControlAction::Resume => {
+            current.pause_generation == result.pause_generation
+        }
+        RunControlAction::Cancel => current.cancel_generation >= result.cancel_generation,
+    }
 }
 
 pub fn read_run_result(
@@ -366,7 +451,14 @@ fn validate_run_response(
     response: &PublicJsonResponse<RunViewV1>,
     expected_run_id: Option<&ResourceId>,
 ) -> Result<(), RunClientError> {
-    let run = &response.body;
+    validate_run_view(&response.body, expected_run_id, &response.etag)
+}
+
+fn validate_run_view(
+    run: &RunViewV1,
+    expected_run_id: Option<&ResourceId>,
+    envelope_etag: &str,
+) -> Result<(), RunClientError> {
     if run.schema_version != 1
         || run.run_id.kind() != ResourceKind::Run
         || expected_run_id.is_some_and(|expected| expected != &run.run_id)
@@ -377,7 +469,7 @@ fn validate_run_response(
             .as_ref()
             .is_some_and(|id| id.kind() != ResourceKind::RunValue)
         || run.version == 0
-        || run.etag != response.etag
+        || run.etag != envelope_etag
         || run.etag != format!("\"{}-{}\"", run.run_id, run.version)
         || run.updated_at.as_str() < run.created_at.as_str()
         || run
@@ -450,11 +542,13 @@ mod tests {
     };
     use serde_json::json;
     use std::{
+        fs,
         io::Read as _,
         net::{TcpListener, TcpStream},
         thread,
         time::Duration,
     };
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     fn id(kind: ResourceKind) -> ResourceId {
@@ -662,9 +756,128 @@ mod tests {
         .unwrap();
         let created = create_run(&client, &serde_json::to_vec(&request).unwrap()).unwrap();
         assert_eq!(created, initial);
-        let controlled = control_run(&client, &run_id, RunControlAction::Pause).unwrap();
+        let journals = TempDir::new().unwrap();
+        let controlled =
+            control_run(&client, &run_id, RunControlAction::Pause, journals.path()).unwrap();
         assert_eq!(controlled, paused);
         assert_eq!(read_run_result(&client, &run_id).unwrap(), result);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn control_replays_exact_intent_after_response_loss() {
+        let run_id = id(ResourceKind::Run);
+        let current = RunViewV1 {
+            schema_version: 1,
+            run_id: run_id.clone(),
+            agent_deployment_id: id(ResourceKind::AgentDeployment),
+            state: RunState::Running,
+            version: 1,
+            input_value_id: id(ResourceKind::RunValue),
+            output_value_id: None,
+            pause_generation: 0,
+            cancel_generation: 0,
+            deadline: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+            started_at: Some("2026-08-29T00:00:01.000000Z".parse().unwrap()),
+            terminal_at: None,
+            created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
+            updated_at: "2026-08-29T00:00:01.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-1\""),
+        };
+        let paused = RunViewV1 {
+            state: RunState::Waiting,
+            version: 2,
+            pause_generation: 1,
+            updated_at: "2026-08-29T00:00:02.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-2\""),
+            ..current.clone()
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_run_id = run_id.clone();
+        let server_current = current.clone();
+        let server_paused = paused.clone();
+        let server =
+            thread::spawn(move || {
+                let (mut first_read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut first_read);
+                assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                write_json_response(
+                    &mut first_read,
+                    "200 OK",
+                    "11111111111111111111111111111111",
+                    Some(&server_current.etag),
+                    None,
+                    &server_current,
+                );
+
+                let (mut dropped, _) = listener.accept().unwrap();
+                let (dropped_head, _) = read_request(&mut dropped);
+                assert!(dropped_head
+                    .starts_with(&format!("POST /v1/runs/{server_run_id}:pause HTTP/1.1")));
+                let receipt = header_value(&dropped_head, "idempotency-key")
+                    .unwrap()
+                    .to_owned();
+                let if_match = header_value(&dropped_head, "if-match").unwrap().to_owned();
+                drop(dropped);
+
+                let (mut replay, _) = listener.accept().unwrap();
+                let (replay_head, _) = read_request(&mut replay);
+                assert!(replay_head
+                    .starts_with(&format!("POST /v1/runs/{server_run_id}:pause HTTP/1.1")));
+                assert_eq!(
+                    header_value(&replay_head, "idempotency-key"),
+                    Some(receipt.as_str())
+                );
+                assert_eq!(
+                    header_value(&replay_head, "if-match"),
+                    Some(if_match.as_str())
+                );
+                let trace = request_trace_id(&replay_head);
+                write_json_response(
+                    &mut replay,
+                    "200 OK",
+                    &trace,
+                    Some(&server_paused.etag),
+                    None,
+                    &server_paused,
+                );
+
+                let (mut final_read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut final_read);
+                assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                write_json_response(
+                    &mut final_read,
+                    "200 OK",
+                    "22222222222222222222222222222222",
+                    Some(&server_paused.etag),
+                    None,
+                    &server_paused,
+                );
+            });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let journals = TempDir::new().unwrap();
+        assert!(matches!(
+            control_run(&client, &run_id, RunControlAction::Pause, journals.path()),
+            Err(RunClientError::Public(PublicClientError::Transport(_)))
+        ));
+        assert_eq!(
+            control_run(&client, &run_id, RunControlAction::Pause, journals.path()).unwrap(),
+            paused
+        );
+        assert_eq!(
+            control_run(&client, &run_id, RunControlAction::Pause, journals.path()).unwrap(),
+            paused
+        );
+        let journal =
+            fs::read_to_string(run_journal::journal_path(journals.path(), &run_id, "pause"))
+                .unwrap();
+        assert!(!journal.contains("Bearer"));
         server.join().unwrap();
     }
 

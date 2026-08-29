@@ -37,6 +37,11 @@ sequence，随后立即输出一条 tagged JSON Line 并 flush。Run authority �
 - result 按合同不要求 ETag，但仍要求 closed JSON、trace、private no-store envelope；Inline 结果重新计算 canonical
   content digest，Artifact 结果重验 digest 与 classification。
 
+control mutation 在 `.insight/run-control/<run_id>-<action>.json` 使用 bounded、closed、原子替换的本地 journal。CLI
+在发送前写入 exact Receipt/If-Match，响应校验后只保存 public Run projection。未决 journal 下次执行时不先读取可能已
+变化的 ETag，而是重放原 intent；已完成 journal 则读取 current Run，并以 pause/cancel generation 判断该 effect 是否仍
+为 current。journal 不保存 token、请求 Authorization 或内部 control payload。
+
 ## 3. 当前证据与剩余门禁
 
 loopback HTTP fixture 已覆盖 create -> read current -> CAS pause -> result，断言 Authorization、Receipt、If-Match、
@@ -44,9 +49,11 @@ trace、Location、ETag，以及无 ETag 的 result envelope。另一 fixture �
 页 opaque cursor、sequence 单调、event/Run identity 一致，并证明两个 event record 与 terminal record 各自 flush。
 closed request 和 result digest 另有负向单元测试。
 
+control crash-window fixture 在服务端收到 pause 后丢弃响应，确认第二次 CLI 调用跳过 GET 并复用 exact Receipt/If-Match；
+authority 响应持久化后，第三次调用只读取 current Run，不创建第二个 mutation。
+
 本批尚不关闭 M2：
 
-- control mutation 的 request-before-send journal 与 response-loss 精确恢复尚未实现；
 - cursor expired/invalid、429/503、truncated/oversized/duplicate SSE frame 与 timeout 的完整负向矩阵尚未实现；
 - 真实 Gateway + fresh PostgreSQL + Orchestration Worker 的 first Run 和跨 worker restart 尚未形成 P1 journey；
 - terminal failure、409/412/429 与 result-not-ready 的 CLI fixture 尚未完成。

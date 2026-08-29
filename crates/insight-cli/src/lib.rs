@@ -9,6 +9,7 @@ mod apply_journal;
 mod artifact;
 mod public_client;
 mod run;
+mod run_journal;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{
@@ -3979,7 +3980,13 @@ fn control_local_run(
         CliRunControlAction::Cancel => run::RunControlAction::Cancel,
     };
     let (client, _) = local_runtime_http_client(root)?;
-    let view = run::control_run(&client, &run_id, action).map_err(CliError::Run)?;
+    let view = run::control_run(
+        &client,
+        &run_id,
+        action,
+        &root.join(PROJECT_DIRECTORY).join("run-control"),
+    )
+    .map_err(CliError::Run)?;
     render_json(&view)
 }
 
