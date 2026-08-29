@@ -236,7 +236,8 @@ impl InstalledCapabilityHttpEndpointCatalog {
     pub fn new(
         entries: Vec<InstalledCapabilityHttpEndpoint>,
     ) -> Result<Self, EgressConfigurationError> {
-        if entries.is_empty() || entries.len() > MAX_INSTALLED_CAPABILITY_HTTP_ENDPOINTS {
+        // Empty is the closed deny-all catalog; requests still fail before dispatch.
+        if entries.len() > MAX_INSTALLED_CAPABILITY_HTTP_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
         let mut catalog = BTreeMap::new();

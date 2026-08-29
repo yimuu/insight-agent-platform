@@ -751,3 +751,13 @@ fn resolved_secret_debug_output_never_contains_material() {
     assert!(!debug.contains("never-print-this"));
     assert!(!debug.contains("material"));
 }
+
+#[test]
+fn empty_installed_catalogs_are_explicit_deny_all_closures() {
+    InstalledModelProviderEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledCapabilityHttpEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledCapabilityGrpcEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledRemoteContextEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledMcpStreamableHttpEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledMcpOAuthVerificationCatalog::new(Vec::new()).unwrap();
+}

@@ -959,7 +959,8 @@ impl InstalledMcpStreamableHttpEndpointCatalog {
     pub fn new(
         entries: Vec<InstalledMcpStreamableHttpEndpoint>,
     ) -> Result<Self, EgressConfigurationError> {
-        if entries.is_empty() || entries.len() > MAX_INSTALLED_MCP_HTTP_ENDPOINTS {
+        // Empty is the closed deny-all catalog; requests still fail before dispatch.
+        if entries.len() > MAX_INSTALLED_MCP_HTTP_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
         let mut catalog = BTreeMap::new();

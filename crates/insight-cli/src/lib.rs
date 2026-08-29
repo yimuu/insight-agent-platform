@@ -83,6 +83,10 @@ const RUNTIME_PROCESS_STATE_FILE: &str = "processes.json";
 const RUNTIME_LOG_DIRECTORY: &str = "logs";
 const LOCAL_ARTIFACT_BUCKET: &str = "insight-platform-artifacts";
 const LOCAL_AWS_ENDPOINT: &str = "https://localhost.localstack.cloud:4566";
+const LOCAL_SECRET_READINESS_NAME: &str = "insight/platform/readiness";
+const LOCAL_SECRET_NAME_PREFIX: &str = "insight/platform/prepared";
+const LOCAL_TEST_SECRET_READINESS_ARN: &str =
+    "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-local";
 const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
 const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
@@ -1045,6 +1049,7 @@ fn valid_runtime_role(value: &str) -> bool {
             | "context-native"
             | "artifact-maintenance"
             | "security-authority"
+            | "egress-broker"
     )
 }
 
@@ -1098,6 +1103,8 @@ struct RuntimeProfileState {
     #[serde(default)]
     source_fingerprint: String,
     kms_key_arn: String,
+    #[serde(default)]
+    secret_readiness_arn: String,
     s3_bucket: String,
     #[serde(default = "RuntimePortBindings::legacy_defaults")]
     ports: RuntimePortBindings,
@@ -1660,6 +1667,7 @@ pub fn prepare_runtime_profile(
     prepare_runtime_profile_with_ports(
         root,
         kms_key_arn,
+        LOCAL_TEST_SECRET_READINESS_ARN,
         source_fingerprint,
         &RuntimePortBindings::legacy_defaults(),
     )
@@ -1668,6 +1676,7 @@ pub fn prepare_runtime_profile(
 fn prepare_runtime_profile_with_ports(
     root: &Path,
     kms_key_arn: &str,
+    secret_readiness_arn: &str,
     source_fingerprint: &str,
     ports: &RuntimePortBindings,
 ) -> Result<BTreeMap<String, String>, CliError> {
@@ -1680,6 +1689,7 @@ fn prepare_runtime_profile_with_ports(
             path: root.join(PROJECT_DIRECTORY).display().to_string(),
         });
     }
+    validate_local_secret_readiness_arn(root, secret_readiness_arn)?;
     let state_directory = root.join(PROJECT_DIRECTORY);
     let project = load_local_project_state(&state_directory)?;
     validate_loaded_local_identity(&state_directory, &project.identity)?;
@@ -1699,6 +1709,7 @@ fn prepare_runtime_profile_with_ports(
         &configuration_directory,
         &project.identity,
         kms_key_arn,
+        secret_readiness_arn,
         source_fingerprint,
         ports,
     );
@@ -1713,6 +1724,7 @@ fn prepare_runtime_profile_inner(
     configuration_directory: &Path,
     identity: &LocalIdentityState,
     kms_key_arn: &str,
+    secret_readiness_arn: &str,
     source_fingerprint: &str,
     ports: &RuntimePortBindings,
 ) -> Result<BTreeMap<String, String>, CliError> {
@@ -1724,6 +1736,7 @@ fn prepare_runtime_profile_inner(
             path: state_directory.display().to_string(),
         })?;
     let catalog = local_artifact_provider_catalog(kms_key_arn)?;
+    let secret_provider_catalog = local_secret_provider_catalog(kms_key_arn, secret_readiness_arn)?;
     let scanner_contract_digest = local_digest("artifact-scanner-contract")?;
     let write_storage_binding_digest = catalog["write_storage_binding_digest"]
         .as_str()
@@ -2029,7 +2042,41 @@ fn prepare_runtime_profile_inner(
         &catalog,
         &local_digest("context-native-adapter")?,
         &local_digest("context-native-contract")?,
-        &identity.egress_broker_principal_id,
+        full_profile::EgressConfigInputs {
+            service_principal_id: &identity.egress_broker_principal_id,
+            secret_provider_catalog: &secret_provider_catalog,
+            mcp_state_key_root: &fs::canonicalize(
+                runtime.join(full_profile::MCP_STATE_KEY_DIRECTORY),
+            )
+            .map_err(|source| CliError::InitializeProject {
+                path: runtime
+                    .join(full_profile::MCP_STATE_KEY_DIRECTORY)
+                    .display()
+                    .to_string(),
+                source,
+            })?,
+            mcp_state_key_path: &fs::canonicalize(
+                runtime
+                    .join(full_profile::MCP_STATE_KEY_DIRECTORY)
+                    .join(full_profile::MCP_STATE_KEY_FILE),
+            )
+            .map_err(|source| CliError::InitializeProject {
+                path: runtime
+                    .join(full_profile::MCP_STATE_KEY_DIRECTORY)
+                    .join(full_profile::MCP_STATE_KEY_FILE)
+                    .display()
+                    .to_string(),
+                source,
+            })?,
+            mcp_state_key_reference_digest: &format!(
+                "sha256:{}",
+                lower_hex(&Sha256::digest(read_bounded_identity_file(
+                    &runtime
+                        .join(full_profile::MCP_STATE_KEY_DIRECTORY)
+                        .join(full_profile::MCP_STATE_KEY_FILE),
+                )?))
+            ),
+        },
     ));
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
@@ -2050,10 +2097,11 @@ fn prepare_runtime_profile_inner(
     let cursor_key = Sha256::digest(Uuid::now_v7().as_bytes());
     write_sensitive_new(&runtime.join(RUNTIME_CURSOR_KEY_FILE), &cursor_key)?;
     let profile = RuntimeProfileState {
-        schema_version: 1,
+        schema_version: 2,
         kind: "insight.dev.runtime-profile/v1".to_owned(),
         source_fingerprint: source_fingerprint.to_owned(),
         kms_key_arn: kms_key_arn.to_owned(),
+        secret_readiness_arn: secret_readiness_arn.to_owned(),
         s3_bucket: LOCAL_ARTIFACT_BUCKET.to_owned(),
         ports: ports.clone(),
         config_digests: digests.clone(),
@@ -2133,6 +2181,63 @@ fn local_artifact_provider_catalog(kms_key_arn: &str) -> Result<serde_json::Valu
             "connect_timeout_milliseconds": 5000,
             "operation_timeout_milliseconds": 30000,
         }],
+    }))
+}
+
+fn validate_local_secret_readiness_arn(root: &Path, value: &str) -> Result<(), CliError> {
+    let valid = value.len() <= 2_048
+        && value.is_ascii()
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+        && value
+            .split_once(":secret:")
+            .is_some_and(|(authority, name)| {
+                authority.starts_with("arn:aws:secretsmanager:us-east-1:")
+                    && name.starts_with("insight/platform/readiness-")
+            });
+    if valid {
+        Ok(())
+    } else {
+        Err(CliError::InvalidLocalIdentity {
+            path: root.join(PROJECT_DIRECTORY).display().to_string(),
+        })
+    }
+}
+
+fn local_secret_provider_catalog(
+    kms_key_arn: &str,
+    readiness_secret_arn: &str,
+) -> Result<serde_json::Value, CliError> {
+    let (authority, _) = readiness_secret_arn.split_once(":secret:").ok_or_else(|| {
+        CliError::InvalidLocalIdentity {
+            path: "local Secret provider configuration".to_owned(),
+        }
+    })?;
+    let mut provider = serde_json::json!({
+        "schema_version": 1,
+        "provider_id": fresh_resource_id(ResourceKind::SecretProvider),
+        "region": "us-east-1",
+        "secrets_endpoint": LOCAL_AWS_ENDPOINT,
+        "kms_endpoint": LOCAL_AWS_ENDPOINT,
+        "kms_key_arn": kms_key_arn,
+        "secret_arn_prefix": format!("{authority}:secret:insight/platform/"),
+        "secret_name_prefix": LOCAL_SECRET_NAME_PREFIX,
+        "readiness_secret_id": readiness_secret_arn,
+        "connect_timeout_milliseconds": 5000,
+        "operation_timeout_milliseconds": 30000,
+    });
+    let digest = canonical_digest(&provider).map_err(|_| CliError::InvalidLocalIdentity {
+        path: "local Secret provider configuration".to_owned(),
+    })?;
+    provider
+        .as_object_mut()
+        .expect("local provider configuration is an object")
+        .insert(
+            "provider_config_digest".to_owned(),
+            serde_json::Value::String(digest),
+        );
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "providers": [provider],
     }))
 }
 
@@ -2249,10 +2354,16 @@ fn run_development_profile(
     let profile_state = match read_runtime_profile_state(&runtime)? {
         Some(state) => state,
         None => {
-            let kms_key_arn =
+            let (kms_key_arn, secret_readiness_arn) =
                 initialize_localstack_artifact_dependency(&workspace, &compose_project, &runtime)?;
             let ports = RuntimePortBindings::allocate()?;
-            prepare_runtime_profile_with_ports(&root, &kms_key_arn, &fingerprint, &ports)?;
+            prepare_runtime_profile_with_ports(
+                &root,
+                &kms_key_arn,
+                &secret_readiness_arn,
+                &fingerprint,
+                &ports,
+            )?;
             read_runtime_profile_state(&runtime)?.ok_or_else(|| {
                 CliError::RuntimeState(
                     "runtime profile was not persisted after generation".to_owned(),
@@ -2272,6 +2383,20 @@ fn run_development_profile(
                 .to_owned(),
         )
     })?;
+    if profile == DevProfile::Full {
+        if profile_state.secret_readiness_arn.is_empty() {
+            return Err(CliError::RuntimeUnavailable(
+                "the persisted local profile predates the full-profile Secret authority; initialize a fresh local project before starting `--profile full`"
+                    .to_owned(),
+            ));
+        }
+        ensure_localstack_secret_dependency(
+            &workspace,
+            &compose_project,
+            &runtime,
+            &profile_state.secret_readiness_arn,
+        )?;
+    }
     ensure_runtime_binaries(&workspace, &runtime, &fingerprint, profile)?;
     provision_and_bootstrap_authority(&workspace, &runtime, &project.identity, &profile_state)?;
     let processes = start_profile_processes(&workspace, &runtime, &profile_state, profile)?;
@@ -2353,18 +2478,8 @@ fn stop_development_profile(workspace: &Path, root: &Path) -> Result<String, Cli
             "no local Platform process state exists; run `insight dev` first".to_owned(),
         )
     })?;
-    for role in [
-        "gateway-runtime",
-        "gateway-management",
-        "orchestration",
-        "registry-validation",
-        "capability-native",
-        "artifact-gateway",
-        "artifact-data",
-    ] {
-        if let Some(process) = state.processes.get(role) {
-            stop_process(process.pid)?;
-        }
+    for process in state.processes.values() {
+        stop_process(process.pid)?;
     }
     state.processes.clear();
     write_runtime_json_replace(&runtime.join(RUNTIME_PROCESS_STATE_FILE), &state)?;
@@ -2439,7 +2554,7 @@ fn initialize_localstack_artifact_dependency(
     workspace: &Path,
     compose_project: &str,
     runtime: &Path,
-) -> Result<String, CliError> {
+) -> Result<(String, String), CliError> {
     compose_awslocal(
         workspace,
         compose_project,
@@ -2489,7 +2604,28 @@ fn initialize_localstack_artifact_dependency(
             "local KMS did not return a valid key ARN".to_owned(),
         ));
     }
-    Ok(arn.to_owned())
+    let secret_arn = compose_awslocal(
+        workspace,
+        compose_project,
+        runtime,
+        &[
+            "secretsmanager",
+            "create-secret",
+            "--name",
+            LOCAL_SECRET_READINESS_NAME,
+            "--secret-string",
+            "ready",
+            "--kms-key-id",
+            arn,
+            "--query",
+            "ARN",
+            "--output",
+            "text",
+        ],
+    )?;
+    let secret_arn = secret_arn.trim();
+    validate_local_secret_readiness_arn(Path::new("."), secret_arn)?;
+    Ok((arn.to_owned(), secret_arn.to_owned()))
 }
 
 fn ensure_localstack_artifact_dependency(
@@ -2520,6 +2656,26 @@ fn ensure_localstack_artifact_dependency(
         compose_project,
         runtime,
         &["kms", "describe-key", "--key-id", kms_key_arn],
+    )?;
+    Ok(())
+}
+
+fn ensure_localstack_secret_dependency(
+    workspace: &Path,
+    compose_project: &str,
+    runtime: &Path,
+    readiness_secret_arn: &str,
+) -> Result<(), CliError> {
+    compose_awslocal(
+        workspace,
+        compose_project,
+        runtime,
+        &[
+            "secretsmanager",
+            "describe-secret",
+            "--secret-id",
+            readiness_secret_arn,
+        ],
     )?;
     Ok(())
 }
@@ -2609,6 +2765,10 @@ fn ensure_runtime_binaries(
             "insight-platform-security-authority",
             "--bin",
             "platform-security-authority",
+            "-p",
+            "insight-platform-egress-broker",
+            "--bin",
+            "platform-egress-broker",
         ]);
     }
     run_external(command, "build the changed local Platform role closure")?;
@@ -5013,7 +5173,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 11);
+        assert_eq!(digests.len(), 12);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5044,6 +5204,7 @@ mod tests {
                 "security-authority",
                 full_profile::SECURITY_AUTHORITY_CONFIG_FILE,
             ),
+            ("egress-broker", full_profile::EGRESS_BROKER_CONFIG_FILE),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

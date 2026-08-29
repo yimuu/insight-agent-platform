@@ -154,7 +154,9 @@ impl InstalledMcpOAuthVerificationCatalog {
     pub fn new(
         bindings: Vec<InstalledMcpOAuthVerificationBinding>,
     ) -> Result<Self, McpOAuthEgressConfigurationError> {
-        if bindings.is_empty() || bindings.len() > MAX_INSTALLED_MCP_OAUTH_VERIFICATION_BINDINGS {
+        // Empty is the closed deny-all verifier catalog. OAuth cannot be attempted until an exact
+        // Auth Policy binding is installed, but the shared broker may still serve other lanes.
+        if bindings.len() > MAX_INSTALLED_MCP_OAUTH_VERIFICATION_BINDINGS {
             return Err(McpOAuthEgressConfigurationError::InvalidVerificationCatalog);
         }
         let mut installed = BTreeMap::new();

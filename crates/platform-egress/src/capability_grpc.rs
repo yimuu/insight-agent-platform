@@ -245,7 +245,8 @@ impl InstalledCapabilityGrpcEndpointCatalog {
     pub fn new(
         entries: Vec<InstalledCapabilityGrpcEndpoint>,
     ) -> Result<Self, EgressConfigurationError> {
-        if entries.is_empty() || entries.len() > MAX_INSTALLED_CAPABILITY_GRPC_ENDPOINTS {
+        // Empty is the closed deny-all catalog; requests still fail before dispatch.
+        if entries.len() > MAX_INSTALLED_CAPABILITY_GRPC_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
         let mut catalog = BTreeMap::new();

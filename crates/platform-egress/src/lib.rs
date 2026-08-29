@@ -185,7 +185,9 @@ impl InstalledModelProviderEndpointCatalog {
     pub fn new(
         entries: Vec<InstalledModelProviderEndpoint>,
     ) -> Result<Self, EgressConfigurationError> {
-        if entries.is_empty() || entries.len() > MAX_INSTALLED_MODEL_ENDPOINTS {
+        // An empty installed closure is a valid deny-all state. This lets deployments enable the
+        // broker before a Model endpoint is admitted without inventing a permissive placeholder.
+        if entries.len() > MAX_INSTALLED_MODEL_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
         let mut catalog = BTreeMap::new();

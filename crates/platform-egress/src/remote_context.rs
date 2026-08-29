@@ -185,7 +185,8 @@ impl InstalledRemoteContextEndpointCatalog {
     pub fn new(
         entries: Vec<InstalledRemoteContextEndpoint>,
     ) -> Result<Self, EgressConfigurationError> {
-        if entries.is_empty() || entries.len() > MAX_INSTALLED_REMOTE_CONTEXT_ENDPOINTS {
+        // Empty is the closed deny-all catalog; requests still fail before dispatch.
+        if entries.len() > MAX_INSTALLED_REMOTE_CONTEXT_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
         let mut catalog = BTreeMap::new();

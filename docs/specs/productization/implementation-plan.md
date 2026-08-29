@@ -117,8 +117,13 @@ Security/Egress 前置身份随后已按独立 authority owner 扩展：developm
 Broker SPIFFE URI 的 ClientAuth 证书，Security Authority 配置只包含 PostgreSQL/RPC 边界而不包含 Secret provider。
 Egress Broker 现在另有独立 ServerAuth 证书、持久化动态 RPC/observability 端口，以及权限收紧的 exact 32-byte
 MCP remote-task/subscription state key；旧的已持久化 port closure 使用固定 additive defaults 重放，不旋转已有 identity。
-fresh PostgreSQL 上七个 base roles、P2 deterministic Run 与单独 Security Authority readiness 探针均通过；Egress
-Broker 的 closed endpoint/provider catalog 和进程启动仍未完成，因此仍不构成 full/M1 完成证据。
+LocalStack closure 增加 Secrets Manager，fresh profile 创建并持久化 exact readiness Secret ARN；Egress 的 AWS provider
+config 冻结同一 KMS key、Secret namespace、HTTPS endpoint 和 canonical config digest。未安装 exact Deployment 的 Model、
+Capability HTTP/gRPC、MCP/OAuth 与 remote Context lane 使用显式空 catalog 作为 deny-all closure，任何请求仍在 dispatch 前
+失败，而 Broker 不再被迫使用虚构 endpoint 才能启动。2026-08-29 fresh PostgreSQL/LocalStack 探针已同时启动七个 base
+roles、Security Authority 与 Egress Broker；双向 TLS readiness 为 `ready`，dependency metrics 对 KMS 与 Secret 各记录一次
+success、零 failure。实际 remote endpoint catalog、对应 worker、一次受监督 `full` journey 与 WASI 仍未完成，因此仍不构成
+full/M1 完成证据。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、

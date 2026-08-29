@@ -2,7 +2,7 @@
 
 `compose.yaml` is consumed only by the `insight dev --profile base` supervisor. It provides the
 durable/external dependencies that existing Platform processes require: PostgreSQL 16, NATS and
-a pinned LocalStack Community 3.8.1 S3/KMS implementation. The platform Gateway, Artifact
+a pinned LocalStack Community 3.8.1 S3/KMS/Secrets Manager implementation. The platform Gateway, Artifact
 Gateway, Artifact Data Worker, Orchestration Worker and Native Capability Worker are **not**
 reimplemented here; the CLI starts their checked Cargo products as independent processes.
 
@@ -23,6 +23,8 @@ key, then starts the seven independent roles. It writes only generated state bel
 `/path/to/my-platform-project/.insight/`; private keys do not enter the role configuration files.
 
 PostgreSQL, NATS, and LocalStack keep their fixed loopback ports `5432`, `4222`, and `4566`.
+Secrets Manager is prepared in the same pinned LocalStack process for the additive `full` profile;
+the `base` role set never starts Security Authority or Egress Broker.
 NATS JetStream requires mutual TLS even in the development profile. `insight init` generates a
 project-local CA, `localhost` server certificate and client certificate; the supervisor passes only
 the three exact server-side paths to Compose, while NATS-consuming Platform roles receive the CA
