@@ -109,8 +109,10 @@ Security/Egress 前置身份随后已按独立 authority owner 扩展：developm
 集合，新建 profile 使用 schema v2 同时创建 Registry Validator 与独立 Egress Broker `ServiceIdentity`，旧 schema v1
 仍可 exact replay。CLI identity schema v3 生成 Egress principal、Security Authority ServerAuth 证书及带 exact Egress
 Broker SPIFFE URI 的 ClientAuth 证书，Security Authority 配置只包含 PostgreSQL/RPC 边界而不包含 Secret provider。
+Egress Broker 现在另有独立 ServerAuth 证书、持久化动态 RPC/observability 端口，以及权限收紧的 exact 32-byte
+MCP remote-task/subscription state key；旧的已持久化 port closure 使用固定 additive defaults 重放，不旋转已有 identity。
 fresh PostgreSQL 上七个 base roles、P2 deterministic Run 与单独 Security Authority readiness 探针均通过；Egress
-Broker 及下游 full roles 尚未启动，因此仍不构成 full/M1 完成证据。
+Broker 的 closed endpoint/provider catalog 和进程启动仍未完成，因此仍不构成 full/M1 完成证据。
 
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、

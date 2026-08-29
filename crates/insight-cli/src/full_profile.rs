@@ -18,6 +18,10 @@ pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE: &str = "egress-broker-client-key.pem";
+pub(crate) const EGRESS_BROKER_CERTIFICATE_FILE: &str = "egress-broker.pem";
+pub(crate) const EGRESS_BROKER_PRIVATE_KEY_FILE: &str = "egress-broker-key.pem";
+pub(crate) const MCP_STATE_KEY_DIRECTORY: &str = "mcp-state-keys";
+pub(crate) const MCP_STATE_KEY_FILE: &str = "current";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
 
@@ -48,6 +52,10 @@ pub(crate) struct PortBindings {
     pub(crate) artifact_maintenance_observability: u16,
     pub(crate) security_authority: u16,
     pub(crate) security_authority_observability: u16,
+    #[serde(default = "default_egress_broker_port")]
+    pub(crate) egress_broker: u16,
+    #[serde(default = "default_egress_broker_observability_port")]
+    pub(crate) egress_broker_observability: u16,
 }
 
 impl PortBindings {
@@ -57,6 +65,8 @@ impl PortBindings {
             artifact_maintenance_observability: next()?,
             security_authority: next()?,
             security_authority_observability: next()?,
+            egress_broker: next()?,
+            egress_broker_observability: next()?,
         })
     }
 
@@ -66,8 +76,18 @@ impl PortBindings {
             artifact_maintenance_observability: 19_096,
             security_authority: 19_097,
             security_authority_observability: 19_098,
+            egress_broker: default_egress_broker_port(),
+            egress_broker_observability: default_egress_broker_observability_port(),
         }
     }
+}
+
+const fn default_egress_broker_port() -> u16 {
+    19_099
+}
+
+const fn default_egress_broker_observability_port() -> u16 {
+    19_100
 }
 
 impl Default for PortBindings {
@@ -302,6 +322,8 @@ mod tests {
             artifact_maintenance_observability: 31_002,
             security_authority: 31_003,
             security_authority_observability: 31_004,
+            egress_broker: 31_005,
+            egress_broker_observability: 31_006,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -334,6 +356,8 @@ mod tests {
             artifact_maintenance_observability: 31_002,
             security_authority: 31_003,
             security_authority_observability: 31_004,
+            egress_broker: 31_005,
+            egress_broker_observability: 31_006,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -378,5 +402,18 @@ mod tests {
         assert!(launches[2].environment.iter().any(|(name, value)| *name
             == "PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH"
             && value == "/project/runtime/tls/ca.pem"));
+    }
+
+    #[test]
+    fn persisted_pre_egress_ports_replay_with_fixed_additive_defaults() {
+        let ports: PortBindings = serde_json::from_value(json!({
+            "context_native_observability": 31_001,
+            "artifact_maintenance_observability": 31_002,
+            "security_authority": 31_003,
+            "security_authority_observability": 31_004
+        }))
+        .unwrap();
+        assert_eq!(ports.egress_broker, 19_099);
+        assert_eq!(ports.egress_broker_observability, 19_100);
     }
 }

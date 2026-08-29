@@ -1127,7 +1127,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(14);
+        let mut listeners = Vec::with_capacity(16);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1584,6 +1584,26 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
         Some(full_profile::EGRESS_BROKER_WORKLOAD_IDENTITY),
         ExtendedKeyUsagePurpose::ClientAuth,
         &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
+        full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    let mcp_state_directory = state_directory
+        .join(RUNTIME_DIRECTORY)
+        .join(full_profile::MCP_STATE_KEY_DIRECTORY);
+    fs::create_dir(&mcp_state_directory).map_err(|source| CliError::InitializeProject {
+        path: mcp_state_directory.display().to_string(),
+        source,
+    })?;
+    write_sensitive_new(
+        &mcp_state_directory.join(full_profile::MCP_STATE_KEY_FILE),
+        &Sha256::digest(Uuid::now_v7().as_bytes()),
     )
 }
 
@@ -4841,6 +4861,7 @@ mod tests {
             RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
             full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
             full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
+            full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -4859,6 +4880,7 @@ mod tests {
                 RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
                 full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -4869,6 +4891,20 @@ mod tests {
                     0
                 );
             }
+        }
+        let mcp_state_key = root
+            .join(RUNTIME_DIRECTORY)
+            .join(full_profile::MCP_STATE_KEY_DIRECTORY)
+            .join(full_profile::MCP_STATE_KEY_FILE);
+        assert_eq!(fs::read(&mcp_state_key).unwrap().len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(mcp_state_key).unwrap().permissions().mode() & 0o077,
+                0
+            );
         }
         let verifier = InstalledOidcVerifierConfig {
             issuer: persisted.identity.issuer.clone(),
