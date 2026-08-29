@@ -148,7 +148,9 @@ fixture 证明跨调用精确重放。真实 first Run 与 Orchestration Worker 
 Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt 和 bounded closed intent/result journal；
 response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成后只读 authority state。fresh P2 journey 已证明
 waiting Task -> submit-input -> Run resume，并在终态后重放同一 CLI journal 得到同一 authority Task；旧 ETag 搭配新
-Receipt 的 raw `/v1` mutation 被 closed 409 `invalid_state_transition` 拒绝。Task 的权限、过期及其余 action 矩阵仍未完成。
+Receipt 的 raw `/v1` mutation 被 closed 409 `invalid_state_transition` 拒绝。该子旅程已提取为独立 fixture，并生成
+`approval-task-resume` 的 machine-readable incomplete report；仅因 Console 入口仍未运行而不升级为 Passed。Task 的权限、
+过期及其余 action 矩阵仍未完成。
 
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
@@ -212,7 +214,8 @@ SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。1
 [`report checker`](../../../scripts/check-productization-scenario-reports.py)。严格门禁要求同一 exact Git revision 的十份
 fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 failure probe；缺失、skip、`not_run` 或未知字段
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
-[`m4-golden-scenarios.md`](m4-golden-scenarios.md)。这不是 M4 完成证据，其余九条 fixture/report 与 full profile
+[`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
+`approval-task-resume` incomplete report。这不是 M4 完成证据，其余八条 fixture/report 与 full profile
 仍未交付。
 
 ### 7.1 工作项

@@ -15,6 +15,9 @@ use std::{
 };
 use tempfile::TempDir;
 
+#[path = "approval_task_resume.rs"]
+mod approval_task_resume;
+
 const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
 const REPORT_DIRECTORY_ENV: &str = "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY";
@@ -156,33 +159,6 @@ fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
     let problem: Value = second.json().expect("Receipt conflict Problem is JSON");
     assert_eq!(problem["status"], 409);
     assert_eq!(problem["code"], "idempotency_conflict");
-    assert_eq!(problem["retryable"], false);
-}
-
-fn prove_stale_task_fence(project: &Path, task_id: &str, stale_etag: &str, input: &Value) {
-    let (client, base_url, token) = raw_runtime_client(project);
-    let response = client
-        .post(format!("{base_url}/v1/tasks/{task_id}:submit-input"))
-        .bearer_auth(token)
-        .header("accept", "application/json")
-        .header("content-type", "application/json")
-        .header("idempotency-key", "productization-stale-task-fence")
-        .header("if-match", stale_etag)
-        .json(input)
-        .send()
-        .expect("stale Task mutation completes with a public Problem");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response
-            .headers()
-            .get("cache-control")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-store, private, max-age=0")
-    );
-    assert!(response.headers().contains_key("trace-id"));
-    let problem: Value = response.json().expect("stale Task Problem is JSON");
-    assert_eq!(problem["status"], 409);
-    assert_eq!(problem["code"], "invalid_state_transition");
     assert_eq!(problem["retryable"], false);
 }
 
@@ -851,229 +827,14 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(result["schema_digest"], schema_digest);
 
-    let human_task_plan = json!({
-        "plan_version": 5,
-        "interface_contract_digest": CONTRACT_DIGEST,
-        "entry_node_id": "start",
-        "dependency_slots": {},
-        "nodes": {
-            "start": {"kind": "start", "next": "collect_input"},
-            "collect_input": {
-                "kind": "human_task",
-                "definition": {
-                    "kind": "interaction",
-                    "interaction_kind": "form",
-                    "eligible_principal_rule_digest": canonical_digest(&json!({
-                        "rule": "local_developer",
-                    })),
-                    "safe_prompt_key": "provide_message",
-                },
-                "response": {
-                    "source": "node_output",
-                    "producer_node_id": "collect_input",
-                    "port_id": "response",
-                    "schema_digest": schema_digest,
-                },
-                "timeout_milliseconds": 240_000,
-                "resume": "finish",
-            },
-            "finish": {
-                "kind": "return",
-                "value": {
-                    "source": "node_output",
-                    "producer_node_id": "collect_input",
-                    "port_id": "response",
-                    "schema_digest": schema_digest,
-                },
-            },
-        },
-    });
-    let human_task_plan_path =
-        write_canonical(fixture.path(), "human-task-plan.json", &human_task_plan);
-    let human_task_plan_upload = upload_artifact(
+    let approval_evidence = approval_task_resume::run(
         insight,
         project,
-        &human_task_plan_path,
-        "typed_plan",
-        "human-task-plan.json",
-    );
-    let mut human_task_manifest = agent_manifest.clone();
-    human_task_manifest["create"]["display_name"] = json!("Deterministic human task agent");
-    human_task_manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
-        human_task_plan_upload["artifact_id"].clone();
-    human_task_manifest["create"]["document"]["spec"]["typed_plan_digest"] =
-        human_task_plan_upload["content_digest"].clone();
-    human_task_manifest["publish"]["plan_content_digest"] =
-        human_task_plan_upload["content_digest"].clone();
-    human_task_manifest["publish"]["artifact_id"] = human_task_plan_upload["artifact_id"].clone();
-    let human_task_manifest_path = write_canonical(
         fixture.path(),
-        "human-task-agent.apply.json",
-        &human_task_manifest,
+        &schema_digest,
+        &agent_manifest,
     );
-    let human_task_agent = run_json(
-        insight,
-        &[
-            "apply",
-            "--file",
-            human_task_manifest_path.to_str().unwrap(),
-            "--timeout-seconds",
-            "120",
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-
-    let human_task_request = json!({
-        "agent_id": human_task_agent["resource_id"],
-        "input": {
-            "classification": "internal",
-            "schema_digest": schema_digest,
-            "value": {"kind": "inline", "value": {"message": "before task"}},
-        },
-        "deadline": (Utc::now() + Duration::minutes(5))
-            .to_rfc3339_opts(SecondsFormat::Micros, true),
-    });
-    let human_task_request_path =
-        write_canonical(fixture.path(), "human-task-run.json", &human_task_request);
-    let human_task_run = run_json(
-        insight,
-        &[
-            "run",
-            "create",
-            "--file",
-            human_task_request_path.to_str().unwrap(),
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-    let human_task_run_id = human_task_run["run_id"]
-        .as_str()
-        .expect("Human Task Run ID");
-    let mut watcher = Command::new(insight)
-        .args([
-            "run",
-            "watch",
-            human_task_run_id,
-            "--timeout-seconds",
-            "120",
-            "--path",
-            project.to_str().unwrap(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Human Task Run watcher starts");
-    let stdout = watcher.stdout.take().expect("watcher stdout is piped");
-    let mut lines = BufReader::new(stdout).lines();
-    let mut watch_records = Vec::new();
-    let task_id = loop {
-        let line = lines
-            .next()
-            .unwrap_or_else(|| panic!("Run watch ended before interaction.required"))
-            .expect("Run watch line is readable");
-        let record: Value = serde_json::from_str(&line).expect("Run watch line is closed JSON");
-        let task_id = (record["kind"] == "event"
-            && record["event"]["event_type"] == "interaction.required")
-            .then(|| record["event"]["data"]["source_id"].as_str())
-            .flatten()
-            .map(str::to_owned);
-        watch_records.push(record);
-        if let Some(task_id) = task_id {
-            break task_id;
-        }
-    };
-
-    let waiting_run = run_json(
-        insight,
-        &[
-            "run",
-            "get",
-            human_task_run_id,
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(waiting_run["state"], "waiting");
-    let pending_task = run_json(
-        insight,
-        &["task", "get", &task_id, "--path", project.to_str().unwrap()],
-    );
-    assert_eq!(pending_task["task_kind"], "interaction_form");
-    assert_eq!(pending_task["state"], "pending");
-    assert_eq!(pending_task["owner"]["run_id"], human_task_run_id);
-    assert_eq!(pending_task["response_schema_digest"], schema_digest);
-    let pending_task_etag = pending_task["etag"]
-        .as_str()
-        .expect("pending Task ETag")
-        .to_owned();
-
-    let task_response = json!({
-        "classification": "internal",
-        "schema_digest": schema_digest,
-        "value": {"kind": "inline", "value": {"message": "after task"}},
-    });
-    let task_response_path =
-        write_canonical(fixture.path(), "human-task-response.json", &task_response);
-    let responded_task = run_json(
-        insight,
-        &[
-            "task",
-            "submit-input",
-            &task_id,
-            "--file",
-            task_response_path.to_str().unwrap(),
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(responded_task["state"], "responded");
-    let replayed_task = run_json(
-        insight,
-        &[
-            "task",
-            "submit-input",
-            &task_id,
-            "--file",
-            task_response_path.to_str().unwrap(),
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(replayed_task, responded_task);
-    prove_stale_task_fence(project, &task_id, &pending_task_etag, &task_response);
-
-    for line in lines {
-        watch_records.push(
-            serde_json::from_str(&line.expect("Run watch line is readable"))
-                .expect("Run watch line is closed JSON"),
-        );
-    }
-    let watch_status = watcher.wait().expect("Run watcher status is readable");
-    assert!(watch_status.success(), "Human Task Run watch failed");
-    let terminal = watch_records.last().expect("Human Task terminal record");
-    assert_eq!(terminal["kind"], "terminal");
-    assert_eq!(terminal["run"]["state"], "succeeded");
-    assert!(watch_records.iter().any(|record| {
-        record["kind"] == "event"
-            && record["event"]["event_type"] == "interaction.resolved"
-            && record["event"]["data"]["source_id"] == task_id
-    }));
-    let human_task_result = run_json(
-        insight,
-        &[
-            "run",
-            "result",
-            human_task_run_id,
-            "--path",
-            project.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(
-        human_task_result["value"],
-        json!({"kind": "inline", "value": {"message": "after task"}})
-    );
-    assert_eq!(human_task_result["schema_digest"], schema_digest);
+    let human_task_run_id = approval_evidence.run_id.as_str();
 
     // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business
     // state is neither treated as a bootstrap conflict nor used as a reason to skip verification.
@@ -1199,7 +960,7 @@ fn public_cli_deterministic_first_run() {
             "contract_profile": "insight.platform/v1",
             "profile": "base",
             "automation_layer": "P2",
-            "source_revision": revision,
+            "source_revision": revision.clone(),
             "environment": {
                 "os": env::consts::OS,
                 "architecture": env::consts::ARCH,
@@ -1230,5 +991,11 @@ fn public_cli_deterministic_first_run() {
             serde_jcs::to_vec(&report).expect("scenario report is canonicalizable"),
         )
         .expect("scenario report is writable");
+        fs::write(
+            report_directory.join("approval-task-resume.json"),
+            serde_jcs::to_vec(&approval_evidence.report(&revision))
+                .expect("approval scenario report is canonicalizable"),
+        )
+        .expect("approval scenario report is writable");
     }
 }
