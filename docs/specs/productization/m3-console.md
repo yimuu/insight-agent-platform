@@ -60,18 +60,27 @@ raw prompt 与 tool output 在 DOM 中均为 `[redacted]`，浏览器 console �
 边界，不能替代真实 Gateway/PostgreSQL authority。远端 job 的 exact 输出为 `request_count=15`，六项 journey
 check 全部通过，证据链接见 [`console-browser-fixture.md`](console-browser-fixture.md)。
 
-这仍不是 fresh PostgreSQL + 真实 Gateway 证据，尚不能关闭 M3。剩余门禁包括：
+上述 stateful fixture 本身不是 fresh PostgreSQL + 真实 Gateway 证据。后续真实 authority 结果如下。
 
-1. 真实 Gateway + fresh PostgreSQL 下的浏览器 journey：失败/等待 Run -> Task -> mutation -> terminal Run；
-2. Gateway restart 后使用 SSE cursor 恢复，页面刷新后从 authority ID 重新读取状态；
-3. telemetry sink 的 checked sensitive fixture 负向检查；
-4. 空状态、慢依赖的浏览器契约测试，以及正式 accessibility audit；
-5. 静态 bundle 由 Gateway/Ingress 同源承载的部署清单与 CI lane。
+Git revision `591baf00c9b5bac04826f84b58ee96032aa2749b` 的手动 GitHub run
+[`33279353000`](https://github.com/yimuu/insight-agent-platform/actions/runs/33279353000) 随后已在 fresh
+`ubuntu-24.04` authority 上完成真实 Gateway/PostgreSQL 与 headless Chrome Task journey，job
+[`99171748184`](https://github.com/yimuu/insight-agent-platform/actions/runs/33279353000/job/99171748184) 为 Passed。
+其 machine-readable `approval-task-resume` report 的三个 entrypoint、三个 assertion 和两个 failure probe 全部
+Passed；证据摘要见 [`base-journey-evidence.md`](base-journey-evidence.md)。M3 仍缺 Gateway restart 下的浏览器
+重连、正式静态部署、telemetry、慢依赖与完整 accessibility audit，故状态继续为 In Progress。
 
-真实 authority 自动化入口现已实现但尚未取得 fresh Passed evidence。
-`scripts/run-productization-base-journey.sh --console-browser` 会使用现有全局 Node/Corepack 构建静态 bundle，通过严格 loopback 透明代理连接同一次 fresh Runtime
-Gateway，并在独立 Human Task Run 上驱动浏览器 mutation；NVM 路径可用 `--node-bin` 显式传入，不把 Node 变成平台
-runtime 依赖。2026-08-30 首次 fresh 尝试被本机无响应的 OrbStack Docker API 阻断在 `doctor`，没有启动 Gateway，
-因此当前状态仍为 Not run。该尝试同时促成 `doctor` 外部命令的 5 秒 timeout 与可操作失败诊断。
+剩余门禁包括：
+
+1. Gateway restart 后使用 SSE cursor 恢复，页面刷新后从 authority ID 重新读取状态；
+2. telemetry sink 的 checked sensitive fixture 负向检查；
+3. 空状态、慢依赖的浏览器契约测试，以及正式 accessibility audit；
+4. 静态 bundle 由 Gateway/Ingress 同源承载的部署清单与 CI lane。
+
+`scripts/run-productization-base-journey.sh --console-browser` 使用现有全局 Node/Corepack 构建静态 bundle，通过严格
+loopback 透明代理连接同一次 fresh Runtime Gateway，并在独立 Human Task Run 上驱动浏览器 mutation；NVM 路径可用
+`--node-bin` 显式传入，不把 Node 变成平台 runtime 依赖。2026-08-30 首次本地 fresh 尝试被无响应的 OrbStack
+Docker API 阻断在 `doctor`，并促成外部命令的 5 秒 timeout 与可操作失败诊断；上述 GitHub Linux run 随后关闭了
+真实 authority 的 Not run 状态，但没有关闭其余 M3 门禁。
 
 这些证据完成前，M3 与 Platform spec00～18 均不升级为 Verified。

@@ -314,6 +314,13 @@ Docker API 无响应而在 `doctor` 阶段终止，故真实项仍为 Not run。
 缺口：所有命令探针现在 5 秒 fail closed，真实无响应 daemon 在约 6 秒内返回 `docker_engine=failed` 的可操作 JSON，
 不再挂住 CLI。M3 的真实 Gateway、Gateway restart、telemetry、慢依赖、accessibility 与正式部署门禁仍未完成。
 
+2026-08-30 Git revision `591baf00c9b5bac04826f84b58ee96032aa2749b` 已在 GitHub `ubuntu-24.04` 的显式手动
+run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gateway + headless Chrome journey。
+`approval-task-resume` 的 CLI、raw HTTP、Console、三项 assertion 与两项 failure probe 均 Passed，成为第一条完整
+黄金场景报告；另外两份 base 报告继续诚实保持 Incomplete。核心步骤约 14 分 1 秒，仍超过 G1 的 10 分钟 cold
+目标，因此 M1/M3/M4 继续 In Progress。完整摘要、artifact digest 与边界见
+[`base-journey-evidence.md`](base-journey-evidence.md)。
+
 ### 6.1 工作项
 
 1. 实现登录/tenant context 与平台 readiness 页面，不在浏览器持久化长期 Secret；
@@ -339,9 +346,13 @@ Docker API 无响应而在 `doctor` 阶段终止，故真实项仍为 Not run。
 fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 failure probe；缺失、skip、`not_run` 或未知字段
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
-`approval-task-resume` incomplete report，Timer/Signal restart fixture 会产出第三份
-`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据，其余七条 fixture/report、同 authority 的真实
-Console entrypoint、Timer/Signal stale-fence probe 与 full profile 仍未交付。
+`approval-task-resume` report；启用真实浏览器时该报告已可完整 Passed。Timer/Signal restart fixture 会产出第三份
+`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据，其余七条 fixture/report、deterministic 与
+Timer/Signal 各自的 Console entrypoint、Timer/Signal stale-fence probe 与 full profile 场景仍未交付。
+
+远端 fresh base run `33279353000` 已将 `approval-task-resume` 升级为第一份完整 Passed report；严格 M4 checker
+仍会因另外九条未全部 Passed 而失败。精确报告摘要见
+[`base-journey-evidence.md`](base-journey-evidence.md)。
 
 ### 7.1 工作项
 
