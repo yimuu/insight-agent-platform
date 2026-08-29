@@ -28,6 +28,8 @@ for marker in (
     "needs.changes.outputs.policy == 'true'",
     "corepack pnpm --dir web/console install --frozen-lockfile",
     "corepack pnpm --dir web/console browser:fixture:qualify",
+    "corepack install --global pnpm@11.19.0",
+    "corepack install --global pnpm@11.9.0",
     "runs-on: ubuntu-24.04",
     "node-version: \"24\"",
     "workflow_dispatch:",

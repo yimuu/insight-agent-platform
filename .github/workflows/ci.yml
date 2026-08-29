@@ -281,7 +281,9 @@ jobs:
         with:
           node-version: "24"
       - name: Enable pinned pnpm
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.19.0
       - name: Install exact Console dependencies
         run: corepack pnpm --dir web/console install --frozen-lockfile
       - name: Test, build and lint Console
@@ -305,7 +307,9 @@ jobs:
         with:
           node-version: "24"
       - name: Enable pinned pnpm
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.9.0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
