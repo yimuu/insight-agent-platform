@@ -350,7 +350,7 @@ const fn task_json_limits() -> JsonLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use insight_platform_contracts::TraceId;
+    use insight_platform_contracts::{ApiProblem, ApiProblemCode, TraceId};
     use serde_json::json;
     use std::{
         io::{Read as _, Write as _},
@@ -538,6 +538,214 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn task_mutations_preserve_closed_failure_matrix() {
+        let submit_input = parse_submit_input(
+            &serde_json::to_vec(&json!({
+                "classification": "internal",
+                "schema_digest": digest('a'),
+                "value": {"kind": "inline", "value": {"answer": 42}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let cases = [
+            (
+                TaskAction::SubmitInput,
+                TaskStateV1::Expired,
+                "409 Conflict",
+                409,
+                ApiProblemCode::InvalidStateTransition,
+                false,
+                None,
+            ),
+            (
+                TaskAction::Approve,
+                TaskStateV1::Pending,
+                "403 Forbidden",
+                403,
+                ApiProblemCode::PermissionDenied,
+                false,
+                None,
+            ),
+            (
+                TaskAction::Reject,
+                TaskStateV1::Pending,
+                "412 Precondition Failed",
+                412,
+                ApiProblemCode::PreconditionFailed,
+                false,
+                None,
+            ),
+            (
+                TaskAction::Cancel,
+                TaskStateV1::Pending,
+                "429 Too Many Requests",
+                429,
+                ApiProblemCode::RateLimited,
+                true,
+                Some(250),
+            ),
+            (
+                TaskAction::Approve,
+                TaskStateV1::Pending,
+                "503 Service Unavailable",
+                503,
+                ApiProblemCode::TemporarilyUnavailable,
+                true,
+                Some(500),
+            ),
+            (
+                TaskAction::Approve,
+                TaskStateV1::Rejected,
+                "409 Conflict",
+                409,
+                ApiProblemCode::InvalidStateTransition,
+                false,
+                None,
+            ),
+            (
+                TaskAction::Reject,
+                TaskStateV1::Approved,
+                "409 Conflict",
+                409,
+                ApiProblemCode::InvalidStateTransition,
+                false,
+                None,
+            ),
+            (
+                TaskAction::Cancel,
+                TaskStateV1::Approved,
+                "409 Conflict",
+                409,
+                ApiProblemCode::InvalidStateTransition,
+                false,
+                None,
+            ),
+        ];
+
+        for (action, state, status_line, status, code, retryable, retry_after_ms) in cases {
+            let task_id = id(if action == TaskAction::SubmitInput {
+                ResourceKind::Interaction
+            } else {
+                ResourceKind::ApprovalTask
+            });
+            let current = if action == TaskAction::SubmitInput {
+                task_view(task_id.clone(), state, 1)
+            } else {
+                approval_task_view(task_id.clone(), state, 1)
+            };
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_task_id = task_id.clone();
+            let server_current = current.clone();
+            let server_code = code;
+            let server = thread::spawn(move || {
+                let (mut read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut read);
+                assert!(head.starts_with(&format!("GET /v1/tasks/{server_task_id} HTTP/1.1")));
+                write_json_response(
+                    &mut read,
+                    &server_current,
+                    "11111111111111111111111111111111",
+                );
+
+                let (mut mutation, _) = listener.accept().unwrap();
+                let (head, body) = read_request(&mut mutation);
+                assert!(head.starts_with(&format!(
+                    "POST /v1/tasks/{server_task_id}:{} HTTP/1.1",
+                    action.as_str()
+                )));
+                assert_eq!(
+                    header_value(&head, "if-match"),
+                    Some(server_current.etag.as_str())
+                );
+                assert!(header_value(&head, "idempotency-key")
+                    .is_some_and(|value| value.ends_with(action.as_str())));
+                if action == TaskAction::SubmitInput {
+                    assert!(!body.is_empty());
+                } else {
+                    assert!(body.is_empty());
+                }
+                let trace_id = request_trace_id(&head).parse().unwrap();
+                let problem = problem(status, server_code, retryable, retry_after_ms, trace_id);
+                write_problem_response(&mut mutation, status_line, &problem);
+            });
+            let client = PublicHttpClient::new(
+                format!("http://127.0.0.1:{port}"),
+                "token".to_owned(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let journals = TempDir::new().unwrap();
+            let input = (action == TaskAction::SubmitInput).then_some(&submit_input);
+            match resolve_task(&client, &task_id, action, input, journals.path()).unwrap_err() {
+                TaskClientError::Public(PublicClientError::Problem(actual)) => {
+                    assert_eq!(actual.status, status);
+                    assert_eq!(actual.code, code);
+                    assert_eq!(actual.retryable, retryable);
+                    assert_eq!(actual.retry_after_ms, retry_after_ms);
+                }
+                other => panic!("expected closed Task Problem, got {other:?}"),
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn approval_reject_and_cancel_require_their_exact_terminal_state() {
+        for (action, terminal) in [
+            (TaskAction::Approve, TaskStateV1::Approved),
+            (TaskAction::Reject, TaskStateV1::Rejected),
+            (TaskAction::Cancel, TaskStateV1::Cancelled),
+        ] {
+            let task_id = id(ResourceKind::ApprovalTask);
+            let pending = approval_task_view(task_id.clone(), TaskStateV1::Pending, 1);
+            let resolved = approval_task_view(task_id.clone(), terminal, 2);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server_task_id = task_id.clone();
+            let server_pending = pending.clone();
+            let server_resolved = resolved.clone();
+            let server = thread::spawn(move || {
+                let (mut read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut read);
+                assert!(head.starts_with(&format!("GET /v1/tasks/{server_task_id} HTTP/1.1")));
+                write_json_response(
+                    &mut read,
+                    &server_pending,
+                    "11111111111111111111111111111111",
+                );
+
+                let (mut mutation, _) = listener.accept().unwrap();
+                let (head, body) = read_request(&mut mutation);
+                assert!(head.starts_with(&format!(
+                    "POST /v1/tasks/{server_task_id}:{} HTTP/1.1",
+                    action.as_str()
+                )));
+                assert!(body.is_empty());
+                assert_eq!(
+                    header_value(&head, "if-match"),
+                    Some(server_pending.etag.as_str())
+                );
+                let trace_id = request_trace_id(&head);
+                write_json_response(&mut mutation, &server_resolved, &trace_id);
+            });
+            let client = PublicHttpClient::new(
+                format!("http://127.0.0.1:{port}"),
+                "token".to_owned(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let journals = TempDir::new().unwrap();
+            assert_eq!(
+                resolve_task(&client, &task_id, action, None, journals.path()).unwrap(),
+                resolved
+            );
+            server.join().unwrap();
+        }
+    }
+
     fn task_view(task_id: ResourceId, state: TaskStateV1, version: u64) -> TaskViewV1 {
         TaskViewV1 {
             schema_version: 1,
@@ -557,6 +765,36 @@ mod tests {
             created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
             updated_at: "2026-08-29T00:00:01.000000Z".parse().unwrap(),
             etag: format!("\"{task_id}-{version}\""),
+        }
+    }
+
+    fn approval_task_view(task_id: ResourceId, state: TaskStateV1, version: u64) -> TaskViewV1 {
+        TaskViewV1 {
+            task_kind: TaskKindV1::Approval,
+            response_schema_digest: None,
+            safe_prompt_key: "approval.review_effect".to_owned(),
+            ..task_view(task_id, state, version)
+        }
+    }
+
+    fn problem(
+        status: u16,
+        code: ApiProblemCode,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        trace_id: TraceId,
+    ) -> ApiProblem {
+        ApiProblem {
+            type_uri: format!("urn:insight:problem:{}", code.as_str()),
+            title: "Task request rejected".to_owned(),
+            status,
+            code,
+            detail: Some("safe public diagnostic".to_owned()),
+            request_id: id(ResourceKind::ServerRequest),
+            trace_id,
+            retryable,
+            retry_after_ms,
+            field_errors: Vec::new(),
         }
     }
 
@@ -602,6 +840,18 @@ mod tests {
             stream,
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: {trace}\r\netag: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             view.etag,
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    }
+
+    fn write_problem_response(stream: &mut TcpStream, status: &str, problem: &ApiProblem) {
+        let body = serde_json::to_vec(problem).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            problem.trace_id,
             body.len()
         )
         .unwrap();

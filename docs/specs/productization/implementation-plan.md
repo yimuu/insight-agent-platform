@@ -152,8 +152,9 @@ Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt
 response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成后只读 authority state。fresh P2 journey 已证明
 waiting Task -> submit-input -> Run resume，并在终态后重放同一 CLI journal 得到同一 authority Task；旧 ETag 搭配新
 Receipt 的 raw `/v1` mutation 被 closed 409 `invalid_state_transition` 拒绝。该子旅程已提取为独立 fixture，并生成
-`approval-task-resume` 的 machine-readable incomplete report；仅因 Console 入口仍未运行而不升级为 Passed。Task 的权限、
-过期及其余 action 矩阵仍未完成。
+`approval-task-resume` 的 machine-readable incomplete report；仅因 Console 入口仍未运行而不升级为 Passed。命令级
+fixture 又覆盖 409/412/429/503、错误 assignee 的 403、expired submit-input，以及 approve/reject/cancel 的成功与冲突
+矩阵。Task 命令面的既定负向矩阵已闭合，M2 仍受 Artifact 与完整 HTTP fixture 门禁约束。
 
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
