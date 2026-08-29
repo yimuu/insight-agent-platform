@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Baseline / sampled, not a performance claim |
+| 状态 | Baseline + path-aware implementation / performance not yet verified |
 | 采样日期 | 2026-08-29 |
 | 数据来源 | GitHub Actions run metadata 与 `.github/workflows/*.yml` |
 
@@ -28,17 +28,25 @@
 verify 而不是 `cosign sign --yes`。后续报告必须单独记录 queue、build runtime、cache hit/miss、registry push、
 cosign、attestation 和 verification 时长。
 
-## 3. M5 目标触发矩阵
+## 3. M5 已实现触发矩阵
 
 | 变化范围 | target lane | 禁止触发 |
 |---|---|---|
-| `docs/**`、非运行控制台静态文本 | docs/links | workspace test、image build、registry push、cosign、attestation |
-| `crates/insight-cli/**`、`examples/productization/**`、console | quick + relevant contract/journey smoke | candidate image/signing；除非同时修改 runtime/deployment |
-| 一个 Platform crate | affected component + contract checker | 无关 interop/policy job；full 保留给合并前/主干 |
-| dependency/contract/schema/worker | workspace full + required PostgreSQL/real-process | 无 |
-| Dockerfile、`deploy/**`、candidate workflow、release/tag/manual dispatch | candidate release | 无；使用 exact GitOps closure |
+| `docs/**` | quick；Productization docs 另触发 CLI affected lane | workspace full、image build、registry push、cosign、attestation |
+| `web/console/**` | quick + Node 24 Console test/build/lint | workspace full、candidate image/signing |
+| `crates/insight-cli/**`、`examples/productization/**`、`tests/productization/**` | quick + CLI check/clippy/test + journey compile | workspace full、candidate image/signing |
+| Platform runtime、contract、schema、deployment 或未知路径 | quick + workspace lint/check/clippy + fresh PostgreSQL full test | 无 |
+| MCP/proto/interop 相关 runtime | 上述 workspace full + MCP external SDK interop | dependency policy（除非 dependency 同时变化） |
+| `Cargo.toml`、`Cargo.lock`、crate manifest、`deny.toml` | workspace full + dependency policy | candidate image/signing |
+| 手动或每周 scheduled CI | 强制全部普通 CI lane | candidate image/signing |
+| candidate workflow 手动 dispatch | exact GitOps closure + candidate release | 自动 PR/push/tag 触发 |
 
-这张矩阵在 M5 之前是 target。现有 CI 不应被误报为已 path-aware。
+[`classify-ci-paths.py`](../../../scripts/classify-ci-paths.py) 对路径采用 closed 分类：未知路径 fail closed 到 runtime，
+CI workflow 自身变更也运行 workspace full。`Required CI summary` 为 branch protection 提供稳定结果，允许未选 lane
+显示 skipped，但拒绝任何 selected lane failure/cancel。普通 CI 文件不含 Docker build/push、cosign 或 attestation；
+candidate 仍由独立手动 workflow 持有。
+
+该实现解决触发范围，不证明 G6 的 10/30 分钟 wall-clock。必须取得连续主干样本后才能升级性能状态。
 
 ## 4. 后续测量格式
 

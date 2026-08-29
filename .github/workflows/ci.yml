@@ -3,6 +3,9 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -17,8 +20,64 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      quick: ${{ steps.classify.outputs.quick }}
+      cli: ${{ steps.classify.outputs.cli }}
+      console: ${{ steps.classify.outputs.console }}
+      runtime: ${{ steps.classify.outputs.runtime }}
+      mcp_interop: ${{ steps.classify.outputs.mcp_interop }}
+      policy: ${{ steps.classify.outputs.policy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve closed CI lane set
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "schedule" ]]; then
+            python3 scripts/classify-ci-paths.py --all --github-output "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-paths.txt
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA" > changed-paths.txt
+          else
+            git diff --name-only "$BEFORE_SHA" "$HEAD_SHA" > changed-paths.txt
+          fi
+          python3 scripts/classify-ci-paths.py changed-paths.txt --github-output "$GITHUB_OUTPUT"
+
+  quick:
+    name: Quick contracts
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check cutover and Productization contracts
+        run: |
+          bash scripts/check-cutover-residuals.sh
+          python3 scripts/check-productization-m0.py
+          python3 scripts/check-productization-ci.py
+          python3 scripts/check-productization-scenario-reports.py \
+            tests/fixtures/productization-reports/incomplete \
+            --allow-incomplete \
+            --source-revision 0000000000000000000000000000000000000000
+          python3 -m unittest \
+            scripts/tests/test_classify_ci_paths.py \
+            scripts/tests/test_productization_scenario_reports.py
+
   lint:
-    name: Lint and format
+    name: Workspace lint and checks
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,17 +91,6 @@ jobs:
           shared-key: "registry-only"
           cache-targets: "false"
           cache-on-failure: "false"
-      - name: Check DSL cutover residuals
-        run: bash scripts/check-cutover-residuals.sh
-      - name: Check Productization M0 golden-scenario manifest
-        run: python3 scripts/check-productization-m0.py
-      - name: Check Productization scenario report contract
-        run: |
-          python3 scripts/check-productization-scenario-reports.py \
-            tests/fixtures/productization-reports/incomplete \
-            --allow-incomplete \
-            --source-revision 0000000000000000000000000000000000000000
-          python3 -m unittest scripts/tests/test_productization_scenario_reports.py
       - name: Check Platform v1 machine contracts and fixtures
         run: |
           python3 scripts/check-platform-v1-contracts.py
@@ -100,7 +148,9 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: Test
+    name: Workspace full tests
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     env:
       # Durable fixtures share one freshly provisioned PostgreSQL authority and use fixed nominal
@@ -190,8 +240,56 @@ jobs:
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features
 
+  cli:
+    name: Affected CLI
+    needs: changes
+    if: needs.changes.outputs.cli == 'true' && needs.changes.outputs.runtime != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-cli"
+          shared-key: "cli"
+          cache-on-failure: "false"
+      - name: Check CLI formatting and component
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked -p insight-cli --all-targets
+          cargo clippy --locked -p insight-cli --all-targets -- -D warnings
+      - name: Test CLI and compile Productization journeys
+        run: |
+          cargo test --locked -p insight-cli
+          cargo test --locked --test productization --no-run
+
+  console:
+    name: Affected Console
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install exact Console dependencies
+        run: corepack pnpm --dir web/console install --frozen-lockfile
+      - name: Test, build and lint Console
+        run: |
+          corepack pnpm --dir web/console test
+          corepack pnpm --dir web/console build
+          corepack pnpm --dir web/console lint
+
   mcp-interop:
     name: MCP external SDK interoperability
+    needs: changes
+    if: needs.changes.outputs.mcp_interop == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -224,6 +322,8 @@ jobs:
 
   policy:
     name: Dependency policy
+    needs: changes
+    if: needs.changes.outputs.policy == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -244,3 +344,28 @@ jobs:
         run: cargo audit
       - name: Check dependency policy
         run: cargo deny check
+
+  required:
+    name: Required CI summary
+    if: always()
+    needs: [changes, quick, lint, test, cli, console, mcp-interop, policy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject any selected lane failure
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUICK_RESULT: ${{ needs.quick.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CLI_RESULT: ${{ needs.cli.result }}
+          CONSOLE_RESULT: ${{ needs.console.result }}
+          MCP_RESULT: ${{ needs.mcp-interop.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+        run: |
+          for result in \
+            "$CHANGES_RESULT" "$QUICK_RESULT" "$LINT_RESULT" "$TEST_RESULT" \
+            "$CLI_RESULT" "$CONSOLE_RESULT" "$MCP_RESULT" "$POLICY_RESULT"; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              exit 1
+            fi
+          done

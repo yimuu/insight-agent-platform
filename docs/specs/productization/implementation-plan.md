@@ -226,6 +226,12 @@ fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 f
 
 ## 8. Milestone M5：CI 收敛与仓库 clean cut
 
+状态：**In Progress**。普通 CI 已实现 quick、CLI/Console affected、workspace full、MCP interop 与 dependency
+policy 的 closed path classifier；未知路径 fail closed，手动/weekly run 强制全部普通 lane，并由稳定 summary 汇总。
+production candidate 仍仅由独立手动 workflow 触发，普通 CI 不包含 image push、cosign 或 attestation。Dockerfile
+保持单次 workspace Cargo build graph。尚缺连续主干 wall-clock/cache evidence、十条场景前置与 repository clean cut，
+因此不得标记 M5 完成。
+
 ### 8.1 CI 与供应链
 
 1. 将验证分为 path-aware quick、affected component、workspace full、candidate release 四类 lane；
