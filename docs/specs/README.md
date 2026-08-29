@@ -11,14 +11,16 @@
 
 ## 当前规范
 
+- [产品化收敛阶段目标](productization/00-goals.md)及其
+  [实施计划](productization/implementation-plan.md)：下一阶段停止横向扩展平台内核，交付一个命令的本地
+  平台、薄 Python SDK、最小运行控制台、十条黄金场景和最终仓库 clean cut。当前状态为 Proposed，尚未改变
+  `docs/current` 描述的产品行为；
 - [Platform v2 clean-cut 规范集合](platform-v2/00-overview.md)：重新定义 Agent、Skill、Capability、
-  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的最优边界。00～18 已完成
-  [全量 cross-review](platform-v2/cross-review.md)，Accepted 基线已冻结；当前正遵循
-  [依赖驱动的分阶段实现计划](platform-v2/implementation-plan.md)执行 Phase 1 PostgreSQL Authority。Phase 0
-  Contract Foundation 已通过退出门禁；这些目标合同尚未改变 v1 当前行为；
-  其中“v2”是架构代号，交付时会由新的 `insight.platform/v1` 原位替换旧合同，不提供兼容或双栈；
-
-除上述规范外，当前没有其他尚未完成的活动设计规范。
+  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。00～18 与
+  [四阶段实现计划](platform-v2/implementation-plan.md)已按 CR-201 仓库范围关闭为 Verified；真实多节点
+  Kubernetes、runsc、production telemetry、容量/混沌/恢复/soak 与人工 GitOps promotion 仍是可选部署
+  资格，不属于未完成的 spec 实现任务。“v2”是架构代号，目标公共合同仍为 `insight.platform/v1` 和
+  `/v1`，不会提供 `/v2` 或兼容双栈；这些目标尚未完成对当前旧产品入口的 clean cut。
 
 最近完成的规范：
 

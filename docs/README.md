@@ -32,11 +32,16 @@
 [`specs/`](specs/README.md) 描述已经形成实施和验收边界、但尚未完全成为当前可执行合同的目标设计。
 规范中的新 API、配置、schema 和容量数字在实现及 conformance evidence 完成前均不是当前行为。
 
-当前活动设计为 [Platform v2 clean-cut 规范集合](specs/platform-v2/00-overview.md)。00～18 已完成
-[全量 cross-review](specs/platform-v2/cross-review.md)，Accepted 基线已冻结；当前正按
-[依赖驱动的分阶段实现计划](specs/platform-v2/implementation-plan.md)执行 Phase 1 PostgreSQL Authority。Phase 0
-Contract Foundation 已通过退出门禁；当前 Phase 1 仍只在隔离 candidate schema 中实现，不改变 `insight.agent/v1`
-当前合同；“v2”是架构代号，目标公共合同仍使用 `/v1`，并在交付时 clean replacement 旧实现。最近完成的
+下一活动阶段为 [产品化收敛目标](specs/productization/00-goals.md)及其
+[实施计划](specs/productization/implementation-plan.md)：停止横向扩展平台内核，集中交付本地开发入口、
+Python SDK、最小运行控制台、十条黄金场景和仓库 clean cut。该计划当前为 Proposed，尚未改变
+`docs/current`。
+
+[Platform v2 clean-cut 规范集合](specs/platform-v2/00-overview.md)的 00～18 与
+[四阶段实现计划](specs/platform-v2/implementation-plan.md)已按 CR-201 仓库范围关闭为 Verified。真实多节点
+Kubernetes、runsc、production telemetry、容量/混沌/恢复/soak 与人工 GitOps promotion 未在本项目执行，
+仍是部署方可选的 production release gate；它们不再是 spec00～18 或实现计划的剩余任务。Platform v2 尚未
+对当前旧产品入口执行 clean cut；“v2”是架构代号，目标公共合同仍使用 `/v1`，不会提供 `/v2` 或兼容双栈。最近完成的
 [MCP 完整支持规范](archive/specs/2026-07-30-complete-mcp-support.md)及其
 [资格验收](archive/qualifications/2026-07-30-complete-mcp-qualification.md)已归档；当前合同见
 [MCP 使用、运行与安全合同](current/mcp.md)。Provider Catalog 优化见
@@ -50,6 +55,7 @@ Contract Foundation 已通过退出门禁；当前 Phase 1 仍只在隔离 candi
 | 验收 | 状态 | 剩余工作 |
 |---|---|---|
 | [Durable Runtime 24 小时 RC](qualifications/durable-runtime-24h-rc.md) | Pending / requires always-on runner | 以 10 arrival/s 完成不中断的 24 小时 Gate D 并保存正式证据 |
+| [Platform v2 Production L4～L6](qualifications/platform-v2-production-l4-l6.md) | Not run / optional deployment release gate | 仅在部署方需要 production-ready 声明时执行真实 runsc、容量、恢复与 GitOps clean cut |
 
 Terminal-only 已于 2026-07-28 完成 Phase 0、Gate A～D 与完成定义 1～12，状态为
 `Implemented / capacity-qualified`。设计记录已移入
