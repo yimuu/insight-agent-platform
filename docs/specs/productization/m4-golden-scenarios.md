@@ -41,7 +41,9 @@ working-tree revision 或 manifest drift 都失败。
 
 `deterministic_first_run.rs` 的真实 P2 journey 已覆盖 CLI、独立 raw public HTTP、terminal Run、durable SSE、exact
 binding、Orchestration Worker replacement、Human Task resume、Artifact S3/KMS I/O、invalid Receipt conflict、Gateway
-unavailable diagnostic 与角色重启。它仍未覆盖该场景 manifest 要求的真实 Console browser journey，因此即使其余
+unavailable diagnostic 与角色重启。共享 fresh journey 也已执行 Human Task exact journal replay 与 stale ETag/new
+Receipt fence，但尚未拆出 `approval-task-resume` 的独立 report。它仍未覆盖首条场景 manifest 要求的真实 Console
+browser journey，因此即使其余
 断言通过，M4 报告也必须保持 `incomplete`。其余九条场景尚未产生报告。
 
 这一区分防止把一个覆盖多项行为的集成测试误报为十条黄金场景，或用普通单元测试替代 fresh base/full

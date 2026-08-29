@@ -115,13 +115,16 @@ fn prove_raw_http_read(project: &Path, run_id: &str) {
 
 fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
     let (client, base_url, token) = raw_runtime_client(project);
-    let receipt = "productization-deterministic-first-run-conflict";
+    let receipt = format!(
+        "productization-conflict-{}",
+        request["agent_id"].as_str().expect("Agent ID")
+    );
     let first = client
         .post(format!("{base_url}/v1/runs"))
         .bearer_auth(&token)
         .header("accept", "application/json")
         .header("content-type", "application/json")
-        .header("idempotency-key", receipt)
+        .header("idempotency-key", &receipt)
         .json(request)
         .send()
         .expect("first raw public Run create completes");
@@ -137,7 +140,7 @@ fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
         .bearer_auth(token)
         .header("accept", "application/json")
         .header("content-type", "application/json")
-        .header("idempotency-key", receipt)
+        .header("idempotency-key", &receipt)
         .json(&conflicting)
         .send()
         .expect("conflicting raw public Run create completes");
@@ -153,6 +156,33 @@ fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
     let problem: Value = second.json().expect("Receipt conflict Problem is JSON");
     assert_eq!(problem["status"], 409);
     assert_eq!(problem["code"], "idempotency_conflict");
+    assert_eq!(problem["retryable"], false);
+}
+
+fn prove_stale_task_fence(project: &Path, task_id: &str, stale_etag: &str, input: &Value) {
+    let (client, base_url, token) = raw_runtime_client(project);
+    let response = client
+        .post(format!("{base_url}/v1/tasks/{task_id}:submit-input"))
+        .bearer_auth(token)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "productization-stale-task-fence")
+        .header("if-match", stale_etag)
+        .json(input)
+        .send()
+        .expect("stale Task mutation completes with a public Problem");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, private, max-age=0")
+    );
+    assert!(response.headers().contains_key("trace-id"));
+    let problem: Value = response.json().expect("stale Task Problem is JSON");
+    assert_eq!(problem["status"], 409);
+    assert_eq!(problem["code"], "invalid_state_transition");
     assert_eq!(problem["retryable"], false);
 }
 
@@ -973,6 +1003,10 @@ fn public_cli_deterministic_first_run() {
     assert_eq!(pending_task["state"], "pending");
     assert_eq!(pending_task["owner"]["run_id"], human_task_run_id);
     assert_eq!(pending_task["response_schema_digest"], schema_digest);
+    let pending_task_etag = pending_task["etag"]
+        .as_str()
+        .expect("pending Task ETag")
+        .to_owned();
 
     let task_response = json!({
         "classification": "internal",
@@ -994,6 +1028,20 @@ fn public_cli_deterministic_first_run() {
         ],
     );
     assert_eq!(responded_task["state"], "responded");
+    let replayed_task = run_json(
+        insight,
+        &[
+            "task",
+            "submit-input",
+            &task_id,
+            "--file",
+            task_response_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(replayed_task, responded_task);
+    prove_stale_task_fence(project, &task_id, &pending_task_etag, &task_response);
 
     for line in lines {
         watch_records.push(

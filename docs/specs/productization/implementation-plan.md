@@ -141,8 +141,9 @@ fixture 证明跨调用精确重放。真实 first Run 与 Orchestration Worker 
 
 [`insight task`](m2-cli-task.md) 已增加 get/submit-input/approve/reject/cancel，只通过 Runtime Gateway 读取和提交
 Interaction/Approval Task。mutation 使用 current ETag、deterministic Receipt 和 bounded closed intent/result journal；
-response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成后只读 authority state。Task 的完整冲突/权限/过期矩阵
-与 waiting Task -> Run resume 真实 P1 journey 尚未完成。
+response-loss fixture 已证明未决提交跨 CLI 调用精确重放，完成后只读 authority state。fresh P2 journey 已证明
+waiting Task -> submit-input -> Run resume，并在终态后重放同一 CLI journal 得到同一 authority Task；旧 ETag 搭配新
+Receipt 的 raw `/v1` mutation 被 closed 409 `invalid_state_transition` 拒绝。Task 的权限、过期及其余 action 矩阵仍未完成。
 
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready
