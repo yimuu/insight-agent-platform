@@ -70,6 +70,12 @@ M0 的已审查输入保存在：
 authoring、重启后的 durable Run 恢复和本里程碑的全部退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
 Verified。
 
+已确认的前置缺口：Management Gateway 能创建 `RegistryValidation` Job，但仓库当前没有可部署的 role 负责
+claim、执行并以受信任的记录者身份提交该 Job 结果。因而 base profile 不能把任意 Draft 诚实推进到
+`validate -> publish -> Deployment -> activate`；CLI 不得通过直接数据库写入、Gateway 内联验证或伪造
+`ValidationSummary` 绕过这一闭环。先补齐该 owner contract、worker 与资格测试，才开始实现会宣称完整
+lifecycle 的 `insight apply`。
+
 ### 4.1 工作项
 
 1. 新建 Rust CLI，首批命令固定为：
