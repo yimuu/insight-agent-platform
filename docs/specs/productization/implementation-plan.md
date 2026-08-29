@@ -162,8 +162,10 @@ content；read 按 exact ArtifactRef 校验长度、media type、SHA-256 和 con
 upload 已使用 bounded `0600` crash-safe journal 固定 canonical request、prepare/complete Receipt、If-Match、同一
 Artifact/Operation/Grant identity 与单调 effect phase。loopback response-loss fixture 已证明 complete 已接受但响应丢失时，
 第二次命令只重放同一 complete、不会再次 PUT 或创建第二个 Artifact，完成后再次调用只读同一 Ready authority；临近过期
-target 只能通过同一 prepare Receipt 刷新同一 generation。完整负向矩阵尚未完成；fresh 真实 S3/KMS upload 已由
-deterministic first Run P2 journey 覆盖。
+target 只能通过同一 prepare Receipt 刷新同一 generation。fresh 真实 S3/KMS upload 已由 deterministic first Run P2
+journey 覆盖。自签 HTTPS fixture 又证明 no-redirect/no-proxy/no-token、非 200、TLS fail-closed，并覆盖 expired target、
+409/412/429/503、非 Ready authority state 与 truncated/oversized/digest-mismatch download。Artifact 命令面的既定
+负向矩阵已闭合，M2 仍受完整 HTTP fixture 与跨命令场景报告门禁约束。
 
 ### 5.1 工作项
 

@@ -52,15 +52,17 @@ Authorization、Receipt、If-Match、Location、trace、exact Operation target �
 调用复用同一 Receipt/If-Match 和 Artifact identity，object PUT 计数保持一次，成功后的第三次调用只读 Ready authority
 并返回相同报告。
 
+独立自签 HTTPS object fixture 现已证明 uploader 不跟随 307、不使用 `HTTPS_PROXY`/`ALL_PROXY`、不发送平台
+Authorization 或 Proxy-Authorization，并对非 200 与 TLS handshake failure fail closed。prepare target 的 expired/non-HTTPS
+响应在 PUT 前拒绝；prepare 的 409/429/503 与 complete 的 412 保留 closed Problem 和 retry metadata，且 complete 412
+发生时 journal 仍证明 object PUT 只有一次。download fixture 拒绝 Quarantined/Rejected/Deleted authority state，并对
+truncated、超过 ArtifactRef 上限和同长度 digest mismatch 的 content 清理临时文件、不发布输出。
+
 fresh deterministic first Run P2 journey 已通过真实 Artifact Gateway、Artifact Data Worker 与 HTTPS S3/KMS dependency
 上传 scheduler 所需 typed Plan、authoring 与 qualification Artifact；对 typed Plan 又通过公开 CLI 显式等待同一
 ArtifactVerify Operation、读取 Ready metadata、受控下载并逐字节校验 canonical 内容。重复下载到同一路径必须失败且
 原文件保持不变，证明真实 public download 主路径与 no-clobber 边界。随后该 Artifact 被 scheduler 读取并完成 Agent
-publication 与 Run。该证据覆盖真实 upload/download 主路径，但不替代下列故障矩阵。
+publication 与 Run。该证据覆盖真实 upload/download 主路径。
 
-以下仍未完成：
-
-- 真实 HTTPS object PUT 的 redirect/proxy/token 泄露、非 200、TLS、expiry 和 digest mismatch 负向 fixture；
-- 409/412/429、quarantined/rejected/deleted、truncated/oversized stream。
-
-因此本文件只声明初始 Artifact lifecycle，不声明 M2 或 spec00～18 已完成。
+Artifact 命令面的既定上传、下载、恢复与负向矩阵已闭合。M2 仍受完整原始 HTTP lifecycle 和跨命令场景报告等门禁
+约束，因此本文件不单独声明 M2 或 spec00～18 已完成。

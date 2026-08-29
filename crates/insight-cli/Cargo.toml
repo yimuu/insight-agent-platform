@@ -25,4 +25,5 @@ x509-parser.workspace = true
 
 [dev-dependencies]
 insight-platform-api.workspace = true
+rustls.workspace = true
 tempfile.workspace = true
