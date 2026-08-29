@@ -8,18 +8,19 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, is_job_kind_work_owner_triple,
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    AuthoringPackage, CandidateSelectionPolicyDocument, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
-    ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
-    FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
-    InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
+    ArtifactRetentionPolicy, AuthoringPackage, CandidateSelectionPolicyDocument, ClosedJsonSchema,
+    ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
+    EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef,
+    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
+    HardLimitProfile, InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
     NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
     PolicyReferenceRole, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind,
     PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload, RegistryResourceKind,
     ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, RunState, SchedulerPriority, ScopeState, SecretBindingPayload,
-    SecretPurpose, Sha256Digest, TenantConfig, TenantPrincipalPayload, TraceId, TraceIdentityV1,
-    ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
+    RunBindingsSnapshot, RunState, SandboxArtifactIoPolicyDocument, SchedulerPriority,
+    SchedulingPolicyDocument, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest,
+    TenantConfig, TenantPrincipalPayload, TraceId, TraceIdentityV1, ValidationSummary, ValueRef,
+    WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
     decide_control as decide_capability_control, AdmitCapabilityInvocation, CapabilityControlKind,
@@ -685,6 +686,16 @@ impl PgRepository {
             .config
             .validate()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let tenant_id = ResourceId::parse_expected(&command.tenant.tenant_id, ResourceKind::Tenant)
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let artifact_authority = command
+            .artifact_authority
+            .as_ref()
+            .map(|seed| development_artifact_authority_material(&tenant_id, seed))
+            .transpose()?;
+        let effective_tenant_config = artifact_authority
+            .as_ref()
+            .map_or(&command.tenant.config, |material| &material.tenant_config);
         let installation_payload = TypedPayload::with_limit(1, &installation_bindings, 65_536)?;
         let installation_event = TypedPayload::with_limit(
             1,
@@ -697,7 +708,7 @@ impl PgRepository {
             }),
             65_536,
         )?;
-        let tenant_config = TypedPayload::with_limit(1, &command.tenant.config, 65_536)?;
+        let tenant_config = TypedPayload::with_limit(1, effective_tenant_config, 65_536)?;
         let developer_payload =
             TypedPayload::with_limit(1, &command.developer.installation_bindings, 65_536)?;
         let registry_validator_payload =
@@ -849,6 +860,16 @@ impl PgRepository {
             .bind(&payload.value)
             .bind(&payload.digest)
             .execute(&mut *transaction)
+            .await?;
+        }
+        if let (Some(seed), Some(material)) = (&command.artifact_authority, &artifact_authority) {
+            insert_development_artifact_authority(
+                &mut transaction,
+                &tenant_id,
+                &command.developer.principal_id,
+                seed,
+                material,
+            )
             .await?;
         }
         transaction.commit().await?;
@@ -4687,7 +4708,33 @@ impl PgRepository {
 
     pub async fn claim_jobs(&self, command: ClaimJobs) -> Result<Vec<JobRecord>, RepositoryError> {
         command.validate()?;
-        self.claim_jobs_filtered(command, None).await
+        self.claim_jobs_filtered(command, None, None).await
+    }
+
+    /// Claims RegistryValidation work only for tenants where the configured validator is an
+    /// active service identity with the exact write permission required by the Job payload.
+    /// The terminal commit repeats the authorization check and remains the semantic authority;
+    /// this predicate prevents an ineligible process from stealing another validator's lease.
+    pub async fn claim_registry_validation_jobs(
+        &self,
+        command: ClaimJobs,
+        validator_principal_id: &ResourceId,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        if command.work_class != WorkClass::RegistryValidation.as_str()
+            || validator_principal_id.kind() != ResourceKind::Principal
+        {
+            return Err(RepositoryError::InvalidInput(
+                "RegistryValidation claims require a validator Principal".to_owned(),
+            ));
+        }
+        validate_claim_bounds(
+            &command.worker_id,
+            command.limit,
+            command.lease_milliseconds,
+            &command.lease_token_digests,
+        )?;
+        self.claim_jobs_filtered(command, None, Some(validator_principal_id))
+            .await
     }
 
     /// Claims Artifact work through a closed physical-role lane. The typed Job-kind predicate is part of
@@ -4708,6 +4755,7 @@ impl PgRepository {
                 lease_token_digests: command.lease_token_digests,
             },
             Some(job_kinds),
+            None,
         )
         .await
     }
@@ -4724,7 +4772,7 @@ impl PgRepository {
                 "MCP discovery claim requires the MCP work class".to_owned(),
             ));
         }
-        self.claim_jobs_filtered(command, Some(&["mcp_discovery"]))
+        self.claim_jobs_filtered(command, Some(&["mcp_discovery"]), None)
             .await
     }
 
@@ -4740,7 +4788,7 @@ impl PgRepository {
                 "MCP subscription claim requires the MCP work class".to_owned(),
             ));
         }
-        self.claim_jobs_filtered(command, Some(&["mcp_subscription"]))
+        self.claim_jobs_filtered(command, Some(&["mcp_subscription"]), None)
             .await
     }
 
@@ -4748,6 +4796,7 @@ impl PgRepository {
         &self,
         command: ClaimJobs,
         job_kinds: Option<&'static [&'static str]>,
+        authorized_principal_id: Option<&ResourceId>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -4756,8 +4805,8 @@ impl PgRepository {
         let candidates = sqlx::query(
             r#"
             SELECT *
-            FROM insight_platform.jobs
-            WHERE work_class = $1
+            FROM insight_platform.jobs AS candidate
+            WHERE candidate.work_class = $1
               AND state IN ('ready', 'retry_scheduled')
               AND terminal_at IS NULL
               AND worker_id IS NULL
@@ -4765,6 +4814,21 @@ impl PgRepository {
               AND (retry_at IS NULL OR retry_at <= $3)
               AND deadline > $3
               AND ($4::text[] IS NULL OR job_kind = ANY($4::text[]))
+              AND (
+                $5::text IS NULL OR EXISTS (
+                    SELECT 1
+                    FROM insight_platform.tenant_principals AS binding
+                    JOIN insight_platform.principals AS principal
+                      ON principal.principal_id = binding.principal_id
+                    WHERE binding.tenant_id = candidate.tenant_id
+                      AND binding.principal_id = $5
+                      AND binding.principal_kind = 'service_identity'
+                      AND binding.state = 'active' AND principal.state = 'active'
+                      AND binding.permissions_schema_version = 1
+                      AND binding.permissions -> 'permissions'
+                          ? (candidate.payload ->> 'resource_kind' || '.write')
+                )
+              )
             ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
             FOR UPDATE SKIP LOCKED
             LIMIT $2
@@ -4774,6 +4838,7 @@ impl PgRepository {
         .bind(i64::from(command.limit))
         .bind(database_now)
         .bind(job_kinds.map(|kinds| kinds.to_vec()))
+        .bind(authorized_principal_id.map(ToString::to_string))
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -4935,6 +5000,143 @@ impl PgRepository {
         let record = job_from_row(row)?;
         transaction.commit().await?;
         Ok(record)
+    }
+
+    /// Bounded owner recovery for RegistryValidation leases. Validation is read-only until its
+    /// fenced terminal transaction, so an expired running attempt is safe to retry; no external
+    /// effect reconciliation is required.
+    pub async fn recover_expired_registry_validation_jobs(
+        &self,
+        limit: u16,
+        retry_backoff_milliseconds: i64,
+    ) -> Result<u64, RepositoryError> {
+        if limit == 0
+            || limit > 256
+            || retry_backoff_milliseconds <= 0
+            || retry_backoff_milliseconds > 60_000
+        {
+            return Err(RepositoryError::InvalidInput(
+                "RegistryValidation recovery bounds are invalid".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT *
+            FROM insight_platform.jobs
+            WHERE work_class = 'registry_validation'
+              AND job_kind = 'registry_validation'
+              AND owner_kind = 'job' AND owner_id = job_id
+              AND state IN ('leased', 'running')
+              AND terminal_at IS NULL AND lease_expires_at <= $1
+            ORDER BY lease_expires_at, tenant_id, job_id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $2
+            "#,
+        )
+        .bind(database_now)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut recovered = 0_u64;
+        for row in rows {
+            let current = job_from_row(row)?;
+            let projection = job_projection(&current)?;
+            let retry_at = database_now
+                .checked_add_signed(Duration::milliseconds(retry_backoff_milliseconds))
+                .ok_or_else(|| {
+                    RepositoryError::InvalidInput(
+                        "RegistryValidation retry time overflowed".to_owned(),
+                    )
+                })?;
+            let (target, retry_at) = if database_now >= projection.deadline {
+                (JobState::TimedOut, None)
+            } else if projection.state == JobState::Leased {
+                (JobState::Ready, None)
+            } else if projection.attempt_count < projection.attempt_limit
+                && retry_at < projection.deadline
+            {
+                (JobState::RetryScheduled, Some(retry_at))
+            } else if projection.attempt_count >= projection.attempt_limit {
+                (JobState::Failed, None)
+            } else {
+                (JobState::TimedOut, None)
+            };
+            let next = decide_expired_job_lease(
+                &projection,
+                u64::try_from(current.version).map_err(|_| {
+                    RepositoryError::CorruptRow(
+                        "negative RegistryValidation Job version".to_owned(),
+                    )
+                })?,
+                u64::try_from(current.lease_epoch).map_err(|_| {
+                    RepositoryError::CorruptRow(
+                        "negative RegistryValidation lease generation".to_owned(),
+                    )
+                })?,
+                database_now,
+                target,
+                retry_at,
+            )?;
+            let terminal_at = matches!(
+                next.state,
+                JobState::Failed | JobState::TimedOut | JobState::ReconciliationRequired
+            )
+            .then_some(database_now);
+            let result_digest = terminal_at
+                .map(|_| {
+                    canonical_digest(&serde_json::json!({
+                        "job_id": current.job_id,
+                        "reason": "registry_validation_attempts_exhausted_or_timed_out",
+                        "schema_version": 1,
+                        "state": next.state,
+                    }))
+                })
+                .transpose()
+                .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
+            let affected = sqlx::query(
+                r#"
+                UPDATE insight_platform.jobs
+                SET state = $4, version = $5, worker_id = NULL,
+                    lease_token_digest = NULL, lease_expires_at = NULL,
+                    heartbeat_at = NULL, retry_at = $6, result_digest = $7,
+                    terminal_at = $8, updated_at = $9
+                WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+                  AND work_class = 'registry_validation'
+                  AND job_kind = 'registry_validation'
+                  AND state IN ('leased', 'running')
+                "#,
+            )
+            .bind(&current.tenant_id)
+            .bind(&current.job_id)
+            .bind(current.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput(
+                    "RegistryValidation Job version exceeds bigint".to_owned(),
+                )
+            })?)
+            .bind(next.retry_at)
+            .bind(result_digest)
+            .bind(terminal_at)
+            .bind(database_now)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            if affected != 1 {
+                return Err(RepositoryError::Conflict("expired RegistryValidation Job"));
+            }
+            recovered = recovered.checked_add(1).ok_or_else(|| {
+                RepositoryError::InvalidInput(
+                    "RegistryValidation recovery count overflowed".to_owned(),
+                )
+            })?;
+        }
+        transaction.commit().await?;
+        Ok(recovered)
     }
 
     /// Atomically records a RegistryValidation success and terminals its fenced Job.
@@ -28473,6 +28675,33 @@ pub struct BootstrapDevelopmentProfile {
     pub developer: NewPrincipal,
     pub registry_validator: NewPrincipal,
     pub tenant_principal_bindings: Vec<NewTenantPrincipal>,
+    pub artifact_authority: Option<DevelopmentArtifactAuthoritySeed>,
+}
+
+/// Exact non-production roots required to break the Artifact-policy publication bootstrap cycle.
+/// The one-shot development bootstrap materializes these as ordinary immutable Policy versions,
+/// Deployments and tenant bindings in the same transaction as the fresh tenant. Production
+/// installation remains owned by its deployment/GitOps workflow and never uses this seed.
+#[derive(Debug, Clone)]
+pub struct DevelopmentArtifactAuthoritySeed {
+    pub authoring_artifact_id: ResourceId,
+    pub authoring_blob_id: ResourceId,
+    pub retention_policy_id: ResourceId,
+    pub retention_policy_revision_id: ResourceId,
+    pub retention_policy_deployment_id: ResourceId,
+    pub artifact_io_policy_id: ResourceId,
+    pub artifact_io_policy_revision_id: ResourceId,
+    pub artifact_io_policy_deployment_id: ResourceId,
+    pub scheduling_policy_id: ResourceId,
+    pub scheduling_policy_revision_id: ResourceId,
+    pub scheduling_policy_deployment_id: ResourceId,
+    pub staging_quota_account_id: ResourceId,
+    pub orchestration_quota_account_id: ResourceId,
+    pub retention_policy: ArtifactRetentionPolicy,
+    pub artifact_io_policy: SandboxArtifactIoPolicyDocument,
+    pub scheduling_policy: SchedulingPolicyDocument,
+    pub staging_quota_bytes: i64,
+    pub orchestration_concurrent_jobs: i64,
 }
 
 fn validate_development_bootstrap(
@@ -28499,6 +28728,9 @@ fn validate_development_bootstrap(
         return Err(RepositoryError::InvalidInput(
             "development bootstrap principal identity is invalid".to_owned(),
         ));
+    }
+    if let Some(seed) = &command.artifact_authority {
+        seed.validate()?;
     }
     validate_id(&command.tenant.tenant_id)?;
     validate_code("tenant state", &command.tenant.state)?;
@@ -28527,6 +28759,630 @@ fn validate_development_bootstrap(
             ));
         }
     }
+    Ok(())
+}
+
+impl DevelopmentArtifactAuthoritySeed {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        for (id, kind) in [
+            (&self.authoring_artifact_id, ResourceKind::Artifact),
+            (&self.authoring_blob_id, ResourceKind::InternalBlob),
+            (&self.retention_policy_id, ResourceKind::Policy),
+            (
+                &self.retention_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            ),
+            (
+                &self.retention_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            ),
+            (&self.artifact_io_policy_id, ResourceKind::Policy),
+            (
+                &self.artifact_io_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            ),
+            (
+                &self.artifact_io_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            ),
+            (&self.scheduling_policy_id, ResourceKind::Policy),
+            (
+                &self.scheduling_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            ),
+            (
+                &self.scheduling_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            ),
+            (&self.staging_quota_account_id, ResourceKind::QuotaAccount),
+            (
+                &self.orchestration_quota_account_id,
+                ResourceKind::QuotaAccount,
+            ),
+            (
+                &self.artifact_io_policy.encryption_domain_id,
+                ResourceKind::EncryptionDomain,
+            ),
+        ] {
+            if id.kind() != kind {
+                return Err(RepositoryError::InvalidInput(
+                    "development Artifact bootstrap identity is invalid".to_owned(),
+                ));
+            }
+        }
+        let unique = [
+            &self.authoring_artifact_id,
+            &self.authoring_blob_id,
+            &self.retention_policy_id,
+            &self.retention_policy_revision_id,
+            &self.retention_policy_deployment_id,
+            &self.artifact_io_policy_id,
+            &self.artifact_io_policy_revision_id,
+            &self.artifact_io_policy_deployment_id,
+            &self.scheduling_policy_id,
+            &self.scheduling_policy_revision_id,
+            &self.scheduling_policy_deployment_id,
+            &self.staging_quota_account_id,
+            &self.orchestration_quota_account_id,
+            &self.artifact_io_policy.encryption_domain_id,
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+        if unique.len() != 14
+            || self.staging_quota_bytes <= 0
+            || self.orchestration_concurrent_jobs <= 0
+            || self.retention_policy.validate().is_err()
+            || self.artifact_io_policy.validate().is_err()
+            || self.scheduling_policy.validate().is_err()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "development Artifact bootstrap closure is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct DevelopmentArtifactAuthorityMaterial {
+    tenant_config: TenantConfig,
+    authoring_content_digest: Sha256Digest,
+    authoring_size_bytes: i64,
+    authoring_metadata: TypedPayload,
+    retention_resource: TypedPayload,
+    retention_version: TypedPayload,
+    retention_deployment: TypedPayload,
+    artifact_io_resource: TypedPayload,
+    artifact_io_version: TypedPayload,
+    artifact_io_deployment: TypedPayload,
+    scheduling_resource: TypedPayload,
+    scheduling_version: TypedPayload,
+    scheduling_deployment: TypedPayload,
+    quota_payload: TypedPayload,
+    security_domain_digest: Sha256Digest,
+}
+
+fn development_seed_digest(
+    tenant_id: &ResourceId,
+    purpose: &str,
+) -> Result<Sha256Digest, RepositoryError> {
+    canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "environment_class": "development",
+        "purpose": purpose,
+        "tenant_id": tenant_id,
+    }))
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+    .parse::<Sha256Digest>()
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))
+}
+
+fn development_artifact_authority_material(
+    tenant_id: &ResourceId,
+    seed: &DevelopmentArtifactAuthoritySeed,
+) -> Result<DevelopmentArtifactAuthorityMaterial, RepositoryError> {
+    seed.validate()?;
+    let authoring_value = serde_json::json!({
+        "schema_version": 1,
+        "environment_class": "development",
+        "kind": "insight.platform.builtin-artifact-authority/v1",
+        "tenant_id": tenant_id,
+    });
+    let authoring_bytes = canonical_json(&authoring_value)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let authoring_content_digest: Sha256Digest = canonical_digest(&authoring_value)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse::<Sha256Digest>()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let authoring_size_bytes = i64::try_from(authoring_bytes.len()).map_err(|_| {
+        RepositoryError::InvalidInput("development bootstrap Artifact is too large".to_owned())
+    })?;
+    let authoring_ref = ArtifactRef::new(
+        seed.authoring_artifact_id.clone(),
+        authoring_content_digest.clone(),
+        u64::try_from(authoring_size_bytes).map_err(|_| {
+            RepositoryError::InvalidInput("development bootstrap Artifact is too large".to_owned())
+        })?,
+        "application/json",
+        DataClassification::Internal,
+        Some("builtin-artifact-authority.json".to_owned()),
+    )
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let authoring_package = AuthoringPackage {
+        artifact: authoring_ref.clone(),
+        manifest_digest: authoring_content_digest.clone(),
+    };
+    let retention_rules_digest = seed
+        .retention_policy
+        .canonical_digest()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let retention_document =
+        ResourceDocument::Policy(Box::new(insight_platform_contracts::PolicyResourceSpec {
+            authoring_package: authoring_package.clone(),
+            contract_digest: development_seed_digest(tenant_id, "artifact-retention-contract")?,
+            dependency_versions: Vec::new(),
+            policy_versions: Vec::new(),
+            policy_kind: PolicyKind::Retention,
+            rules_digest: retention_rules_digest,
+            selection: None,
+            scheduling: None,
+            retention: Some(seed.retention_policy.clone()),
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            sandbox_secret_resolution: None,
+        }));
+    let artifact_io_rules_digest = seed
+        .artifact_io_policy
+        .canonical_digest()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let artifact_io_document =
+        ResourceDocument::Policy(Box::new(insight_platform_contracts::PolicyResourceSpec {
+            authoring_package,
+            contract_digest: development_seed_digest(tenant_id, "artifact-io-contract")?,
+            dependency_versions: Vec::new(),
+            policy_versions: Vec::new(),
+            policy_kind: PolicyKind::ArtifactIo,
+            rules_digest: artifact_io_rules_digest,
+            selection: None,
+            scheduling: None,
+            retention: None,
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: Some(seed.artifact_io_policy.clone()),
+            sandbox_secret_resolution: None,
+        }));
+    let scheduling_rules_digest = seed
+        .scheduling_policy
+        .canonical_digest()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let scheduling_document =
+        ResourceDocument::Policy(Box::new(insight_platform_contracts::PolicyResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: authoring_ref.clone(),
+                manifest_digest: authoring_content_digest.clone(),
+            },
+            contract_digest: development_seed_digest(tenant_id, "scheduling-contract")?,
+            dependency_versions: Vec::new(),
+            policy_versions: Vec::new(),
+            policy_kind: PolicyKind::Scheduling,
+            rules_digest: scheduling_rules_digest,
+            selection: None,
+            scheduling: Some(seed.scheduling_policy.clone()),
+            retention: None,
+            model_safety: None,
+            model_budget: None,
+            model_public_projection: None,
+            mcp_protocol: None,
+            mcp_auth: None,
+            sandbox_isolation: None,
+            sandbox_resource: None,
+            sandbox_network: None,
+            sandbox_artifact_io: None,
+            sandbox_secret_resolution: None,
+        }));
+    retention_document
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    artifact_io_document
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    scheduling_document
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let validation = |purpose| -> Result<ValidationSummary, RepositoryError> {
+        Ok(ValidationSummary {
+            validator_digest: development_seed_digest(tenant_id, "builtin-validator")?,
+            validated_draft_digest: development_seed_digest(tenant_id, purpose)?,
+            dependency_closure_digest: development_seed_digest(
+                tenant_id,
+                "builtin-empty-dependency-closure",
+            )?,
+            security_evidence_digest: development_seed_digest(
+                tenant_id,
+                "builtin-development-security-evidence",
+            )?,
+            warnings: Vec::new(),
+        })
+    };
+    let retention_resource = TypedPayload::new(
+        1,
+        &ResourceDraftPayload {
+            display_name: "Built-in local Artifact retention".to_owned(),
+            document: retention_document.clone(),
+            validation: None,
+        },
+    )?;
+    let retention_version = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: retention_document,
+            validation: validation("builtin-retention-draft")?,
+        },
+    )?;
+    let artifact_io_resource = TypedPayload::new(
+        1,
+        &ResourceDraftPayload {
+            display_name: "Built-in local Artifact I/O".to_owned(),
+            document: artifact_io_document.clone(),
+            validation: None,
+        },
+    )?;
+    let artifact_io_version = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: artifact_io_document,
+            validation: validation("builtin-artifact-io-draft")?,
+        },
+    )?;
+    let scheduling_resource = TypedPayload::new(
+        1,
+        &ResourceDraftPayload {
+            display_name: "Built-in local Scheduling".to_owned(),
+            document: scheduling_document.clone(),
+            validation: None,
+        },
+    )?;
+    let scheduling_version = TypedPayload::new(
+        1,
+        &PublishedVersionPayload {
+            document: scheduling_document,
+            validation: validation("builtin-scheduling-draft")?,
+        },
+    )?;
+    let qualification_evidence = authoring_ref.clone();
+    let retention_deployment = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(insight_platform_contracts::PolicyDeploymentClosure {
+            policy_revision: ExactVersionRef::new(
+                seed.retention_policy_revision_id.clone(),
+                retention_version
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            applicability_digest: development_seed_digest(
+                tenant_id,
+                "builtin-local-applicability",
+            )?,
+            qualification_evidence: qualification_evidence.clone(),
+        }),
+    )?;
+    let artifact_io_deployment = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(insight_platform_contracts::PolicyDeploymentClosure {
+            policy_revision: ExactVersionRef::new(
+                seed.artifact_io_policy_revision_id.clone(),
+                artifact_io_version
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            applicability_digest: development_seed_digest(
+                tenant_id,
+                "builtin-local-applicability",
+            )?,
+            qualification_evidence,
+        }),
+    )?;
+    let scheduling_deployment = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(insight_platform_contracts::PolicyDeploymentClosure {
+            policy_revision: ExactVersionRef::new(
+                seed.scheduling_policy_revision_id.clone(),
+                scheduling_version
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            applicability_digest: development_seed_digest(
+                tenant_id,
+                "builtin-local-applicability",
+            )?,
+            qualification_evidence: authoring_ref,
+        }),
+    )?;
+    let tenant_config = TenantConfig {
+        scheduling_policy: Some(
+            ExactDeploymentRef::new(
+                seed.scheduling_policy_deployment_id.clone(),
+                scheduling_deployment
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+        ),
+        artifact_retention_policy: Some(
+            ExactDeploymentRef::new(
+                seed.retention_policy_deployment_id.clone(),
+                retention_deployment
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+        ),
+        artifact_io_policy: Some(
+            ExactDeploymentRef::new(
+                seed.artifact_io_policy_deployment_id.clone(),
+                artifact_io_deployment
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+            )
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+        ),
+    };
+    tenant_config
+        .validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    Ok(DevelopmentArtifactAuthorityMaterial {
+        tenant_config,
+        authoring_content_digest,
+        authoring_size_bytes,
+        authoring_metadata: TypedPayload::new(
+            1,
+            &serde_json::json!({"kind": "builtin_development_authority"}),
+        )?,
+        retention_resource,
+        retention_version,
+        retention_deployment,
+        artifact_io_resource,
+        artifact_io_version,
+        artifact_io_deployment,
+        scheduling_resource,
+        scheduling_version,
+        scheduling_deployment,
+        quota_payload: TypedPayload::new(1, &serde_json::json!({"profile": "local_development"}))?,
+        security_domain_digest: development_seed_digest(
+            tenant_id,
+            "builtin-artifact-security-domain",
+        )?,
+    })
+}
+
+async fn insert_development_artifact_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    developer_principal_id: &ResourceId,
+    seed: &DevelopmentArtifactAuthoritySeed,
+    material: &DevelopmentArtifactAuthorityMaterial,
+) -> Result<(), RepositoryError> {
+    for (resource_id, payload) in [
+        (&seed.retention_policy_id, &material.retention_resource),
+        (&seed.artifact_io_policy_id, &material.artifact_io_resource),
+        (&seed.scheduling_policy_id, &material.scheduling_resource),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.resources (
+                tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, $2, 'policy', 'active', 'enabled', $3, $4, $5)
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_blobs (
+            tenant_id, blob_id, backend, storage_binding_digest,
+            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
+            encryption_domain_id, content_digest, size_bytes, state, verified_at
+        ) VALUES ($1, $2, 'builtin', $3, $4, $5, 'builtin-v1',
+                  'builtin-development', $6, $7, $8, 'verified', clock_timestamp())
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(seed.authoring_blob_id.to_string())
+    .bind(
+        seed.artifact_io_policy
+            .write_storage_binding_digest
+            .to_string(),
+    )
+    .bind(material.security_domain_digest.to_string())
+    .bind(
+        canonical_json(&serde_json::json!({
+            "kind": "builtin-development-authority",
+            "tenant_id": tenant_id,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+    )
+    .bind(seed.artifact_io_policy.encryption_domain_id.to_string())
+    .bind(material.authoring_content_digest.to_string())
+    .bind(material.authoring_size_bytes)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifacts (
+            tenant_id, artifact_id, blob_id, purpose, classification,
+            expected_size_bytes, expected_digest, declared_media_type,
+            verified_media_type, state, metadata_schema_version, metadata,
+            metadata_digest, retention_policy_revision_id, retain_until, created_by
+        ) VALUES ($1, $2, $3, 'authoring_document', 'internal', $4, $5,
+                  'application/json', 'application/json', 'ready', $6, $7, $8,
+                  $9, clock_timestamp() + interval '365 days', $10)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(seed.authoring_artifact_id.to_string())
+    .bind(seed.authoring_blob_id.to_string())
+    .bind(material.authoring_size_bytes)
+    .bind(material.authoring_content_digest.to_string())
+    .bind(material.authoring_metadata.schema_version)
+    .bind(&material.authoring_metadata.value)
+    .bind(&material.authoring_metadata.digest)
+    .bind(seed.retention_policy_revision_id.to_string())
+    .bind(developer_principal_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    for (resource_id, revision_id, version) in [
+        (
+            &seed.retention_policy_id,
+            &seed.retention_policy_revision_id,
+            &material.retention_version,
+        ),
+        (
+            &seed.artifact_io_policy_id,
+            &seed.artifact_io_policy_revision_id,
+            &material.artifact_io_version,
+        ),
+        (
+            &seed.scheduling_policy_id,
+            &seed.scheduling_policy_revision_id,
+            &material.scheduling_version,
+        ),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.resource_versions (
+                tenant_id, resource_version_id, resource_id, resource_version_kind,
+                revision_no, content_digest, artifact_id, payload_schema_version,
+                payload, payload_digest, created_by
+            ) VALUES ($1, $2, $3, 'policy_revision', 1, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(revision_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(&version.digest)
+        .bind(seed.authoring_artifact_id.to_string())
+        .bind(version.schema_version)
+        .bind(&version.value)
+        .bind(&version.digest)
+        .bind(developer_principal_id.to_string())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    for (resource_id, revision_id, deployment_id, deployment) in [
+        (
+            &seed.retention_policy_id,
+            &seed.retention_policy_revision_id,
+            &seed.retention_policy_deployment_id,
+            &material.retention_deployment,
+        ),
+        (
+            &seed.artifact_io_policy_id,
+            &seed.artifact_io_policy_revision_id,
+            &seed.artifact_io_policy_deployment_id,
+            &material.artifact_io_deployment,
+        ),
+        (
+            &seed.scheduling_policy_id,
+            &seed.scheduling_policy_revision_id,
+            &seed.scheduling_policy_deployment_id,
+            &material.scheduling_deployment,
+        ),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.deployments (
+                tenant_id, deployment_id, resource_id, resource_version_id, environment,
+                bindings_digest, payload_schema_version, bindings, created_by
+            ) VALUES ($1, $2, $3, $4, 'local', $5, $6, $7, $8)
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(deployment_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(revision_id.to_string())
+        .bind(&deployment.digest)
+        .bind(deployment.schema_version)
+        .bind(&deployment.value)
+        .bind(developer_principal_id.to_string())
+        .execute(&mut **transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET active_version_id = NULL, active_deployment_id = $3,
+                version = version + 2, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(resource_id.to_string())
+        .bind(deployment_id.to_string())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_accounts (
+            tenant_id, quota_account_id, scope_kind, scope_id, work_class, metric,
+            limit_value, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, 'tenant', $1, 'artifact', 'artifact.staging_bytes',
+                  $3, $4, $5, $6)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(seed.staging_quota_account_id.to_string())
+    .bind(seed.staging_quota_bytes)
+    .bind(material.quota_payload.schema_version)
+    .bind(&material.quota_payload.value)
+    .bind(&material.quota_payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.quota_accounts (
+            tenant_id, quota_account_id, scope_kind, scope_id, work_class, metric,
+            limit_value, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, 'tenant', $1, 'orchestration', 'concurrent_jobs',
+                  $3, $4, $5, $6)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(seed.orchestration_quota_account_id.to_string())
+    .bind(seed.orchestration_concurrent_jobs)
+    .bind(material.quota_payload.schema_version)
+    .bind(&material.quota_payload.value)
+    .bind(&material.quota_payload.digest)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -32412,9 +33268,13 @@ impl ClaimJobs {
             .work_class
             .parse::<WorkClass>()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
-        if matches!(work_class, WorkClass::Sandbox | WorkClass::Artifact) {
+        if matches!(
+            work_class,
+            WorkClass::Sandbox | WorkClass::Artifact | WorkClass::RegistryValidation
+        ) {
             return Err(RepositoryError::InvalidInput(
-                "Sandbox and Artifact Jobs require dedicated role-gated claim paths".to_owned(),
+                "Sandbox, Artifact, and RegistryValidation Jobs require dedicated role-gated claim paths"
+                    .to_owned(),
             ));
         }
         validate_claim_bounds(
@@ -36655,6 +37515,7 @@ mod tests {
                     permissions: PermissionSet::new(vec![Permission::AgentRead]).unwrap(),
                 },
             }],
+            artifact_authority: None,
         };
         assert!(validate_development_bootstrap(&command).is_ok());
 

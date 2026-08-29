@@ -1023,14 +1023,44 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(replayed_validation.state, "ready");
 
     let worker_id = sandbox_id(ResourceKind::WorkerProcessGeneration, 0x71);
+    assert!(matches!(
+        repository
+            .claim_jobs(ClaimJobs {
+                work_class: "registry_validation".to_owned(),
+                worker_id: sandbox_id(ResourceKind::WorkerProcessGeneration, 0x70),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![digest('9')],
+            })
+            .await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    let ineligible_claims = repository
+        .claim_registry_validation_jobs(
+            ClaimJobs {
+                work_class: "registry_validation".to_owned(),
+                worker_id: sandbox_id(ResourceKind::WorkerProcessGeneration, 0x70),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![digest('9')],
+            },
+            &id(DENIED_PRINCIPAL_ID),
+        )
+        .await
+        .unwrap();
+    assert!(ineligible_claims.is_empty());
+
     let claimed = repository
-        .claim_jobs(ClaimJobs {
-            work_class: "registry_validation".to_owned(),
-            worker_id: worker_id.clone(),
-            limit: 1,
-            lease_milliseconds: 30_000,
-            lease_token_digests: vec![digest('0')],
-        })
+        .claim_registry_validation_jobs(
+            ClaimJobs {
+                work_class: "registry_validation".to_owned(),
+                worker_id: worker_id.clone(),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![digest('0')],
+            },
+            &id(VALIDATOR_PRINCIPAL_ID),
+        )
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);

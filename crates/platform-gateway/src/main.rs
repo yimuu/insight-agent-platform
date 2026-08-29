@@ -139,10 +139,7 @@ fn gateway_operation(path: &str) -> &'static str {
         "/livez" => "live",
         "/readyz" => "ready",
         "/metrics" => "metrics",
-        _ => match path
-            .strip_prefix("/v1/")
-            .and_then(|suffix| suffix.split('/').next())
-        {
+        _ => match public_route_noun(path) {
             Some("resources") => "resources",
             Some("runs") => "runs",
             Some("tasks") => "tasks",
@@ -152,6 +149,13 @@ fn gateway_operation(path: &str) -> &'static str {
             _ => "other",
         },
     }
+}
+
+fn public_route_noun(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/")
+        .and_then(|suffix| suffix.split('/').next())
+        .and_then(|segment| segment.split(':').next())
+        .filter(|noun| !noun.is_empty())
 }
 
 #[cfg(test)]
@@ -231,10 +235,7 @@ impl ProcessRole {
         if matches!(path, "/livez" | "/readyz" | "/metrics") {
             return true;
         }
-        let Some(noun) = path
-            .strip_prefix("/v1/")
-            .and_then(|suffix| suffix.split('/').next())
-        else {
+        let Some(noun) = public_route_noun(path) else {
             return false;
         };
         noun == "operations"
@@ -498,6 +499,17 @@ struct MtlsArtifactMutationForwarder {
     endpoint: String,
 }
 
+fn map_artifact_transport_failure(failure: reqwest::Error) -> ArtifactApplicationError {
+    tracing::error!(
+        error = %failure,
+        connect = failure.is_connect(),
+        timeout = failure.is_timeout(),
+        request = failure.is_request(),
+        "Artifact Gateway transport failed"
+    );
+    ArtifactApplicationError::Unavailable
+}
+
 impl MtlsArtifactMutationForwarder {
     fn install(config: &ArtifactGatewayConfig) -> Result<Self, ProcessError> {
         config.validate()?;
@@ -590,7 +602,13 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
         &self,
         intent: PrepareArtifactUploadIntent,
     ) -> Result<PrepareArtifactUploadResponseV1, ArtifactApplicationError> {
-        if intent.deadline <= chrono::Utc::now() {
+        let now = chrono::Utc::now();
+        if intent.deadline <= now {
+            tracing::error!(
+                deadline = %intent.deadline,
+                now = %now,
+                "Artifact Gateway command deadline expired before forwarding"
+            );
             return Err(ArtifactApplicationError::Unavailable);
         }
         let response = self
@@ -602,7 +620,7 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             .json(&intent.request)
             .send()
             .await
-            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+            .map_err(map_artifact_transport_failure)?;
         decode_artifact_response(response).await
     }
 
@@ -626,7 +644,7 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             .json(&intent.request)
             .send()
             .await
-            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+            .map_err(map_artifact_transport_failure)?;
         decode_artifact_response(response).await
     }
 
@@ -650,7 +668,7 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             .body(Vec::new())
             .send()
             .await
-            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+            .map_err(map_artifact_transport_failure)?;
         decode_artifact_response(response).await
     }
 
@@ -668,7 +686,7 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             )
             .send()
             .await
-            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+            .map_err(map_artifact_transport_failure)?;
         decode_artifact_response(response).await
     }
 
@@ -686,7 +704,7 @@ impl ArtifactMutationForwarder for MtlsArtifactMutationForwarder {
             )
             .send()
             .await
-            .map_err(|_| ArtifactApplicationError::Unavailable)?;
+            .map_err(map_artifact_transport_failure)?;
         if !response.status().is_success() {
             return Err(map_artifact_status(response.status()));
         }
@@ -3140,7 +3158,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(operation.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(operation.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            operation.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
 
         let metrics_response = router
             .oneshot(
@@ -3222,6 +3243,7 @@ mod tests {
                 404,
                 401,
             ),
+            ("/v1/artifacts:prepare-upload", 404, 401),
             (
                 "/v1/operations/job_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
                 401,

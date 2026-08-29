@@ -257,7 +257,7 @@ fn authentication_problem(error: AuthenticationError) -> Response {
     let mut response = (status, Json(problem)).into_response();
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
+        axum::http::HeaderValue::from_static("no-store, private, max-age=0"),
     );
     if retryable {
         response.headers_mut().insert(

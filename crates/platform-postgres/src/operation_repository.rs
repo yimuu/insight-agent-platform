@@ -1,5 +1,5 @@
 use crate::repository::{
-    job_from_row, load_current_principal_snapshot, JobRecord, RepositoryError,
+    decode_typed_payload, job_from_row, load_current_principal_snapshot, JobRecord, RepositoryError,
 };
 use chrono::Utc;
 use insight_platform_artifacts::{ArtifactJobPayload, ArtifactUploadOperationSnapshot};
@@ -231,8 +231,10 @@ async fn public_kind_and_target(
                 .owner_id
                 .parse()
                 .map_err(|_| OperationReadError::CorruptAuthority)?;
-            let kind = match serde_json::from_value::<ArtifactJobPayload>(job.payload.value.clone())
-            {
+            let kind = match decode_typed_payload::<ArtifactJobPayload>(
+                &job.payload,
+                "public Artifact Operation Job",
+            ) {
                 Ok(payload) => {
                     payload
                         .validate_for_owner(&artifact_id)

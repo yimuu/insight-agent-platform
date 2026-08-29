@@ -557,7 +557,10 @@ where
             .store
             .claim_orchestration_jobs(command)
             .await
-            .map_err(|_| DriveError::StoreUnavailable)?;
+            .map_err(|failure| {
+                tracing::error!(error = %failure, "durable orchestration claim failed");
+                DriveError::StoreUnavailable
+            })?;
         if claimed.is_empty() {
             return Ok(DriveResult::NoWork);
         }

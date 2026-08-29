@@ -469,6 +469,8 @@ fn update_operational_metrics(
         critical_control_available: u64::try_from(pool.critical_control_available)
             .unwrap_or(u64::MAX),
         active_jobs: coordinator.active_jobs,
+        drive_batches: coordinator.drive_batches,
+        claim_attempts: coordinator.claim_attempts,
         jobs_claimed: coordinator.jobs_claimed,
         claim_failures: coordinator.claim_failures,
         recovery_scan_attempts: recovery.scan_attempts,

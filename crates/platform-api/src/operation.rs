@@ -208,9 +208,10 @@ fn problem(error: OperationApplicationError) -> Response {
 }
 
 fn no_store(mut response: Response) -> Response {
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
     response
 }
 
@@ -329,7 +330,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         let requests = application.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].tenant_id, principal.tenant_id);

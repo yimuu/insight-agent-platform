@@ -5,7 +5,7 @@
 
 use insight_platform_contracts::{
     ApiProblem, OperationViewV1, ResourceId, ResourceKind, Sha256Digest, SpanId, TraceId,
-    MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
+    MAX_FIELD_ERRORS, MAX_OPAQUE_CURSOR_BYTES, MAX_SAFE_TEXT_BYTES,
 };
 use reqwest::{
     blocking::{Client, Response},
@@ -384,7 +384,10 @@ impl PublicHttpClient {
             .header(ACCEPT, "text/event-stream")
             .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token));
         if let Some(cursor) = last_event_id {
-            request = request.header("last-event-id", bounded_header(cursor, "Last-Event-ID")?);
+            request = request.header(
+                "last-event-id",
+                bounded_header_with_limit(cursor, "Last-Event-ID", MAX_OPAQUE_CURSOR_BYTES)?,
+            );
         }
         let response = request
             .send()
@@ -683,7 +686,15 @@ fn validate_public_path(path: &str) -> Result<(), PublicClientError> {
 }
 
 fn bounded_header(value: &str, purpose: &'static str) -> Result<HeaderValue, PublicClientError> {
-    if value.is_empty() || value.len() > 255 || !value.is_ascii() {
+    bounded_header_with_limit(value, purpose, 255)
+}
+
+fn bounded_header_with_limit(
+    value: &str,
+    purpose: &'static str,
+    maximum_bytes: usize,
+) -> Result<HeaderValue, PublicClientError> {
+    if value.is_empty() || value.len() > maximum_bytes || !value.is_ascii() {
         return Err(PublicClientError::InvalidConfiguration(purpose));
     }
     HeaderValue::from_str(value).map_err(|_| PublicClientError::InvalidConfiguration(purpose))
@@ -694,9 +705,14 @@ fn decode_problem<T>(
     status: StatusCode,
     response_trace_id: TraceId,
 ) -> Result<T, PublicClientError> {
-    if required_header(&response, CACHE_CONTROL.as_str())? != "no-store" {
+    let response_path = response.url().path().to_owned();
+    let cache_control = required_header(&response, CACHE_CONTROL.as_str())?;
+    if cache_control != OPERATION_CACHE_CONTROL {
         return Err(PublicClientError::InvalidResponse(
-            "Problem cache-control is not no-store".to_owned(),
+            format!(
+                "Problem cache-control is not the closed private no-store value: path={response_path} status={} value={cache_control:?}",
+                status.as_u16(),
+            ),
         ));
     }
     let body = read_bounded_body(response)?;
@@ -737,7 +753,10 @@ fn required_header<'a>(response: &'a Response, name: &str) -> Result<&'a str, Pu
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            PublicClientError::InvalidResponse(format!("required {name} header is absent"))
+            PublicClientError::InvalidResponse(format!(
+                "required {name} header is absent for HTTP {}",
+                response.status()
+            ))
         })
 }
 
@@ -890,7 +909,7 @@ mod tests {
             let _ = stream.read(&mut request).unwrap();
             write!(
                 stream,
-                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncache-control: no-store\r\ntrace-id: {trace_id}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncache-control: {OPERATION_CACHE_CONTROL}\r\ntrace-id: {trace_id}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                 body.len()
             )
             .unwrap();

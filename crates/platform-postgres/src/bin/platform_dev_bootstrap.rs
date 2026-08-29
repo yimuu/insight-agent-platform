@@ -6,14 +6,16 @@
 //! links a PostgreSQL client.
 
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, JsonLimits, Permission, PermissionSet,
-    PrincipalBindingsPayload, PrincipalKind, ResourceId, ResourceKind, Sha256Digest, TenantConfig,
+    canonical_digest, parse_strict_json, ArtifactRetentionPolicy, JsonLimits, Permission,
+    PermissionSet, PrincipalBindingsPayload, PrincipalKind, ResourceId, ResourceKind,
+    SandboxArtifactIoPolicyDocument, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
     TenantPrincipalPayload,
 };
 use insight_platform_postgres::{
     repository::{
-        BootstrapDevelopmentProfile, BootstrapInstallationOperator, BootstrapOutcome, NewPrincipal,
-        NewTenant, NewTenantPrincipal, PgRepository,
+        BootstrapDevelopmentProfile, BootstrapInstallationOperator, BootstrapOutcome,
+        DevelopmentArtifactAuthoritySeed, NewPrincipal, NewTenant, NewTenantPrincipal,
+        PgRepository,
     },
     verify_schema,
 };
@@ -23,6 +25,8 @@ use std::{error::Error, fmt, fs::File, io::Read as _, path::Path};
 
 const CONFIG_PATH_ENV: &str = "PLATFORM_DEV_BOOTSTRAP_CONFIG";
 const CONFIG_DIGEST_ENV: &str = "PLATFORM_DEV_BOOTSTRAP_CONFIG_DIGEST";
+const ARTIFACT_CONFIG_PATH_ENV: &str = "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG";
+const ARTIFACT_CONFIG_DIGEST_ENV: &str = "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG_DIGEST";
 const DATABASE_URL_ENV: &str = "PLATFORM_DATABASE_URL";
 const MAX_CONFIG_BYTES: usize = 65_536;
 
@@ -61,6 +65,31 @@ struct RegistryValidatorConfig {
     principal_id: String,
     authentication_authority_digest: String,
     subject_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactAuthorityConfig {
+    schema_version: u32,
+    environment_class: String,
+    authoring_artifact_id: String,
+    authoring_blob_id: String,
+    retention_policy_id: String,
+    retention_policy_revision_id: String,
+    retention_policy_deployment_id: String,
+    artifact_io_policy_id: String,
+    artifact_io_policy_revision_id: String,
+    artifact_io_policy_deployment_id: String,
+    scheduling_policy_id: String,
+    scheduling_policy_revision_id: String,
+    scheduling_policy_deployment_id: String,
+    staging_quota_account_id: String,
+    orchestration_quota_account_id: String,
+    retention_policy: ArtifactRetentionPolicy,
+    artifact_io_policy: SandboxArtifactIoPolicyDocument,
+    scheduling_policy: SchedulingPolicyDocument,
+    staging_quota_bytes: i64,
+    orchestration_concurrent_jobs: i64,
 }
 
 struct BootstrapInput {
@@ -155,6 +184,87 @@ impl Config {
     }
 }
 
+impl ArtifactAuthorityConfig {
+    fn load() -> Result<Self, ProcessError> {
+        let path = required_absolute_path(ARTIFACT_CONFIG_PATH_ENV)?;
+        let bytes = read_bounded_file(&path, MAX_CONFIG_BYTES)?;
+        let value = parse_strict_json(
+            &bytes,
+            JsonLimits {
+                max_bytes: MAX_CONFIG_BYTES,
+                max_depth: 10,
+                max_properties_per_object: 32,
+                max_items_per_array: 64,
+                max_string_bytes: 512,
+            },
+        )
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let expected: Sha256Digest = required(ARTIFACT_CONFIG_DIGEST_ENV)?
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        let actual: Sha256Digest = canonical_digest(&value)
+            .map_err(|_| ProcessError::InvalidConfiguration)?
+            .parse()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        if actual != expected {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        let config: Self =
+            serde_json::from_value(value).map_err(|_| ProcessError::InvalidConfiguration)?;
+        if config.schema_version != 1 || config.environment_class != "development" {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        Ok(config)
+    }
+
+    fn into_seed(self) -> Result<DevelopmentArtifactAuthoritySeed, ProcessError> {
+        Ok(DevelopmentArtifactAuthoritySeed {
+            authoring_artifact_id: parse_id(&self.authoring_artifact_id, ResourceKind::Artifact)?,
+            authoring_blob_id: parse_id(&self.authoring_blob_id, ResourceKind::InternalBlob)?,
+            retention_policy_id: parse_id(&self.retention_policy_id, ResourceKind::Policy)?,
+            retention_policy_revision_id: parse_id(
+                &self.retention_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            )?,
+            retention_policy_deployment_id: parse_id(
+                &self.retention_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            )?,
+            artifact_io_policy_id: parse_id(&self.artifact_io_policy_id, ResourceKind::Policy)?,
+            artifact_io_policy_revision_id: parse_id(
+                &self.artifact_io_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            )?,
+            artifact_io_policy_deployment_id: parse_id(
+                &self.artifact_io_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            )?,
+            scheduling_policy_id: parse_id(&self.scheduling_policy_id, ResourceKind::Policy)?,
+            scheduling_policy_revision_id: parse_id(
+                &self.scheduling_policy_revision_id,
+                ResourceKind::PolicyRevision,
+            )?,
+            scheduling_policy_deployment_id: parse_id(
+                &self.scheduling_policy_deployment_id,
+                ResourceKind::PolicyDeployment,
+            )?,
+            staging_quota_account_id: parse_id(
+                &self.staging_quota_account_id,
+                ResourceKind::QuotaAccount,
+            )?,
+            orchestration_quota_account_id: parse_id(
+                &self.orchestration_quota_account_id,
+                ResourceKind::QuotaAccount,
+            )?,
+            retention_policy: self.retention_policy,
+            artifact_io_policy: self.artifact_io_policy,
+            scheduling_policy: self.scheduling_policy,
+            staging_quota_bytes: self.staging_quota_bytes,
+            orchestration_concurrent_jobs: self.orchestration_concurrent_jobs,
+        })
+    }
+}
+
 fn parse_id(value: &str, expected: ResourceKind) -> Result<ResourceId, ProcessError> {
     ResourceId::parse_expected(value, expected).map_err(|_| ProcessError::InvalidConfiguration)
 }
@@ -221,6 +331,7 @@ async fn main() {
 
 async fn run() -> Result<(), ProcessError> {
     let input = Config::load()?.validate()?;
+    let artifact_authority = ArtifactAuthorityConfig::load()?.into_seed()?;
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -229,17 +340,7 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(ProcessError::Database)?;
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
     let repository = PgRepository::new(pool);
-    let agent_author_permissions = PermissionSet::new(vec![
-        Permission::AgentRead,
-        Permission::AgentWrite,
-        Permission::AgentPublish,
-        Permission::AgentDeploy,
-        Permission::AgentActivate,
-    ])
-    .map_err(|_| ProcessError::InvalidConfiguration)?;
-    let agent_runner_permissions =
-        PermissionSet::new(vec![Permission::AgentRead, Permission::AgentRun])
-            .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let developer_permissions = local_developer_permissions()?;
     let registry_validation_permissions = PermissionSet::new(vec![
         Permission::AgentWrite,
         Permission::SkillWrite,
@@ -288,29 +389,22 @@ async fn run() -> Result<(), ProcessError> {
             tenant_principal_bindings: vec![
                 NewTenantPrincipal {
                     tenant_id: tenant_id.clone(),
-                    principal_id: developer_principal_id.clone(),
+                    principal_id: developer_principal_id,
                     principal_kind: PrincipalKind::AgentAuthor,
                     payload: TenantPrincipalPayload {
-                        permissions: agent_author_permissions,
+                        permissions: developer_permissions,
                     },
                 },
                 NewTenantPrincipal {
-                    tenant_id: tenant_id.clone(),
+                    tenant_id,
                     principal_id: registry_validator_principal_id,
                     principal_kind: PrincipalKind::ServiceIdentity,
                     payload: TenantPrincipalPayload {
                         permissions: registry_validation_permissions,
                     },
                 },
-                NewTenantPrincipal {
-                    tenant_id: tenant_id.clone(),
-                    principal_id: developer_principal_id,
-                    principal_kind: PrincipalKind::AgentRunner,
-                    payload: TenantPrincipalPayload {
-                        permissions: agent_runner_permissions,
-                    },
-                },
             ],
+            artifact_authority: Some(artifact_authority),
         })
         .await
         .map_err(ProcessError::Repository)?;
@@ -323,6 +417,80 @@ async fn run() -> Result<(), ProcessError> {
     }
     println!("development tenant and developer principal created");
     Ok(())
+}
+
+/// The local profile deliberately issues one short-lived developer token. Its exact binding must
+/// therefore cover every public productization journey that token can drive; a second binding
+/// under another principal kind is unusable because principal kind is part of the authenticated
+/// identity. This is a development-only closure and intentionally excludes installation,
+/// tenant-administration, emergency-stop, Secret inspection/rotation and Artifact maintenance.
+fn local_developer_permissions() -> Result<PermissionSet, ProcessError> {
+    PermissionSet::new(vec![
+        Permission::AgentRead,
+        Permission::AgentWrite,
+        Permission::AgentPublish,
+        Permission::AgentDeploy,
+        Permission::AgentActivate,
+        Permission::AgentRun,
+        Permission::SkillRead,
+        Permission::SkillWrite,
+        Permission::SkillPublish,
+        Permission::SkillBind,
+        Permission::SkillActivate,
+        Permission::CapabilityRead,
+        Permission::CapabilityWrite,
+        Permission::CapabilityPublish,
+        Permission::CapabilityDeploy,
+        Permission::CapabilityActivate,
+        Permission::CapabilityBind,
+        Permission::CapabilityInvoke,
+        Permission::ContextRead,
+        Permission::ContextWrite,
+        Permission::ContextPublish,
+        Permission::ContextDeploy,
+        Permission::ContextActivate,
+        Permission::ContextQuery,
+        Permission::ContextBuildDataset,
+        Permission::McpRead,
+        Permission::McpWrite,
+        Permission::McpDiscover,
+        Permission::McpImport,
+        Permission::McpPublish,
+        Permission::McpDeploy,
+        Permission::McpActivate,
+        Permission::McpInvoke,
+        Permission::ModelRead,
+        Permission::ModelWrite,
+        Permission::ModelDiscover,
+        Permission::ModelImport,
+        Permission::ModelPublish,
+        Permission::ModelDeploy,
+        Permission::ModelActivate,
+        Permission::ModelInvoke,
+        Permission::SandboxRead,
+        Permission::SandboxWrite,
+        Permission::SandboxBuild,
+        Permission::SandboxPublish,
+        Permission::SandboxActivate,
+        Permission::SandboxExecute,
+        Permission::ArtifactRead,
+        Permission::ArtifactWrite,
+        Permission::ApprovalRead,
+        Permission::ApprovalRespond,
+        Permission::InteractionRead,
+        Permission::InteractionRespond,
+        Permission::PolicyRead,
+        Permission::PolicyWrite,
+        Permission::PolicyPublish,
+        Permission::PolicyActivate,
+        Permission::OperationRead,
+        Permission::OperationCancel,
+        Permission::RuntimeRead,
+        Permission::RuntimeControl,
+        Permission::RuntimeSignal,
+        Permission::SecretBind,
+    ])
+    .map_err(|_| ProcessError::InvalidConfiguration)
 }
 
 fn required(name: &'static str) -> Result<String, ProcessError> {
@@ -394,6 +562,11 @@ mod tests {
                 "principal_id": "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b94",
                 "authentication_authority_digest": digest('d'),
                 "subject_digest": digest('e')
+            },
+            "registry_validator": {
+                "principal_id": "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b95",
+                "authentication_authority_digest": digest('f'),
+                "subject_digest": digest('1')
             }
         }))
         .unwrap()
@@ -424,5 +597,37 @@ mod tests {
             config.validate(),
             Err(ProcessError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn local_developer_permission_closure_covers_public_product_journeys_only() {
+        let permissions = local_developer_permissions().unwrap();
+        for required in [
+            Permission::AgentWrite,
+            Permission::AgentRun,
+            Permission::ArtifactRead,
+            Permission::ArtifactWrite,
+            Permission::PolicyPublish,
+            Permission::OperationRead,
+            Permission::RuntimeRead,
+            Permission::RuntimeControl,
+            Permission::RuntimeSignal,
+            Permission::ApprovalRespond,
+            Permission::InteractionRespond,
+        ] {
+            assert!(permissions.contains(required), "missing {required}");
+        }
+        for forbidden in [
+            Permission::InstallationManage,
+            Permission::TenantManage,
+            Permission::TenantEmergencyStop,
+            Permission::SecretInspect,
+            Permission::SecretRotate,
+            Permission::SecretRevoke,
+            Permission::ArtifactHold,
+            Permission::ArtifactRescan,
+        ] {
+            assert!(!permissions.contains(forbidden), "unexpected {forbidden}");
+        }
     }
 }

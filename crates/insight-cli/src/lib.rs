@@ -15,7 +15,8 @@ mod task_journal;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactPurpose, DataClassification, PublicJobState, ResourceId, ResourceKind,
+    canonical_digest, ArtifactPurpose, ArtifactRetentionPolicy, DataClassification, PublicJobState,
+    ResourceId, ResourceKind, SandboxArtifactIoPolicyDocument, SchedulingPolicyDocument,
 };
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rcgen::{
@@ -64,6 +65,7 @@ const RUNTIME_CONFIGURATION_DIRECTORY: &str = "config";
 const RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE: &str = "gateway-management.json";
 const RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE: &str = "gateway-runtime.json";
 const RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE: &str = "artifact-gateway.json";
+const RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE: &str = "artifact-bootstrap.json";
 const RUNTIME_ARTIFACT_DATA_CONFIG_FILE: &str = "artifact-data.json";
 const RUNTIME_ORCHESTRATION_CONFIG_FILE: &str = "orchestration.json";
 const RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE: &str = "capability-native.json";
@@ -1636,12 +1638,111 @@ fn prepare_runtime_profile_inner(
         })?;
     let catalog = local_artifact_provider_catalog(kms_key_arn)?;
     let scanner_contract_digest = local_digest("artifact-scanner-contract")?;
-    let scanner_ruleset_digest = local_digest("artifact-scanner-ruleset")?;
+    let write_storage_binding_digest = catalog["write_storage_binding_digest"]
+        .as_str()
+        .ok_or_else(|| CliError::InvalidLocalIdentity {
+            path: "local artifact provider configuration".to_owned(),
+        })?
+        .parse()
+        .map_err(|_| CliError::InvalidLocalIdentity {
+            path: "local artifact provider configuration".to_owned(),
+        })?;
+    let artifact_io_policy = SandboxArtifactIoPolicyDocument {
+        schema_version: 3,
+        allowed_input_media_types: vec![
+            "application/json".to_owned(),
+            "application/octet-stream".to_owned(),
+            "application/wasm".to_owned(),
+            "text/plain".to_owned(),
+        ],
+        allowed_output_media_types: vec![
+            "application/json".to_owned(),
+            "application/octet-stream".to_owned(),
+            "application/wasm".to_owned(),
+            "text/plain".to_owned(),
+        ],
+        maximum_input_artifacts: 64,
+        maximum_output_artifacts: 64,
+        scanner_contract_digest: scanner_contract_digest.parse().map_err(|_| {
+            CliError::InvalidLocalIdentity {
+                path: "local Artifact I/O policy".to_owned(),
+            }
+        })?,
+        verification_evidence_ttl_milliseconds: 3_600_000,
+        verification_retry_backoff_milliseconds: 250,
+        write_storage_binding_digest,
+        encryption_domain_id: identity
+            .artifact_encryption_domain_id
+            .parse()
+            .map_err(|_| CliError::InvalidLocalIdentity {
+                path: "local Artifact I/O policy".to_owned(),
+            })?,
+        deny_symlink: true,
+        deny_hardlink: true,
+        deny_device: true,
+        deny_fifo: true,
+        deny_socket: true,
+        deny_sparse_file: true,
+        archive_expansion_disabled: true,
+    };
+    artifact_io_policy
+        .validate()
+        .map_err(|_| CliError::InvalidLocalIdentity {
+            path: "local Artifact I/O policy".to_owned(),
+        })?;
+    let scanner_ruleset_digest = artifact_io_policy
+        .canonical_digest()
+        .map_err(|_| CliError::InvalidLocalIdentity {
+            path: "local Artifact I/O policy".to_owned(),
+        })?
+        .to_string();
+    let retention_policy = ArtifactRetentionPolicy {
+        version: 1,
+        minimum_retention_seconds: 3_600,
+        gc_grace_seconds: 86_400,
+        tombstone_retention_seconds: 2_592_000,
+        retain_provenance_sources: true,
+        delete_requires_approval: false,
+    };
+    let scheduling_policy = SchedulingPolicyDocument {
+        version: 1,
+        weight: 1,
+        burst: 2,
+        aging_rounds: 2,
+    };
     let orchestration_adapter_digest = local_digest("orchestration-worker")?;
     let registry_validator_digest = local_digest("registry-validator")?;
     let registry_validation_profile_digest = local_digest("registry-validation-profile")?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
     let configs = BTreeMap::from([
+        (
+            "artifact-bootstrap".to_owned(),
+            (
+                RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "environment_class": "development",
+                    "authoring_artifact_id": fresh_resource_id(ResourceKind::Artifact),
+                    "authoring_blob_id": fresh_resource_id(ResourceKind::InternalBlob),
+                    "retention_policy_id": fresh_resource_id(ResourceKind::Policy),
+                    "retention_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
+                    "retention_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
+                    "artifact_io_policy_id": fresh_resource_id(ResourceKind::Policy),
+                    "artifact_io_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
+                    "artifact_io_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
+                    "scheduling_policy_id": fresh_resource_id(ResourceKind::Policy),
+                    "scheduling_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
+                    "scheduling_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
+                    "staging_quota_account_id": fresh_resource_id(ResourceKind::QuotaAccount),
+                    "orchestration_quota_account_id": fresh_resource_id(ResourceKind::QuotaAccount),
+                    "retention_policy": retention_policy,
+                    "artifact_io_policy": artifact_io_policy,
+                    "scheduling_policy": scheduling_policy,
+                    "staging_quota_bytes": 67_108_864,
+                    "orchestration_concurrent_jobs": 4,
+                }),
+            ),
+        ),
         (
             "gateway-management".to_owned(),
             (
@@ -1692,6 +1793,8 @@ fn prepare_runtime_profile_inner(
                     "scanner_contract_digest": scanner_contract_digest,
                     "scan_evidence_ttl_milliseconds": 3600000,
                     "scan_retry_backoff_milliseconds": 250,
+                    "finalize_batch_size": 32,
+                    "finalize_poll_milliseconds": 100,
                     "maximum_upload_target_seconds": 300,
                     "maximum_download_bytes": 16777216,
                     "maximum_download_in_flight": 16,
@@ -2093,7 +2196,7 @@ fn run_development_profile(
         }
     };
     ensure_runtime_binaries(&workspace, &runtime, &fingerprint)?;
-    provision_and_bootstrap_authority(&workspace, &runtime, &project.identity)?;
+    provision_and_bootstrap_authority(&workspace, &runtime, &project.identity, &profile_state)?;
     let processes = start_base_processes(&workspace, &runtime, &profile_state)?;
     let state = RuntimeProcessState {
         schema_version: 1,
@@ -2458,6 +2561,7 @@ fn provision_and_bootstrap_authority(
     workspace: &Path,
     runtime: &Path,
     identity: &LocalIdentityState,
+    profile: &RuntimeProfileState,
 ) -> Result<(), CliError> {
     let database_url = "postgres://insight:insight@127.0.0.1:5432/insight_platform";
     let binaries = runtime_binary_paths(workspace);
@@ -2494,6 +2598,23 @@ fn provision_and_bootstrap_authority(
             .env(
                 "PLATFORM_DEV_BOOTSTRAP_CONFIG_DIGEST",
                 &identity.bootstrap_config_digest,
+            )
+            .env(
+                "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG",
+                runtime
+                    .join(RUNTIME_CONFIGURATION_DIRECTORY)
+                    .join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE),
+            )
+            .env(
+                "PLATFORM_DEV_ARTIFACT_BOOTSTRAP_CONFIG_DIGEST",
+                profile
+                    .config_digests
+                    .get("artifact-bootstrap")
+                    .ok_or_else(|| {
+                        CliError::RuntimeState(
+                            "Artifact bootstrap config digest is unavailable".to_owned(),
+                        )
+                    })?,
             );
         run_external(
             command,
@@ -4700,7 +4821,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 7);
+        assert_eq!(digests.len(), 8);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -4711,6 +4832,7 @@ mod tests {
         assert_eq!(profile.config_digests, digests);
         let configurations = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
         for (role, file) in [
+            ("artifact-bootstrap", RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE),
             ("gateway-management", RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE),
             ("gateway-runtime", RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE),
             ("artifact-gateway", RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE),
@@ -4730,6 +4852,42 @@ mod tests {
             );
             assert!(!String::from_utf8(bytes).unwrap().contains("PRIVATE KEY"));
         }
+        let bootstrap: serde_json::Value = serde_json::from_slice(
+            &fs::read(configurations.join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bootstrap["environment_class"], "development");
+        assert_eq!(bootstrap["scheduling_policy"]["version"], 1);
+        assert_eq!(bootstrap["scheduling_policy"]["weight"], 1);
+        assert_eq!(bootstrap["scheduling_policy"]["burst"], 2);
+        assert_eq!(bootstrap["scheduling_policy"]["aging_rounds"], 2);
+        assert!(bootstrap["scheduling_policy_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("pol_")));
+        assert!(bootstrap["scheduling_policy_revision_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("prev_")));
+        assert!(bootstrap["scheduling_policy_deployment_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("pdep_")));
+        assert!(bootstrap["orchestration_quota_account_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("qac_")));
+        assert_eq!(bootstrap["orchestration_concurrent_jobs"], 4);
+        assert_eq!(
+            bootstrap["artifact_io_policy"]["scanner_contract_digest"],
+            local_digest("artifact-scanner-contract").unwrap()
+        );
+        let artifact_data: serde_json::Value = serde_json::from_slice(
+            &fs::read(configurations.join(RUNTIME_ARTIFACT_DATA_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_digest(&bootstrap["artifact_io_policy"]).unwrap(),
+            artifact_data["scan_worker"]["ruleset_digest"]
+                .as_str()
+                .unwrap()
+        );
         assert!(matches!(
             prepare_runtime_profile(
                 directory.path(),

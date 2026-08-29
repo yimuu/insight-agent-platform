@@ -17,8 +17,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactRef, ArtifactReferenceKind,
     ArtifactState, ArtifactWorkloadAudience, BlobIntegrityState, CommandAudit, CommandOutcome,
-    DataClassification, ExactVersionRef, HardLimitProfile, JobState, ResourceId, ResourceKind,
-    Sha256Digest,
+    DataClassification, ExactVersionRef, HardLimitProfile, JobState, PrincipalKind, ResourceId,
+    ResourceKind, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -229,6 +229,7 @@ pub struct UploadGrantSnapshot {
     pub artifact_id: ResourceId,
     pub operation_id: ResourceId,
     pub subject_principal_id: ResourceId,
+    pub subject_principal_kind: PrincipalKind,
     pub operations: Vec<ArtifactGrantOperation>,
     pub audience: ArtifactWorkloadAudience,
     pub purpose: ArtifactPurpose,
@@ -240,6 +241,14 @@ pub struct UploadGrantSnapshot {
 
 impl UploadGrantSnapshot {
     pub fn canonical_digest(&self) -> Result<Sha256Digest, ArtifactCommandError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.operation_id.kind() != ResourceKind::Job
+            || self.subject_principal_id.kind() != ResourceKind::Principal
+            || self.subject_principal_kind == PrincipalKind::InstallationOperator
+        {
+            return Err(ArtifactCommandError::InvalidIdentity);
+        }
         digest(self)
     }
 
@@ -253,6 +262,7 @@ impl UploadGrantSnapshot {
             "purpose": self.purpose,
             "schema_version": 1,
             "subject_principal_id": self.subject_principal_id,
+            "subject_principal_kind": self.subject_principal_kind,
         });
         canonical_digest(&identity)
             .map_err(|_| ArtifactCommandError::Canonicalization)?
@@ -378,6 +388,7 @@ impl PrepareArtifact {
             artifact_id: self.artifact_id.clone(),
             operation_id: self.operation_id.clone(),
             subject_principal_id: self.audit.principal_id.clone(),
+            subject_principal_kind: self.audit.principal_kind,
             operations: vec![
                 ArtifactGrantOperation::WriteStaging,
                 ArtifactGrantOperation::CommitStaging,

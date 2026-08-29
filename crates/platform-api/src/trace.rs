@@ -157,7 +157,7 @@ fn invalid_trace_problem() -> Response {
     let mut response = (status, Json(problem)).into_response();
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
+        HeaderValue::from_static("no-store, private, max-age=0"),
     );
     response
 }

@@ -886,7 +886,7 @@ mod tests {
         let run_id = id(ResourceKind::Run);
         let deployment_id = id(ResourceKind::AgentDeployment);
         let input_value_id = id(ResourceKind::RunValue);
-        let cursor_one = OpaqueRunEventCursor::new("cursor-one").unwrap();
+        let cursor_one = OpaqueRunEventCursor::new(format!("cursor-{}", "a".repeat(512))).unwrap();
         let cursor_two = OpaqueRunEventCursor::new("cursor-two").unwrap();
         let event =
             |sequence: u64, event_type: PublicRunEventType, cursor: OpaqueRunEventCursor| {

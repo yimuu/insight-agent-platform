@@ -22,18 +22,20 @@ use insight_platform_artifact_broker::{
     BrokeredGatewayArtifactReader, GatewayArtifactReadError,
 };
 use insight_platform_artifacts::{
-    ArtifactStore, ArtifactTransaction, CompleteArtifactUpload, GatewayArtifactReadRequest,
-    MarkArtifactDeletion, PrepareArtifact, ScheduleInitialArtifactScan,
+    ArtifactStore, ArtifactTransaction, CompleteArtifactUpload, FinalizeArtifact,
+    GatewayArtifactReadRequest, MarkArtifactDeletion, PrepareArtifact, ScheduleInitialArtifactScan,
 };
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, CommandAudit, CommandOutcome, JsonLimits, PrincipalKind,
-    ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
+    canonical_digest, parse_strict_json, ArtifactReferenceKind, CommandAudit, CommandOutcome,
+    JsonLimits, PrincipalKind, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
 };
 use insight_platform_observability::{
     process_observability_router, ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_postgres::{
-    dependency_health::run_postgres_health_sampler, repository::PgRepository, verify_schema,
+    dependency_health::run_postgres_health_sampler,
+    repository::{PgRepository, RepositoryError},
+    verify_schema,
 };
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
@@ -136,6 +138,8 @@ struct GatewayConfig {
     scanner_contract_digest: Sha256Digest,
     scan_evidence_ttl_milliseconds: u64,
     scan_retry_backoff_milliseconds: u64,
+    finalize_batch_size: u16,
+    finalize_poll_milliseconds: u64,
     maximum_upload_target_seconds: u64,
     maximum_download_bytes: usize,
     maximum_download_in_flight: usize,
@@ -193,6 +197,9 @@ impl GatewayConfig {
             || self.scan_evidence_ttl_milliseconds > 86_400_000
             || self.scan_retry_backoff_milliseconds == 0
             || self.scan_retry_backoff_milliseconds > 60_000
+            || self.finalize_batch_size == 0
+            || self.finalize_batch_size > 256
+            || !(10..=60_000).contains(&self.finalize_poll_milliseconds)
             || self.maximum_download_bytes == 0
             || self.maximum_download_bytes > 64 * 1024 * 1024
             || !(1..=4_096).contains(&self.maximum_download_in_flight)
@@ -275,6 +282,7 @@ async fn run() -> Result<(), GatewayError> {
         .await
         .map_err(|_| GatewayError::ProviderUnavailable)?;
     let repository = Arc::new(PgRepository::new(pool));
+    let finalize_repository = Arc::clone(&repository);
     let (uploads, unsealer, stores) = providers.into_gateway_components();
     let reader = Arc::new(
         BrokeredGatewayArtifactReader::new(
@@ -355,6 +363,13 @@ async fn run() -> Result<(), GatewayError> {
             .with_graceful_shutdown(observability_cancellation.cancelled_owned())
             .await
     });
+    let finalize_cancellation = cancellation.child_token();
+    let mut finalizer = tokio::spawn(run_public_upload_finalizer(
+        finalize_repository,
+        config.finalize_batch_size,
+        Duration::from_millis(config.finalize_poll_milliseconds),
+        finalize_cancellation,
+    ));
     metrics.mark_ready();
     tokio::select! {
         _ = shutdown_signal() => cancellation.cancel(),
@@ -382,6 +397,11 @@ async fn run() -> Result<(), GatewayError> {
                 .map_err(|_| GatewayError::ObservabilityUnavailable)?;
             return Err(GatewayError::DependencyObserverUnavailable);
         }
+        result = &mut finalizer => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::FinalizerUnavailable)??;
+            return Err(GatewayError::FinalizerUnavailable);
+        }
     }
     tokio::time::timeout(
         Duration::from_millis(config.shutdown_grace_milliseconds),
@@ -394,11 +414,153 @@ async fn run() -> Result<(), GatewayError> {
                 .map_err(|_| GatewayError::ObservabilityUnavailable)?
                 .map_err(|_| GatewayError::ObservabilityUnavailable)?;
             postgres_health.await;
+            finalizer
+                .await
+                .map_err(|_| GatewayError::FinalizerUnavailable)??;
             Ok(())
         },
     )
     .await
     .map_err(|_| GatewayError::ShutdownDeadlineExceeded)?
+}
+
+async fn run_public_upload_finalizer(
+    repository: Arc<PgRepository>,
+    batch_size: u16,
+    poll_interval: Duration,
+    cancellation: CancellationToken,
+) -> Result<(), GatewayError> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        match repository
+            .scan_public_artifact_finalize_candidates(batch_size)
+            .await
+        {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    if let Err(error) = finalize_public_upload(&repository, candidate).await {
+                        // A concurrent owner winner is expected. Every retry starts from a fresh,
+                        // bounded database scan and the final transaction revalidates exact CAS.
+                        if !matches!(
+                            error,
+                            RepositoryError::Conflict(_) | RepositoryError::StaleFence
+                        ) {
+                            eprintln!("Artifact public upload finalize attempt failed: {error}");
+                        }
+                    }
+                }
+            }
+            Err(error) => eprintln!("Artifact public upload finalize scan failed: {error}"),
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+async fn finalize_public_upload(
+    repository: &PgRepository,
+    candidate: insight_platform_postgres::artifact_repository::PublicArtifactFinalizeCandidate,
+) -> Result<(), RepositoryError> {
+    let operation_id = candidate.operation.operation_id.clone();
+    let content_digest = candidate.blob.content_digest.clone().ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no content digest".to_owned())
+    })?;
+    let size_bytes = candidate.blob.size_bytes.ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no byte length".to_owned())
+    })?;
+    let object_generation = candidate.blob.object_generation.clone().ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no generation".to_owned())
+    })?;
+    let verified_media_type = candidate
+        .artifact
+        .verified_media_type
+        .clone()
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow("Verified Artifact has no media type".to_owned())
+        })?;
+    let idempotency_key_digest = owner_digest(
+        "artifact.public_upload.finalize.idempotency",
+        &serde_json::json!({"operation_id": operation_id, "schema_version": 1}),
+    )?;
+    let request_digest = owner_digest(
+        "artifact.public_upload.finalize.request",
+        &serde_json::json!({
+            "artifact_id": candidate.artifact.artifact_id,
+            "artifact_version": candidate.artifact.version,
+            "blob_id": candidate.blob.blob_id,
+            "blob_version": candidate.blob.version,
+            "content_digest": content_digest,
+            "grant_id": candidate.grant.upload_grant_id,
+            "grant_version": candidate.grant.version,
+            "object_generation": object_generation,
+            "operation_id": operation_id,
+            "operation_version": candidate.operation.version,
+            "quota_account_id": candidate.quota_account_id,
+            "quota_account_version": candidate.quota_account_version,
+            "schema_version": 1,
+            "size_bytes": size_bytes,
+            "verified_media_type": verified_media_type,
+        }),
+    )?;
+    let command = FinalizeArtifact {
+        audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
+            tenant_id: candidate.artifact.tenant_id.clone(),
+            principal_id: candidate.grant.snapshot.subject_principal_id.clone(),
+            principal_kind: candidate.grant.snapshot.subject_principal_kind,
+            receipt_id: correlated_id(ResourceKind::Receipt, &operation_id),
+            event_id: correlated_id(ResourceKind::Event, &operation_id),
+            outbox_id: correlated_id(ResourceKind::OutboxEvent, &operation_id),
+            idempotency_key_digest,
+            request_digest,
+            receipt_expires_at: candidate.operation.deadline,
+        },
+        operation_id: operation_id.clone(),
+        artifact_id: candidate.artifact.artifact_id,
+        blob_id: candidate.blob.blob_id,
+        upload_grant_id: candidate.grant.upload_grant_id,
+        artifact_reference_id: correlated_id(ResourceKind::ArtifactLink, &operation_id),
+        quota_account_id: candidate.quota_account_id,
+        quota_settle_entry_id: correlated_id(ResourceKind::QuotaLedgerEntry, &operation_id),
+        expected_artifact_version: candidate.artifact.version,
+        expected_blob_version: candidate.blob.version,
+        expected_operation_version: candidate.operation.version,
+        expected_grant_version: candidate.grant.version,
+        expected_quota_account_version: candidate.quota_account_version,
+        grant_generation: candidate.grant.snapshot.generation,
+        object_generation,
+        content_digest,
+        size_bytes,
+        verified_media_type,
+        reference_kind: ArtifactReferenceKind::Attachment,
+    };
+    let mut transaction = repository.begin_artifact_transaction().await?;
+    match transaction.finalize_artifact(command).await {
+        Ok(_) => transaction.commit().await,
+        Err(error) => {
+            transaction.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
+fn correlated_id(kind: ResourceKind, operation_id: &ResourceId) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, operation_id.uuid())
+        .expect("an Operation ID always contains an RFC4122 UUIDv7")
+}
+
+fn owner_digest<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Digest, RepositoryError> {
+    canonical_digest(&serde_json::json!({
+        "domain": domain,
+        "value": value,
+    }))
+    .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?
+    .parse()
+    .map_err(|error| RepositoryError::InvalidInput(format!("invalid owner digest: {error}")))
 }
 
 async fn install_mtls_listener(address: SocketAddr) -> Result<ExactMtlsListener, GatewayError> {
@@ -523,14 +685,16 @@ async fn prepare_upload_inner(
     let target_duration =
         chrono::Duration::seconds(i64::try_from(target_seconds).map_err(|_| HttpError::Invalid)?);
     let operation_deadline = now + target_duration;
-    let retention_seconds = authority
-        .retention_policy
-        .minimum_retention_seconds
-        .max(target_seconds);
-    let retain_until = now
-        + chrono::Duration::seconds(
-            i64::try_from(retention_seconds).map_err(|_| HttpError::Invalid)?,
-        );
+    let retention_duration = chrono::Duration::seconds(
+        i64::try_from(authority.retention_policy.minimum_retention_seconds)
+            .map_err(|_| HttpError::Invalid)?,
+    );
+    // The repository validates retention against its later database clock. Starting retention at
+    // request admission races that clock and makes every positive minimum a few milliseconds too
+    // short. Preserve the complete upload window, then begin the exact minimum retention period.
+    let retain_until = operation_deadline
+        .checked_add_signed(retention_duration)
+        .ok_or(HttpError::Invalid)?;
     let operation_id = server_id(ResourceKind::Job);
     let artifact_id = server_id(ResourceKind::Artifact);
     let blob_id = server_id(ResourceKind::InternalBlob);
@@ -1228,6 +1392,7 @@ enum GatewayError {
     HttpUnavailable,
     ObservabilityUnavailable,
     DependencyObserverUnavailable,
+    FinalizerUnavailable,
     ShutdownDeadlineExceeded,
 }
 
@@ -1246,6 +1411,9 @@ impl fmt::Display for GatewayError {
             }
             Self::DependencyObserverUnavailable => {
                 formatter.write_str("Artifact Gateway dependency observer stopped")
+            }
+            Self::FinalizerUnavailable => {
+                formatter.write_str("Artifact Gateway public upload finalizer stopped")
             }
             Self::ShutdownDeadlineExceeded => {
                 formatter.write_str("Artifact Gateway shutdown deadline exceeded")

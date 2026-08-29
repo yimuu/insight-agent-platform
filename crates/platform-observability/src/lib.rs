@@ -633,6 +633,8 @@ pub struct OrchestrationOperationalSnapshot {
     pub critical_control_capacity: u64,
     pub critical_control_available: u64,
     pub active_jobs: u64,
+    pub drive_batches: u64,
+    pub claim_attempts: u64,
     pub jobs_claimed: u64,
     pub claim_failures: u64,
     pub recovery_scan_attempts: u64,
@@ -739,6 +741,8 @@ pub struct OrchestrationOperationalMetrics {
     critical_control_capacity: AtomicU64,
     critical_control_available: AtomicU64,
     active_jobs: AtomicU64,
+    drive_batches: AtomicU64,
+    claim_attempts: AtomicU64,
     jobs_claimed: AtomicU64,
     claim_failures: AtomicU64,
     recovery_scan_attempts: AtomicU64,
@@ -765,6 +769,10 @@ impl OrchestrationOperationalMetrics {
             .store(snapshot.critical_control_available, Ordering::Release);
         self.active_jobs
             .store(snapshot.active_jobs, Ordering::Release);
+        self.drive_batches
+            .store(snapshot.drive_batches, Ordering::Release);
+        self.claim_attempts
+            .store(snapshot.claim_attempts, Ordering::Release);
         self.jobs_claimed
             .store(snapshot.jobs_claimed, Ordering::Release);
         self.claim_failures
@@ -825,6 +833,16 @@ impl OrchestrationOperationalMetrics {
             "insight_platform_orchestration_active_jobs{{component_role=\"{role}\"}} {}",
             self.active_jobs.load(Ordering::Acquire)
         );
+        output.push_str(
+            "# HELP insight_platform_orchestration_drives_total Coordinator drive and durable claim attempts.\n\
+             # TYPE insight_platform_orchestration_drives_total counter\n",
+        );
+        for (outcome, value) in [
+            ("batch", self.drive_batches.load(Ordering::Acquire)),
+            ("claim_attempt", self.claim_attempts.load(Ordering::Acquire)),
+        ] {
+            let _ = writeln!(output, "insight_platform_orchestration_drives_total{{component_role=\"{role}\",outcome=\"{outcome}\"}} {value}");
+        }
         output.push_str(
             "# HELP insight_platform_orchestration_claims_total Durable orchestration claim outcomes.\n\
              # TYPE insight_platform_orchestration_claims_total counter\n",
@@ -1093,6 +1111,8 @@ mod tests {
             critical_control_capacity: 2,
             critical_control_available: 1,
             active_jobs: 5,
+            drive_batches: 17,
+            claim_attempts: 16,
             jobs_claimed: 13,
             claim_failures: 2,
             recovery_scan_attempts: 21,

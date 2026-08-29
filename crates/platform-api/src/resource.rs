@@ -1694,9 +1694,10 @@ fn problem(error: ResourceApplicationError) -> Response {
 }
 
 fn no_store(mut response: Response) -> Response {
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private, max-age=0"),
+    );
     response
 }
 
@@ -2165,7 +2166,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         let body = to_bytes(response.into_body(), 65_536).await.unwrap();
         let view: ResourceVersionViewV1 = serde_json::from_slice(&body).unwrap();
         assert_eq!(view.resource_id, dataset_id);
@@ -2321,7 +2325,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         assert_eq!(
             response.headers()["location"],
             "/v1/policies/pol_0198f1cc-32e4-75e1-a9e8-d95ca0f80004"
@@ -2388,7 +2395,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         assert_eq!(response.headers()["etag"], format!("\"{resource_id}-3\""));
 
         let wrong_kind = router
@@ -2543,7 +2553,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         assert_eq!(
             response.headers()["etag"],
             resource_version_etag(&version_id, &fixed_digest('9'))
@@ -2591,7 +2604,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
         let body = to_bytes(response.into_body(), MAX_RESOURCE_REQUEST_BYTES)
             .await
             .unwrap();

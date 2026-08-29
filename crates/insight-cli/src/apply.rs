@@ -694,24 +694,60 @@ pub fn apply_manifest(
         journal
             .step_trace_ids
             .insert("deploy".to_owned(), deployment.trace_id);
+        let deployed_resource: PublicJsonResponse<ResourceViewV1> =
+            client.get_json(&format!("{base_path}/{resource_id}"), StatusCode::OK)?;
+        validate_resource_response(&deployed_resource, kind, Some(&resource_id))?;
+        require_post_deployment_resource_version(
+            &resource_id,
+            &publish.resource_etag,
+            deployed_resource.body.version,
+        )?;
+        journal
+            .step_trace_ids
+            .insert("read_deployed".to_owned(), deployed_resource.trace_id);
         journal.deployment = Some(JournalDeployment {
             deployment_id: deployment.body.deployment_id,
             etag: deployment.etag,
+            resource_etag: Some(deployed_resource.etag),
         });
         apply_journal::save(&journal_path, &journal)?;
     }
-    let deployment_id = journal
+    if journal
         .deployment
         .as_ref()
-        .ok_or_else(|| {
-            ApplyError::InvalidResponse("apply journal omitted Deployment result".to_owned())
-        })?
-        .deployment_id
-        .clone();
+        .is_some_and(|deployment| deployment.resource_etag.is_none())
+    {
+        let deployed_resource: PublicJsonResponse<ResourceViewV1> =
+            client.get_json(&format!("{base_path}/{resource_id}"), StatusCode::OK)?;
+        validate_resource_response(&deployed_resource, kind, Some(&resource_id))?;
+        require_post_deployment_resource_version(
+            &resource_id,
+            &publish.resource_etag,
+            deployed_resource.body.version,
+        )?;
+        journal
+            .step_trace_ids
+            .insert("read_deployed".to_owned(), deployed_resource.trace_id);
+        journal
+            .deployment
+            .as_mut()
+            .expect("deployment presence was checked")
+            .resource_etag = Some(deployed_resource.etag);
+        apply_journal::save(&journal_path, &journal)?;
+    }
+    let deployment = journal.deployment.as_ref().ok_or_else(|| {
+        ApplyError::InvalidResponse("apply journal omitted Deployment result".to_owned())
+    })?;
+    let deployment_id = deployment.deployment_id.clone();
+    let deployed_resource_etag = deployment.resource_etag.clone().ok_or_else(|| {
+        ApplyError::InvalidResponse(
+            "apply journal omitted post-Deployment Resource ETag".to_owned(),
+        )
+    })?;
 
     let activation_intent = JournalIntent {
         receipt: receipt_key(&manifest_digest, "activate"),
-        if_match: Some(publish.resource_etag.clone()),
+        if_match: Some(deployed_resource_etag),
     };
     persist_intent(
         &journal_path,
@@ -768,6 +804,28 @@ pub fn apply_manifest(
             .map(|(step, trace_id)| (step.clone(), trace_id.to_string()))
             .collect(),
     })
+}
+
+fn require_post_deployment_resource_version(
+    resource_id: &ResourceId,
+    published_etag: &str,
+    deployed_version: u64,
+) -> Result<(), ApplyError> {
+    let prefix = format!("\"{resource_id}-");
+    let published_version = published_etag
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix('"'))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|version| *version > 0)
+        .ok_or_else(|| {
+            ApplyError::InvalidResponse("publish response Resource ETag is invalid".to_owned())
+        })?;
+    if published_version.checked_add(1) != Some(deployed_version) {
+        return Err(ApplyError::InvalidResponse(
+            "post-Deployment Resource version is not the exact successor".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<(ApplyManifestV1, Sha256Digest), ApplyError> {
@@ -963,7 +1021,11 @@ fn validate_resume_journal(
         validate_optional_intent(
             journal.activation_intent.as_ref(),
             receipt_key(digest, "activate"),
-            &publish.resource_etag,
+            journal
+                .deployment
+                .as_ref()
+                .and_then(|deployment| deployment.resource_etag.as_deref())
+                .unwrap_or(&publish.resource_etag),
         )?;
     }
     if journal.deployment.as_ref().is_some_and(|deployment| {
@@ -1202,11 +1264,7 @@ fn validate_deployment_response(
     closure: &DeploymentClosure,
 ) -> Result<(), ApplyError> {
     let body = &response.body;
-    let closure_digest = canonical_digest(
-        &serde_json::to_value(closure)
-            .map_err(|error| ApplyError::InvalidResponse(error.to_string()))?,
-    )
-    .map_err(|error| ApplyError::InvalidResponse(error.to_string()))?;
+    let closure_digest = deployment_closure_digest_v1(closure)?;
     if body.schema_version != 1
         || body.deployment_id.kind()
             != kind.deployment_kind().ok_or_else(|| {
@@ -1217,7 +1275,7 @@ fn validate_deployment_response(
         || &body.resource_version_id != resource_version_id
         || body.environment != environment
         || &body.closure != closure
-        || body.closure_digest.to_string() != closure_digest
+        || body.closure_digest != closure_digest
         || body.etag != response.etag
         || body.created_at.as_str().is_empty()
     {
@@ -1226,6 +1284,24 @@ fn validate_deployment_response(
         ));
     }
     Ok(())
+}
+
+fn deployment_closure_digest_v1(closure: &DeploymentClosure) -> Result<Sha256Digest, ApplyError> {
+    // Persisted Deployment bindings are a typed JSONB payload. Its digest includes the owning
+    // schema_version inserted by the authority, even though the public closure DTO omits that
+    // envelope field.
+    let mut value = serde_json::to_value(closure)
+        .map_err(|error| ApplyError::InvalidResponse(error.to_string()))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| {
+            ApplyError::InvalidResponse("Deployment closure is not an object".to_owned())
+        })?
+        .insert("schema_version".to_owned(), serde_json::json!(1));
+    canonical_digest(&value)
+        .map_err(|error| ApplyError::InvalidResponse(error.to_string()))?
+        .parse()
+        .map_err(|error| ApplyError::InvalidResponse(format!("Deployment digest: {error}")))
 }
 
 fn require_succeeded_operation(operation: &OperationViewV1) -> Result<(), ApplyError> {
@@ -1473,7 +1549,8 @@ mod tests {
         let create_etag = resource_etag(&resource_id, 1);
         let validated_etag = resource_etag(&resource_id, 2);
         let publish_etag = resource_etag(&resource_id, 3);
-        let activated_etag = resource_etag(&resource_id, 4);
+        let deployed_resource_etag = resource_etag(&resource_id, 4);
+        let activated_etag = resource_etag(&resource_id, 5);
         let version_digest = digest('a');
         let version_etag = resource_version_etag(&version_id, &version_digest);
         let published = vec![PublishedResourceVersionSummaryV1 {
@@ -1489,10 +1566,7 @@ mod tests {
             .clone()
             .resolve(&published)
             .unwrap();
-        let closure_digest = canonical_digest(&serde_json::to_value(&closure).unwrap())
-            .unwrap()
-            .parse::<Sha256Digest>()
-            .unwrap();
+        let closure_digest = deployment_closure_digest_v1(&closure).unwrap();
         let deployment_etag = deployment_etag(&deployment_id, &closure_digest);
         let operation_etag = operation_etag(&operation_id.to_string(), 2);
         let responses = vec![
@@ -1636,9 +1710,30 @@ mod tests {
                 assert_deployment_version: Some(version_id.clone()),
             },
             ScriptedResponse {
+                method: "GET",
+                path: format!("/v1/policies/{resource_id}"),
+                expected_if_match: None,
+                status: "200 OK",
+                etag: deployed_resource_etag.clone(),
+                location: None,
+                body: serde_json::to_vec(&ResourceViewV1 {
+                    schema_version: 1,
+                    resource_id: resource_id.clone(),
+                    resource_kind: RegistryResourceKind::Policy,
+                    lifecycle_state: EntityLifecycle::Active,
+                    gate_state: AdministrativeGate::Enabled,
+                    draft_generation: 1,
+                    version: 4,
+                    draft: validated_draft.clone(),
+                    etag: deployed_resource_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+            ScriptedResponse {
                 method: "POST",
                 path: format!("/v1/policies/{resource_id}/deployments/{deployment_id}:activate"),
-                expected_if_match: Some(publish_etag),
+                expected_if_match: Some(deployed_resource_etag),
                 status: "200 OK",
                 etag: activated_etag.clone(),
                 location: None,
@@ -1649,7 +1744,7 @@ mod tests {
                     lifecycle_state: EntityLifecycle::Active,
                     gate_state: AdministrativeGate::Enabled,
                     draft_generation: 1,
-                    version: 4,
+                    version: 5,
                     draft: validated_draft,
                     etag: activated_etag.clone(),
                 })

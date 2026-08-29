@@ -104,6 +104,13 @@ impl RegistryValidationWorkerDriver {
         &self,
         active: &mut JoinSet<bool>,
     ) -> Result<usize, RegistryValidationWorkerError> {
+        self.repository
+            .recover_expired_registry_validation_jobs(
+                self.config.claim_batch,
+                i64::try_from(self.config.failure_backoff.as_millis())
+                    .map_err(|_| RegistryValidationWorkerError::InvalidConfiguration)?,
+            )
+            .await?;
         let Some(reservation) = self
             .pools
             .reserve_claim_capacity(
@@ -121,14 +128,17 @@ impl RegistryValidationWorkerDriver {
             .collect::<Result<Vec<_>, _>>()?;
         let claims = self
             .repository
-            .claim_jobs(ClaimJobs {
-                work_class: WorkClass::RegistryValidation.as_str().to_owned(),
-                worker_id: process.worker_process_generation_id.clone(),
-                limit: u16::try_from(reservation.claim_limit())
-                    .map_err(|_| RegistryValidationWorkerError::InvalidGeneratedCommand)?,
-                lease_milliseconds: self.config.lease_milliseconds,
-                lease_token_digests: tokens,
-            })
+            .claim_registry_validation_jobs(
+                ClaimJobs {
+                    work_class: WorkClass::RegistryValidation.as_str().to_owned(),
+                    worker_id: process.worker_process_generation_id.clone(),
+                    limit: u16::try_from(reservation.claim_limit())
+                        .map_err(|_| RegistryValidationWorkerError::InvalidGeneratedCommand)?,
+                    lease_milliseconds: self.config.lease_milliseconds,
+                    lease_token_digests: tokens,
+                },
+                &self.validator_principal_id,
+            )
             .await?;
         let permits = reservation
             .bind_claimed_jobs(
@@ -191,7 +201,11 @@ impl RegistryValidationWorkerDriver {
                 _ = cancellation.cancelled() => break,
                 result = active.join_next(), if !active.is_empty() => match result {
                     Some(Ok(true)) => report.committed += 1,
-                    Some(_) => report.abandoned += 1,
+                    Some(Ok(false)) => report.abandoned += 1,
+                    Some(Err(error)) => {
+                        eprintln!("registry validation attempt task failed: {error}");
+                        report.abandoned += 1;
+                    }
                     None => {}
                 },
                 _ = scan.tick() => match self.drive_once(&mut active).await {

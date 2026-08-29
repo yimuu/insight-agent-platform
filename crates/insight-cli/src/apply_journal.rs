@@ -76,6 +76,8 @@ pub struct JournalPublishResult {
 pub struct JournalDeployment {
     pub deployment_id: ResourceId,
     pub etag: String,
+    #[serde(default)]
+    pub resource_etag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -169,10 +171,13 @@ impl ApplyJournalV1 {
                 .is_some_and(|intent| !valid_intent(intent, true))
             || self.deployment_intent.is_some() && self.publish.is_none()
             || self.deployment.is_some() && self.deployment_intent.is_none()
-            || self
-                .deployment
-                .as_ref()
-                .is_some_and(|deployment| !valid_etag(&deployment.etag))
+            || self.deployment.as_ref().is_some_and(|deployment| {
+                !valid_etag(&deployment.etag)
+                    || deployment
+                        .resource_etag
+                        .as_ref()
+                        .is_some_and(|etag| !valid_etag(etag))
+            })
             || self
                 .activation_intent
                 .as_ref()
@@ -186,7 +191,13 @@ impl ApplyJournalV1 {
             || self.step_trace_ids.keys().any(|step| {
                 !matches!(
                     step.as_str(),
-                    "create" | "validate" | "read_validated" | "publish" | "deploy" | "activate"
+                    "create"
+                        | "validate"
+                        | "read_validated"
+                        | "publish"
+                        | "deploy"
+                        | "read_deployed"
+                        | "activate"
                 )
             })
         {

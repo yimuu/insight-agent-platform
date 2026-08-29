@@ -397,6 +397,18 @@ pub struct PublicArtifactPrepareAuthority {
     pub quota_account_id: ResourceId,
 }
 
+/// Exact current-state closure consumed by the public upload owner driver. The driver may choose
+/// opaque mutation IDs, but it cannot choose any business identity, evidence, or quota authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicArtifactFinalizeCandidate {
+    pub artifact: ArtifactRecord,
+    pub blob: ArtifactBlobRecord,
+    pub grant: ArtifactGrantRecord,
+    pub operation: ArtifactOperationRecord,
+    pub quota_account_id: ResourceId,
+    pub quota_account_version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InternalArtifactAdmissionAuthority {
     pub retention_policy_revision: ExactVersionRef,
@@ -2694,6 +2706,119 @@ impl PgRepository {
         }
         transaction.commit().await?;
         Ok(prepared)
+    }
+
+    /// Finds public upload Operations whose immutable bytes have been verified but whose owning
+    /// public lifecycle has not yet committed the Ready reference. This is a bounded safety scan;
+    /// `finalize_artifact` re-locks and revalidates every returned version before mutation.
+    pub async fn scan_public_artifact_finalize_candidates(
+        &self,
+        limit: u16,
+    ) -> Result<Vec<PublicArtifactFinalizeCandidate>, RepositoryError> {
+        if limit == 0 || limit > 256 {
+            return Err(RepositoryError::InvalidInput(
+                "public Artifact finalize scan limit is invalid".to_owned(),
+            ));
+        }
+        let mut transaction = begin_read_only_repeatable(self.pool()).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT artifact.tenant_id, artifact.artifact_id, artifact.blob_id,
+                   operation.job_id AS operation_id,
+                   operation.payload_schema_version, operation.payload,
+                   operation.payload_digest,
+                   upload_grant.artifact_link_id AS upload_grant_id
+            FROM insight_platform.artifacts AS artifact
+            JOIN insight_platform.artifact_blobs AS blob
+              ON blob.tenant_id = artifact.tenant_id AND blob.blob_id = artifact.blob_id
+            JOIN insight_platform.jobs AS operation
+              ON operation.tenant_id = artifact.tenant_id
+             AND operation.owner_kind = 'artifact'
+             AND operation.owner_id = artifact.artifact_id
+             AND operation.work_class = 'artifact'
+             AND operation.job_kind = 'artifact_scan'
+            JOIN insight_platform.artifact_links AS upload_grant
+              ON upload_grant.tenant_id = artifact.tenant_id
+             AND upload_grant.target_artifact_id = artifact.artifact_id
+             AND upload_grant.link_kind = 'grant'
+             AND upload_grant.state = 'consumed'
+            WHERE artifact.state = 'verified' AND blob.state = 'verified'
+              AND operation.state = 'waiting'
+              AND operation.worker_id IS NULL
+              AND operation.lease_token_digest IS NULL
+              AND operation.lease_expires_at IS NULL
+              AND operation.heartbeat_at IS NULL
+              AND operation.deadline > clock_timestamp()
+            ORDER BY operation.updated_at, operation.job_id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut candidates = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload =
+                payload_from_row(&row, "payload_schema_version", "payload", "payload_digest")?;
+            let payload: ArtifactJobPayload = decode_typed_payload(&payload, "Artifact Job")?;
+            let ArtifactJobPayload::Scan { scan } = payload else {
+                continue;
+            };
+            // Internal producer candidates have a separate exact business owner and must never be
+            // adopted by the public upload owner driver.
+            if scan.scan_kind != ArtifactScanKind::Initial || scan.producer_job_id.is_some() {
+                continue;
+            }
+            let tenant_id = parse_id(row.try_get("tenant_id")?, "Artifact tenant")?;
+            let artifact_id = parse_id(row.try_get("artifact_id")?, "Artifact")?;
+            let blob_id = parse_id(
+                row.try_get::<Option<String>, _>("blob_id")?
+                    .ok_or_else(|| {
+                        RepositoryError::CorruptRow("Verified Artifact has no Blob".to_owned())
+                    })?,
+                "Artifact Blob",
+            )?;
+            let operation_id = parse_id(row.try_get("operation_id")?, "Artifact Operation")?;
+            let upload_grant_id =
+                parse_id(row.try_get("upload_grant_id")?, "Artifact upload Grant")?;
+            let prepared = load_artifact_bundle(
+                &mut transaction,
+                &tenant_id,
+                &artifact_id,
+                &blob_id,
+                &upload_grant_id,
+                &operation_id,
+            )
+            .await?;
+            let quota = sqlx::query(
+                r#"
+                SELECT quota_account_id, version
+                FROM insight_platform.quota_accounts
+                WHERE tenant_id = $1 AND scope_kind = 'tenant' AND scope_id = $1
+                  AND work_class = 'artifact' AND metric = 'artifact.staging_bytes'
+                "#,
+            )
+            .bind(tenant_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepositoryError::NotFound("tenant Artifact staging quota"))?;
+            candidates.push(PublicArtifactFinalizeCandidate {
+                artifact: prepared.artifact,
+                blob: prepared.blob,
+                grant: prepared.grant,
+                operation: prepared.operation,
+                quota_account_id: parse_id(
+                    quota.try_get("quota_account_id")?,
+                    "Artifact quota account",
+                )?,
+                quota_account_version: parse_u64(
+                    quota.try_get("version")?,
+                    "Artifact quota account version",
+                )?,
+            });
+        }
+        transaction.commit().await?;
+        Ok(candidates)
     }
 
     pub async fn load_gateway_artifact_deletion_target(
