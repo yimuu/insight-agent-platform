@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: productization-base-journey-${{ github.ref }}
+  group: productization-journey-${{ github.ref }}-${{ inputs.profile }}
   cancel-in-progress: true
 
 env:
