@@ -64,6 +64,12 @@ M0 的已审查输入保存在：
 
 ## 4. Milestone M1：`insight` CLI 与可复用本地平台
 
+状态：**In Progress**。当前实现仅覆盖 base profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
+以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和六个独立 Platform role。role
+监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`full` profile、first Run
+authoring、重启后的 durable Run 恢复和本里程碑的全部退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
+Verified。
+
 ### 4.1 工作项
 
 1. 新建 Rust CLI，首批命令固定为：

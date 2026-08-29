@@ -28,14 +28,10 @@ services:
     environment:
       AWS_DEFAULT_REGION: us-east-1
       EAGER_SERVICE_LOADING: "1"
+      PERSISTENCE: "1"
       SERVICES: s3,kms
     ports:
       - "127.0.0.1:4566:4566"
-    healthcheck:
-      test: ["CMD-SHELL", "awslocal s3api list-buckets >/dev/null 2>&1 && awslocal kms list-keys >/dev/null 2>&1"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
     volumes:
       - localstack-data:/var/lib/localstack
 
