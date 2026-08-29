@@ -16,7 +16,7 @@
   "status": "incomplete",
   "entrypoints": [
     {"id": "cli", "status": "passed", "evidence": "fixture CLI evidence"},
-    {"id": "http_fixture", "status": "not_run", "evidence": "fixture raw HTTP gap"},
+    {"id": "http_fixture", "status": "passed", "evidence": "fixture raw HTTP evidence"},
     {"id": "console", "status": "not_run", "evidence": "fixture Console gap"}
   ],
   "assertions": [
@@ -25,7 +25,7 @@
     {"id": "exact_binding_visible", "status": "passed", "evidence": "fixture binding evidence"}
   ],
   "failure_probes": [
-    {"id": "invalid_receipt_conflict", "status": "not_run", "evidence": "fixture Receipt gap"},
-    {"id": "gateway_unavailable", "status": "not_run", "evidence": "fixture Gateway gap"}
+    {"id": "invalid_receipt_conflict", "status": "passed", "evidence": "fixture Receipt conflict evidence"},
+    {"id": "gateway_unavailable", "status": "passed", "evidence": "fixture Gateway diagnostic evidence"}
   ]
 }

@@ -1,4 +1,5 @@
 use chrono::{Duration, SecondsFormat, Utc};
+use reqwest::{blocking::Client, redirect::Policy, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -40,29 +41,119 @@ fn process_is_running(pid: u64) -> bool {
 }
 
 fn stop_orchestration_worker(project: &Path) {
+    stop_role(project, "orchestration");
+}
+
+fn stop_role(project: &Path, role: &str) {
     let process_state: Value = serde_json::from_slice(
         &fs::read(project.join(".insight/runtime/processes.json"))
             .expect("runtime process state is readable"),
     )
     .expect("runtime process state is closed JSON");
-    let pid = process_state["processes"]["orchestration"]["pid"]
+    let pid = process_state["processes"][role]["pid"]
         .as_u64()
-        .expect("orchestration PID");
+        .unwrap_or_else(|| panic!("{role} PID"));
     assert!(
         Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .status()
             .is_ok_and(|status| status.success()),
-        "orchestration worker accepts TERM"
+        "{role} accepts TERM"
     );
     let deadline = Instant::now() + StdDuration::from_secs(15);
     while process_is_running(pid) && Instant::now() < deadline {
         thread::sleep(StdDuration::from_millis(50));
     }
-    assert!(
-        !process_is_running(pid),
-        "orchestration worker did not stop"
+    assert!(!process_is_running(pid), "{role} did not stop");
+}
+
+fn raw_runtime_client(project: &Path) -> (Client, String, String) {
+    let profile: Value = serde_json::from_slice(
+        &fs::read(project.join(".insight/runtime/profile.json"))
+            .expect("runtime profile is readable"),
+    )
+    .expect("runtime profile is closed JSON");
+    let port = profile["ports"]["gateway_runtime"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .expect("Runtime Gateway port");
+    let token = fs::read_to_string(project.join(".insight/identity/access-token.jwt"))
+        .expect("local access token is readable")
+        .trim()
+        .to_owned();
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .no_proxy()
+        .timeout(StdDuration::from_secs(10))
+        .build()
+        .expect("raw public HTTP client builds");
+    (client, format!("http://127.0.0.1:{port}"), token)
+}
+
+fn prove_raw_http_read(project: &Path, run_id: &str) {
+    let (client, base_url, token) = raw_runtime_client(project);
+    let response = client
+        .get(format!("{base_url}/v1/runs/{run_id}"))
+        .bearer_auth(token)
+        .header("accept", "application/json")
+        .send()
+        .expect("raw public Run read completes");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, private, max-age=0")
     );
+    assert!(response.headers().contains_key("trace-id"));
+    assert!(response.headers().contains_key("etag"));
+    let view: Value = response.json().expect("raw public Run view is JSON");
+    assert_eq!(view["run_id"], run_id);
+    assert_eq!(view["state"], "succeeded");
+}
+
+fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
+    let (client, base_url, token) = raw_runtime_client(project);
+    let receipt = "productization-deterministic-first-run-conflict";
+    let first = client
+        .post(format!("{base_url}/v1/runs"))
+        .bearer_auth(&token)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .header("idempotency-key", receipt)
+        .json(request)
+        .send()
+        .expect("first raw public Run create completes");
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert!(first.headers().contains_key("trace-id"));
+    assert!(first.headers().contains_key("location"));
+    let _: Value = first.json().expect("first raw public Run view is JSON");
+
+    let mut conflicting = request.clone();
+    conflicting["input"]["value"]["value"]["message"] = json!("receipt conflict");
+    let second = client
+        .post(format!("{base_url}/v1/runs"))
+        .bearer_auth(token)
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .header("idempotency-key", receipt)
+        .json(&conflicting)
+        .send()
+        .expect("conflicting raw public Run create completes");
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        second
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, private, max-age=0")
+    );
+    assert!(second.headers().contains_key("trace-id"));
+    let problem: Value = second.json().expect("Receipt conflict Problem is JSON");
+    assert_eq!(problem["status"], 409);
+    assert_eq!(problem["code"], "idempotency_conflict");
+    assert_eq!(problem["retryable"], false);
 }
 
 fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrchestrationWorker {
@@ -658,6 +749,8 @@ fn public_cli_deterministic_first_run() {
         json!({"kind": "inline", "value": {"message": "hello"}})
     );
     assert_eq!(result["schema_digest"], schema_digest);
+    prove_raw_http_read(project, run_id);
+    prove_invalid_receipt_conflict(project, &run_request);
 
     stop_orchestration_worker(project);
     let restart_request = json!({
@@ -944,6 +1037,25 @@ fn public_cli_deterministic_first_run() {
         .and_then(|metadata| metadata.modified())
         .expect("build state modification time is readable");
     drop(replacement);
+    stop_role(project, "gateway-runtime");
+    let unavailable = run_failure(
+        insight,
+        &[
+            "run",
+            "get",
+            human_task_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        unavailable.contains("public API transport failed"),
+        "Gateway unavailability must identify the public transport boundary: {unavailable}"
+    );
+    assert!(
+        !unavailable.contains("backtrace") && !unavailable.contains("panicked"),
+        "Gateway unavailability must not require a Rust backtrace: {unavailable}"
+    );
     let stopped = Command::new(insight)
         .args(["stop", "--path", project.to_str().unwrap()])
         .output()
@@ -1050,7 +1162,7 @@ fn public_cli_deterministic_first_run() {
             "status": "incomplete",
             "entrypoints": [
                 check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh base profile"),
-                check("http_fixture", "not_run", "an independent raw HTTP lifecycle fixture is not yet part of this journey"),
+                check("http_fixture", "passed", "independent bounded HTTP requests read a Run and exercised a conflicting Idempotency-Key through /v1"),
                 check("console", "not_run", "a real browser Console journey is not yet part of this P2 fixture"),
             ],
             "assertions": [
@@ -1059,8 +1171,8 @@ fn public_cli_deterministic_first_run() {
                 check("exact_binding_visible", "passed", "public apply report exposed the exact published Agent Plan content digest"),
             ],
             "failure_probes": [
-                check("invalid_receipt_conflict", "not_run", "the dedicated invalid Receipt conflict probe is not implemented"),
-                check("gateway_unavailable", "not_run", "the dedicated Gateway unavailable diagnostic probe is not implemented"),
+                check("invalid_receipt_conflict", "passed", "the same Idempotency-Key with a different canonical Run request returned closed 409 idempotency_conflict"),
+                check("gateway_unavailable", "passed", "after Runtime Gateway termination the CLI returned an actionable public transport error without backtrace"),
             ],
         });
         let report_directory = Path::new(&report_directory);
