@@ -31,6 +31,16 @@ class ClassifyCiPathsTests(unittest.TestCase):
         self.assertTrue(result["cli"])
         self.assertFalse(result["runtime"])
 
+    def test_base_journey_runner_uses_cli_without_runtime(self) -> None:
+        result = MODULE.classify(
+            [
+                "scripts/run-productization-base-journey.sh",
+                "scripts/tests/test_productization_base_journey_runner.py",
+            ]
+        )
+        self.assertTrue(result["cli"])
+        self.assertFalse(result["runtime"])
+
     def test_runtime_and_mcp_changes_select_full_and_interop(self) -> None:
         result = MODULE.classify(["crates/platform-mcp-service/src/main.rs"])
         self.assertTrue(result["runtime"])

@@ -80,6 +80,11 @@ schema verify 与 exact development bootstrap replay，再启动七个 roles；�
 profile/build state 字节与 build-state mtime 均未变化，证明没有 release rebuild 或 identity/port/key rotation。该证据覆盖
 应用角色重启，不宣称 LocalStack/KMS 基础设施销毁恢复或 production restore。
 
+该 base 证据已由 [`run-productization-base-journey.sh`](../../../scripts/run-productization-base-journey.sh) 固化为单一可复制
+入口：它执行 release CLI build、`doctor -> init -> dev -> status`、真实 P2 journey 与 `stop`，默认关闭精确 Compose
+dependency project 但不删除卷，并保留 fresh project 供审计。显式 `--report-directory` 只允许 clean Git worktree，设置
+fresh-profile evidence 环境并运行 manifest-aware partial checker；脚本不会把缺失 Console 的 incomplete report 升级为 Passed。
+
 2026-08-29 fresh macOS P1 探针已证明 `doctor` 通过、`init` 可创建尚不存在的 project root，且真实 provision 后
 Artifact Data/Gateway、Native Capability、Management/Runtime Gateway、Orchestration 与 Registry Validation 七个独立
 role 全部 ready；`stop` 正常收束并保留 PostgreSQL/LocalStack 卷。探针同时发现并闭合 Agent public authoring P0：CR-203

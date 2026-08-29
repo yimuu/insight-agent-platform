@@ -51,7 +51,12 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
             "examples/productization",
             "docs/specs/productization",
         )
-    ) or any(path.name.startswith("check-productization") for path in normalized)
+    ) or any(
+        path.name.startswith("check-productization")
+        or path.name == "run-productization-base-journey.sh"
+        or path.name == "test_productization_base_journey_runner.py"
+        for path in normalized
+    )
     policy = any(
         path.as_posix() in {"Cargo.toml", "Cargo.lock", "deny.toml"}
         or (path.name == "Cargo.toml" and is_under(path, "crates"))
@@ -81,7 +86,9 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
                 and (
                     path.name.startswith("check-productization")
                     or path.name == "classify-ci-paths.py"
+                    or path.name == "run-productization-base-journey.sh"
                     or path.name == "test_classify_ci_paths.py"
+                    or path.name == "test_productization_base_journey_runner.py"
                     or path.name == "test_productization_scenario_reports.py"
                 )
             )
