@@ -132,6 +132,11 @@ pub enum CliCommand {
         root: PathBuf,
         run_id: String,
     },
+    RunWatch {
+        root: PathBuf,
+        run_id: String,
+        timeout_seconds: u64,
+    },
     ArtifactGet {
         root: PathBuf,
         artifact_id: String,
@@ -683,6 +688,14 @@ fn parse_run(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     let Some(run_id) = arguments.get(1).and_then(|value| value.to_str()) else {
         return Err(CliError::Usage);
     };
+    if action == "watch" {
+        let (root, timeout_seconds) = parse_path_and_timeout(&arguments[2..], 300)?;
+        return Ok(CliCommand::RunWatch {
+            root,
+            run_id: run_id.to_owned(),
+            timeout_seconds,
+        });
+    }
     let root = parse_path_only(&arguments[2..])?;
     match action {
         "get" => Ok(CliCommand::RunGet {
@@ -705,6 +718,54 @@ fn parse_run(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         }),
         _ => Err(CliError::UnknownCommand(format!("run {action}"))),
     }
+}
+
+fn parse_path_and_timeout(
+    arguments: &[OsString],
+    default_timeout_seconds: u64,
+) -> Result<(PathBuf, u64), CliError> {
+    let mut root = None;
+    let mut timeout_seconds = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--path"));
+                };
+                root = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            "--timeout-seconds" => {
+                if timeout_seconds.is_some() {
+                    return Err(CliError::DuplicateOption("--timeout-seconds"));
+                }
+                let Some(value) = arguments.get(cursor + 1).and_then(|value| value.to_str()) else {
+                    return Err(CliError::MissingValue("--timeout-seconds"));
+                };
+                timeout_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|seconds| (1..=3_600).contains(seconds))
+                        .ok_or_else(|| CliError::InvalidOptionValue {
+                            option: "--timeout-seconds",
+                            value: value.to_owned(),
+                        })?,
+                );
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    Ok((
+        root.unwrap_or_else(|| PathBuf::from(".")),
+        timeout_seconds.unwrap_or(default_timeout_seconds),
+    ))
 }
 
 fn parse_run_create(arguments: &[OsString]) -> Result<CliCommand, CliError> {
@@ -3699,6 +3760,17 @@ pub fn execute(
             let root = resolve_root(current_directory, root);
             read_local_run_result(&root, &run_id)
         }
+        CliCommand::RunWatch {
+            root,
+            run_id,
+            timeout_seconds,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let mut output = Vec::new();
+            watch_local_run(&root, &run_id, timeout_seconds, &mut output)?;
+            String::from_utf8(output)
+                .map_err(|_| CliError::RuntimeState("Run watch output is not UTF-8".to_owned()))
+        }
         CliCommand::ArtifactGet { root, artifact_id } => {
             let root = resolve_root(current_directory, root);
             read_local_artifact(&root, &artifact_id)
@@ -3736,6 +3808,28 @@ pub fn execute(
     }
 }
 
+pub fn execute_to_writer<W: Write>(
+    command: CliCommand,
+    current_directory: &Path,
+    probe: &dyn DoctorProbe,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    if let CliCommand::RunWatch {
+        root,
+        run_id,
+        timeout_seconds,
+    } = command
+    {
+        let root = resolve_root(current_directory, root);
+        return watch_local_run(&root, &run_id, timeout_seconds, writer);
+    }
+    let output = execute(command, current_directory, probe)?;
+    writer
+        .write_all(output.as_bytes())
+        .and_then(|_| writer.flush())
+        .map_err(|error| CliError::RuntimeState(format!("cannot write CLI output: {error}")))
+}
+
 fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
     if root.is_absolute() {
         root
@@ -3745,7 +3839,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run` and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
 fn apply_local_manifest(
@@ -3894,6 +3988,24 @@ fn read_local_run_result(root: &Path, run_id: &str) -> Result<String, CliError> 
     let (client, _) = local_runtime_http_client(root)?;
     let view = run::read_run_result(&client, &run_id).map_err(CliError::Run)?;
     render_json(&view)
+}
+
+fn watch_local_run<W: Write>(
+    root: &Path,
+    run_id: &str,
+    timeout_seconds: u64,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let run_id = parse_run_id(run_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    run::watch_run(
+        &client,
+        &run_id,
+        Duration::from_secs(timeout_seconds),
+        writer,
+    )
+    .map(|_| ())
+    .map_err(CliError::Run)
 }
 
 fn read_local_artifact(root: &Path, artifact_id: &str) -> Result<String, CliError> {
@@ -4616,6 +4728,24 @@ mod tests {
             CliCommand::RunResult {
                 root: PathBuf::from("."),
                 run_id,
+            }
+        );
+        let watch_id = format!("run_{}", Uuid::now_v7());
+        assert_eq!(
+            parse_command(&[
+                OsString::from("run"),
+                OsString::from("watch"),
+                OsString::from(&watch_id),
+                OsString::from("--timeout-seconds"),
+                OsString::from("120"),
+                OsString::from("--path"),
+                OsString::from("demo"),
+            ])
+            .unwrap(),
+            CliCommand::RunWatch {
+                root: PathBuf::from("demo"),
+                run_id: watch_id,
+                timeout_seconds: 120,
             }
         );
         assert!(matches!(

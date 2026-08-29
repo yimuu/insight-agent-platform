@@ -1,5 +1,5 @@
-use insight_cli::{execute, parse_command, SystemDoctorProbe};
-use std::{env, process::ExitCode};
+use insight_cli::{execute_to_writer, parse_command, SystemDoctorProbe};
+use std::{env, io, process::ExitCode};
 
 fn main() -> ExitCode {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
@@ -18,11 +18,13 @@ fn main() -> ExitCode {
         }
     };
     let probe = SystemDoctorProbe;
-    match execute(command, &current_directory, &probe) {
-        Ok(output) => {
-            print!("{output}");
-            ExitCode::SUCCESS
-        }
+    let result = {
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        execute_to_writer(command, &current_directory, &probe, &mut writer)
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if let Some(output) = error.output() {
                 print!("{output}");

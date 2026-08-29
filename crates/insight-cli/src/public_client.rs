@@ -26,6 +26,8 @@ use std::{
 
 const MAX_PUBLIC_REQUEST_BYTES: usize = 1_048_576;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 131_072;
+const MAX_PUBLIC_SSE_BYTES: usize = 8_388_608;
+const MAX_PUBLIC_SSE_FRAMES: usize = 128;
 const JSON_CONTENT_TYPE: &str = "application/json";
 const OPERATION_CACHE_CONTROL: &str = "no-store, private, max-age=0";
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
@@ -104,6 +106,13 @@ pub struct PublicBinaryResponse {
     pub etag: String,
     pub content_digest: Sha256Digest,
     pub trace_id: TraceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicSseFrame<T> {
+    pub id: String,
+    pub event: String,
+    pub data: T,
 }
 
 impl PublicHttpClient {
@@ -363,6 +372,26 @@ impl PublicHttpClient {
         })
     }
 
+    pub fn get_sse_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<Vec<PublicSseFrame<T>>, PublicClientError> {
+        validate_public_path(path)?;
+        let mut request = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .header(ACCEPT, "text/event-stream")
+            .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token));
+        if let Some(cursor) = last_event_id {
+            request = request.header("last-event-id", bounded_header(cursor, "Last-Event-ID")?);
+        }
+        let response = request
+            .send()
+            .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+        decode_sse_response(response)
+    }
+
     pub fn post_json<Request: Serialize, ResponseBody: DeserializeOwned>(
         &self,
         path: &str,
@@ -454,6 +483,127 @@ fn decode_body_response<T: DeserializeOwned>(
         PublicClientError::InvalidResponse("response body is not closed JSON".to_owned())
     })?;
     Ok(PublicBodyResponse { body })
+}
+
+fn decode_sse_response<T: DeserializeOwned>(
+    mut response: Response,
+) -> Result<Vec<PublicSseFrame<T>>, PublicClientError> {
+    let status = response.status();
+    let trace_id = required_header(&response, "trace-id")?
+        .parse::<TraceId>()
+        .map_err(|_| PublicClientError::InvalidResponse("trace-id is invalid".to_owned()))?;
+    if status != StatusCode::OK {
+        if !status.is_client_error() && !status.is_server_error() {
+            return Err(PublicClientError::InvalidResponse(format!(
+                "unexpected HTTP status {status}"
+            )));
+        }
+        require_json_content_type(&response)?;
+        return decode_problem(response, status, trace_id);
+    }
+    if required_header(&response, CACHE_CONTROL.as_str())? != OPERATION_CACHE_CONTROL {
+        return Err(PublicClientError::InvalidResponse(
+            "SSE cache-control is not the closed private no-store value".to_owned(),
+        ));
+    }
+    let content_type = required_header(&response, CONTENT_TYPE.as_str())?;
+    if content_type
+        .split(';')
+        .next()
+        .is_none_or(|value| value.trim() != "text/event-stream")
+    {
+        return Err(PublicClientError::InvalidResponse(
+            "SSE content-type is invalid".to_owned(),
+        ));
+    }
+    if response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_PUBLIC_SSE_BYTES as u64)
+    {
+        return Err(PublicClientError::InvalidResponse(
+            "SSE page exceeds the client limit".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take((MAX_PUBLIC_SSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+    if bytes.len() > MAX_PUBLIC_SSE_BYTES {
+        return Err(PublicClientError::InvalidResponse(
+            "SSE page exceeds the client limit".to_owned(),
+        ));
+    }
+    parse_sse_frames(&bytes)
+}
+
+fn parse_sse_frames<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<Vec<PublicSseFrame<T>>, PublicClientError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| PublicClientError::InvalidResponse("SSE page is not UTF-8".to_owned()))?;
+    if text.contains('\0') {
+        return Err(PublicClientError::InvalidResponse(
+            "SSE page contains a null byte".to_owned(),
+        ));
+    }
+    let mut frames = Vec::new();
+    let mut id = None;
+    let mut event = None;
+    let mut data = None;
+    for raw_line in text.split('\n').chain(std::iter::once("")) {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
+            if id.is_none() && event.is_none() && data.is_none() {
+                continue;
+            }
+            let id = id.take().ok_or_else(|| {
+                PublicClientError::InvalidResponse("SSE frame omitted id".to_owned())
+            })?;
+            let event = event.take().ok_or_else(|| {
+                PublicClientError::InvalidResponse("SSE frame omitted event".to_owned())
+            })?;
+            let data = data.take().ok_or_else(|| {
+                PublicClientError::InvalidResponse("SSE frame omitted data".to_owned())
+            })?;
+            frames.push(PublicSseFrame { id, event, data });
+            if frames.len() > MAX_PUBLIC_SSE_FRAMES {
+                return Err(PublicClientError::InvalidResponse(
+                    "SSE page contains too many frames".to_owned(),
+                ));
+            }
+            continue;
+        }
+        let (field, value) = line.split_once(':').ok_or_else(|| {
+            PublicClientError::InvalidResponse("SSE line has no field separator".to_owned())
+        })?;
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "id" if id.is_none() && !value.is_empty() && value.len() <= 4_096 => {
+                id = Some(value.to_owned())
+            }
+            "event" if event.is_none() && !value.is_empty() && value.len() <= 128 => {
+                event = Some(value.to_owned())
+            }
+            "data" if data.is_none() && value.len() <= 262_144 => {
+                data = Some(serde_json::from_str::<T>(value).map_err(|_| {
+                    PublicClientError::InvalidResponse(
+                        "SSE data is not closed event JSON".to_owned(),
+                    )
+                })?)
+            }
+            _ => {
+                return Err(PublicClientError::InvalidResponse(
+                    "SSE frame contains an unknown, duplicate, or oversized field".to_owned(),
+                ))
+            }
+        }
+    }
+    Ok(frames)
 }
 
 fn is_loopback_http_base(value: &str) -> bool {

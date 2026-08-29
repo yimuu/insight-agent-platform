@@ -113,10 +113,11 @@ intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并�
 零网络恢复。Artifact upload、首次 Run、完整失败矩阵和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为
 Verified。
 
-[`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result 初始命令面，并严格区分 Runtime Gateway
+[`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result/watch 命令面，并严格区分 Runtime Gateway
 与 Management Gateway。create 使用 canonical request Receipt，control 使用 current ETag + Receipt，result 对 Inline
-content digest 或 Artifact digest/classification 做重验。SSE watch、control response-loss journal、真实 first Run 和
-restart recovery 仍未完成。
+content digest 或 Artifact digest/classification 做重验；watch 按 opaque Last-Event-ID 重连 durable SSE，逐条校验、
+输出和 flush，直到 Run authority terminal。control response-loss journal、SSE 负向矩阵、真实 first Run 和 restart
+recovery 仍未完成。
 
 [`insight artifact`](m2-cli-artifact.md) 已增加 upload/get/read：upload 以本地计算的 exact size/digest prepare，使用不
 携带 OIDC 的独立 no-proxy/no-redirect HTTPS client PUT，再 complete、等待 ArtifactVerify Operation 并重验 Ready

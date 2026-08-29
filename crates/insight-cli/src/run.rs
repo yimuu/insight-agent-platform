@@ -1,13 +1,21 @@
 //! Closed public Run lifecycle client for the local Runtime Gateway.
 
-use crate::public_client::{PublicClientError, PublicHttpClient, PublicJsonResponse};
+use crate::public_client::{
+    PublicClientError, PublicHttpClient, PublicJsonResponse, PublicSseFrame,
+};
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, DataClassification, JsonLimits, ResourceId, ResourceKind,
-    RunState, Sha256Digest, UtcTimestamp, ValueRef,
+    canonical_digest, parse_strict_json, DataClassification, EventDurability, JsonLimits,
+    PublicRunEvent, ResourceId, ResourceKind, RunState, Sha256Digest, UtcTimestamp, ValueRef,
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr as _};
+use std::{
+    fmt,
+    io::Write,
+    str::FromStr as _,
+    thread,
+    time::{Duration, Instant},
+};
 
 const MAX_RUN_REQUEST_BYTES: usize = 1_048_576;
 
@@ -16,6 +24,11 @@ pub enum RunClientError {
     InvalidRequest(String),
     InvalidResponse(String),
     Public(PublicClientError),
+    WatchTimeout {
+        run_id: String,
+        timeout_seconds: u64,
+    },
+    Output(String),
 }
 
 impl fmt::Display for RunClientError {
@@ -26,6 +39,14 @@ impl fmt::Display for RunClientError {
                 write!(formatter, "Run authority response is invalid: {detail}")
             }
             Self::Public(error) => write!(formatter, "{error}"),
+            Self::WatchTimeout {
+                run_id,
+                timeout_seconds,
+            } => write!(
+                formatter,
+                "Run {run_id} did not become terminal within {timeout_seconds} seconds"
+            ),
+            Self::Output(detail) => write!(formatter, "cannot write Run watch output: {detail}"),
         }
     }
 }
@@ -98,6 +119,19 @@ pub enum RunControlAction {
     Pause,
     Resume,
     Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunWatchRecordV1 {
+    Event {
+        schema_version: u16,
+        event: PublicRunEvent,
+    },
+    Terminal {
+        schema_version: u16,
+        run: RunViewV1,
+    },
 }
 
 impl RunControlAction {
@@ -185,6 +219,109 @@ pub fn read_run_result(
     let result = response.body;
     validate_run_result(&result, run_id)?;
     Ok(result)
+}
+
+pub fn watch_run<W: Write>(
+    client: &PublicHttpClient,
+    run_id: &ResourceId,
+    timeout: Duration,
+    writer: &mut W,
+) -> Result<RunViewV1, RunClientError> {
+    require_run_id(run_id)?;
+    if timeout.is_zero() || timeout > Duration::from_secs(3_600) {
+        return Err(RunClientError::InvalidRequest(
+            "watch timeout is outside 1..=3600 seconds".to_owned(),
+        ));
+    }
+    let started = Instant::now();
+    let mut cursor = None::<String>;
+    let mut last_sequence = 0_u64;
+    loop {
+        let frames = client.get_sse_json::<PublicRunEvent>(
+            &format!("/v1/runs/{run_id}/events"),
+            cursor.as_deref(),
+        )?;
+        let page_is_full = frames.len() == 128;
+        for frame in frames {
+            let (next_cursor, sequence) = validate_event_frame(&frame, run_id, last_sequence)?;
+            write_watch_record(
+                writer,
+                &RunWatchRecordV1::Event {
+                    schema_version: 1,
+                    event: frame.data,
+                },
+            )?;
+            cursor = Some(next_cursor);
+            last_sequence = sequence;
+        }
+        let run = read_run(client, run_id)?;
+        if terminal_run_state(run.state) && !page_is_full {
+            write_watch_record(
+                writer,
+                &RunWatchRecordV1::Terminal {
+                    schema_version: 1,
+                    run: run.clone(),
+                },
+            )?;
+            return Ok(run);
+        }
+        if started.elapsed() >= timeout {
+            return Err(RunClientError::WatchTimeout {
+                run_id: run_id.to_string(),
+                timeout_seconds: timeout.as_secs(),
+            });
+        }
+        if cursor.is_none() || !page_is_full {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn validate_event_frame(
+    frame: &PublicSseFrame<PublicRunEvent>,
+    expected_run_id: &ResourceId,
+    last_sequence: u64,
+) -> Result<(String, u64), RunClientError> {
+    let event = &frame.data;
+    event.validate().map_err(|_| {
+        RunClientError::InvalidResponse("SSE event violates its public contract".to_owned())
+    })?;
+    let cursor = event.cursor.as_ref().ok_or_else(|| {
+        RunClientError::InvalidResponse("durable SSE event omitted its cursor".to_owned())
+    })?;
+    let sequence = event.sequence.ok_or_else(|| {
+        RunClientError::InvalidResponse("durable SSE event omitted its sequence".to_owned())
+    })?;
+    if &event.run_id != expected_run_id
+        || event.durability != EventDurability::Durable
+        || cursor.as_str() != frame.id
+        || event.event_type.as_str() != frame.event
+        || sequence <= last_sequence
+    {
+        return Err(RunClientError::InvalidResponse(
+            "SSE id, type, Run, durability, or sequence is inconsistent".to_owned(),
+        ));
+    }
+    Ok((cursor.as_str().to_owned(), sequence))
+}
+
+fn write_watch_record<W: Write>(
+    writer: &mut W,
+    record: &RunWatchRecordV1,
+) -> Result<(), RunClientError> {
+    serde_json::to_writer(&mut *writer, record)
+        .map_err(|error| RunClientError::Output(error.to_string()))?;
+    writer
+        .write_all(b"\n")
+        .and_then(|_| writer.flush())
+        .map_err(|error| RunClientError::Output(error.to_string()))
+}
+
+const fn terminal_run_state(state: RunState) -> bool {
+    matches!(
+        state,
+        RunState::Succeeded | RunState::Failed | RunState::Cancelled | RunState::TimedOut
+    )
 }
 
 fn parse_create_request(
@@ -307,9 +444,13 @@ const fn run_json_limits() -> JsonLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insight_platform_contracts::{
+        DurablePublicRunEventData, OpaqueRunEventCursor, PublicRunEventSourceKind,
+        PublicRunEventType, TraceId,
+    };
     use serde_json::json;
     use std::{
-        io::{Read as _, Write as _},
+        io::Read as _,
         net::{TcpListener, TcpStream},
         thread,
         time::Duration,
@@ -322,6 +463,24 @@ mod tests {
 
     fn digest(character: char) -> String {
         format!("sha256:{}", character.to_string().repeat(64))
+    }
+
+    #[derive(Default)]
+    struct FlushWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl std::io::Write for FlushWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
     }
 
     #[test]
@@ -509,6 +668,142 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn watch_reconnects_with_opaque_cursor_and_flushes_terminal_json_lines() {
+        let run_id = id(ResourceKind::Run);
+        let deployment_id = id(ResourceKind::AgentDeployment);
+        let input_value_id = id(ResourceKind::RunValue);
+        let cursor_one = OpaqueRunEventCursor::new("cursor-one").unwrap();
+        let cursor_two = OpaqueRunEventCursor::new("cursor-two").unwrap();
+        let event =
+            |sequence: u64, event_type: PublicRunEventType, cursor: OpaqueRunEventCursor| {
+                PublicRunEvent {
+                    event_id: Some(id(ResourceKind::Event)),
+                    run_id: run_id.clone(),
+                    cursor: Some(cursor),
+                    sequence: Some(sequence),
+                    schema_version: 1,
+                    trace_id: TraceId::new(),
+                    event_type,
+                    durability: EventDurability::Durable,
+                    occurred_at: format!("2026-08-29T00:00:0{sequence}.000000Z")
+                        .parse()
+                        .unwrap(),
+                    data: serde_json::to_value(DurablePublicRunEventData {
+                        source_kind: PublicRunEventSourceKind::Run,
+                        source_id: run_id.clone(),
+                        source_projection_version: sequence,
+                        safe_summary: None,
+                    })
+                    .unwrap(),
+                }
+            };
+        let queued = event(1, PublicRunEventType::RunQueued, cursor_one.clone());
+        let completed = event(2, PublicRunEventType::RunCompleted, cursor_two.clone());
+        let running = RunViewV1 {
+            schema_version: 1,
+            run_id: run_id.clone(),
+            agent_deployment_id: deployment_id.clone(),
+            state: RunState::Running,
+            version: 2,
+            input_value_id: input_value_id.clone(),
+            output_value_id: None,
+            pause_generation: 0,
+            cancel_generation: 0,
+            deadline: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+            started_at: Some("2026-08-29T00:00:01.000000Z".parse().unwrap()),
+            terminal_at: None,
+            created_at: "2026-08-29T00:00:00.000000Z".parse().unwrap(),
+            updated_at: "2026-08-29T00:00:01.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-2\""),
+        };
+        let terminal = RunViewV1 {
+            state: RunState::Succeeded,
+            version: 3,
+            output_value_id: Some(id(ResourceKind::RunValue)),
+            terminal_at: Some("2026-08-29T00:00:02.000000Z".parse().unwrap()),
+            updated_at: "2026-08-29T00:00:02.000000Z".parse().unwrap(),
+            etag: format!("\"{run_id}-3\""),
+            ..running.clone()
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_run_id = run_id.clone();
+        let server_cursor_one = cursor_one.clone();
+        let server_terminal = terminal.clone();
+        let server = thread::spawn(move || {
+            for step in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut stream);
+                assert_eq!(header_value(&head, "authorization"), Some("Bearer token"));
+                match step {
+                    0 => {
+                        assert!(head
+                            .starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+                        assert_eq!(header_value(&head, "last-event-id"), None);
+                        write_sse_response(&mut stream, &queued);
+                    }
+                    1 => {
+                        assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                        write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            "11111111111111111111111111111111",
+                            Some(&running.etag),
+                            None,
+                            &running,
+                        );
+                    }
+                    2 => {
+                        assert!(head
+                            .starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+                        assert_eq!(
+                            header_value(&head, "last-event-id"),
+                            Some(server_cursor_one.as_str())
+                        );
+                        write_sse_response(&mut stream, &completed);
+                    }
+                    3 => {
+                        assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                        write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            "22222222222222222222222222222222",
+                            Some(&server_terminal.etag),
+                            None,
+                            &server_terminal,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut output = FlushWriter::default();
+        assert_eq!(
+            watch_run(&client, &run_id, Duration::from_secs(2), &mut output).unwrap(),
+            terminal
+        );
+        assert_eq!(output.flushes, 3);
+        let records = String::from_utf8(output.bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["kind"], "event");
+        assert_eq!(records[0]["event"]["sequence"], 1);
+        assert_eq!(records[1]["event"]["sequence"], 2);
+        assert_eq!(records[2]["kind"], "terminal");
+        assert_eq!(records[2]["run"]["state"], "succeeded");
+        server.join().unwrap();
+    }
+
     fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -578,5 +873,21 @@ mod tests {
         )
         .unwrap();
         stream.write_all(&body).unwrap();
+    }
+
+    fn write_sse_response(stream: &mut TcpStream, event: &PublicRunEvent) {
+        let cursor = event.cursor.as_ref().unwrap();
+        let body = format!(
+            "id:{}\nevent:{}\ndata:{}\n\n",
+            cursor.as_str(),
+            event.event_type.as_str(),
+            serde_json::to_string(event).unwrap()
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: 33333333333333333333333333333333\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
     }
 }
