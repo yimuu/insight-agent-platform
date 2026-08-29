@@ -1,0 +1,56 @@
+name: Productization base journey
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: productization-base-journey-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+
+jobs:
+  fresh-base-console:
+    name: Fresh base CLI and real Console journey
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.94.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: "v1-productization-base"
+          shared-key: "productization-base"
+          cache-on-failure: "false"
+      - name: Enable exact Console package manager
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.19.0
+      - name: Run fresh public CLI and real Gateway Console journey
+        run: |
+          scripts/run-productization-base-journey.sh \
+            --project "$RUNNER_TEMP/insight-productization-base" \
+            --report-directory "$RUNNER_TEMP/productization-reports" \
+            --console-browser \
+            --node-bin "$(command -v node)" \
+            --browser-bin "$(command -v google-chrome)"
+      - name: Preserve exact-revision scenario reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: productization-base-scenario-reports-${{ github.sha }}
+          path: ${{ runner.temp }}/productization-reports/*.json
+          if-no-files-found: warn
+          retention-days: 14

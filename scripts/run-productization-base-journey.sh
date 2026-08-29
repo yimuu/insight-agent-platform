@@ -160,6 +160,7 @@ trap cleanup EXIT
 cd "$workspace"
 cargo build --locked --release -p insight-cli --bin insight
 if [[ "$console_browser" == true ]]; then
+  PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm --dir "$workspace/web/console" install --frozen-lockfile
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm --dir "$workspace/web/console" run build
 fi
 if [[ ! -x "$insight_bin" ]]; then

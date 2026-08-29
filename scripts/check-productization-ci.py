@@ -9,6 +9,9 @@ ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 candidate = (ROOT / ".github/workflows/platform-production-candidate.yml").read_text(
     encoding="utf-8"
 )
+base_journey = (
+    ROOT / ".github/workflows/productization-base-journey.yml"
+).read_text(encoding="utf-8")
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 failures: list[str] = []
 
@@ -59,6 +62,31 @@ if dockerfile.count("cargo build --locked --release") != 1:
     failures.append("candidate Dockerfile must compile the production closure once")
 if "cargo build --locked --release --workspace" not in dockerfile:
     failures.append("candidate Dockerfile must use one workspace binary build graph")
+
+journey_trigger = base_journey.split("permissions:", 1)[0]
+if "workflow_dispatch:" not in journey_trigger:
+    failures.append("base journey qualification is not explicitly dispatched")
+for forbidden_trigger in ("push:", "pull_request:", "schedule:"):
+    if forbidden_trigger in journey_trigger:
+        failures.append(
+            f"base journey qualification contains automatic trigger {forbidden_trigger!r}"
+        )
+for marker in (
+    "runs-on: ubuntu-24.04",
+    "scripts/run-productization-base-journey.sh",
+    "--report-directory",
+    "--console-browser",
+    'node-version: "24"',
+    "pnpm@11.19.0",
+    "timeout-minutes: 60",
+):
+    if marker not in base_journey:
+        failures.append(f"base journey qualification misses {marker!r}")
+for forbidden in ("cosign sign", "docker/build-push-action@", "docker push"):
+    if forbidden in base_journey:
+        failures.append(
+            f"base journey qualification contains candidate-only operation {forbidden!r}"
+        )
 
 if failures:
     raise SystemExit("\n".join(failures))

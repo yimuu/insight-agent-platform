@@ -26,6 +26,14 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn("--report-directory", result.stdout)
         self.assertIn("--keep-dependencies", result.stdout)
 
+    def test_console_path_installs_exact_dependencies_before_build(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        install = 'pnpm --dir "$workspace/web/console" install --frozen-lockfile'
+        build = 'pnpm --dir "$workspace/web/console" run build'
+        self.assertIn(install, source)
+        self.assertIn(build, source)
+        self.assertLess(source.index(install), source.index(build))
+
     def test_unknown_option_fails_before_build_or_mutation(self) -> None:
         result = self.run_runner("--unknown")
         self.assertEqual(result.returncode, 2)
