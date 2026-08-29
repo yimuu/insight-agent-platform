@@ -36,6 +36,13 @@ jobs:
         run: bash scripts/check-cutover-residuals.sh
       - name: Check Productization M0 golden-scenario manifest
         run: python3 scripts/check-productization-m0.py
+      - name: Check Productization scenario report contract
+        run: |
+          python3 scripts/check-productization-scenario-reports.py \
+            tests/fixtures/productization-reports/incomplete \
+            --allow-incomplete \
+            --source-revision 0000000000000000000000000000000000000000
+          python3 -m unittest scripts/tests/test_productization_scenario_reports.py
       - name: Check Platform v1 machine contracts and fixtures
         run: |
           python3 scripts/check-platform-v1-contracts.py

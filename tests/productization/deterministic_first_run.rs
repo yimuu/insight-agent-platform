@@ -16,6 +16,8 @@ use tempfile::TempDir;
 
 const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
+const REPORT_DIRECTORY_ENV: &str = "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY";
+const FRESH_PROFILE_ENV: &str = "PLATFORM_PRODUCTIZATION_FRESH_PROFILE";
 const CONTRACT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -297,6 +299,7 @@ fn public_cli_deterministic_first_run() {
     };
     let project = Path::new(&project);
     let insight = Path::new(&insight);
+    let started_at = Utc::now();
     assert!(project.join(".insight/project.json").is_file());
     assert!(insight.is_file());
 
@@ -995,4 +998,77 @@ fn public_cli_deterministic_first_run() {
         ],
     );
     assert_eq!(persisted["state"], "succeeded");
+
+    if let Ok(report_directory) = env::var(REPORT_DIRECTORY_ENV) {
+        assert_eq!(
+            env::var(FRESH_PROFILE_ENV).as_deref(),
+            Ok("true"),
+            "writing qualification evidence requires an explicitly fresh profile"
+        );
+        let workspace = insight
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("insight binary is inside workspace target directory");
+        let dirty = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(workspace)
+            .output()
+            .expect("Git working tree status is readable");
+        assert!(dirty.status.success(), "Git status succeeds");
+        assert!(
+            dirty.stdout.is_empty(),
+            "qualification reports cannot identify an uncommitted working tree as an exact revision"
+        );
+        let revision = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace)
+            .output()
+            .expect("Git revision is readable");
+        assert!(revision.status.success(), "Git revision lookup succeeds");
+        let revision = String::from_utf8(revision.stdout)
+            .expect("Git revision is UTF-8")
+            .trim()
+            .to_owned();
+        assert_eq!(revision.len(), 40, "Git revision is exact");
+        let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
+        let report = json!({
+            "schema_version": 1,
+            "report_kind": "insight.productization.scenario-report/v1",
+            "scenario_id": "deterministic-first-run",
+            "contract_profile": "insight.platform/v1",
+            "profile": "base",
+            "automation_layer": "P2",
+            "source_revision": revision,
+            "environment": {
+                "os": env::consts::OS,
+                "architecture": env::consts::ARCH,
+                "fresh_profile": true,
+            },
+            "started_at": started_at.to_rfc3339_opts(SecondsFormat::Micros, true),
+            "finished_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+            "status": "incomplete",
+            "entrypoints": [
+                check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh base profile"),
+                check("http_fixture", "not_run", "an independent raw HTTP lifecycle fixture is not yet part of this journey"),
+                check("console", "not_run", "a real browser Console journey is not yet part of this P2 fixture"),
+            ],
+            "assertions": [
+                check("run_terminal", "passed", "deterministic, replacement-worker and Human Task runs reached succeeded"),
+                check("stream_replay", "passed", "durable SSE watch reached terminal before and after Orchestration Worker replacement"),
+                check("exact_binding_visible", "passed", "public apply report exposed the exact published Agent Plan content digest"),
+            ],
+            "failure_probes": [
+                check("invalid_receipt_conflict", "not_run", "the dedicated invalid Receipt conflict probe is not implemented"),
+                check("gateway_unavailable", "not_run", "the dedicated Gateway unavailable diagnostic probe is not implemented"),
+            ],
+        });
+        let report_directory = Path::new(&report_directory);
+        fs::create_dir_all(report_directory).expect("scenario report directory is writable");
+        fs::write(
+            report_directory.join("deterministic-first-run.json"),
+            serde_jcs::to_vec(&report).expect("scenario report is canonicalizable"),
+        )
+        .expect("scenario report is writable");
+    }
 }

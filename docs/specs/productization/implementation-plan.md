@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M1–M3 |
+| 状态 | In Progress / M1–M4 |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
@@ -197,6 +197,14 @@ SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。1
 - 控制台没有 Console 专用业务表、写代理或内部 RPC 凭据。
 
 ## 7. Milestone M4：十条黄金场景与生态复用
+
+状态：**In Progress**。已定义 closed
+[`scenario-report/v1`](../../../examples/productization/scenario-report.schema.json) 与 manifest-aware
+[`report checker`](../../../scripts/check-productization-scenario-reports.py)。严格门禁要求同一 exact Git revision 的十份
+fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 failure probe；缺失、skip、`not_run` 或未知字段
+均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
+[`m4-golden-scenarios.md`](m4-golden-scenarios.md)。这不是 M4 完成证据，其余九条 fixture/report 与 full profile
+仍未交付。
 
 ### 7.1 工作项
 
