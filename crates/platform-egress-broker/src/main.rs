@@ -67,7 +67,6 @@ const SERVER_KEY_PATH_ENV: &str = "PLATFORM_EGRESS_BROKER_KEY_PATH";
 const MAX_CONFIG_BYTES: usize = 16 * 1_048_576;
 const MAX_TLS_FILE_BYTES: usize = 1_048_576;
 const MCP_STATE_KEY_BYTES: usize = 32;
-const MCP_STATE_KEY_DIRECTORY: &str = "/etc/insight/mcp-state-keys";
 
 struct EgressSecretDependencyObserver {
     metrics: Arc<DependencyObservationMetrics>,
@@ -139,6 +138,7 @@ struct SecretBrokerProcessLimits {
 #[serde(deny_unknown_fields)]
 struct McpStateKeyProcessConfig {
     active_key_id: String,
+    projected_secret_root: String,
     keys: Vec<McpStateKeyFile>,
 }
 
@@ -151,13 +151,23 @@ struct McpStateKeyFile {
 }
 
 impl McpStateKeyProcessConfig {
+    fn projected_secret_root(&self) -> Result<PathBuf, ProcessError> {
+        let root = PathBuf::from(&self.projected_secret_root);
+        if valid_projected_secret_root(&root) {
+            Ok(root)
+        } else {
+            Err(ProcessError::InvalidConfiguration)
+        }
+    }
+
     fn load_remote_tasks(&self) -> Result<AeadMcpRemoteTaskStateCodec, ProcessError> {
+        let root = self.projected_secret_root()?;
         let keys = self
             .keys
             .iter()
             .map(|key| {
                 let path = PathBuf::from(&key.key_material_path);
-                if !valid_projected_secret_path(&path) {
+                if !valid_projected_secret_path(&path, &root) {
                     return Err(ProcessError::InvalidConfiguration);
                 }
                 let material = read_projected_secret(&path, MCP_STATE_KEY_BYTES)?;
@@ -174,12 +184,13 @@ impl McpStateKeyProcessConfig {
     }
 
     fn load_subscriptions(&self) -> Result<AeadMcpSubscriptionStateCodec, ProcessError> {
+        let root = self.projected_secret_root()?;
         let keys = self
             .keys
             .iter()
             .map(|key| {
                 let path = PathBuf::from(&key.key_material_path);
-                if !valid_projected_secret_path(&path) {
+                if !valid_projected_secret_path(&path, &root) {
                     return Err(ProcessError::InvalidConfiguration);
                 }
                 let material = read_projected_secret(&path, MCP_STATE_KEY_BYTES)?;
@@ -728,10 +739,28 @@ fn required_absolute_path(name: &'static str) -> Result<PathBuf, ProcessError> {
     Ok(path)
 }
 
-fn valid_projected_secret_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path.parent() == Some(Path::new(MCP_STATE_KEY_DIRECTORY))
+fn valid_projected_secret_root(root: &Path) -> bool {
+    root.is_absolute()
+        && root != Path::new("/")
+        && root.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn valid_projected_secret_path(path: &Path, root: &Path) -> bool {
+    valid_projected_secret_root(root)
+        && path.is_absolute()
+        && path.parent() == Some(root)
         && path.file_name().is_some()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
 }
 
 fn read_projected_secret(path: &Path, exact_size: usize) -> Result<Vec<u8>, ProcessError> {
@@ -825,16 +854,34 @@ mod tests {
 
     #[test]
     fn remote_task_key_path_is_confined_to_projected_secret_directory() {
-        assert!(valid_projected_secret_path(Path::new(
-            "/etc/insight/mcp-state-keys/current"
+        let production_root = Path::new("/etc/insight/mcp-state-keys");
+        let local_root = Path::new("/tmp/insight-full-profile/mcp-state-keys");
+        assert!(valid_projected_secret_root(production_root));
+        assert!(valid_projected_secret_root(local_root));
+        assert!(!valid_projected_secret_root(Path::new("/")));
+        assert!(!valid_projected_secret_root(Path::new(
+            "/tmp/insight-full-profile/../mcp-state-keys"
         )));
-        assert!(!valid_projected_secret_path(Path::new(
-            "/etc/insight/mcp-state-keys/../other/current"
-        )));
-        assert!(!valid_projected_secret_path(Path::new(
-            "/etc/insight/other/current"
-        )));
-        assert!(!valid_projected_secret_path(Path::new("current")));
+        assert!(valid_projected_secret_path(
+            Path::new("/etc/insight/mcp-state-keys/current"),
+            production_root
+        ));
+        assert!(valid_projected_secret_path(
+            Path::new("/tmp/insight-full-profile/mcp-state-keys/current"),
+            local_root
+        ));
+        assert!(!valid_projected_secret_path(
+            Path::new("/etc/insight/mcp-state-keys/../other/current"),
+            production_root
+        ));
+        assert!(!valid_projected_secret_path(
+            Path::new("/etc/insight/other/current"),
+            production_root
+        ));
+        assert!(!valid_projected_secret_path(
+            Path::new("current"),
+            production_root
+        ));
     }
 
     #[test]
