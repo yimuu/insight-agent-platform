@@ -1,13 +1,33 @@
 use super::*;
 
 pub(super) struct TimerSignalEvidence {
+    pub run_id: String,
+    console_passed: bool,
     started_at: chrono::DateTime<Utc>,
     finished_at: chrono::DateTime<Utc>,
 }
 
 impl TimerSignalEvidence {
+    pub fn mark_console_passed(&mut self) {
+        self.console_passed = true;
+        self.finished_at = Utc::now();
+    }
+
     pub fn report(&self, revision: &str) -> Value {
         let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
+        let console = if self.console_passed {
+            check(
+                "console",
+                "passed",
+                "the same real headless Chromium session read this exact Timer/Signal Run ID from the fresh Gateway/PostgreSQL authority and verified its succeeded Inline result after replacement-Worker recovery",
+            )
+        } else {
+            check(
+                "console",
+                "not_run",
+                "set PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true to read the exact Timer/Signal Run through the real Console",
+            )
+        };
         json!({
             "schema_version": 1,
             "report_kind": "insight.productization.scenario-report/v1",
@@ -27,7 +47,7 @@ impl TimerSignalEvidence {
             "entrypoints": [
                 check("cli", "passed", "public insight artifact/apply/run watch/result commands completed on the fresh base authority"),
                 check("http_fixture", "passed", "raw public /v1 signal submission and exact Receipt replay both returned the closed 204 contract"),
-                check("console", "not_run", "the same fresh authority was not driven through a real browser Console journey"),
+                console,
             ],
             "assertions": [
                 check("restart_resume", "passed", "the accepted signal durably moved the Run to running with a ready continuation while the Orchestration Worker was absent, then an exact replacement Worker reached succeeded"),
@@ -216,6 +236,8 @@ pub(super) fn run(
 
     (
         TimerSignalEvidence {
+            run_id: run_id.to_owned(),
+            console_passed: false,
             started_at,
             finished_at: Utc::now(),
         },

@@ -881,15 +881,7 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(result["schema_digest"], schema_digest);
 
-    let approval_evidence = approval_task_resume::run(
-        insight,
-        project,
-        fixture.path(),
-        &schema_digest,
-        &agent_manifest,
-        run_id,
-    );
-    let (timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
+    let (mut timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
         insight,
         project,
         fixture.path(),
@@ -897,6 +889,18 @@ fn public_cli_deterministic_first_run() {
         &agent_manifest,
         replacement,
     );
+    let approval_evidence = approval_task_resume::run(
+        insight,
+        project,
+        fixture.path(),
+        &schema_digest,
+        &agent_manifest,
+        run_id,
+        &timer_signal_evidence.run_id,
+    );
+    if approval_evidence.console_passed {
+        timer_signal_evidence.mark_console_passed();
+    }
     let human_task_run_id = approval_evidence.run_id.as_str();
 
     // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business

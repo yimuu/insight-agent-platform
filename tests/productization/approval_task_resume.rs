@@ -69,6 +69,7 @@ pub(super) fn run(
     schema_digest: &str,
     agent_manifest: &Value,
     deterministic_run_id: &str,
+    timer_signal_run_id: &str,
 ) -> ApprovalTaskEvidence {
     let started_at = Utc::now();
     let human_task_plan = json!({
@@ -296,6 +297,7 @@ pub(super) fn run(
                     .as_str()
                     .expect("Human Task Agent ID"),
                 deterministic_run_id,
+                timer_signal_run_id,
             );
             true
         } else {
@@ -317,6 +319,7 @@ fn run_real_gateway_console_journey(
     schema_digest: &str,
     agent_id: &str,
     deterministic_run_id: &str,
+    timer_signal_run_id: &str,
 ) {
     let request = json!({
         "agent_id": agent_id,
@@ -397,6 +400,7 @@ fn run_real_gateway_console_journey(
         .env("INSIGHT_CONSOLE_RUN_ID", &run_id)
         .env("INSIGHT_CONSOLE_TASK_ID", &task_id)
         .env("INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID", deterministic_run_id)
+        .env("INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID", timer_signal_run_id)
         .env(
             "INSIGHT_CONSOLE_TASK_RESPONSE",
             serde_json::to_string(&response).expect("Console Task response is JSON"),
@@ -422,6 +426,7 @@ fn run_real_gateway_console_journey(
         browser_evidence["deterministic_run_id"],
         deterministic_run_id
     );
+    assert_eq!(browser_evidence["timer_signal_run_id"], timer_signal_run_id);
 
     for line in lines {
         watch_records.push(

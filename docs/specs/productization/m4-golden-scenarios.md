@@ -65,6 +65,11 @@ authority 读取该 Run 的 `succeeded` 与预期 Inline result，才允许将 `
 记为 Passed。该增量已通过 stateful browser regression 和 Rust fixture 编译，但尚未取得新的 fresh remote report；
 因此上述 revision `591baf00...` 的 deterministic 报告仍保持 Incomplete，不能预先升级。
 
+Timer/Signal 子旅程现调整为先完成 replacement-Worker recovery，再把 exact Timer/Signal Run ID 交给同一真实
+Console session；浏览器必须读取 `succeeded` 与 `resume after signal` Inline result，报告才会把该场景的 Console
+entrypoint 记为 Passed。报告仍固定保留未执行的 `stale_job_fence`，所以即使 Console 通过也只能是 Incomplete。
+该增量已通过 stateful browser regression 与 Rust fixture 编译，fresh remote report 尚待下一次 base journey。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console

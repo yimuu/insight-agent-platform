@@ -326,6 +326,11 @@ run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gat
 和顶层状态升级为 Passed。stateful browser regression、Console build/lint 与 Rust productization fixture 编译已通过，
 fresh remote evidence 尚待下一次 base journey，故当前已记录报告不变。
 
+同一浏览器入口也已接收先完成的 exact Timer/Signal Run ID，并在 Task mutation 前重读其 replacement-Worker
+恢复后的 terminal authority/result。Timer/Signal report 只会升级 Console entrypoint，`stale_job_fence` 继续
+`not_run`，因此顶层仍必须 Incomplete。该顺序调整已通过 stateful Chrome regression 和 Rust fixture 编译，尚未
+取得新的 fresh remote evidence。
+
 ### 6.1 工作项
 
 1. 实现登录/tenant context 与平台 readiness 页面，不在浏览器持久化长期 Secret；
