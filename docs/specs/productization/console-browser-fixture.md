@@ -38,6 +38,14 @@ fixture 请求日志做闭合断言。GitHub `console` job 固定在带 Chrome �
 使用固定 Run/Task 标识和内存态转换，因此每次服务重启都会回到 waiting/pending 初态；它只用于浏览器
 契约验证，不进入生产产物。
 
+远端权威记录为 Git revision `d6dca5c180f9027441284b29b2c2684b3fd0c795`、GitHub Actions run
+[`33274451057`](https://github.com/yimuu/insight-agent-platform/actions/runs/33274451057)、job
+[`99158633401`](https://github.com/yimuu/insight-agent-platform/actions/runs/33274451057/job/99158633401)。该 job 在
+`ubuntu-24.04` 的预装 Chrome 中返回 closed `passed` evidence，记录 `request_count=15`，并逐项通过
+`gateway_ready`、`sse_task_discovery`、`task_mutation`、`terminal_run`、`reload_authority_read` 与
+`memory_only_token`。workflow 后因更晚提交取代而取消，不改变已完成 job 的结果；该证据只适用于上述 exact revision
+且仅适用于 stateful fixture boundary。
+
 ## 证据边界
 
 本报告不证明 PostgreSQL transaction、真实 Gateway authentication/authorization、进程重启恢复、Ingress
