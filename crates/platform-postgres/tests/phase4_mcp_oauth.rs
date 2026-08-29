@@ -1399,7 +1399,7 @@ fn oauth_exchange_callback_fixture_process() {
         .block_on(run_oauth_exchange_callback_fixture(config));
 }
 
-struct OAuthCleanupTlsFixture {
+struct OAuthRpcTlsFixture {
     ca: String,
     server_cert: String,
     server_key: String,
@@ -1407,7 +1407,7 @@ struct OAuthCleanupTlsFixture {
     client_key: String,
 }
 
-fn oauth_cleanup_tls_fixture() -> OAuthCleanupTlsFixture {
+fn oauth_rpc_tls_fixture(client_workload_identity: &str) -> OAuthRpcTlsFixture {
     let mut ca_parameters = CertificateParams::default();
     ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_parameters.key_usages = vec![
@@ -1430,14 +1430,10 @@ fn oauth_cleanup_tls_fixture() -> OAuthCleanupTlsFixture {
         ExtendedKeyUsagePurpose::ServerAuth,
     );
     let (client_cert, client_key) = issue(
-        vec![SanType::URI(
-            insight_platform_egress_rpc::MCP_HOST_WORKLOAD_IDENTITY
-                .try_into()
-                .unwrap(),
-        )],
+        vec![SanType::URI(client_workload_identity.try_into().unwrap())],
         ExtendedKeyUsagePurpose::ClientAuth,
     );
-    OAuthCleanupTlsFixture {
+    OAuthRpcTlsFixture {
         ca: ca.pem(),
         server_cert,
         server_key,
@@ -1951,7 +1947,8 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
         uuid::Uuid::now_v7()
     ));
     std::fs::create_dir(&temporary).unwrap();
-    let tls = oauth_cleanup_tls_fixture();
+    let tls =
+        oauth_rpc_tls_fixture(insight_platform_egress_rpc::MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY);
     let ca_path = temporary.join("ca.pem");
     let client_cert_path = temporary.join("client.pem");
     let client_key_path = temporary.join("client-key.pem");
@@ -2231,7 +2228,8 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
     );
     wait_for_process_file(&token_ready, &mut token_process, StdDuration::from_secs(5));
 
-    let rpc_tls = oauth_cleanup_tls_fixture();
+    let rpc_tls =
+        oauth_rpc_tls_fixture(insight_platform_egress_rpc::MCP_CALLBACK_WORKLOAD_IDENTITY);
     let egress_address = available_address();
     let token_store_marker = temporary.join("token-stored");
     let verification_binding = oauth_verification_binding(&fixture, token_tls.ca_pem.clone());
