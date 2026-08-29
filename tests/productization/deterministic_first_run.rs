@@ -203,6 +203,27 @@ fn run_json_lines(insight: &Path, arguments: &[&str]) -> Vec<Value> {
     records
 }
 
+fn run_failure(insight: &Path, arguments: &[&str]) -> String {
+    let output = Command::new(insight)
+        .args(arguments)
+        .output()
+        .expect("insight command starts");
+    assert!(
+        !output.status.success(),
+        "insight {:?} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        arguments,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed insight {:?} emitted a success document:\n{}",
+        arguments,
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8(output.stderr).expect("insight failure is UTF-8")
+}
+
 fn write_canonical(directory: &Path, name: &str, value: &Value) -> std::path::PathBuf {
     let path = directory.join(name);
     fs::write(&path, canonical_bytes(value)).expect("fixture artifact is writable");
@@ -333,6 +354,83 @@ fn public_cli_deterministic_first_run() {
         "typed-plan.json",
     );
     assert_eq!(plan_upload["content_digest"], canonical_digest(&plan));
+    let operation_id = plan_upload["operation_id"]
+        .as_str()
+        .expect("Artifact upload Operation ID");
+    let operation = run_json(
+        insight,
+        &[
+            "operation",
+            "wait",
+            operation_id,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(operation["operation_id"], operation_id);
+    assert_eq!(operation["state"], "succeeded");
+
+    let plan_artifact_id = plan_upload["artifact_id"]
+        .as_str()
+        .expect("Plan Artifact ID");
+    let artifact = run_json(
+        insight,
+        &[
+            "artifact",
+            "get",
+            plan_artifact_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(artifact["artifact_id"], plan_artifact_id);
+    assert_eq!(artifact["state"], "ready");
+    assert_eq!(
+        artifact["content"]["content_digest"],
+        canonical_digest(&plan)
+    );
+
+    let downloaded_plan_path = fixture.path().join("downloaded-plan.json");
+    let download = run_json(
+        insight,
+        &[
+            "artifact",
+            "read",
+            plan_artifact_id,
+            "--output",
+            downloaded_plan_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(download["artifact_id"], plan_artifact_id);
+    assert_eq!(download["content_digest"], canonical_digest(&plan));
+    assert_eq!(
+        fs::read(&downloaded_plan_path).expect("downloaded Artifact is readable"),
+        canonical_bytes(&plan)
+    );
+    let failure = run_failure(
+        insight,
+        &[
+            "artifact",
+            "read",
+            plan_artifact_id,
+            "--output",
+            downloaded_plan_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        failure.contains("already exists"),
+        "no-clobber failure was not explicit: {failure}"
+    );
+    assert_eq!(
+        fs::read(&downloaded_plan_path).expect("existing download remains readable"),
+        canonical_bytes(&plan)
+    );
     let authoring_upload = upload_artifact(
         insight,
         project,

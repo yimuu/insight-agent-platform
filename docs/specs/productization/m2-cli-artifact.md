@@ -44,13 +44,15 @@ Authorization、Receipt、If-Match、Location、trace、exact Operation target �
 覆盖 upload/get/read 的必需参数。
 
 fresh deterministic first Run P2 journey 已通过真实 Artifact Gateway、Artifact Data Worker 与 HTTPS S3/KMS dependency
-上传并读取 scheduler 所需 typed Plan、authoring 与 qualification Artifact，随后完成 Agent publication 与 Run。该证据
-覆盖真实 upload 主路径，但不替代下列故障矩阵。
+上传 scheduler 所需 typed Plan、authoring 与 qualification Artifact；对 typed Plan 又通过公开 CLI 显式等待同一
+ArtifactVerify Operation、读取 Ready metadata、受控下载并逐字节校验 canonical 内容。重复下载到同一路径必须失败且
+原文件保持不变，证明真实 public download 主路径与 no-clobber 边界。随后该 Artifact 被 scheduler 读取并完成 Agent
+publication 与 Run。该证据覆盖真实 upload/download 主路径，但不替代下列故障矩阵。
 
 以下仍未完成：
 
 - prepare/complete 的 request-before-send journal、过期 target 重新 prepare 与 response-loss 精确恢复；
 - 真实 HTTPS object PUT 的 redirect/proxy/token 泄露、非 200、TLS、expiry 和 digest mismatch 负向 fixture；
-- 409/412/429、quarantined/rejected/deleted、truncated/oversized stream 和真实 public download journey。
+- 409/412/429、quarantined/rejected/deleted、truncated/oversized stream。
 
 因此本文件只声明初始 Artifact lifecycle，不声明 M2 或 spec00～18 已完成。
