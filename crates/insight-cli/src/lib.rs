@@ -4,6 +4,7 @@
 //! host prerequisites and create project-local development state, but all future business
 //! mutations must use the public Gateway `/v1` contract.
 
+mod apply;
 mod public_client;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -25,7 +26,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use x509_parser::{prelude::FromDer as _, public_key::PublicKey, x509::SubjectPublicKeyInfo};
@@ -99,6 +100,11 @@ pub enum CliCommand {
     Stop {
         root: PathBuf,
     },
+    Apply {
+        root: PathBuf,
+        file: PathBuf,
+        timeout_seconds: u64,
+    },
     OperationWait {
         root: PathBuf,
         operation_id: String,
@@ -136,6 +142,10 @@ pub enum CliError {
         path: String,
         source: std::io::Error,
     },
+    ReadApplyManifest {
+        path: String,
+        source: std::io::Error,
+    },
     InvalidLocalIdentity {
         path: String,
     },
@@ -148,14 +158,11 @@ pub enum CliError {
     RuntimeUnavailable(String),
     RuntimeState(String),
     PublicClient(public_client::PublicClientError),
+    Apply(apply::ApplyError),
     OperationTerminal {
         operation_id: String,
         state: String,
         detail: String,
-    },
-    OperationWaitTimeout {
-        operation_id: String,
-        timeout_seconds: u64,
     },
     DoctorFailed {
         report: String,
@@ -204,6 +211,9 @@ impl std::fmt::Display for CliError {
                     "cannot read local identity state at {path}: {source}"
                 )
             }
+            Self::ReadApplyManifest { path, source } => {
+                write!(formatter, "cannot read apply manifest at {path}: {source}")
+            }
             Self::InvalidLocalIdentity { path } => {
                 write!(formatter, "local identity state at {path} is invalid")
             }
@@ -226,6 +236,7 @@ impl std::fmt::Display for CliError {
                 "local development runtime state is invalid: {detail}"
             ),
             Self::PublicClient(error) => write!(formatter, "{error}"),
+            Self::Apply(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
                 state,
@@ -233,13 +244,6 @@ impl std::fmt::Display for CliError {
             } => write!(
                 formatter,
                 "operation {operation_id} reached terminal state {state}: {detail}"
-            ),
-            Self::OperationWaitTimeout {
-                operation_id,
-                timeout_seconds,
-            } => write!(
-                formatter,
-                "operation {operation_id} did not become terminal within {timeout_seconds} seconds"
             ),
             Self::DoctorFailed { .. } => {
                 write!(
@@ -256,8 +260,10 @@ impl std::error::Error for CliError {
         match self {
             Self::InitializeProject { source, .. } => Some(source),
             Self::ReadLocalIdentity { source, .. }
-            | Self::RotateLocalAccessToken { source, .. } => Some(source),
+            | Self::RotateLocalAccessToken { source, .. }
+            | Self::ReadApplyManifest { source, .. } => Some(source),
             Self::PublicClient(source) => Some(source),
+            Self::Apply(source) => Some(source),
             _ => None,
         }
     }
@@ -278,6 +284,7 @@ impl CliError {
             Self::DoctorFailed { .. }
             | Self::InitializeProject { .. }
             | Self::ReadLocalIdentity { .. }
+            | Self::ReadApplyManifest { .. }
             | Self::InvalidLocalIdentity { .. }
             | Self::RotateLocalAccessToken { .. }
             | Self::InvalidClock => 1,
@@ -285,8 +292,8 @@ impl CliError {
             | Self::RuntimeUnavailable(_)
             | Self::RuntimeState(_)
             | Self::PublicClient(_)
-            | Self::OperationTerminal { .. }
-            | Self::OperationWaitTimeout { .. } => 1,
+            | Self::Apply(_)
+            | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
     }
@@ -312,6 +319,7 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "status" => parse_status(&arguments[1..]),
         "logs" => parse_logs(&arguments[1..]),
         "stop" => parse_stop(&arguments[1..]),
+        "apply" => parse_apply(&arguments[1..]),
         "operation" => parse_operation(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
@@ -538,6 +546,63 @@ fn parse_operation(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     Ok(CliCommand::OperationWait {
         root: root.unwrap_or_else(|| PathBuf::from(".")),
         operation_id: operation_id.to_owned(),
+        timeout_seconds: timeout_seconds.unwrap_or(30),
+    })
+}
+
+fn parse_apply(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let mut root = None;
+    let mut file = None;
+    let mut timeout_seconds = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--path"));
+                };
+                root = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            "--file" => {
+                if file.is_some() {
+                    return Err(CliError::DuplicateOption("--file"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--file"));
+                };
+                file = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            "--timeout-seconds" => {
+                if timeout_seconds.is_some() {
+                    return Err(CliError::DuplicateOption("--timeout-seconds"));
+                }
+                let Some(value) = arguments.get(cursor + 1).and_then(|value| value.to_str()) else {
+                    return Err(CliError::MissingValue("--timeout-seconds"));
+                };
+                timeout_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| (1..=3_600).contains(value))
+                        .ok_or_else(|| CliError::InvalidOptionValue {
+                            option: "--timeout-seconds",
+                            value: value.to_owned(),
+                        })?,
+                );
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    Ok(CliCommand::Apply {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+        file: file.ok_or(CliError::MissingValue("--file"))?,
         timeout_seconds: timeout_seconds.unwrap_or(30),
     })
 }
@@ -3332,6 +3397,15 @@ pub fn execute(
             let root = resolve_root(current_directory, root);
             stop_development_profile(current_directory, &root)
         }
+        CliCommand::Apply {
+            root,
+            file,
+            timeout_seconds,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let file = resolve_root(current_directory, file);
+            apply_local_manifest(&root, &file, timeout_seconds)
+        }
         CliCommand::OperationWait {
             root,
             operation_id,
@@ -3352,21 +3426,49 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `operation wait` reads only the public management `/v1` endpoint and preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle and emits a machine-readable authority report. `operation wait` reads only the public management `/v1` endpoint and preserves a closed Problem response. The implemented `base` profile starts independent Platform roles; `full` remains unavailable until its role closure is implemented.\n"
 }
 
-fn wait_local_operation(
+fn apply_local_manifest(
     root: &Path,
-    operation_id: &str,
+    file: &Path,
     timeout_seconds: u64,
 ) -> Result<String, CliError> {
-    let operation_id =
-        ResourceId::parse_expected(operation_id, ResourceKind::Job).map_err(|_| {
-            CliError::InvalidOptionValue {
-                option: "operation_id",
-                value: operation_id.to_owned(),
-            }
-        })?;
+    const MAX_APPLY_MANIFEST_BYTES: u64 = 1_048_576;
+
+    let metadata = fs::metadata(file).map_err(|source| CliError::ReadApplyManifest {
+        path: file.display().to_string(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_APPLY_MANIFEST_BYTES {
+        return Err(CliError::ReadApplyManifest {
+            path: file.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "manifest size must be within 1..=1048576 bytes",
+            ),
+        });
+    }
+    let bytes = fs::read(file).map_err(|source| CliError::ReadApplyManifest {
+        path: file.display().to_string(),
+        source,
+    })?;
+    let (client, tenant_id) = local_public_http_client(root)?;
+    let report = apply::apply_manifest(
+        &client,
+        &tenant_id,
+        &bytes,
+        Duration::from_secs(timeout_seconds),
+    )
+    .map_err(CliError::Apply)?;
+    serde_json::to_string_pretty(&report)
+        .map(|value| value + "\n")
+        .map_err(|error| CliError::RuntimeState(error.to_string()))
+}
+
+fn local_public_http_client(
+    root: &Path,
+) -> Result<(public_client::PublicHttpClient, ResourceId), CliError> {
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
         source,
@@ -3411,48 +3513,52 @@ fn wait_local_operation(
         Duration::from_secs(5),
     )
     .map_err(CliError::PublicClient)?;
-    let timeout = Duration::from_secs(timeout_seconds);
-    let started = Instant::now();
-    loop {
-        let operation = client
-            .read_operation(&operation_id)
-            .map_err(CliError::PublicClient)?;
-        if operation.tenant_id != expected_tenant_id {
-            return Err(CliError::PublicClient(
-                public_client::PublicClientError::InvalidResponse(
-                    "Operation tenant does not match the local project".to_owned(),
-                ),
-            ));
-        }
-        match operation.state {
-            PublicJobState::Succeeded => {
-                return serde_json::to_string_pretty(&operation)
-                    .map(|value| value + "\n")
-                    .map_err(|error| CliError::RuntimeState(error.to_string()));
+    Ok((client, expected_tenant_id))
+}
+
+fn wait_local_operation(
+    root: &Path,
+    operation_id: &str,
+    timeout_seconds: u64,
+) -> Result<String, CliError> {
+    let operation_id =
+        ResourceId::parse_expected(operation_id, ResourceKind::Job).map_err(|_| {
+            CliError::InvalidOptionValue {
+                option: "operation_id",
+                value: operation_id.to_owned(),
             }
-            PublicJobState::Failed
-            | PublicJobState::Cancelled
-            | PublicJobState::TimedOut
-            | PublicJobState::ReconciliationRequired => {
-                let detail = operation.error.as_ref().map_or_else(
-                    || "no public failure detail was provided".to_owned(),
-                    |error| format!("code={} message={}", error.code, error.message),
-                );
-                return Err(CliError::OperationTerminal {
-                    operation_id: operation.operation_id.to_string(),
-                    state: public_job_state_name(operation.state).to_owned(),
-                    detail,
-                });
-            }
-            PublicJobState::Queued | PublicJobState::Running | PublicJobState::Waiting => {}
+        })?;
+    let (client, expected_tenant_id) = local_public_http_client(root)?;
+    let operation = client
+        .wait_operation(
+            &operation_id,
+            &expected_tenant_id,
+            Duration::from_secs(timeout_seconds),
+        )
+        .map_err(CliError::PublicClient)?;
+    match operation.state {
+        PublicJobState::Succeeded => serde_json::to_string_pretty(&operation)
+            .map(|value| value + "\n")
+            .map_err(|error| CliError::RuntimeState(error.to_string())),
+        PublicJobState::Failed
+        | PublicJobState::Cancelled
+        | PublicJobState::TimedOut
+        | PublicJobState::ReconciliationRequired => {
+            let detail = operation.error.as_ref().map_or_else(
+                || "no public failure detail was provided".to_owned(),
+                |error| format!("code={} message={}", error.code, error.message),
+            );
+            Err(CliError::OperationTerminal {
+                operation_id: operation.operation_id.to_string(),
+                state: public_job_state_name(operation.state).to_owned(),
+                detail,
+            })
         }
-        if started.elapsed() >= timeout {
-            return Err(CliError::OperationWaitTimeout {
-                operation_id: operation_id.to_string(),
-                timeout_seconds,
-            });
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        PublicJobState::Queued | PublicJobState::Running | PublicJobState::Waiting => Err(
+            CliError::PublicClient(public_client::PublicClientError::InvalidResponse(
+                "Operation wait returned a non-terminal state".to_owned(),
+            )),
+        ),
     }
 }
 
@@ -3954,6 +4060,31 @@ mod tests {
                 option: "--timeout-seconds",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn command_parser_accepts_closed_apply_file() {
+        assert_eq!(
+            parse_command(&[
+                OsString::from("apply"),
+                OsString::from("--file"),
+                OsString::from("policy.apply.json"),
+                OsString::from("--path"),
+                OsString::from("demo"),
+                OsString::from("--timeout-seconds"),
+                OsString::from("90"),
+            ])
+            .unwrap(),
+            CliCommand::Apply {
+                root: PathBuf::from("demo"),
+                file: PathBuf::from("policy.apply.json"),
+                timeout_seconds: 90,
+            }
+        );
+        assert!(matches!(
+            parse_command(&[OsString::from("apply")]),
+            Err(CliError::MissingValue("--file"))
         ));
     }
 }

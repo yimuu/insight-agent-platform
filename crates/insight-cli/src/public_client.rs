@@ -4,26 +4,41 @@
 //! public response envelope before returning authority state to the command layer.
 
 use insight_platform_contracts::{
-    ApiProblem, OperationViewV1, ResourceId, ResourceKind, TraceId, MAX_FIELD_ERRORS,
+    ApiProblem, OperationViewV1, ResourceId, ResourceKind, SpanId, TraceId, MAX_FIELD_ERRORS,
     MAX_SAFE_TEXT_BYTES,
 };
 use reqwest::{
     blocking::{Client, Response},
-    header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG},
+    header::{
+        HeaderValue, ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG,
+        IF_MATCH, LOCATION,
+    },
     redirect::Policy,
-    StatusCode,
+    Method, StatusCode,
 };
-use std::{fmt, io::Read, time::Duration};
+use serde::{de::DeserializeOwned, Serialize};
+use std::{
+    fmt,
+    io::Read,
+    time::{Duration, Instant},
+};
 
+const MAX_PUBLIC_REQUEST_BYTES: usize = 1_048_576;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 131_072;
 const JSON_CONTENT_TYPE: &str = "application/json";
 const OPERATION_CACHE_CONTROL: &str = "no-store, private, max-age=0";
+const IDEMPOTENCY_KEY: &str = "idempotency-key";
+const TRACEPARENT: &str = "traceparent";
 
 #[derive(Debug)]
 pub enum PublicClientError {
     InvalidConfiguration(&'static str),
     Transport(String),
     InvalidResponse(String),
+    OperationTimeout {
+        operation_id: String,
+        timeout_seconds: u64,
+    },
     Problem(Box<ApiProblem>),
 }
 
@@ -35,6 +50,13 @@ impl fmt::Display for PublicClientError {
             Self::InvalidResponse(detail) => {
                 write!(formatter, "public API returned an invalid response: {detail}")
             }
+            Self::OperationTimeout {
+                operation_id,
+                timeout_seconds,
+            } => write!(
+                formatter,
+                "operation {operation_id} did not become terminal within {timeout_seconds} seconds"
+            ),
             Self::Problem(problem) => write!(
                 formatter,
                 "public API problem status={} code={} request_id={} trace_id={} retryable={} retry_after_ms={} detail={}",
@@ -59,6 +81,14 @@ pub struct PublicHttpClient {
     client: Client,
     base_url: String,
     bearer_token: String,
+}
+
+#[derive(Debug)]
+pub struct PublicJsonResponse<T> {
+    pub body: T,
+    pub etag: String,
+    pub location: Option<String>,
+    pub trace_id: TraceId,
 }
 
 impl PublicHttpClient {
@@ -108,14 +138,138 @@ impl PublicHttpClient {
                 "operation ID must be a Job ID",
             ));
         }
+        let response = self.get_json(&format!("/v1/operations/{operation_id}"), StatusCode::OK)?;
+        let operation: OperationViewV1 = response.body;
+        operation.validate().map_err(|_| {
+            PublicClientError::InvalidResponse("Operation body violates its contract".to_owned())
+        })?;
+        if &operation.operation_id != operation_id || operation.etag != response.etag {
+            return Err(PublicClientError::InvalidResponse(
+                "Operation identity or ETag does not match the request".to_owned(),
+            ));
+        }
+        Ok(operation)
+    }
+
+    pub fn wait_operation(
+        &self,
+        operation_id: &ResourceId,
+        expected_tenant_id: &ResourceId,
+        timeout: Duration,
+    ) -> Result<OperationViewV1, PublicClientError> {
+        if expected_tenant_id.kind() != ResourceKind::Tenant
+            || timeout.is_zero()
+            || timeout > Duration::from_secs(3_600)
+        {
+            return Err(PublicClientError::InvalidConfiguration(
+                "Operation wait arguments are outside their closed bounds",
+            ));
+        }
+        let started = Instant::now();
+        loop {
+            let operation = self.read_operation(operation_id)?;
+            if &operation.tenant_id != expected_tenant_id {
+                return Err(PublicClientError::InvalidResponse(
+                    "Operation tenant does not match the local project".to_owned(),
+                ));
+            }
+            if matches!(
+                operation.state,
+                insight_platform_contracts::PublicJobState::Succeeded
+                    | insight_platform_contracts::PublicJobState::Failed
+                    | insight_platform_contracts::PublicJobState::Cancelled
+                    | insight_platform_contracts::PublicJobState::TimedOut
+                    | insight_platform_contracts::PublicJobState::ReconciliationRequired
+            ) {
+                return Ok(operation);
+            }
+            if started.elapsed() >= timeout {
+                return Err(PublicClientError::OperationTimeout {
+                    operation_id: operation_id.to_string(),
+                    timeout_seconds: timeout.as_secs(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    pub fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        expected_status: StatusCode,
+    ) -> Result<PublicJsonResponse<T>, PublicClientError> {
+        validate_public_path(path)?;
         let response = self
             .client
-            .get(format!("{}/v1/operations/{operation_id}", self.base_url))
+            .get(format!("{}{}", self.base_url, path))
             .header(ACCEPT, JSON_CONTENT_TYPE)
             .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token))
             .send()
             .map_err(|error| PublicClientError::Transport(error.to_string()))?;
-        decode_operation_response(response, operation_id)
+        decode_json_response(response, expected_status, None)
+    }
+
+    pub fn post_json<Request: Serialize, ResponseBody: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Request,
+        expected_status: StatusCode,
+        idempotency_key: &str,
+        if_match: Option<&str>,
+    ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
+        let body = serde_json::to_vec(body).map_err(|_| {
+            PublicClientError::InvalidConfiguration("public request body is not serializable")
+        })?;
+        if body.len() > MAX_PUBLIC_REQUEST_BYTES {
+            return Err(PublicClientError::InvalidConfiguration(
+                "public request body exceeds the client limit",
+            ));
+        }
+        self.send_mutation(path, Some(body), expected_status, idempotency_key, if_match)
+    }
+
+    pub fn post_empty<ResponseBody: DeserializeOwned>(
+        &self,
+        path: &str,
+        expected_status: StatusCode,
+        idempotency_key: &str,
+        if_match: &str,
+    ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
+        self.send_mutation(path, None, expected_status, idempotency_key, Some(if_match))
+    }
+
+    fn send_mutation<ResponseBody: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<Vec<u8>>,
+        expected_status: StatusCode,
+        idempotency_key: &str,
+        if_match: Option<&str>,
+    ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
+        validate_public_path(path)?;
+        let idempotency_key = bounded_header(idempotency_key, "idempotency key")?;
+        let expected_trace_id = TraceId::new();
+        let span_id = SpanId::new();
+        let traceparent = format!("00-{expected_trace_id}-{span_id}-01");
+        let mut request = self
+            .client
+            .request(Method::POST, format!("{}{}", self.base_url, path))
+            .header(ACCEPT, JSON_CONTENT_TYPE)
+            .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token))
+            .header(IDEMPOTENCY_KEY, idempotency_key)
+            .header(TRACEPARENT, traceparent);
+        if let Some(if_match) = if_match {
+            request = request.header(IF_MATCH, bounded_header(if_match, "If-Match")?);
+        }
+        if let Some(body) = body {
+            request = request.header(CONTENT_TYPE, JSON_CONTENT_TYPE).body(body);
+        } else {
+            request = request.body(Vec::new());
+        }
+        let response = request
+            .send()
+            .map_err(|error| PublicClientError::Transport(error.to_string()))?;
+        decode_json_response(response, expected_status, Some(expected_trace_id))
     }
 }
 
@@ -131,37 +285,75 @@ fn is_loopback_http_base(value: &str) -> bool {
         && port.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
-fn decode_operation_response(
+fn decode_json_response<T: DeserializeOwned>(
     response: Response,
-    expected_operation_id: &ResourceId,
-) -> Result<OperationViewV1, PublicClientError> {
+    expected_status: StatusCode,
+    expected_trace_id: Option<TraceId>,
+) -> Result<PublicJsonResponse<T>, PublicClientError> {
     let status = response.status();
     let response_trace_id = required_header(&response, "trace-id")?
         .parse::<TraceId>()
         .map_err(|_| PublicClientError::InvalidResponse("trace-id is invalid".to_owned()))?;
     require_json_content_type(&response)?;
-    if status != StatusCode::OK {
+    if status != expected_status {
+        if !status.is_client_error() && !status.is_server_error() {
+            return Err(PublicClientError::InvalidResponse(format!(
+                "unexpected HTTP status {status}"
+            )));
+        }
         return decode_problem(response, status, response_trace_id);
+    }
+    if expected_trace_id.is_some_and(|expected| expected != response_trace_id) {
+        return Err(PublicClientError::InvalidResponse(
+            "response trace identity does not match the request traceparent".to_owned(),
+        ));
     }
     if required_header(&response, CACHE_CONTROL.as_str())? != OPERATION_CACHE_CONTROL {
         return Err(PublicClientError::InvalidResponse(
-            "Operation cache-control is not the closed private no-store value".to_owned(),
+            "success cache-control is not the closed private no-store value".to_owned(),
         ));
     }
     let response_etag = required_header(&response, ETAG.as_str())?.to_owned();
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .map(|value| {
+            value.to_str().map(str::to_owned).map_err(|_| {
+                PublicClientError::InvalidResponse("Location header is invalid".to_owned())
+            })
+        })
+        .transpose()?;
     let body = read_bounded_body(response)?;
-    let operation = serde_json::from_slice::<OperationViewV1>(&body).map_err(|_| {
-        PublicClientError::InvalidResponse("Operation body is not closed JSON".to_owned())
+    let body = serde_json::from_slice::<T>(&body).map_err(|_| {
+        PublicClientError::InvalidResponse("response body is not closed JSON".to_owned())
     })?;
-    operation.validate().map_err(|_| {
-        PublicClientError::InvalidResponse("Operation body violates its contract".to_owned())
-    })?;
-    if &operation.operation_id != expected_operation_id || operation.etag != response_etag {
-        return Err(PublicClientError::InvalidResponse(
-            "Operation identity or ETag does not match the request".to_owned(),
+    Ok(PublicJsonResponse {
+        body,
+        etag: response_etag,
+        location,
+        trace_id: response_trace_id,
+    })
+}
+
+fn validate_public_path(path: &str) -> Result<(), PublicClientError> {
+    if path.len() > 2_048
+        || !path.starts_with("/v1/")
+        || path.contains("..")
+        || path.contains(['?', '#'])
+        || !path.is_ascii()
+    {
+        return Err(PublicClientError::InvalidConfiguration(
+            "public API path is outside its closed bounds",
         ));
     }
-    Ok(operation)
+    Ok(())
+}
+
+fn bounded_header(value: &str, purpose: &'static str) -> Result<HeaderValue, PublicClientError> {
+    if value.is_empty() || value.len() > 255 || !value.is_ascii() {
+        return Err(PublicClientError::InvalidConfiguration(purpose));
+    }
+    HeaderValue::from_str(value).map_err(|_| PublicClientError::InvalidConfiguration(purpose))
 }
 
 fn decode_problem<T>(
