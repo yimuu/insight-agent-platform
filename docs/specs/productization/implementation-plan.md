@@ -99,6 +99,10 @@ restart recovery 后续已由上述 P2 journey 补齐，但其余 M1/M2 门禁�
 启用 client certificate verification，CLI 启停流程显式传递这些路径。七个 Platform role、P2 deterministic first Run
 与收束流程在该边界下再次通过；这只证明 base dependency transport closure，不代表 `full` profile 或 M1 已完成。
 
+`full` 的增量闭包已开始从 CLI 主文件抽入独立模块：首批生成 Context Native 与 Artifact Maintenance 的 closed、
+digest-bound 配置及持久化动态端口，并复用 exact Artifact provider catalog。生成器测试与两个目标进程自己的严格配置/
+进程单元测试已通过；二进制构建、进程启动以及其余 full roles 尚未接通，因此 `insight dev --profile full` 继续 fail closed。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

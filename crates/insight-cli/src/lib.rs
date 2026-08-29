@@ -8,6 +8,7 @@ mod apply;
 mod apply_journal;
 mod artifact;
 mod artifact_journal;
+mod full_profile;
 mod public_client;
 mod run;
 mod run_journal;
@@ -1115,11 +1116,13 @@ struct RuntimePortBindings {
     orchestration_observability: u16,
     capability_native_observability: u16,
     registry_validation_observability: u16,
+    #[serde(default)]
+    full: full_profile::PortBindings,
 }
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(10);
+        let mut listeners = Vec::with_capacity(12);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1148,6 +1151,7 @@ impl RuntimePortBindings {
             orchestration_observability: next()?,
             capability_native_observability: next()?,
             registry_validation_observability: next()?,
+            full: full_profile::PortBindings::allocate(&mut next)?,
         };
         drop(listeners);
         Ok(ports)
@@ -1165,6 +1169,7 @@ impl RuntimePortBindings {
             orchestration_observability: 19092,
             capability_native_observability: 19093,
             registry_validation_observability: 19094,
+            full: full_profile::PortBindings::legacy_defaults(),
         }
     }
 }
@@ -1740,7 +1745,7 @@ fn prepare_runtime_profile_inner(
     let registry_validator_digest = local_digest("registry-validator")?;
     let registry_validation_profile_digest = local_digest("registry-validation-profile")?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    let configs = BTreeMap::from([
+    let mut configs = BTreeMap::from([
         (
             "artifact-bootstrap".to_owned(),
             (
@@ -1963,6 +1968,12 @@ fn prepare_runtime_profile_inner(
             ),
         ),
     ]);
+    configs.extend(full_profile::initial_configs(
+        &ports.full,
+        &catalog,
+        &local_digest("context-native-adapter")?,
+        &local_digest("context-native-contract")?,
+    ));
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
         let digest = canonical_digest(&config).map_err(|_| CliError::InvalidLocalIdentity {
@@ -4832,7 +4843,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 8);
+        assert_eq!(digests.len(), 10);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -4853,6 +4864,11 @@ mod tests {
             (
                 "registry-validation",
                 RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
+            ),
+            ("context-native", full_profile::CONTEXT_NATIVE_CONFIG_FILE),
+            (
+                "artifact-maintenance",
+                full_profile::ARTIFACT_MAINTENANCE_CONFIG_FILE,
             ),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
