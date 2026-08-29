@@ -2359,6 +2359,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-cli"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "insight-dsl"
 version = "0.1.0"
 dependencies = [

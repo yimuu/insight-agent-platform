@@ -55,6 +55,7 @@ members = [
     "crates/platform-security-rpc",
     "crates/platform-tasks",
     "crates/platform-worker",
+    "crates/insight-cli",
 ]
 exclude = [
     "crates/platform-sandbox-microvm",
