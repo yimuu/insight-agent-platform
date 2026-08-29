@@ -117,6 +117,7 @@ adapter/worker 和 credential reference。平台不会自动跨区域切换，�
 - [架构概览](docs/current/architecture.md)：执行模型、核心不变量与权威边界；
 - [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
 - [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
+- [原始 `/v1` HTTP authoring](docs/current/http-authoring.md)：checked curl Resource lifecycle、Receipt、CAS 与 Problem；
 - [MCP 使用、运行与安全合同](docs/current/mcp.md)：profiles、传输、授权、交互与安全边界；
 - [Agent 与 Provider 管理面](docs/current/management.md)：Draft、Revision、Deployment、调试与安全门；
 - [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；

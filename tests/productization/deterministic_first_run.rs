@@ -324,6 +324,39 @@ fn run_failure(insight: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("insight failure is UTF-8")
 }
 
+fn run_http_resource_lifecycle(insight: &Path, project: &Path, manifest: &Path) -> Value {
+    let workspace = insight
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("insight binary is inside the workspace target directory");
+    let fixture = workspace.join("examples/productization/http-resource-lifecycle.sh");
+    let output = Command::new(&fixture)
+        .args([
+            "--project",
+            project.to_str().unwrap(),
+            "--file",
+            manifest.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+        ])
+        .output()
+        .expect("raw HTTP lifecycle fixture starts");
+    assert!(
+        output.status.success(),
+        "raw HTTP lifecycle failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "raw HTTP lifecycle did not emit one JSON document: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
 fn write_canonical(directory: &Path, name: &str, value: &Value) -> std::path::PathBuf {
     let path = directory.join(name);
     fs::write(&path, canonical_bytes(value)).expect("fixture artifact is writable");
@@ -613,6 +646,25 @@ fn public_cli_deterministic_first_run() {
     });
     let policy_manifest_path =
         write_canonical(fixture.path(), "policy.apply.json", &policy_manifest);
+    let http_policy_report = run_http_resource_lifecycle(insight, project, &policy_manifest_path);
+    assert_eq!(
+        http_policy_report["kind"],
+        "insight.platform.http-resource-lifecycle-report/v1"
+    );
+    assert_eq!(http_policy_report["receipt_replay"], "same_effect");
+    assert_eq!(
+        http_policy_report["conflict_problem"],
+        "idempotency_conflict"
+    );
+    assert!(http_policy_report["resource_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("pol_")));
+    assert!(http_policy_report["validation_operation_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("job_")));
+    assert!(http_policy_report["deployment_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("pdep_")));
     let policy_report = run_json(
         insight,
         &[
@@ -971,7 +1023,7 @@ fn public_cli_deterministic_first_run() {
             "status": "incomplete",
             "entrypoints": [
                 check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh base profile"),
-                check("http_fixture", "passed", "independent bounded HTTP requests read a Run and exercised a conflicting Idempotency-Key through /v1"),
+                check("http_fixture", "passed", "checked curl completed create/replay/conflict/validate/publish/deploy/activate and independent raw HTTP read the terminal Run through /v1"),
                 check("console", "not_run", "a real browser Console journey is not yet part of this P2 fixture"),
             ],
             "assertions": [

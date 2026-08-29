@@ -136,8 +136,9 @@ create -> validate/wait -> read validated Draft -> publish -> create Deployment 
 intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并通过 response-loss fixture 证明精确重放与完成后
 零网络恢复。命令级 fixture 已覆盖 create 409/429、validate 412、Validation Operation failed/cancelled/timed-out/
 reconciliation-required 与无副作用 timeout，并保留 closed Problem retry metadata 和安全 terminal detail。首次 Run
-已由 fresh P2 journey 覆盖；其他七种 Resource closure、完整原始 HTTP fixture 和其余 M2 退出门禁仍未完成，因此不得
-标记 M2 或 spec 00–18 为 Verified。
+已由 fresh P2 journey 覆盖。checked `curl+jq` fixture 已执行同一七步 `/v1` lifecycle、exact Receipt replay 与
+changed-body 409 Problem，普通 CI mock authority 测试通过且真实 P2 入口已接线；当前 revision 尚待 fresh rerun，其他
+七种 Resource closure 和其余 M2 退出门禁仍未完成，因此不得标记 M2 或 spec 00–18 为 Verified。
 
 [`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result/watch 命令面，并严格区分 Runtime Gateway
 与 Management Gateway。create 使用 canonical request Receipt，control 使用 current ETag + Receipt，result 对 Inline

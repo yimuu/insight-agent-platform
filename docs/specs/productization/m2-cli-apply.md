@@ -87,11 +87,18 @@ retryability 与 retry-after。Validation Operation 的 `failed` authority 投�
 `cancelled`、`timed_out` 与 `reconciliation_required` 同样 fail closed。独立 1 秒 timeout fixture 持续返回 queued
 Operation，证明 CLI 返回 exact timeout，且超时后没有继续 publish、deploy 或 activate mutation。
 
+[`http-resource-lifecycle.sh`](../../../examples/productization/http-resource-lifecycle.sh) 现以 `curl+jq` 执行同一七步
+公开 lifecycle，并额外证明 exact create Receipt replay 与 changed-body 409 `idempotency_conflict`。fixture 对每一步
+固定 Authorization、Accept、Content-Type、traceparent、Receipt 和 If-Match 规则，拒绝 proxy/redirect，校验
+Location、cache、trace、body/header ETag、Operation terminal 与 exact Deployment closure。普通 CI 的 mock authority
+测试已覆盖 queued -> running -> succeeded 时 Operation ETag 演进、Policy self Version 注入和 token 不泄露；真实 fresh
+P2 journey 也已接入该脚本，待当前 exact revision 重跑后形成新的资格报告。
+
 以下仍是 M2 未完成项：
 
 - Agent/其他七种 closure 的 checked fixture；
-- 与 CLI 同路径、固定 header/body/Receipt/If-Match/Problem 的原始 curl lifecycle fixture；
 - fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 Policy/Agent publication、Run create/watch/result 与
-  Orchestration Worker restart 已形成 P2 journey；其余 Resource kinds 仍未完成。
+  Orchestration Worker restart 已形成 P2 journey；当前 revision 的新增 curl lifecycle 尚待 fresh rerun，其余 Resource
+  kinds 仍未完成。
 
 因此本文件只描述已实现的 initial lifecycle，不是 M2 完成声明，也不改变 Platform v2 production L4～L6 状态。
