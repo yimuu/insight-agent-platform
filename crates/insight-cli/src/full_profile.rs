@@ -4,6 +4,7 @@
 //! connect to an authority or execute worker logic; each generated document is consumed and
 //! revalidated by the corresponding independent Platform process.
 
+use insight_platform_contracts::canonical_digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -15,6 +16,8 @@ pub(crate) const CONTEXT_NATIVE_CONFIG_FILE: &str = "context-native.json";
 pub(crate) const ARTIFACT_MAINTENANCE_CONFIG_FILE: &str = "artifact-maintenance.json";
 pub(crate) const SECURITY_AUTHORITY_CONFIG_FILE: &str = "security-authority.json";
 pub(crate) const EGRESS_BROKER_CONFIG_FILE: &str = "egress-broker.json";
+pub(crate) const MODEL_WORKER_CONFIG_FILE: &str = "model-worker.json";
+pub(crate) const CONTEXT_REMOTE_CONFIG_FILE: &str = "context-remote.json";
 pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority.pem";
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
@@ -23,14 +26,24 @@ pub(crate) const EGRESS_BROKER_CERTIFICATE_FILE: &str = "egress-broker.pem";
 pub(crate) const EGRESS_BROKER_PRIVATE_KEY_FILE: &str = "egress-broker-key.pem";
 pub(crate) const MCP_STATE_KEY_DIRECTORY: &str = "mcp-state-keys";
 pub(crate) const MCP_STATE_KEY_FILE: &str = "current";
+pub(crate) const MODEL_WORKER_CLIENT_CERTIFICATE_FILE: &str = "model-worker-client.pem";
+pub(crate) const MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "model-worker-client-key.pem";
+pub(crate) const CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE: &str = "context-worker-client.pem";
+pub(crate) const CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "context-worker-client-key.pem";
 pub(crate) const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
+pub(crate) const MODEL_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/model-worker";
+pub(crate) const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/context-worker";
 
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 4] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 6] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
     "platform-egress-broker",
+    "platform-model-worker",
+    "platform-remote-context-worker",
 ];
 
 pub(crate) struct ProcessLaunch {
@@ -46,6 +59,8 @@ pub(crate) struct ProcessPaths<'a> {
     pub(crate) configuration: &'a Path,
     pub(crate) tls: &'a Path,
     pub(crate) ca_certificate_file: &'a str,
+    pub(crate) nats_client_certificate_file: &'a str,
+    pub(crate) nats_client_private_key_file: &'a str,
 }
 
 pub(crate) struct EgressConfigInputs<'a> {
@@ -54,6 +69,14 @@ pub(crate) struct EgressConfigInputs<'a> {
     pub(crate) mcp_state_key_root: &'a Path,
     pub(crate) mcp_state_key_path: &'a Path,
     pub(crate) mcp_state_key_reference_digest: &'a str,
+}
+
+pub(crate) struct WorkerDigests<'a> {
+    pub(crate) context_adapter: &'a str,
+    pub(crate) context_contract: &'a str,
+    pub(crate) model_adapter: &'a str,
+    pub(crate) anthropic_contract: &'a str,
+    pub(crate) openai_contract: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +89,10 @@ pub(crate) struct PortBindings {
     pub(crate) egress_broker: u16,
     #[serde(default = "default_egress_broker_observability_port")]
     pub(crate) egress_broker_observability: u16,
+    #[serde(default = "default_model_worker_observability_port")]
+    pub(crate) model_worker_observability: u16,
+    #[serde(default = "default_remote_context_worker_observability_port")]
+    pub(crate) remote_context_worker_observability: u16,
 }
 
 impl PortBindings {
@@ -77,6 +104,8 @@ impl PortBindings {
             security_authority_observability: next()?,
             egress_broker: next()?,
             egress_broker_observability: next()?,
+            model_worker_observability: next()?,
+            remote_context_worker_observability: next()?,
         })
     }
 
@@ -88,6 +117,8 @@ impl PortBindings {
             security_authority_observability: 19_098,
             egress_broker: default_egress_broker_port(),
             egress_broker_observability: default_egress_broker_observability_port(),
+            model_worker_observability: default_model_worker_observability_port(),
+            remote_context_worker_observability: default_remote_context_worker_observability_port(),
         }
     }
 }
@@ -100,6 +131,14 @@ const fn default_egress_broker_observability_port() -> u16 {
     19_100
 }
 
+const fn default_model_worker_observability_port() -> u16 {
+    19_101
+}
+
+const fn default_remote_context_worker_observability_port() -> u16 {
+    19_102
+}
+
 impl Default for PortBindings {
     fn default() -> Self {
         Self::legacy_defaults()
@@ -109,10 +148,20 @@ impl Default for PortBindings {
 pub(crate) fn initial_configs(
     ports: &PortBindings,
     artifact_provider_catalog: &Value,
-    context_adapter_digest: &str,
-    context_contract_digest: &str,
+    digests: WorkerDigests<'_>,
     egress: EgressConfigInputs<'_>,
 ) -> BTreeMap<String, (&'static str, Value)> {
+    let model_manifest = json!({
+        "manifest_version": 1,
+        "worker_role": "model-worker",
+        "work_class": "model",
+        "adapter_runtime_digest": digests.model_adapter,
+        "protocol_version": 1,
+        "max_concurrency": 4,
+        "critical_control_reserved_slots": 1,
+    });
+    let model_manifest_digest = canonical_digest(&model_manifest)
+        .expect("the closed local Model worker manifest is canonical JSON");
     BTreeMap::from([
         (
             "context-native".to_owned(),
@@ -125,22 +174,22 @@ pub(crate) fn initial_configs(
                         "manifest_version": 1,
                         "worker_role": "context-worker",
                         "work_class": "context",
-                        "adapter_runtime_digest": context_adapter_digest,
+                        "adapter_runtime_digest": digests.context_adapter,
                         "protocol_version": 1,
                         "max_concurrency": 4,
                         "critical_control_reserved_slots": 1,
                     },
                     "native_catalog": {
                         "schema_version": 1,
-                        "installed_adapter_digest": context_adapter_digest,
-                        "adapter_contract_digest": context_contract_digest,
-                        "source_item_identity_digest": context_contract_digest,
+                        "installed_adapter_digest": digests.context_adapter,
+                        "adapter_contract_digest": digests.context_contract,
+                        "source_item_identity_digest": digests.context_contract,
                         "content": "local deterministic context item",
-                        "structured_fields_schema_digest": context_contract_digest,
+                        "structured_fields_schema_digest": digests.context_contract,
                         "score_millionths": 500000,
-                        "locator_digest": context_contract_digest,
-                        "authorization_evidence_digest": context_contract_digest,
-                        "ranking_evidence_digest": context_contract_digest,
+                        "locator_digest": digests.context_contract,
+                        "authorization_evidence_digest": digests.context_contract,
+                        "ranking_evidence_digest": digests.context_contract,
                         "display_label": "Local deterministic context",
                         "classification": "internal",
                     },
@@ -263,6 +312,83 @@ pub(crate) fn initial_configs(
                     "capability_http_endpoints": [],
                     "capability_grpc_endpoints": [],
                     "remote_context_endpoints": [],
+                }),
+            ),
+        ),
+        (
+            "model-worker".to_owned(),
+            (
+                MODEL_WORKER_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.model_worker_observability),
+                    "worker_manifest": model_manifest,
+                    "installed_adapters": [
+                        {
+                            "qualified_name": "anthropic.messages/2023-06-01",
+                            "worker_manifest_digest": model_manifest_digest,
+                            "adapter_contract_digest": digests.anthropic_contract,
+                        },
+                        {
+                            "qualified_name": "openai.responses/v1",
+                            "worker_manifest_digest": model_manifest_digest,
+                            "adapter_contract_digest": digests.openai_contract,
+                        }
+                    ],
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "egress_endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                    "egress_tls_server_name": "localhost",
+                    "egress_connect_timeout_milliseconds": 5000,
+                    "egress_request_timeout_milliseconds": 30000,
+                    "maximum_rpc_metadata_bytes": 65536,
+                    "maximum_rpc_payload_bytes": 1048576,
+                    "live_delta": {
+                        "servers": ["tls://localhost:4222"],
+                        "namespace": "local",
+                        "connect_timeout_milliseconds": 5000,
+                        "publish_timeout_milliseconds": 1000,
+                        "reconnect_backoff_milliseconds": 250,
+                        "drain_timeout_milliseconds": 5000,
+                        "maximum_pending_messages": 1024,
+                        "maximum_pending_bytes": 16777216,
+                    },
+                    "receipt_ttl_seconds": 3600,
+                    "claim_scan_milliseconds": 250,
+                    "claim_failure_backoff_milliseconds": 100,
+                    "drain_grace_milliseconds": 30000,
+                }),
+            ),
+        ),
+        (
+            "context-remote".to_owned(),
+            (
+                CONTEXT_REMOTE_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.remote_context_worker_observability),
+                    "worker_manifest": {
+                        "manifest_version": 1,
+                        "worker_role": "context-worker",
+                        "work_class": "context",
+                        "adapter_runtime_digest": digests.context_adapter,
+                        "protocol_version": 1,
+                        "max_concurrency": 4,
+                        "critical_control_reserved_slots": 1,
+                    },
+                    "installed_adapter_digest": digests.context_adapter,
+                    "egress_endpoint": format!("https://localhost:{}/", ports.egress_broker),
+                    "egress_tls_server_name": "localhost",
+                    "maximum_rpc_metadata_bytes": 65536,
+                    "maximum_rpc_payload_bytes": 1048576,
+                    "connect_timeout_milliseconds": 5000,
+                    "request_timeout_milliseconds": 30000,
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "receipt_ttl_seconds": 3600,
+                    "scan_interval_milliseconds": 250,
+                    "failure_backoff_milliseconds": 100,
+                    "drain_grace_milliseconds": 30000,
                 }),
             ),
         ),
@@ -460,6 +586,126 @@ pub(crate) fn initial_process_launches(
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
                 .collect(),
         },
+        ProcessLaunch {
+            role: "model-worker",
+            binary: binary(INITIAL_BINARY_NAMES[4]),
+            ready_address: loopback_address(ports.model_worker_observability),
+            environment: vec![
+                (
+                    "PLATFORM_MODEL_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(MODEL_WORKER_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_CONFIG_DIGEST",
+                    config_digests["model-worker"].clone(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(MODEL_WORKER_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_NATS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_NATS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(paths.nats_client_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_MODEL_WORKER_NATS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(paths.nats_client_private_key_file)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
+        ProcessLaunch {
+            role: "context-remote",
+            binary: binary(INITIAL_BINARY_NAMES[5]),
+            ready_address: loopback_address(ports.remote_context_worker_observability),
+            environment: vec![
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(CONTEXT_REMOTE_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_CONFIG_DIGEST",
+                    config_digests["context-remote"].clone(),
+                ),
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
     ]
 }
 
@@ -484,6 +730,8 @@ mod tests {
             security_authority_observability: 31_004,
             egress_broker: 31_005,
             egress_broker_observability: 31_006,
+            model_worker_observability: 31_007,
+            remote_context_worker_observability: 31_008,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -492,8 +740,13 @@ mod tests {
         let configs = initial_configs(
             &ports,
             &catalog,
-            &adapter,
-            &contract,
+            WorkerDigests {
+                context_adapter: &adapter,
+                context_contract: &contract,
+                model_adapter: &digest('d'),
+                anthropic_contract: &digest('e'),
+                openai_contract: &digest('f'),
+            },
             EgressConfigInputs {
                 service_principal_id: principal,
                 secret_provider_catalog: &json!({"schema_version": 1, "providers": [{"provider": "closed"}]}),
@@ -542,12 +795,16 @@ mod tests {
             security_authority_observability: 31_004,
             egress_broker: 31_005,
             egress_broker_observability: 31_006,
+            model_worker_observability: 31_007,
+            remote_context_worker_observability: 31_008,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
             ("artifact-maintenance".to_owned(), digest('b')),
             ("security-authority".to_owned(), digest('c')),
             ("egress-broker".to_owned(), digest('d')),
+            ("model-worker".to_owned(), digest('e')),
+            ("context-remote".to_owned(), digest('f')),
         ]);
         let launches = initial_process_launches(
             ProcessPaths {
@@ -555,6 +812,8 @@ mod tests {
                 configuration: Path::new("/project/runtime/config"),
                 tls: Path::new("/project/runtime/tls"),
                 ca_certificate_file: "ca.pem",
+                nats_client_certificate_file: "nats-client.pem",
+                nats_client_private_key_file: "nats-client-key.pem",
             },
             &ports,
             &digests,
@@ -570,13 +829,17 @@ mod tests {
                 "context-native",
                 "artifact-maintenance",
                 "security-authority",
-                "egress-broker"
+                "egress-broker",
+                "model-worker",
+                "context-remote"
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
         assert_eq!(launches[1].ready_address, "127.0.0.1:31002");
         assert_eq!(launches[2].ready_address, "127.0.0.1:31004");
         assert_eq!(launches[3].ready_address, "127.0.0.1:31006");
+        assert_eq!(launches[4].ready_address, "127.0.0.1:31007");
+        assert_eq!(launches[5].ready_address, "127.0.0.1:31008");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
@@ -596,6 +859,12 @@ mod tests {
         assert!(launches[3].environment.iter().any(|(name, value)| *name
             == "PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH"
             && value == "/project/runtime/tls/egress-broker-client.pem"));
+        assert!(launches[4].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH"
+            && value == "/project/runtime/tls/model-worker-client.pem"));
+        assert!(launches[5].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CERT_PATH"
+            && value == "/project/runtime/tls/context-worker-client.pem"));
     }
 
     #[test]
@@ -609,5 +878,7 @@ mod tests {
         .unwrap();
         assert_eq!(ports.egress_broker, 19_099);
         assert_eq!(ports.egress_broker_observability, 19_100);
+        assert_eq!(ports.model_worker_observability, 19_101);
+        assert_eq!(ports.remote_context_worker_observability, 19_102);
     }
 }

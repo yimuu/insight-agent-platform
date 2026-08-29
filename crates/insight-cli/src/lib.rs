@@ -1050,6 +1050,8 @@ fn valid_runtime_role(value: &str) -> bool {
             | "artifact-maintenance"
             | "security-authority"
             | "egress-broker"
+            | "model-worker"
+            | "context-remote"
     )
 }
 
@@ -1134,7 +1136,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(16);
+        let mut listeners = Vec::with_capacity(18);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1594,6 +1596,24 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     )?;
     write_local_leaf_certificate(
         &tls_directory,
+        full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
+        full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::MODEL_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
+        full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
         full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
         full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
         &["localhost"],
@@ -2040,8 +2060,13 @@ fn prepare_runtime_profile_inner(
     configs.extend(full_profile::initial_configs(
         &ports.full,
         &catalog,
-        &local_digest("context-native-adapter")?,
-        &local_digest("context-native-contract")?,
+        full_profile::WorkerDigests {
+            context_adapter: &local_digest("context-native-adapter")?,
+            context_contract: &local_digest("context-native-contract")?,
+            model_adapter: &local_digest("model-worker-adapter")?,
+            anthropic_contract: &local_digest("model-anthropic-contract")?,
+            openai_contract: &local_digest("model-openai-contract")?,
+        },
         full_profile::EgressConfigInputs {
             service_principal_id: &identity.egress_broker_principal_id,
             secret_provider_catalog: &secret_provider_catalog,
@@ -2757,6 +2782,8 @@ fn ensure_runtime_binaries(
             "insight-platform-context-worker",
             "--bin",
             "platform-context-worker",
+            "--bin",
+            "platform-remote-context-worker",
             "-p",
             "insight-platform-artifact-service",
             "--bin",
@@ -2769,6 +2796,10 @@ fn ensure_runtime_binaries(
             "insight-platform-egress-broker",
             "--bin",
             "platform-egress-broker",
+            "-p",
+            "insight-platform-model-worker",
+            "--bin",
+            "platform-model-worker",
         ]);
     }
     run_external(command, "build the changed local Platform role closure")?;
@@ -3205,6 +3236,8 @@ fn full_profile_launch_specs(
             configuration: &configuration,
             tls: &tls,
             ca_certificate_file: RUNTIME_CA_CERTIFICATE_FILE,
+            nats_client_certificate_file: RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+            nats_client_private_key_file: RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
         },
         &profile.ports.full,
         &profile.config_digests,
@@ -5022,6 +5055,8 @@ mod tests {
             full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
             full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
             full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
+            full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
+            full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -5041,6 +5076,8 @@ mod tests {
                 full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
                 full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
+                full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -5173,7 +5210,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 12);
+        assert_eq!(digests.len(), 14);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5205,6 +5242,8 @@ mod tests {
                 full_profile::SECURITY_AUTHORITY_CONFIG_FILE,
             ),
             ("egress-broker", full_profile::EGRESS_BROKER_CONFIG_FILE),
+            ("model-worker", full_profile::MODEL_WORKER_CONFIG_FILE),
+            ("context-remote", full_profile::CONTEXT_REMOTE_CONFIG_FILE),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

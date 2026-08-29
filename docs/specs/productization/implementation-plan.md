@@ -125,6 +125,13 @@ roles、Security Authority 与 Egress Broker；双向 TLS readiness 为 `ready`�
 success、零 failure。实际 remote endpoint catalog、对应 worker、一次受监督 `full` journey 与 WASI 仍未完成，因此仍不构成
 full/M1 完成证据。
 
+随后 Model Worker 与 Remote Context Worker 也进入同一 additive closure：新建 profile 为两者分别签发 Egress RPC
+允许的 exact workload URI SAN ClientAuth 证书，配置冻结 WorkerManifest、adapter/contract digest、Egress endpoint、
+PostgreSQL预算与动态 observability port；Model 还冻结两个现有 provider adapter 及 project-local NATS mTLS live-delta
+通道。fresh 探针按 Security -> Egress -> consumer 顺序启动后，Model 与 Remote Context `/readyz` 均为 `ready`，Model
+NATS dependency metrics 为 success=1/failure=0。探针没有伪造 Model/Context Job，因此 Egress operation counter 保持 0；
+这只证明进程配置、PostgreSQL schema、NATS transport 与 Egress TLS channel closure，不证明黄金场景的 provider dispatch。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway
