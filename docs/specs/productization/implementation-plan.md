@@ -103,6 +103,13 @@ restart recovery 后续已由上述 P2 journey 补齐，但其余 M1/M2 门禁�
 digest-bound 配置及持久化动态端口，并复用 exact Artifact provider catalog。生成器测试与两个目标进程自己的严格配置/
 进程单元测试已通过；二进制构建、进程启动以及其余 full roles 尚未接通，因此 `insight dev --profile full` 继续 fail closed。
 
+Security/Egress 前置身份随后已按独立 authority owner 扩展：development bootstrap 现在接受 bounded service-principal
+集合，新建 profile 使用 schema v2 同时创建 Registry Validator 与独立 Egress Broker `ServiceIdentity`，旧 schema v1
+仍可 exact replay。CLI identity schema v3 生成 Egress principal、Security Authority ServerAuth 证书及带 exact Egress
+Broker SPIFFE URI 的 ClientAuth 证书，Security Authority 配置只包含 PostgreSQL/RPC 边界而不包含 Secret provider。
+fresh PostgreSQL 上七个 base roles、P2 deterministic Run 与单独 Security Authority readiness 探针均通过；Egress
+Broker 及下游 full roles 尚未启动，因此仍不构成 full/M1 完成证据。
+
 已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
 `ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
 Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway

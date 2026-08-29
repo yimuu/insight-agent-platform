@@ -37,7 +37,9 @@ struct Config {
     environment_class: String,
     installation: InstallationConfig,
     developer: DeveloperConfig,
-    registry_validator: RegistryValidatorConfig,
+    registry_validator: ServiceIdentityConfig,
+    #[serde(default)]
+    egress_broker: Option<ServiceIdentityConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +63,7 @@ struct DeveloperConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RegistryValidatorConfig {
+struct ServiceIdentityConfig {
     principal_id: String,
     authentication_authority_digest: String,
     subject_digest: String,
@@ -105,6 +107,13 @@ struct BootstrapInput {
     registry_validator_principal_id: ResourceId,
     registry_validator_authentication_authority_digest: Sha256Digest,
     registry_validator_subject_digest: Sha256Digest,
+    egress_broker: Option<BootstrapServiceIdentity>,
+}
+
+struct BootstrapServiceIdentity {
+    principal_id: ResourceId,
+    authentication_authority_digest: Sha256Digest,
+    subject_digest: Sha256Digest,
 }
 
 impl Config {
@@ -139,7 +148,11 @@ impl Config {
     }
 
     fn validate(&self) -> Result<BootstrapInput, ProcessError> {
-        if self.schema_version != 1 || self.environment_class != "development" {
+        if !matches!(self.schema_version, 1 | 2)
+            || self.environment_class != "development"
+            || (self.schema_version == 1 && self.egress_broker.is_some())
+            || (self.schema_version == 2 && self.egress_broker.is_none())
+        {
             return Err(ProcessError::InvalidConfiguration);
         }
         let installation_principal_id =
@@ -153,9 +166,27 @@ impl Config {
             &self.registry_validator.principal_id,
             ResourceKind::Principal,
         )?;
+        let egress_broker = self
+            .egress_broker
+            .as_ref()
+            .map(|config| {
+                Ok(BootstrapServiceIdentity {
+                    principal_id: parse_id(&config.principal_id, ResourceKind::Principal)?,
+                    authentication_authority_digest: parse_digest(
+                        &config.authentication_authority_digest,
+                    )?,
+                    subject_digest: parse_digest(&config.subject_digest)?,
+                })
+            })
+            .transpose()?;
         if installation_principal_id == developer_principal_id
             || installation_principal_id == registry_validator_principal_id
             || developer_principal_id == registry_validator_principal_id
+            || egress_broker.as_ref().is_some_and(|egress| {
+                egress.principal_id == installation_principal_id
+                    || egress.principal_id == developer_principal_id
+                    || egress.principal_id == registry_validator_principal_id
+            })
         {
             return Err(ProcessError::InvalidConfiguration);
         }
@@ -180,6 +211,7 @@ impl Config {
             registry_validator_subject_digest: parse_digest(
                 &self.registry_validator.subject_digest,
             )?,
+            egress_broker,
         })
     }
 }
@@ -352,9 +384,61 @@ async fn run() -> Result<(), ProcessError> {
         Permission::PolicyWrite,
     ])
     .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let egress_permissions = PermissionSet::new(vec![Permission::SecretBind])
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
     let tenant_id = input.tenant_id.clone();
     let developer_principal_id = input.developer_principal_id.clone();
     let registry_validator_principal_id = input.registry_validator_principal_id.clone();
+    let egress_broker_principal_id = input
+        .egress_broker
+        .as_ref()
+        .map(|identity| identity.principal_id.clone());
+    let mut service_principals = vec![NewPrincipal {
+        principal_id: registry_validator_principal_id.clone(),
+        authentication_authority_digest: input.registry_validator_authentication_authority_digest,
+        subject_digest: input.registry_validator_subject_digest,
+        installation_bindings: PrincipalBindingsPayload {
+            installation_bindings: Vec::new(),
+        },
+    }];
+    if let Some(identity) = input.egress_broker {
+        service_principals.push(NewPrincipal {
+            principal_id: identity.principal_id,
+            authentication_authority_digest: identity.authentication_authority_digest,
+            subject_digest: identity.subject_digest,
+            installation_bindings: PrincipalBindingsPayload {
+                installation_bindings: Vec::new(),
+            },
+        });
+    }
+    let mut tenant_principal_bindings = vec![
+        NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id: developer_principal_id.clone(),
+            principal_kind: PrincipalKind::AgentAuthor,
+            payload: TenantPrincipalPayload {
+                permissions: developer_permissions,
+            },
+        },
+        NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id: registry_validator_principal_id,
+            principal_kind: PrincipalKind::ServiceIdentity,
+            payload: TenantPrincipalPayload {
+                permissions: registry_validation_permissions,
+            },
+        },
+    ];
+    if let Some(principal_id) = egress_broker_principal_id {
+        tenant_principal_bindings.push(NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id,
+            principal_kind: PrincipalKind::ServiceIdentity,
+            payload: TenantPrincipalPayload {
+                permissions: egress_permissions,
+            },
+        });
+    }
     let outcome = repository
         .bootstrap_development_profile(BootstrapDevelopmentProfile {
             installation: BootstrapInstallationOperator {
@@ -377,33 +461,8 @@ async fn run() -> Result<(), ProcessError> {
                     installation_bindings: Vec::new(),
                 },
             },
-            registry_validator: NewPrincipal {
-                principal_id: registry_validator_principal_id.clone(),
-                authentication_authority_digest: input
-                    .registry_validator_authentication_authority_digest,
-                subject_digest: input.registry_validator_subject_digest,
-                installation_bindings: PrincipalBindingsPayload {
-                    installation_bindings: Vec::new(),
-                },
-            },
-            tenant_principal_bindings: vec![
-                NewTenantPrincipal {
-                    tenant_id: tenant_id.clone(),
-                    principal_id: developer_principal_id,
-                    principal_kind: PrincipalKind::AgentAuthor,
-                    payload: TenantPrincipalPayload {
-                        permissions: developer_permissions,
-                    },
-                },
-                NewTenantPrincipal {
-                    tenant_id,
-                    principal_id: registry_validator_principal_id,
-                    principal_kind: PrincipalKind::ServiceIdentity,
-                    payload: TenantPrincipalPayload {
-                        permissions: registry_validation_permissions,
-                    },
-                },
-            ],
+            service_principals,
+            tenant_principal_bindings,
             artifact_authority: Some(artifact_authority),
         })
         .await
@@ -576,6 +635,34 @@ mod tests {
         let input = config().validate().unwrap();
         assert_eq!(input.tenant_id.kind(), ResourceKind::Tenant);
         assert_eq!(input.developer_principal_id.kind(), ResourceKind::Principal);
+    }
+
+    #[test]
+    fn version_two_adds_a_distinct_egress_service_identity() {
+        let mut version_two = config();
+        version_two.schema_version = 2;
+        version_two.egress_broker = Some(ServiceIdentityConfig {
+            principal_id: "prn_0198f1c3-8f49-7c3e-b1f3-773c28367b96".to_owned(),
+            authentication_authority_digest: digest('2'),
+            subject_digest: digest('3'),
+        });
+        let input = version_two.validate().unwrap();
+        assert_eq!(
+            input.egress_broker.unwrap().principal_id.kind(),
+            ResourceKind::Principal
+        );
+
+        let mut reused = config();
+        reused.schema_version = 2;
+        reused.egress_broker = Some(ServiceIdentityConfig {
+            principal_id: reused.registry_validator.principal_id.clone(),
+            authentication_authority_digest: digest('2'),
+            subject_digest: digest('3'),
+        });
+        assert!(matches!(
+            reused.validate(),
+            Err(ProcessError::InvalidConfiguration)
+        ));
     }
 
     #[test]

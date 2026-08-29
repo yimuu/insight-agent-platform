@@ -676,11 +676,12 @@ impl PgRepository {
             .installation_bindings
             .validate()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
-        command
-            .registry_validator
-            .installation_bindings
-            .validate()
-            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        for principal in &command.service_principals {
+            principal
+                .installation_bindings
+                .validate()
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        }
         command
             .tenant
             .config
@@ -711,8 +712,11 @@ impl PgRepository {
         let tenant_config = TypedPayload::with_limit(1, effective_tenant_config, 65_536)?;
         let developer_payload =
             TypedPayload::with_limit(1, &command.developer.installation_bindings, 65_536)?;
-        let registry_validator_payload =
-            TypedPayload::with_limit(1, &command.registry_validator.installation_bindings, 65_536)?;
+        let service_principal_payloads = command
+            .service_principals
+            .iter()
+            .map(|principal| TypedPayload::with_limit(1, &principal.installation_bindings, 65_536))
+            .collect::<Result<Vec<_>, _>>()?;
         let tenant_bindings = command
             .tenant_principal_bindings
             .iter()
@@ -746,13 +750,15 @@ impl PgRepository {
             verify_development_profile_replay(
                 &mut transaction,
                 &command,
-                &installation_payload,
-                &installation_event,
-                &tenant_config,
-                &developer_payload,
-                &registry_validator_payload,
-                &tenant_bindings,
-                artifact_authority.as_ref(),
+                DevelopmentReplayEvidence {
+                    installation_payload: &installation_payload,
+                    installation_event: &installation_event,
+                    tenant_config: &tenant_config,
+                    developer_payload: &developer_payload,
+                    service_principal_payloads: &service_principal_payloads,
+                    tenant_bindings: &tenant_bindings,
+                    artifact_authority: artifact_authority.as_ref(),
+                },
             )
             .await?;
             transaction.commit().await?;
@@ -832,27 +838,28 @@ impl PgRepository {
         .bind(&developer_payload.digest)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO insight_platform.principals (
-                principal_id, state, authentication_authority_digest, subject_digest,
-                payload_schema_version, payload, payload_digest
-            ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(command.registry_validator.principal_id.to_string())
-        .bind(
-            command
-                .registry_validator
-                .authentication_authority_digest
-                .to_string(),
-        )
-        .bind(command.registry_validator.subject_digest.to_string())
-        .bind(registry_validator_payload.schema_version)
-        .bind(&registry_validator_payload.value)
-        .bind(&registry_validator_payload.digest)
-        .execute(&mut *transaction)
-        .await?;
+        for (principal, payload) in command
+            .service_principals
+            .iter()
+            .zip(service_principal_payloads.iter())
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.principals (
+                    principal_id, state, authentication_authority_digest, subject_digest,
+                    payload_schema_version, payload, payload_digest
+                ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+                "#,
+            )
+            .bind(principal.principal_id.to_string())
+            .bind(principal.authentication_authority_digest.to_string())
+            .bind(principal.subject_digest.to_string())
+            .bind(payload.schema_version)
+            .bind(&payload.value)
+            .bind(&payload.digest)
+            .execute(&mut *transaction)
+            .await?;
+        }
         for (binding, payload) in command
             .tenant_principal_bindings
             .iter()
@@ -3640,18 +3647,22 @@ impl PgRepository {
 /// Replays the development bootstrap only when every immutable/configuration root still matches
 /// the exact closed input. Runtime-created rows and mutable quota usage are deliberately ignored;
 /// they are ordinary authority state and must survive a local process restart.
+struct DevelopmentReplayEvidence<'a> {
+    installation_payload: &'a TypedPayload,
+    installation_event: &'a TypedPayload,
+    tenant_config: &'a TypedPayload,
+    developer_payload: &'a TypedPayload,
+    service_principal_payloads: &'a [TypedPayload],
+    tenant_bindings: &'a [TypedPayload],
+    artifact_authority: Option<&'a DevelopmentArtifactAuthorityMaterial>,
+}
+
 async fn verify_development_profile_replay(
     transaction: &mut Transaction<'_, Postgres>,
     command: &BootstrapDevelopmentProfile,
-    installation_payload: &TypedPayload,
-    installation_event: &TypedPayload,
-    tenant_config: &TypedPayload,
-    developer_payload: &TypedPayload,
-    registry_validator_payload: &TypedPayload,
-    tenant_bindings: &[TypedPayload],
-    artifact_authority: Option<&DevelopmentArtifactAuthorityMaterial>,
+    evidence: DevelopmentReplayEvidence<'_>,
 ) -> Result<(), RepositoryError> {
-    for (principal, payload) in [(&command.installation, installation_payload)] {
+    for (principal, payload) in [(&command.installation, evidence.installation_payload)] {
         let exact: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
@@ -3675,10 +3686,14 @@ async fn verify_development_profile_replay(
             ));
         }
     }
-    for (principal, payload) in [
-        (&command.developer, developer_payload),
-        (&command.registry_validator, registry_validator_payload),
-    ] {
+    for (principal, payload) in std::iter::once((&command.developer, evidence.developer_payload))
+        .chain(
+            command
+                .service_principals
+                .iter()
+                .zip(evidence.service_principal_payloads.iter()),
+        )
+    {
         let exact: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
@@ -3720,8 +3735,8 @@ async fn verify_development_profile_replay(
     )
     .bind(event_id)
     .bind(command.installation.principal_id.to_string())
-    .bind(installation_event.schema_version)
-    .bind(&installation_event.digest)
+    .bind(evidence.installation_event.schema_version)
+    .bind(&evidence.installation_event.digest)
     .fetch_one(&mut **transaction)
     .await?;
     if !exact_event {
@@ -3739,18 +3754,18 @@ async fn verify_development_profile_replay(
     )
     .bind(&command.tenant.tenant_id)
     .bind(&command.tenant.state)
-    .bind(tenant_config.schema_version)
-    .bind(&tenant_config.digest)
+    .bind(evidence.tenant_config.schema_version)
+    .bind(&evidence.tenant_config.digest)
     .fetch_one(&mut **transaction)
     .await?;
-    if !exact_tenant || tenant_bindings.len() != command.tenant_principal_bindings.len() {
+    if !exact_tenant || evidence.tenant_bindings.len() != command.tenant_principal_bindings.len() {
         return Err(RepositoryError::Conflict("development bootstrap tenant"));
     }
 
     for (binding, payload) in command
         .tenant_principal_bindings
         .iter()
-        .zip(tenant_bindings.iter())
+        .zip(evidence.tenant_bindings.iter())
     {
         let exact: bool = sqlx::query_scalar(
             r#"
@@ -3776,8 +3791,9 @@ async fn verify_development_profile_replay(
         }
     }
 
-    let (Some(seed), Some(material)) = (&command.artifact_authority, artifact_authority) else {
-        return if command.artifact_authority.is_none() && artifact_authority.is_none() {
+    let (Some(seed), Some(material)) = (&command.artifact_authority, evidence.artifact_authority)
+    else {
+        return if command.artifact_authority.is_none() && evidence.artifact_authority.is_none() {
             Ok(())
         } else {
             Err(RepositoryError::Conflict(
@@ -29069,7 +29085,7 @@ pub struct BootstrapDevelopmentProfile {
     pub installation: BootstrapInstallationOperator,
     pub tenant: NewTenant,
     pub developer: NewPrincipal,
-    pub registry_validator: NewPrincipal,
+    pub service_principals: Vec<NewPrincipal>,
     pub tenant_principal_bindings: Vec<NewTenantPrincipal>,
     pub artifact_authority: Option<DevelopmentArtifactAuthoritySeed>,
 }
@@ -29106,24 +29122,33 @@ fn validate_development_bootstrap(
     if command.installation.principal_id.kind() != ResourceKind::Principal
         || command.installation.request_id.kind() != ResourceKind::ServerRequest
         || command.developer.principal_id.kind() != ResourceKind::Principal
-        || command.registry_validator.principal_id.kind() != ResourceKind::Principal
         || command.installation.principal_id == command.developer.principal_id
-        || command.installation.principal_id == command.registry_validator.principal_id
-        || command.developer.principal_id == command.registry_validator.principal_id
         || !command
             .developer
             .installation_bindings
             .installation_bindings
             .is_empty()
-        || !command
-            .registry_validator
-            .installation_bindings
-            .installation_bindings
-            .is_empty()
+        || command.service_principals.is_empty()
+        || command.service_principals.len() > 16
     {
         return Err(RepositoryError::InvalidInput(
             "development bootstrap principal identity is invalid".to_owned(),
         ));
+    }
+    let mut allowed_principals = BTreeSet::from([command.developer.principal_id.clone()]);
+    for principal in &command.service_principals {
+        if principal.principal_id.kind() != ResourceKind::Principal
+            || principal.principal_id == command.installation.principal_id
+            || !principal
+                .installation_bindings
+                .installation_bindings
+                .is_empty()
+            || !allowed_principals.insert(principal.principal_id.clone())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "development bootstrap service identity is invalid".to_owned(),
+            ));
+        }
     }
     if let Some(seed) = &command.artifact_authority {
         seed.validate()?;
@@ -29145,8 +29170,7 @@ fn validate_development_bootstrap(
     let mut bindings = BTreeSet::new();
     for binding in &command.tenant_principal_bindings {
         if binding.tenant_id != tenant_id
-            || (binding.principal_id != command.developer.principal_id
-                && binding.principal_id != command.registry_validator.principal_id)
+            || !allowed_principals.contains(&binding.principal_id)
             || binding.principal_kind == PrincipalKind::InstallationOperator
             || !bindings.insert((binding.principal_id.clone(), binding.principal_kind))
         {
@@ -37921,14 +37945,14 @@ mod tests {
                     installation_bindings: Vec::new(),
                 },
             },
-            registry_validator: NewPrincipal {
+            service_principals: vec![NewPrincipal {
                 principal_id: registry_validator_principal_id.clone(),
                 authentication_authority_digest: digest('a'),
                 subject_digest: digest('e'),
                 installation_bindings: PrincipalBindingsPayload {
                     installation_bindings: Vec::new(),
                 },
-            },
+            }],
             tenant_principal_bindings: vec![NewTenantPrincipal {
                 tenant_id: tenant_id.clone(),
                 principal_id: developer_principal_id.clone(),

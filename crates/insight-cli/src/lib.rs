@@ -1072,6 +1072,8 @@ pub struct LocalIdentityState {
     pub developer_subject: String,
     #[serde(default)]
     pub registry_validator_principal_id: String,
+    #[serde(default)]
+    pub egress_broker_principal_id: String,
     pub installation_principal_id: String,
     pub installation_request_id: String,
     pub bootstrap_config_digest: String,
@@ -1122,7 +1124,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(12);
+        let mut listeners = Vec::with_capacity(14);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1327,12 +1329,14 @@ fn initialize_local_identity(
     let tenant_id = fresh_resource_id(ResourceKind::Tenant).to_string();
     let developer_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
     let registry_validator_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
+    let egress_broker_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
     let installation_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
     let installation_request_id = fresh_resource_id(ResourceKind::ServerRequest).to_string();
     let artifact_encryption_domain_id =
         fresh_resource_id(ResourceKind::EncryptionDomain).to_string();
     let developer_subject = format!("developer:{issuer_nonce}");
     let registry_validator_subject = format!("registry-validator:{issuer_nonce}");
+    let egress_broker_subject = format!("egress-broker:{issuer_nonce}");
     let installation_subject = format!("bootstrap:{issuer_nonce}");
     let authentication_authority_digest = tagged_digest(
         "oidc_authentication_authority_v1",
@@ -1344,6 +1348,11 @@ fn initialize_local_identity(
     let registry_validator_subject_digest = tagged_digest(
         "oidc_subject_v1",
         &registry_validator_subject,
+        &identity_directory,
+    )?;
+    let egress_broker_subject_digest = tagged_digest(
+        "oidc_subject_v1",
+        &egress_broker_subject,
         &identity_directory,
     )?;
     let installation_subject_digest = tagged_digest(
@@ -1367,7 +1376,7 @@ fn initialize_local_identity(
         invalid_local_identity(&identity_directory, "cannot canonicalize local JWKS")
     })?;
     let bootstrap_config = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "environment_class": "development",
         "installation": {
             "principal_id": installation_principal_id,
@@ -1387,6 +1396,11 @@ fn initialize_local_identity(
             "authentication_authority_digest": authentication_authority_digest,
             "subject_digest": registry_validator_subject_digest,
         },
+        "egress_broker": {
+            "principal_id": egress_broker_principal_id,
+            "authentication_authority_digest": authentication_authority_digest,
+            "subject_digest": egress_broker_subject_digest,
+        },
     });
     let bootstrap_config_digest = canonical_digest(&bootstrap_config).map_err(|_| {
         invalid_local_identity(
@@ -1395,7 +1409,7 @@ fn initialize_local_identity(
         )
     })?;
     let identity = LocalIdentityState {
-        schema_version: 2,
+        schema_version: 3,
         issuer,
         audience: LOCAL_OIDC_AUDIENCE.to_owned(),
         key_id,
@@ -1405,6 +1419,7 @@ fn initialize_local_identity(
         developer_principal_id,
         developer_subject,
         registry_validator_principal_id,
+        egress_broker_principal_id,
         installation_principal_id,
         installation_request_id,
         bootstrap_config_digest,
@@ -1546,6 +1561,24 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
         RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
         &[],
         Some("spiffe://insight.platform/workload/local-nats-client"),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
+        full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
+        &["localhost"],
+        None,
+        ExtendedKeyUsagePurpose::ServerAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
+        full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::EGRESS_BROKER_WORKLOAD_IDENTITY),
         ExtendedKeyUsagePurpose::ClientAuth,
         &issuer,
     )
@@ -1973,6 +2006,7 @@ fn prepare_runtime_profile_inner(
         &catalog,
         &local_digest("context-native-adapter")?,
         &local_digest("context-native-contract")?,
+        &identity.egress_broker_principal_id,
     ));
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
@@ -3482,7 +3516,7 @@ fn validate_loaded_local_identity(
     let invalid = || CliError::InvalidLocalIdentity {
         path: state_directory.display().to_string(),
     };
-    if identity.schema_version != 2
+    if !matches!(identity.schema_version, 2 | 3)
         || identity.issuer.is_empty()
         || identity.audience != LOCAL_OIDC_AUDIENCE
         || identity.key_id.is_empty()
@@ -3492,6 +3526,13 @@ fn validate_loaded_local_identity(
             ResourceKind::Principal,
         )
         .is_err()
+        || (identity.schema_version == 2 && !identity.egress_broker_principal_id.is_empty())
+        || (identity.schema_version == 3
+            && ResourceId::parse_expected(
+                &identity.egress_broker_principal_id,
+                ResourceKind::Principal,
+            )
+            .is_err())
         || ResourceId::parse_expected(&identity.tenant_id, ResourceKind::Tenant).is_err()
         || ResourceId::parse_expected(&identity.developer_principal_id, ResourceKind::Principal)
             .is_err()
@@ -4680,6 +4721,11 @@ mod tests {
         let persisted: LocalProjectState =
             serde_json::from_slice(&fs::read(root.join(PROJECT_STATE_FILE)).unwrap()).unwrap();
         assert_eq!(persisted, state);
+        assert_eq!(persisted.identity.schema_version, 3);
+        assert!(persisted
+            .identity
+            .egress_broker_principal_id
+            .starts_with("prn_"));
         let private_key = root
             .join(IDENTITY_DIRECTORY)
             .join(IDENTITY_PRIVATE_KEY_FILE);
@@ -4714,6 +4760,8 @@ mod tests {
             RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
             RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
             RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+            full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
+            full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
         ] {
             let bytes = fs::read(tls.join(certificate)).unwrap();
             assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -4730,6 +4778,8 @@ mod tests {
                 RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
                 RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE,
                 RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
+                full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
             ] {
                 assert_eq!(
                     fs::metadata(tls.join(private_key))
@@ -4769,6 +4819,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        assert_eq!(bootstrap["schema_version"], 2);
+        assert_eq!(
+            bootstrap["egress_broker"]["principal_id"],
+            persisted.identity.egress_broker_principal_id
+        );
         assert_eq!(
             canonical_digest(&bootstrap).unwrap(),
             persisted.identity.bootstrap_config_digest
@@ -4843,7 +4898,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 10);
+        assert_eq!(digests.len(), 11);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -4869,6 +4924,10 @@ mod tests {
             (
                 "artifact-maintenance",
                 full_profile::ARTIFACT_MAINTENANCE_CONFIG_FILE,
+            ),
+            (
+                "security-authority",
+                full_profile::SECURITY_AUTHORITY_CONFIG_FILE,
             ),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
