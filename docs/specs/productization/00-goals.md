@@ -145,7 +145,8 @@ Control/Orchestration Plane 内执行用户代码，也不绕过 Resource -> Res
   GitOps promotion；
 - 不宣称 production-ready 或发布 CapacityProfile；
 - 不提供与 Agno、LangGraph 等框架等量的 integrations/cookbook；
-- 本阶段不交付 Python、JavaScript 或 Go SDK；语言 SDK 在 `/v1`、CLI 和黄金场景稳定后单独评估；
+- Python SDK 已从产品化收敛阶段取消，不属于当前里程碑、黄金场景或退出门禁；未来如需重启，必须另立目标并基于稳定的 `/v1` 合同重新评审；
+- 本阶段也不交付 JavaScript 或 Go SDK；它们不构成 CLI、HTTP、控制台或黄金场景的前置条件；
 - 不把 Platform v2 改名为 `/v2`，不保留两个 public runtime；
 - 不为了演示而使用内存 repository、mock authority 或服务启动时自动建表替代 durable 路径；
 - 不在完成产品化退出门禁前修改 `docs/current`，使其描述尚不存在的产品行为。
