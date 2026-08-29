@@ -49,7 +49,7 @@ for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTI
 
 for role in (
     "management_api", "runtime_api", "scheduler_recovery", "model_worker",
-    "capability_native_worker", "capability_remote_worker", "context_worker", "mcp_host",
+    "capability_native_worker", "capability_remote_worker", "registry_validation_worker", "context_worker", "mcp_host",
     "sandbox_controller", "sandbox_wasi_executor", "sandbox_gvisor_executor",
     "artifact_gateway", "artifact_data_worker", "artifact_maintenance", "egress_secret_broker",
 ):
@@ -63,6 +63,7 @@ production_bins = (
     "insight-agent-platform", "platform-callback-api", "platform-gateway",
     "platform-model-worker", "platform-context-worker", "platform-remote-context-worker",
     "platform-subscription-context-worker", "platform-orchestration-worker",
+    "platform-registry-validation-worker",
     "platform-capability-native-worker", "platform-capability-remote-worker",
     "platform-mcp-cleanup-worker", "platform-mcp-host", "platform-mcp-resource-host",
     "platform-mcp-discovery-worker", "platform-mcp-subscription-worker",

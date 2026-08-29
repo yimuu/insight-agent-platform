@@ -1,0 +1,12 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-registry-validation-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "insight-platform-registry-validation-worker.labels" . | nindent 6 }}
+  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval | quote }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }} }]
+{{- end }}

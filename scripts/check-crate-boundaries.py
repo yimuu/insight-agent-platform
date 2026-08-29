@@ -16,6 +16,7 @@ INTERNAL_ROLES = {
     "insight-storage": "storage",
     "insight-runtime": "runtime",
     "insight-api": "api",
+    "insight-cli": "cli",
     "insight-platform-artifacts": "artifacts_domain",
     "insight-platform-artifact-broker": "artifact_broker",
     "insight-platform-artifact-rpc": "artifact_rpc",
@@ -45,6 +46,7 @@ INTERNAL_ROLES = {
     "insight-platform-orchestrator": "orchestrator_domain",
     "insight-platform-postgres": "platform_postgres",
     "insight-platform-registry": "registry_domain",
+    "insight-platform-registry-validation-worker": "registry_validation_worker",
     "insight-platform-rpc-trace": "rpc_trace",
     "insight-platform-runtime": "platform_runtime",
     "insight-platform-sandbox": "sandbox_domain",
@@ -74,6 +76,7 @@ ALLOWED_INTERNAL = {
     "storage": {"engine", "durable", "dsl"},
     "runtime": {"engine", "durable", "dsl", "resources", "mcp"},
     "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
+    "cli": {"contracts"},
     "artifacts_domain": {"contracts", "jobs_domain"},
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
     "artifact_rpc": {"artifacts_domain", "contracts", "jobs_domain", "models_domain", "rpc_trace", "sandbox_domain"},
@@ -112,6 +115,7 @@ ALLOWED_INTERNAL = {
     "orchestration_worker": {"artifact_rpc", "artifacts_domain", "contracts", "observability", "orchestrator_domain", "platform_postgres", "platform_runtime", "platform_worker"},
     "orchestrator_domain": {"contracts", "jobs_domain"},
     "registry_domain": {"contracts"},
+    "registry_validation_worker": {"contracts", "observability", "platform_postgres", "platform_worker"},
     "rpc_trace": {"contracts"},
     "scheduler_domain": {"contracts"},
     "secret_broker": {"contracts", "egress_core", "mcp_host", "security_domain"},
@@ -141,6 +145,7 @@ ALLOWED_DEV_INTERNAL = {
     # reaches provider/MCP networks solely through the egress_rpc dependency.
     "mcp_service": {"capability_adapters", "model_adapters"},
     "platform_postgres": {"artifact_rpc", "egress_core", "egress_rpc"},
+    "cli": {"platform_api"},
 }
 
 # Test harnesses may install a tracing collector without granting production crates permission to
@@ -178,6 +183,7 @@ FORBIDDEN_DIRECT = {
     # shared pinned/SSRF-restricted client from insight-mcp for issuer/JWKS
     # discovery. Direct SQL remains forbidden.
     "api": {"sqlx"},
+    "cli": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "artifacts_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "artifact_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "artifact_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
@@ -205,6 +211,7 @@ FORBIDDEN_DIRECT = {
     "orchestration_worker": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "orchestrator_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "registry_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "registry_validation_worker": {"reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "rpc_trace": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "scheduler_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "secret_broker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},

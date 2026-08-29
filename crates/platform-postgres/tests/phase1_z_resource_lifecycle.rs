@@ -16,7 +16,8 @@ use insight_platform_contracts::{
 };
 use insight_platform_postgres::{
     repository::{
-        NewPrincipal, NewTenant, NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
+        ClaimJobs, CommitRegistryValidation, JobFence, NewPrincipal, NewTenant, NewTenantPrincipal,
+        PgRepository, RegistryValidationCommitOutcome, RepositoryError, TypedPayload,
     },
     verify_schema,
 };
@@ -44,6 +45,7 @@ const TENANT_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c00";
 const TENANT_B_ID: &str = "ten_0198f1c3-8f49-7c3e-b1f3-773c28367c01";
 const PRINCIPAL_ID: &str = "prn_0198f1c3-8f49-7c3e-b1f3-773c28367c02";
 const DENIED_PRINCIPAL_ID: &str = "prn_0198f1c3-8f49-7c3e-b1f3-773c28367c03";
+const VALIDATOR_PRINCIPAL_ID: &str = "prn_0198f1c3-8f49-7c3e-b1f3-773c28367c0b";
 const ARTIFACT_ID: &str = "art_0198f1c3-8f49-7c3e-b1f3-773c28367c04";
 const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c3-8f49-7c3e-b1f3-773c28367c09";
 const TYPED_PLAN_BLOB_ID: &str = "iblb_0198f1c3-8f49-7c3e-b1f3-773c28367c0a";
@@ -520,7 +522,11 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             .await
             .unwrap();
     }
-    for (principal_id, subject) in [(PRINCIPAL_ID, '1'), (DENIED_PRINCIPAL_ID, '2')] {
+    for (principal_id, subject) in [
+        (PRINCIPAL_ID, '1'),
+        (DENIED_PRINCIPAL_ID, '2'),
+        (VALIDATOR_PRINCIPAL_ID, '3'),
+    ] {
         repository
             .create_principal(NewPrincipal {
                 principal_id: id(principal_id),
@@ -558,6 +564,17 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
                     Permission::SandboxActivate,
                 ])
                 .unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(VALIDATOR_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::ServiceIdentity,
+            payload: TenantPrincipalPayload {
+                permissions: PermissionSet::new(vec![Permission::PolicyWrite]).unwrap(),
             },
         })
         .await
@@ -1019,28 +1036,64 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(replayed_validation.version, 1);
     assert_eq!(replayed_validation.state, "ready");
 
-    let validation = ValidationSummary {
-        validator_digest: digest('e'),
-        validated_draft_digest: draft_digest.clone(),
-        dependency_closure_digest: digest('0'),
-        security_evidence_digest: digest('1'),
-        warnings: vec![],
+    let worker_id = sandbox_id(ResourceKind::WorkerProcessGeneration, 0x71);
+    let claimed = repository
+        .claim_jobs(ClaimJobs {
+            work_class: "registry_validation".to_owned(),
+            worker_id: worker_id.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![digest('0')],
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    let claimed = claimed.into_iter().next().unwrap();
+    let claimed_fence = JobFence {
+        tenant_id: claimed.tenant_id.clone(),
+        job_id: claimed.job_id.clone(),
+        worker_id,
+        lease_epoch: claimed.lease_epoch,
+        expected_job_version: claimed.version,
+        lease_token_digest: claimed.lease_token_digest.unwrap().parse().unwrap(),
     };
-    let validated = applied(
-        registry_command!(
-            repository,
-            record_resource_validation,
-            RecordResourceValidation {
-                audit: audit(TENANT_ID, PRINCIPAL_ID, "7c30", '2', '3'),
-                resource_id: id(RESOURCE_ID),
-                expected_resource_version: 1,
-                expected_draft_digest: draft_digest.clone(),
-                validation: validation.clone(),
-            }
-        )
-        .unwrap(),
-    );
-    assert_eq!(validated.version, 2);
+    let running = repository.start_job(claimed_fence.clone()).await.unwrap();
+    let committed = repository
+        .commit_registry_validation(CommitRegistryValidation {
+            fence: JobFence {
+                expected_job_version: running.version,
+                ..claimed_fence
+            },
+            validator_principal_id: id(VALIDATOR_PRINCIPAL_ID),
+            validator_digest: digest('e'),
+            validation_profile_digest: digest('f'),
+            receipt_id: sandbox_id(ResourceKind::Receipt, 0x72),
+            resource_event_id: sandbox_id(ResourceKind::Event, 0x73),
+            resource_outbox_id: sandbox_id(ResourceKind::OutboxEvent, 0x74),
+            job_event_id: sandbox_id(ResourceKind::Event, 0x75),
+            job_outbox_id: sandbox_id(ResourceKind::OutboxEvent, 0x76),
+            idempotency_key_digest: digest('1'),
+            request_digest: digest('2'),
+            receipt_expires_at: Utc::now() + Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let RegistryValidationCommitOutcome::Committed { job, resource } = committed else {
+        panic!("expected Registry Validation commit")
+    };
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(job.payload, validation_job.payload);
+    assert_eq!(resource.version, 2);
+    let mut validated_payload = resource.payload.value;
+    validated_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    let validation = serde_json::from_value::<ResourceDraftPayload>(validated_payload)
+        .unwrap()
+        .validation
+        .unwrap();
+    assert_eq!(validation.validated_draft_digest, draft_digest);
 
     assert!(matches!(
         registry_command!(

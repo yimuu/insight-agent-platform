@@ -33,6 +33,7 @@ struct Config {
     environment_class: String,
     installation: InstallationConfig,
     developer: DeveloperConfig,
+    registry_validator: RegistryValidatorConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +55,14 @@ struct DeveloperConfig {
     subject_digest: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryValidatorConfig {
+    principal_id: String,
+    authentication_authority_digest: String,
+    subject_digest: String,
+}
+
 struct BootstrapInput {
     installation_principal_id: ResourceId,
     installation_request_id: ResourceId,
@@ -64,6 +73,9 @@ struct BootstrapInput {
     developer_principal_id: ResourceId,
     developer_authentication_authority_digest: Sha256Digest,
     developer_subject_digest: Sha256Digest,
+    registry_validator_principal_id: ResourceId,
+    registry_validator_authentication_authority_digest: Sha256Digest,
+    registry_validator_subject_digest: Sha256Digest,
 }
 
 impl Config {
@@ -108,7 +120,14 @@ impl Config {
         let tenant_id = parse_id(&self.developer.tenant_id, ResourceKind::Tenant)?;
         let developer_principal_id =
             parse_id(&self.developer.principal_id, ResourceKind::Principal)?;
-        if installation_principal_id == developer_principal_id {
+        let registry_validator_principal_id = parse_id(
+            &self.registry_validator.principal_id,
+            ResourceKind::Principal,
+        )?;
+        if installation_principal_id == developer_principal_id
+            || installation_principal_id == registry_validator_principal_id
+            || developer_principal_id == registry_validator_principal_id
+        {
             return Err(ProcessError::InvalidConfiguration);
         }
         Ok(BootstrapInput {
@@ -125,6 +144,13 @@ impl Config {
                 &self.developer.authentication_authority_digest,
             )?,
             developer_subject_digest: parse_digest(&self.developer.subject_digest)?,
+            registry_validator_principal_id,
+            registry_validator_authentication_authority_digest: parse_digest(
+                &self.registry_validator.authentication_authority_digest,
+            )?,
+            registry_validator_subject_digest: parse_digest(
+                &self.registry_validator.subject_digest,
+            )?,
         })
     }
 }
@@ -214,8 +240,20 @@ async fn run() -> Result<(), ProcessError> {
     let agent_runner_permissions =
         PermissionSet::new(vec![Permission::AgentRead, Permission::AgentRun])
             .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let registry_validation_permissions = PermissionSet::new(vec![
+        Permission::AgentWrite,
+        Permission::SkillWrite,
+        Permission::CapabilityWrite,
+        Permission::ContextWrite,
+        Permission::McpWrite,
+        Permission::ModelWrite,
+        Permission::SandboxWrite,
+        Permission::PolicyWrite,
+    ])
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
     let tenant_id = input.tenant_id.clone();
     let developer_principal_id = input.developer_principal_id.clone();
+    let registry_validator_principal_id = input.registry_validator_principal_id.clone();
     let outcome = repository
         .bootstrap_development_profile(BootstrapDevelopmentProfile {
             installation: BootstrapInstallationOperator {
@@ -238,6 +276,15 @@ async fn run() -> Result<(), ProcessError> {
                     installation_bindings: Vec::new(),
                 },
             },
+            registry_validator: NewPrincipal {
+                principal_id: registry_validator_principal_id.clone(),
+                authentication_authority_digest: input
+                    .registry_validator_authentication_authority_digest,
+                subject_digest: input.registry_validator_subject_digest,
+                installation_bindings: PrincipalBindingsPayload {
+                    installation_bindings: Vec::new(),
+                },
+            },
             tenant_principal_bindings: vec![
                 NewTenantPrincipal {
                     tenant_id: tenant_id.clone(),
@@ -248,7 +295,15 @@ async fn run() -> Result<(), ProcessError> {
                     },
                 },
                 NewTenantPrincipal {
-                    tenant_id,
+                    tenant_id: tenant_id.clone(),
+                    principal_id: registry_validator_principal_id,
+                    principal_kind: PrincipalKind::ServiceIdentity,
+                    payload: TenantPrincipalPayload {
+                        permissions: registry_validation_permissions,
+                    },
+                },
+                NewTenantPrincipal {
+                    tenant_id: tenant_id.clone(),
                     principal_id: developer_principal_id,
                     principal_kind: PrincipalKind::AgentRunner,
                     payload: TenantPrincipalPayload {

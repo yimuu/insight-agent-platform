@@ -14,12 +14,13 @@ GIT_COMMIT = re.compile(r"^sha1:[0-9a-f]{40}$")
 TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$")
 COMPONENT_ROLES = (
     "management_api", "runtime_api", "scheduler_recovery", "model_worker",
-    "capability_native_worker", "capability_remote_worker", "context_worker", "mcp_host",
+    "capability_native_worker", "capability_remote_worker", "registry_validation_worker", "context_worker", "mcp_host",
     "sandbox_controller", "sandbox_wasi_executor", "sandbox_gvisor_executor",
     "artifact_gateway", "artifact_data_worker", "artifact_maintenance", "egress_secret_broker",
 )
 WORKERS = (
     ("orchestration-worker", "orchestration", 16, 2, "runtime"),
+    ("registry-validation-worker", "registry_validation", 4, 1, "runtime"),
     ("model-worker", "model", 16, 2, "runtime"),
     ("capability.native", "capability_native", 4, 1, "runtime"),
     ("capability.remote", "capability_remote", 4, 1, "runtime"),

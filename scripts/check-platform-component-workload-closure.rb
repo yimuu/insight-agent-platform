@@ -8,6 +8,7 @@ ROOT = File.expand_path("..", __dir__)
 CHARTS = %w[
   insight-platform-gateway
   insight-platform-orchestration-worker
+  insight-platform-registry-validation-worker
   insight-platform-model-worker
   insight-platform-capability-native-worker
   insight-platform-capability-remote-worker
@@ -25,6 +26,7 @@ EXPECTED_COUNTS = {
   "model_worker" => 1,
   "capability_native_worker" => 1,
   "capability_remote_worker" => 1,
+  "registry_validation_worker" => 1,
   "context_worker" => 3,
   "mcp_host" => 4,
   "sandbox_controller" => 1,
@@ -128,4 +130,4 @@ end
 
 abort(failures.map { |failure| "component workload closure: #{failure}" }.join("\n")) unless failures.empty?
 
-puts "Platform ComponentRole workload closure passed (15 roles, #{workloads.length} isolated pools)."
+puts "Platform ComponentRole workload closure passed (16 roles, #{workloads.length} isolated pools)."

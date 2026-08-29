@@ -1,0 +1,6 @@
+{{- if or (lt (int .Values.replicas) 2) (lt (int .Values.autoscaling.minReplicas) 2) (lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas)) -}}
+{{- fail "Registry Validation Worker requires an HA replica and HPA closure" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.candidate.deploymentConfigDigest)) -}}
+{{- fail "Registry Validation Worker requires immutable digests" -}}
+{{- end -}}

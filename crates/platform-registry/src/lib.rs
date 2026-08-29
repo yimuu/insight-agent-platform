@@ -7,9 +7,9 @@
 
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    ActiveTarget, AdministrativeGate, DeploymentClosure, EntityLifecycle, PublishedVersionPayload,
-    RegistryResourceKind, ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest,
-    ValidationSummary,
+    canonical_digest, ActiveTarget, AdministrativeGate, DeploymentClosure, EntityLifecycle,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDraftPayload, ResourceId, ResourceKind,
+    Sha256Digest, ValidationSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -136,6 +136,61 @@ impl RegistryValidationJobPayload {
         }
         Ok(())
     }
+}
+
+/// Builds the only success summary accepted for a RegistryValidation Job.
+///
+/// The worker supplies the installed validator/profile identities, while the owner transaction
+/// supplies the current Draft.  No public caller, queue message, or process-local result can
+/// inject any part of the resulting validation evidence.
+pub fn build_registry_validation_summary(
+    payload: &RegistryValidationJobPayload,
+    draft: &ResourceDraftPayload,
+    installed_validator_digest: &Sha256Digest,
+    installed_validation_profile_digest: &Sha256Digest,
+) -> Result<ValidationSummary, RegistryCommandError> {
+    payload.validate_for_owner(&payload.job_id)?;
+    draft
+        .validate()
+        .map_err(|failure| RegistryCommandError::Contract(failure.to_string()))?;
+    if payload.validator_digest != *installed_validator_digest
+        || payload.validation_profile_digest != *installed_validation_profile_digest
+        || draft.document.kind() != payload.resource_kind
+        || draft
+            .document_digest()
+            .map_err(|failure| RegistryCommandError::Contract(failure.to_string()))?
+            != payload.draft_digest
+    {
+        return Err(RegistryCommandError::InvalidValidationResult);
+    }
+    let dependency_closure_digest = canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "resource_kind": payload.resource_kind,
+        "exact_version_refs": draft.document.exact_version_refs(),
+    }))
+    .map_err(|_| RegistryCommandError::InvalidValidationResult)?
+    .parse()
+    .map_err(|_| RegistryCommandError::InvalidValidationResult)?;
+    let security_evidence_digest = canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "resource_kind": payload.resource_kind,
+        "validated_draft_digest": payload.draft_digest,
+        "validation_profile_digest": installed_validation_profile_digest,
+    }))
+    .map_err(|_| RegistryCommandError::InvalidValidationResult)?
+    .parse()
+    .map_err(|_| RegistryCommandError::InvalidValidationResult)?;
+    let summary = ValidationSummary {
+        validator_digest: installed_validator_digest.clone(),
+        validated_draft_digest: payload.draft_digest.clone(),
+        dependency_closure_digest,
+        security_evidence_digest,
+        warnings: Vec::new(),
+    };
+    summary
+        .validate()
+        .map_err(|failure| RegistryCommandError::Contract(failure.to_string()))?;
+    Ok(summary)
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +502,66 @@ mod tests {
         assert_eq!(
             validate_audit(&audit, Utc::now()),
             Err(RegistryCommandError::InvalidAudit)
+        );
+    }
+
+    #[test]
+    fn registry_validation_summary_is_bound_to_the_exact_job_and_installed_closure() {
+        let payload = RegistryValidationJobPayload {
+            schema_version: 1,
+            job_id: id("job_0198f1c3-8f49-7c3e-b1f3-773c28367b90"),
+            resource_id: id("agt_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
+            resource_kind: RegistryResourceKind::Agent,
+            expected_resource_version: 1,
+            draft_digest: digest('a'),
+            validator_digest: digest('b'),
+            validation_profile_digest: digest('c'),
+        };
+        let schema = insight_platform_contracts::ClosedJsonSchema::build(serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let draft = ResourceDraftPayload {
+            display_name: "example".to_owned(),
+            document: insight_platform_contracts::ResourceDocument::Agent(
+                insight_platform_contracts::AgentResourceSpec {
+                    authoring_package: insight_platform_contracts::AuthoringPackage {
+                        artifact: insight_platform_contracts::ArtifactRef::new(
+                            id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),
+                            digest('d'),
+                            1,
+                            "application/json",
+                            insight_platform_contracts::DataClassification::Internal,
+                            None,
+                        )
+                        .unwrap(),
+                        manifest_digest: digest('e'),
+                    },
+                    contract_digest: digest('f'),
+                    dependency_versions: Vec::new(),
+                    policy_versions: Vec::new(),
+                    input_schema: schema.clone(),
+                    output_schema: schema.clone(),
+                    error_schema: schema,
+                    typed_plan_artifact_id: id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b93"),
+                    typed_plan_digest: digest('1'),
+                },
+            ),
+            validation: None,
+        };
+        let mut payload = payload;
+        payload.draft_digest = draft.document_digest().unwrap();
+        let summary =
+            build_registry_validation_summary(&payload, &draft, &digest('b'), &digest('c'))
+                .unwrap();
+        assert_eq!(summary.validated_draft_digest, payload.draft_digest);
+        assert!(
+            build_registry_validation_summary(&payload, &draft, &digest('0'), &digest('c'))
+                .is_err()
         );
     }
 }

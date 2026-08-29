@@ -26,6 +26,7 @@ RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin platform-remote-context-worker \
     --bin platform-subscription-context-worker \
     --bin platform-orchestration-worker \
+    --bin platform-registry-validation-worker \
     --bin platform-capability-native-worker \
     --bin platform-capability-remote-worker \
     --bin platform-mcp-cleanup-worker \
@@ -59,6 +60,7 @@ RUN cargo build --locked --release --workspace \
     --bin platform-remote-context-worker \
     --bin platform-subscription-context-worker \
     --bin platform-orchestration-worker \
+    --bin platform-registry-validation-worker \
     --bin platform-capability-native-worker \
     --bin platform-capability-remote-worker \
     --bin platform-mcp-cleanup-worker \
@@ -96,6 +98,7 @@ COPY --from=builder /workspace/target/release/platform-context-worker /usr/local
 COPY --from=builder /workspace/target/release/platform-remote-context-worker /usr/local/bin/platform-remote-context-worker
 COPY --from=builder /workspace/target/release/platform-subscription-context-worker /usr/local/bin/platform-subscription-context-worker
 COPY --from=builder /workspace/target/release/platform-orchestration-worker /usr/local/bin/platform-orchestration-worker
+COPY --from=builder /workspace/target/release/platform-registry-validation-worker /usr/local/bin/platform-registry-validation-worker
 COPY --from=builder /workspace/target/release/platform-capability-native-worker /usr/local/bin/platform-capability-native-worker
 COPY --from=builder /workspace/target/release/platform-capability-remote-worker /usr/local/bin/platform-capability-remote-worker
 COPY --from=builder /workspace/target/release/platform-mcp-cleanup-worker /usr/local/bin/platform-mcp-cleanup-worker

@@ -59,6 +59,8 @@ jobs:
         run: bash scripts/check-crate-boundaries.sh
       - name: Install Helm for Sandbox deployment contract
         uses: azure/setup-helm@v4
+      - name: Check closed ComponentRole workload closure
+        run: ruby scripts/check-platform-component-workload-closure.rb
       - name: Check Sandbox deployment contract
         run: bash scripts/check-platform-sandbox-deployment.sh
       - name: Check Security Authority and Egress deployment boundary

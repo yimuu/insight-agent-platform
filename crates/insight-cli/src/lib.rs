@@ -56,6 +56,7 @@ const RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE: &str = "artifact-gateway.json";
 const RUNTIME_ARTIFACT_DATA_CONFIG_FILE: &str = "artifact-data.json";
 const RUNTIME_ORCHESTRATION_CONFIG_FILE: &str = "orchestration.json";
 const RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE: &str = "capability-native.json";
+const RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE: &str = "registry-validation.json";
 const RUNTIME_CURSOR_KEY_FILE: &str = "run-event-cursor-key";
 const RUNTIME_PROFILE_STATE_FILE: &str = "profile.json";
 const RUNTIME_BUILD_STATE_FILE: &str = "build.json";
@@ -477,6 +478,8 @@ pub struct LocalIdentityState {
     pub tenant_id: String,
     pub developer_principal_id: String,
     pub developer_subject: String,
+    #[serde(default)]
+    pub registry_validator_principal_id: String,
     pub installation_principal_id: String,
     pub installation_request_id: String,
     pub bootstrap_config_digest: String,
@@ -517,11 +520,12 @@ struct RuntimePortBindings {
     artifact_data_observability: u16,
     orchestration_observability: u16,
     capability_native_observability: u16,
+    registry_validation_observability: u16,
 }
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(9);
+        let mut listeners = Vec::with_capacity(10);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -549,6 +553,7 @@ impl RuntimePortBindings {
             artifact_data_observability: next()?,
             orchestration_observability: next()?,
             capability_native_observability: next()?,
+            registry_validation_observability: next()?,
         };
         drop(listeners);
         Ok(ports)
@@ -565,6 +570,7 @@ impl RuntimePortBindings {
             artifact_data_observability: 19091,
             orchestration_observability: 19092,
             capability_native_observability: 19093,
+            registry_validation_observability: 19094,
         }
     }
 }
@@ -717,11 +723,13 @@ fn initialize_local_identity(
     let key_id = format!("local-oidc-{issuer_nonce}");
     let tenant_id = fresh_resource_id(ResourceKind::Tenant).to_string();
     let developer_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
+    let registry_validator_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
     let installation_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
     let installation_request_id = fresh_resource_id(ResourceKind::ServerRequest).to_string();
     let artifact_encryption_domain_id =
         fresh_resource_id(ResourceKind::EncryptionDomain).to_string();
     let developer_subject = format!("developer:{issuer_nonce}");
+    let registry_validator_subject = format!("registry-validator:{issuer_nonce}");
     let installation_subject = format!("bootstrap:{issuer_nonce}");
     let authentication_authority_digest = tagged_digest(
         "oidc_authentication_authority_v1",
@@ -730,6 +738,11 @@ fn initialize_local_identity(
     )?;
     let developer_subject_digest =
         tagged_digest("oidc_subject_v1", &developer_subject, &identity_directory)?;
+    let registry_validator_subject_digest = tagged_digest(
+        "oidc_subject_v1",
+        &registry_validator_subject,
+        &identity_directory,
+    )?;
     let installation_subject_digest = tagged_digest(
         "oidc_subject_v1",
         &installation_subject,
@@ -766,6 +779,11 @@ fn initialize_local_identity(
             "authentication_authority_digest": authentication_authority_digest,
             "subject_digest": developer_subject_digest,
         },
+        "registry_validator": {
+            "principal_id": registry_validator_principal_id,
+            "authentication_authority_digest": authentication_authority_digest,
+            "subject_digest": registry_validator_subject_digest,
+        },
     });
     let bootstrap_config_digest = canonical_digest(&bootstrap_config).map_err(|_| {
         invalid_local_identity(
@@ -774,7 +792,7 @@ fn initialize_local_identity(
         )
     })?;
     let identity = LocalIdentityState {
-        schema_version: 1,
+        schema_version: 2,
         issuer,
         audience: LOCAL_OIDC_AUDIENCE.to_owned(),
         key_id,
@@ -783,6 +801,7 @@ fn initialize_local_identity(
         tenant_id,
         developer_principal_id,
         developer_subject,
+        registry_validator_principal_id,
         installation_principal_id,
         installation_request_id,
         bootstrap_config_digest,
@@ -1194,6 +1213,36 @@ fn prepare_runtime_profile_inner(
             (
                 RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE,
                 local_capability_native_config(ports.capability_native_observability)?,
+            ),
+        ),
+        (
+            "registry-validation".to_owned(),
+            (
+                RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.registry_validation_observability),
+                    "worker_manifest": {
+                        "manifest_version": 1,
+                        "worker_role": "registry-validation-worker",
+                        "work_class": "registry_validation",
+                        "adapter_runtime_digest": registry_validator_digest,
+                        "protocol_version": 1,
+                        "max_concurrency": 2,
+                        "critical_control_reserved_slots": 1,
+                    },
+                    "validator_principal_id": identity.registry_validator_principal_id,
+                    "validator_digest": registry_validator_digest,
+                    "validation_profile_digest": registry_validation_profile_digest,
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "claim_batch": 2,
+                    "lease_milliseconds": 30000,
+                    "receipt_ttl_seconds": 300,
+                    "scan_interval_milliseconds": 100,
+                    "failure_backoff_milliseconds": 50,
+                    "drain_grace_milliseconds": 5000,
+                }),
             ),
         ),
     ]);
@@ -1728,6 +1777,10 @@ fn ensure_runtime_binaries(
         "--bin",
         "platform-dev-bootstrap",
         "-p",
+        "insight-platform-registry-validation-worker",
+        "--bin",
+        "platform-registry-validation-worker",
+        "-p",
         "insight-platform-gateway",
         "--bin",
         "platform-gateway",
@@ -1773,6 +1826,12 @@ fn runtime_binary_paths(workspace: &Path) -> BTreeMap<&'static str, PathBuf> {
             workspace
                 .join("target/release")
                 .join(format!("platform-dev-bootstrap{suffix}")),
+        ),
+        (
+            "platform-registry-validation-worker",
+            workspace
+                .join("target/release")
+                .join(format!("platform-registry-validation-worker{suffix}")),
         ),
         (
             "platform-gateway",
@@ -2013,6 +2072,26 @@ fn start_base_processes(
                 ),
                 (
                     "PLATFORM_CAPABILITY_NATIVE_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+            ],
+            Vec::new(),
+        ),
+        RuntimeLaunchSpec::new(
+            "registry-validation",
+            binaries["platform-registry-validation-worker"].clone(),
+            &loopback_address(profile.ports.registry_validation_observability),
+            vec![
+                (
+                    "PLATFORM_REGISTRY_VALIDATION_WORKER_CONFIG",
+                    config_path(&configuration, RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE),
+                ),
+                (
+                    "PLATFORM_REGISTRY_VALIDATION_WORKER_CONFIG_DIGEST",
+                    profile.config_digests["registry-validation"].clone(),
+                ),
+                (
+                    "PLATFORM_REGISTRY_VALIDATION_WORKER_DATABASE_URL",
                     database_url.to_owned(),
                 ),
             ],
@@ -2677,11 +2756,16 @@ fn validate_loaded_local_identity(
     let invalid = || CliError::InvalidLocalIdentity {
         path: state_directory.display().to_string(),
     };
-    if identity.schema_version != 1
+    if identity.schema_version != 2
         || identity.issuer.is_empty()
         || identity.audience != LOCAL_OIDC_AUDIENCE
         || identity.key_id.is_empty()
         || identity.developer_subject.is_empty()
+        || ResourceId::parse_expected(
+            &identity.registry_validator_principal_id,
+            ResourceKind::Principal,
+        )
+        .is_err()
         || ResourceId::parse_expected(&identity.tenant_id, ResourceKind::Tenant).is_err()
         || ResourceId::parse_expected(&identity.developer_principal_id, ResourceKind::Principal)
             .is_err()
@@ -3484,7 +3568,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 6);
+        assert_eq!(digests.len(), 7);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -3501,6 +3585,10 @@ mod tests {
             ("artifact-data", RUNTIME_ARTIFACT_DATA_CONFIG_FILE),
             ("orchestration", RUNTIME_ORCHESTRATION_CONFIG_FILE),
             ("capability-native", RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE),
+            (
+                "registry-validation",
+                RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
+            ),
         ] {
             let bytes = fs::read(configurations.join(file)).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

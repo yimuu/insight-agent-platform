@@ -1,0 +1,32 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: {{ .Values.namespace }}}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ include "insight-platform-registry-validation-worker.name" . }}, namespace: {{ .Values.namespace }}}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "insight-platform-registry-validation-worker.labels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.monitoringPodSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: {{ int .Values.observability.port }}}]
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 12 }}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - ipBlock: {cidr: {{ first .Values.networkPolicy.postgresCidrs | quote }}}
+      ports: [{protocol: TCP, port: 5432}]
+{{- end }}

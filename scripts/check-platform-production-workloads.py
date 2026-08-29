@@ -21,6 +21,7 @@ COMPONENT_ROLES = {
     "model_worker",
     "capability_native_worker",
     "capability_remote_worker",
+    "registry_validation_worker",
     "context_worker",
     "mcp_host",
     "sandbox_controller",

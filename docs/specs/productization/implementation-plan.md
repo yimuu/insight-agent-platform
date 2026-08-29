@@ -65,16 +65,16 @@ M0 的已审查输入保存在：
 ## 4. Milestone M1：`insight` CLI 与可复用本地平台
 
 状态：**In Progress**。当前实现仅覆盖 base profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
-以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和六个独立 Platform role。role
+以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和七个独立 Platform role。role
 监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`full` profile、first Run
 authoring、重启后的 durable Run 恢复和本里程碑的全部退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
 Verified。
 
-已确认的前置缺口：Management Gateway 能创建 `RegistryValidation` Job，但仓库当前没有可部署的 role 负责
-claim、执行并以受信任的记录者身份提交该 Job 结果。因而 base profile 不能把任意 Draft 诚实推进到
-`validate -> publish -> Deployment -> activate`；CLI 不得通过直接数据库写入、Gateway 内联验证或伪造
-`ValidationSummary` 绕过这一闭环。先补齐该 owner contract、worker 与资格测试，才开始实现会宣称完整
-lifecycle 的 `insight apply`。
+已补齐的前置闭环：`platform-registry-validation-worker` 以独立 `registry_validation` pool 和 tenant-scoped
+`ServiceIdentity` claim Job；成功路径在同一 PostgreSQL transaction 写入不可变验证摘要、Resource、Job、Event、
+Outbox 和 Receipt，且保留 Job 原始 payload 供 public Operation 投影使用。它不会通过直接 CLI 数据库写入、Gateway
+内联验证或伪造 `ValidationSummary` 绕过 authority。仍缺 `insight apply` 的 public authoring/lifecycle 入口、真实进程
+smoke 和后续 M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 
 ### 4.1 工作项
 
@@ -84,8 +84,8 @@ lifecycle 的 `insight apply`。
    - `insight dev`：显式 provision 后启动 base/full 多进程 profile；
    - `insight status/logs/stop`：按 role 显示 readiness、依赖和退出原因；
 2. `deploy/dev/base` 覆盖 deterministic first Run 的完整启动 closure：Management/Runtime Gateway、Artifact
-   Gateway、Artifact Data Worker、HTTPS S3/KMS-compatible test dependency、最小 Orchestration/Native Capability
-   role 与基础 authority。`full` 再按场景增加 Model、MCP、Context、Artifact Maintenance、Egress/Security 与 WASI
+   Gateway、Artifact Data Worker、HTTPS S3/KMS-compatible test dependency、最小 Orchestration/Native Capability、
+   Registry Validation Worker role 与基础 authority。`full` 再按场景增加 Model、MCP、Context、Artifact Maintenance、Egress/Security 与 WASI
    所需现有 role。profile 不能用单进程 mock 替代 durable authority；
 3. schema 安装作为可见的一次性 CLI step 调用现有 schema tool，服务进程继续保持零 DDL；
 4. 使用 source/lockfile/profile digest 决定构建，复用 Cargo target、OCI layer 或已发布 dev image；未变化时

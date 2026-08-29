@@ -58,10 +58,10 @@ use insight_platform_orchestrator::{
     ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
-    ActivateResource, CreateDeployment, CreateResourceDraft, NewPublishedVersion,
-    PublishResourceVersions, RecordResourceValidation, RegistryCommandError, RegistryStore,
-    RegistryTransaction, RegistryValidationJobPayload, RequestResourceValidation, SetResourceGate,
-    SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
+    build_registry_validation_summary, ActivateResource, CreateDeployment, CreateResourceDraft,
+    NewPublishedVersion, PublishResourceVersions, RecordResourceValidation, RegistryCommandError,
+    RegistryStore, RegistryTransaction, RegistryValidationJobPayload, RequestResourceValidation,
+    SetResourceGate, SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
 };
 use insight_platform_sandbox::{
     SandboxCommandLimits, SandboxContractError as DomainSandboxContractError,
@@ -676,6 +676,11 @@ impl PgRepository {
             .validate()
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         command
+            .registry_validator
+            .installation_bindings
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        command
             .tenant
             .config
             .validate()
@@ -695,6 +700,8 @@ impl PgRepository {
         let tenant_config = TypedPayload::with_limit(1, &command.tenant.config, 65_536)?;
         let developer_payload =
             TypedPayload::with_limit(1, &command.developer.installation_bindings, 65_536)?;
+        let registry_validator_payload =
+            TypedPayload::with_limit(1, &command.registry_validator.installation_bindings, 65_536)?;
         let tenant_bindings = command
             .tenant_principal_bindings
             .iter()
@@ -799,6 +806,27 @@ impl PgRepository {
         .bind(developer_payload.schema_version)
         .bind(&developer_payload.value)
         .bind(&developer_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.principals (
+                principal_id, state, authentication_authority_digest, subject_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(command.registry_validator.principal_id.to_string())
+        .bind(
+            command
+                .registry_validator
+                .authentication_authority_digest
+                .to_string(),
+        )
+        .bind(command.registry_validator.subject_digest.to_string())
+        .bind(registry_validator_payload.schema_version)
+        .bind(&registry_validator_payload.value)
+        .bind(&registry_validator_payload.digest)
         .execute(&mut *transaction)
         .await?;
         for (binding, payload) in command
@@ -4900,6 +4928,253 @@ impl PgRepository {
         let record = job_from_row(row)?;
         transaction.commit().await?;
         Ok(record)
+    }
+
+    /// Atomically records a RegistryValidation success and terminals its fenced Job.
+    ///
+    /// This intentionally does not use `commit_job`: a registry validation Job's payload is its
+    /// public Operation target and therefore remains immutable after the result is committed.
+    pub async fn commit_registry_validation(
+        &self,
+        command: CommitRegistryValidation,
+    ) -> Result<RegistryValidationCommitOutcome, RepositoryError> {
+        command.validate()?;
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "job_id": command.fence.job_id,
+                "schema_version": 1,
+                "validator_principal_id": command.validator_principal_id,
+            }),
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        if claim_job_mutation_receipt(
+            &mut transaction,
+            &command.fence,
+            &command.receipt_id,
+            "registry_validation.commit",
+            &command.idempotency_key_digest,
+            &command.request_digest,
+            &receipt_payload,
+            command.receipt_expires_at,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(RegistryValidationCommitOutcome::Replayed);
+        }
+
+        let current = load_job_for_update_by_text(
+            &mut transaction,
+            &command.fence.tenant_id,
+            &command.fence.job_id,
+        )
+        .await?;
+        if current.work_class != WorkClass::RegistryValidation.as_str()
+            || current.job_kind != JobKind::RegistryValidation.as_str()
+            || current.owner_kind != ResourceKind::Job.descriptor().name
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Job is not a RegistryValidation work item".to_owned(),
+            ));
+        }
+        let owner_id = current.owner_id.parse::<ResourceId>().map_err(|_| {
+            RepositoryError::CorruptRow("Registry validation Job owner ID is invalid".to_owned())
+        })?;
+        let payload: RegistryValidationJobPayload =
+            decode_versioned_payload(&current.payload, "Registry validation Job")?;
+        payload
+            .validate_for_owner(&owner_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if payload.job_id.to_string() != current.job_id {
+            return Err(RepositoryError::CorruptRow(
+                "Registry validation Job payload ID does not match its row".to_owned(),
+            ));
+        }
+        let tenant_id = ResourceId::parse_expected(&current.tenant_id, ResourceKind::Tenant)
+            .map_err(|_| {
+                RepositoryError::CorruptRow(
+                    "Registry validation Job tenant ID is invalid".to_owned(),
+                )
+            })?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            &tenant_id,
+            &command.validator_principal_id,
+            PrincipalKind::ServiceIdentity,
+        )
+        .await?;
+        if !principal
+            .permissions
+            .contains(write_permission(payload.resource_kind))
+        {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let locked =
+            load_resource_for_update(&mut transaction, &tenant_id, &payload.resource_id).await?;
+        let kind = locked
+            .resource_kind
+            .parse::<RegistryResourceKind>()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if kind != payload.resource_kind
+            || locked.resource_id != payload.resource_id.to_string()
+            || locked.version
+                != i64::try_from(payload.expected_resource_version).map_err(|_| {
+                    RepositoryError::CorruptRow(
+                        "Registry validation Job expected resource version is invalid".to_owned(),
+                    )
+                })?
+            || locked.lifecycle_state == "retired"
+        {
+            return Err(RepositoryError::Conflict("registry validation authority"));
+        }
+        let mut draft = decode_resource_draft(&locked.payload)?;
+        require_ready_authoring_artifact(
+            &mut transaction,
+            &tenant_id,
+            draft.document.authoring_package(),
+        )
+        .await?;
+        require_ready_typed_plan_artifact(&mut transaction, &tenant_id, &draft.document).await?;
+        require_ready_sandbox_runtime_bundle(&mut transaction, &tenant_id, &draft.document).await?;
+        let exact_references = draft.document.exact_version_refs();
+        validate_exact_version_refs_exist(&mut transaction, &tenant_id, &exact_references).await?;
+        let summary = build_registry_validation_summary(
+            &payload,
+            &draft,
+            &command.validator_digest,
+            &command.validation_profile_digest,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        draft.validation = Some(summary.clone());
+        let resource_payload = TypedPayload::new(1, &draft)?;
+        let resource_row = sqlx::query(
+            r#"
+            UPDATE insight_platform.resources
+            SET payload_schema_version = $4, payload = $5, payload_digest = $6,
+                version = version + 1, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND resource_id = $2 AND version = $3
+            RETURNING tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+                      draft_generation, active_version_id, active_deployment_id, version,
+                      payload_schema_version, payload, payload_digest, created_at, updated_at
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .bind(payload.resource_id.to_string())
+        .bind(locked.version)
+        .bind(resource_payload.schema_version)
+        .bind(&resource_payload.value)
+        .bind(&resource_payload.digest)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let resource = resource_from_row(resource_row)?;
+        let result_digest = canonical_digest(
+            &serde_json::to_value(&summary)
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+        )
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let next = decide_job_terminal(
+            &job_projection(&current)?,
+            &domain_job_fence(&command.fence)?,
+            database_now,
+            JobState::Succeeded,
+        )?;
+        let job_row =
+            sqlx::query(
+                r#"
+            UPDATE insight_platform.jobs
+            SET state = $4, version = $5, result_digest = $6,
+                worker_id = NULL, lease_token_digest = NULL,
+                lease_expires_at = NULL, heartbeat_at = NULL,
+                terminal_at = $7, updated_at = $7
+            WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+            RETURNING *
+            "#,
+            )
+            .bind(&command.fence.tenant_id)
+            .bind(&command.fence.job_id)
+            .bind(current.version)
+            .bind(next.state.as_str())
+            .bind(i64::try_from(next.version).map_err(|_| {
+                RepositoryError::InvalidInput("Job version exceeds bigint".to_owned())
+            })?)
+            .bind(&result_digest)
+            .bind(database_now)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let job = job_from_row(job_row)?;
+        let resource_event_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "job_id": job.job_id,
+                "validated_draft_digest": summary.validated_draft_digest,
+                "validator_digest": summary.validator_digest,
+            }),
+        )?;
+        let job_event_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "resource_id": resource.resource_id,
+                "result_digest": result_digest,
+            }),
+        )?;
+        insert_registry_validation_event(
+            &mut transaction,
+            &tenant_id,
+            &command.resource_event_id,
+            "resource",
+            &resource.resource_id,
+            resource.version,
+            &job.trace,
+            "resource.validation_recorded",
+            &resource_event_payload,
+        )
+        .await?;
+        insert_registry_validation_outbox(
+            &mut transaction,
+            &tenant_id,
+            &command.resource_outbox_id,
+            &command.resource_event_id,
+            &job.trace,
+        )
+        .await?;
+        insert_registry_validation_event(
+            &mut transaction,
+            &tenant_id,
+            &command.job_event_id,
+            "job",
+            &job.job_id,
+            job.version,
+            &job.trace,
+            "job.registry_validation_succeeded",
+            &job_event_payload,
+        )
+        .await?;
+        insert_registry_validation_outbox(
+            &mut transaction,
+            &tenant_id,
+            &command.job_outbox_id,
+            &command.job_event_id,
+            &job.trace,
+        )
+        .await?;
+        terminalize_job_mutation_receipt_with_reference(
+            &mut transaction,
+            &command.fence,
+            &command.receipt_id,
+            &command.request_digest,
+            "committed",
+            &resource.resource_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(RegistryValidationCommitOutcome::Committed {
+            job: Box::new(job),
+            resource: Box::new(resource),
+        })
     }
 
     pub async fn commit_job(
@@ -11926,6 +12201,63 @@ async fn terminalize_job_mutation_receipt_with_reference(
     if updated != 1 {
         return Err(RepositoryError::Conflict("Job mutation receipt"));
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_registry_validation_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    event_id: &ResourceId,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: i64,
+    trace: &TraceIdentityV1,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.events (
+            tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+            trace_id, event_type, visibility, payload_schema_version, payload, payload_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'internal', $8, $9, $10)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(event_id.to_string())
+    .bind(aggregate_kind)
+    .bind(aggregate_id)
+    .bind(aggregate_version)
+    .bind(trace.trace_id.to_string())
+    .bind(event_type)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_registry_validation_outbox(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    outbox_id: &ResourceId,
+    event_id: &ResourceId,
+    trace: &TraceIdentityV1,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.outbox_events (tenant_id, outbox_id, event_id, trace_id)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(outbox_id.to_string())
+    .bind(event_id.to_string())
+    .bind(trace.trace_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -28068,6 +28400,7 @@ pub struct BootstrapDevelopmentProfile {
     pub installation: BootstrapInstallationOperator,
     pub tenant: NewTenant,
     pub developer: NewPrincipal,
+    pub registry_validator: NewPrincipal,
     pub tenant_principal_bindings: Vec<NewTenantPrincipal>,
 }
 
@@ -28077,9 +28410,17 @@ fn validate_development_bootstrap(
     if command.installation.principal_id.kind() != ResourceKind::Principal
         || command.installation.request_id.kind() != ResourceKind::ServerRequest
         || command.developer.principal_id.kind() != ResourceKind::Principal
+        || command.registry_validator.principal_id.kind() != ResourceKind::Principal
         || command.installation.principal_id == command.developer.principal_id
+        || command.installation.principal_id == command.registry_validator.principal_id
+        || command.developer.principal_id == command.registry_validator.principal_id
         || !command
             .developer
+            .installation_bindings
+            .installation_bindings
+            .is_empty()
+        || !command
+            .registry_validator
             .installation_bindings
             .installation_bindings
             .is_empty()
@@ -28102,12 +28443,13 @@ fn validate_development_bootstrap(
     }
     let tenant_id = ResourceId::parse_expected(&command.tenant.tenant_id, ResourceKind::Tenant)
         .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
-    let mut kinds = BTreeSet::new();
+    let mut bindings = BTreeSet::new();
     for binding in &command.tenant_principal_bindings {
         if binding.tenant_id != tenant_id
-            || binding.principal_id != command.developer.principal_id
+            || (binding.principal_id != command.developer.principal_id
+                && binding.principal_id != command.registry_validator.principal_id)
             || binding.principal_kind == PrincipalKind::InstallationOperator
-            || !kinds.insert(binding.principal_kind)
+            || !bindings.insert((binding.principal_id.clone(), binding.principal_kind))
         {
             return Err(RepositoryError::InvalidInput(
                 "development bootstrap tenant principal binding is invalid".to_owned(),
@@ -32130,6 +32472,67 @@ pub struct CommitJob {
     pub outbox_id: String,
 }
 
+/// Fenced terminal mutation owned exclusively by the Registry Validation Worker.
+///
+/// The Job keeps its immutable request payload so that the public Operation projection can
+/// continue to expose the resource target after completion.  The validated draft and the Job
+/// terminal state are committed in one PostgreSQL transaction.
+#[derive(Debug, Clone)]
+pub struct CommitRegistryValidation {
+    pub fence: JobFence,
+    pub validator_principal_id: ResourceId,
+    pub validator_digest: Sha256Digest,
+    pub validation_profile_digest: Sha256Digest,
+    pub receipt_id: ResourceId,
+    pub resource_event_id: ResourceId,
+    pub resource_outbox_id: ResourceId,
+    pub job_event_id: ResourceId,
+    pub job_outbox_id: ResourceId,
+    pub idempotency_key_digest: Sha256Digest,
+    pub request_digest: Sha256Digest,
+    pub receipt_expires_at: DateTime<Utc>,
+}
+
+impl CommitRegistryValidation {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        self.fence.validate()?;
+        if self.validator_principal_id.kind() != ResourceKind::Principal
+            || self.receipt_id.kind() != ResourceKind::Receipt
+            || self.resource_event_id.kind() != ResourceKind::Event
+            || self.resource_outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.job_event_id.kind() != ResourceKind::Event
+            || self.job_outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.receipt_expires_at <= Utc::now()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "registry validation commit identity is invalid".to_owned(),
+            ));
+        }
+        let identities = [
+            self.receipt_id.to_string(),
+            self.resource_event_id.to_string(),
+            self.resource_outbox_id.to_string(),
+            self.job_event_id.to_string(),
+            self.job_outbox_id.to_string(),
+        ];
+        if identities.iter().collect::<BTreeSet<_>>().len() != identities.len() {
+            return Err(RepositoryError::InvalidInput(
+                "registry validation commit mutation IDs must be distinct".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegistryValidationCommitOutcome {
+    Committed {
+        job: Box<JobRecord>,
+        resource: Box<ResourceRecord>,
+    },
+    Replayed,
+}
+
 impl CommitJob {
     fn validate(&self) -> Result<(), RepositoryError> {
         self.fence.validate()?;
@@ -36142,6 +36545,7 @@ mod tests {
         };
         let installation_principal_id = id(ResourceKind::Principal);
         let developer_principal_id = id(ResourceKind::Principal);
+        let registry_validator_principal_id = id(ResourceKind::Principal);
         let tenant_id = id(ResourceKind::Tenant);
         let command = BootstrapDevelopmentProfile {
             installation: BootstrapInstallationOperator {
@@ -36160,6 +36564,14 @@ mod tests {
                 principal_id: developer_principal_id.clone(),
                 authentication_authority_digest: digest('a'),
                 subject_digest: digest('d'),
+                installation_bindings: PrincipalBindingsPayload {
+                    installation_bindings: Vec::new(),
+                },
+            },
+            registry_validator: NewPrincipal {
+                principal_id: registry_validator_principal_id.clone(),
+                authentication_authority_digest: digest('a'),
+                subject_digest: digest('e'),
                 installation_bindings: PrincipalBindingsPayload {
                     installation_bindings: Vec::new(),
                 },
