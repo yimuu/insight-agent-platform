@@ -35,9 +35,9 @@ JWKS 与 bootstrap config 不含 private key 或 token。自动测试把生成�
 
 仓库同时提供 `platform-dev-bootstrap` 作为一次性的开发数据库引导工具。它只接受绝对路径的、严格解析且
 digest 固定的 development JSON config，并在已 provision 和通过 schema verification 的 PostgreSQL authority
-中创建 installation operator、development tenant 及最小 developer bindings。它拒绝 production environment
-class、installation/developer principal 复用、非 canonical config 和未提供的显式环境变量；服务进程仍不执行
-DDL，`insight` CLI 也不直接连接数据库。
+中用一个事务创建 installation operator、development tenant 及最小 developer bindings。它拒绝 production
+environment class、installation/developer principal 复用、非 canonical config 和未提供的显式环境变量；已有
+authority 上的重放会拒绝且不会新增任何 row。服务进程仍不执行 DDL，`insight` CLI 也不直接连接数据库。
 
 bootstrap 工具尚未由 `insight dev` 编排，且 profile role closure、readiness、restart 和泄漏负向 smoke 仍未交付；
 因此这不是已完成的 local profile，M1 仍保持 In Progress。

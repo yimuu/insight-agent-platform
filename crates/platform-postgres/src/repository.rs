@@ -645,6 +645,188 @@ impl PgRepository {
         Ok(BootstrapOutcome::Replayed)
     }
 
+    /// Bootstraps every development identity row as one fresh-database transaction.
+    ///
+    /// This is intentionally separate from the idempotent installation-operator bootstrap: a
+    /// development profile needs its tenant and developer bindings to appear atomically with the
+    /// operator, rather than leave a partially initialized authority after a process failure.
+    pub async fn bootstrap_development_profile(
+        &self,
+        command: BootstrapDevelopmentProfile,
+    ) -> Result<BootstrapOutcome, RepositoryError> {
+        validate_development_bootstrap(&command)?;
+        let installation_bindings = PrincipalBindingsPayload {
+            installation_bindings: vec![InstallationPrincipalBinding {
+                principal_kind: PrincipalKind::InstallationOperator,
+                permissions: PermissionSet::new(vec![
+                    Permission::InstallationManage,
+                    Permission::InstallationSupport,
+                ])
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
+                state: PrincipalBindingState::Active,
+                generation: 1,
+            }],
+        };
+        installation_bindings
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        command
+            .developer
+            .installation_bindings
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        command
+            .tenant
+            .config
+            .validate()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        let installation_payload = TypedPayload::with_limit(1, &installation_bindings, 65_536)?;
+        let installation_event = TypedPayload::with_limit(
+            1,
+            &serde_json::json!({
+                "authentication_authority_digest": command.installation.authentication_authority_digest.as_str(),
+                "evidence_digest": command.installation.evidence_digest.as_str(),
+                "principal_id": command.installation.principal_id.to_string(),
+                "request_id": command.installation.request_id.to_string(),
+                "subject_digest": command.installation.subject_digest.as_str(),
+            }),
+            65_536,
+        )?;
+        let tenant_config = TypedPayload::with_limit(1, &command.tenant.config, 65_536)?;
+        let developer_payload =
+            TypedPayload::with_limit(1, &command.developer.installation_bindings, 65_536)?;
+        let tenant_bindings = command
+            .tenant_principal_bindings
+            .iter()
+            .map(|binding| TypedPayload::with_limit(1, &binding.payload, 65_536))
+            .collect::<Result<Vec<_>, _>>()?;
+        let event_id = format!(
+            "evt_{}",
+            command.installation.request_id.uuid().hyphenated()
+        );
+        let trace = TraceIdentityV1::generate();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x4950_4445_5642_4f4f_i64)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "LOCK TABLE insight_platform.tenants, insight_platform.principals, \
+             insight_platform.tenant_principals, insight_platform.events IN SHARE ROW EXCLUSIVE MODE",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let state_count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM insight_platform.tenants) + \
+                    (SELECT count(*) FROM insight_platform.principals) + \
+                    (SELECT count(*) FROM insight_platform.tenant_principals) + \
+                    (SELECT count(*) FROM insight_platform.events)",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        if state_count != 0 {
+            return Err(RepositoryError::Conflict("development bootstrap"));
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.principals (
+                principal_id, state, authentication_authority_digest, subject_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(command.installation.principal_id.to_string())
+        .bind(
+            command
+                .installation
+                .authentication_authority_digest
+                .to_string(),
+        )
+        .bind(command.installation.subject_digest.to_string())
+        .bind(installation_payload.schema_version)
+        .bind(&installation_payload.value)
+        .bind(&installation_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.events (
+                tenant_id, event_id, aggregate_kind, aggregate_id, aggregate_version,
+                trace_id, event_type, visibility, payload_schema_version, payload,
+                payload_digest
+            ) VALUES (NULL, $1, 'principal', $2, 1, $3, 'installation.bootstrap',
+                      'internal', $4, $5, $6)
+            "#,
+        )
+        .bind(&event_id)
+        .bind(command.installation.principal_id.to_string())
+        .bind(trace.trace_id.to_string())
+        .bind(installation_event.schema_version)
+        .bind(&installation_event.value)
+        .bind(&installation_event.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.tenants (
+                tenant_id, state, config_schema_version, config, config_digest
+            ) VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&command.tenant.tenant_id)
+        .bind(&command.tenant.state)
+        .bind(tenant_config.schema_version)
+        .bind(&tenant_config.value)
+        .bind(&tenant_config.digest)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.principals (
+                principal_id, state, authentication_authority_digest, subject_digest,
+                payload_schema_version, payload, payload_digest
+            ) VALUES ($1, 'active', $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(command.developer.principal_id.to_string())
+        .bind(
+            command
+                .developer
+                .authentication_authority_digest
+                .to_string(),
+        )
+        .bind(command.developer.subject_digest.to_string())
+        .bind(developer_payload.schema_version)
+        .bind(&developer_payload.value)
+        .bind(&developer_payload.digest)
+        .execute(&mut *transaction)
+        .await?;
+        for (binding, payload) in command
+            .tenant_principal_bindings
+            .iter()
+            .zip(tenant_bindings.iter())
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO insight_platform.tenant_principals (
+                    tenant_id, principal_id, principal_kind, state, permissions_schema_version,
+                    permissions, permissions_digest
+                ) VALUES ($1, $2, $3, 'active', $4, $5, $6)
+                "#,
+            )
+            .bind(binding.tenant_id.to_string())
+            .bind(binding.principal_id.to_string())
+            .bind(binding.principal_kind.as_str())
+            .bind(payload.schema_version)
+            .bind(&payload.value)
+            .bind(&payload.digest)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(BootstrapOutcome::Created)
+    }
+
     pub async fn create_tenant(&self, command: NewTenant) -> Result<TenantRecord, RepositoryError> {
         validate_id(&command.tenant_id)?;
         validate_code("tenant state", &command.state)?;
@@ -27881,6 +28063,60 @@ pub enum BootstrapOutcome {
     Replayed,
 }
 
+#[derive(Debug, Clone)]
+pub struct BootstrapDevelopmentProfile {
+    pub installation: BootstrapInstallationOperator,
+    pub tenant: NewTenant,
+    pub developer: NewPrincipal,
+    pub tenant_principal_bindings: Vec<NewTenantPrincipal>,
+}
+
+fn validate_development_bootstrap(
+    command: &BootstrapDevelopmentProfile,
+) -> Result<(), RepositoryError> {
+    if command.installation.principal_id.kind() != ResourceKind::Principal
+        || command.installation.request_id.kind() != ResourceKind::ServerRequest
+        || command.developer.principal_id.kind() != ResourceKind::Principal
+        || command.installation.principal_id == command.developer.principal_id
+        || !command
+            .developer
+            .installation_bindings
+            .installation_bindings
+            .is_empty()
+    {
+        return Err(RepositoryError::InvalidInput(
+            "development bootstrap principal identity is invalid".to_owned(),
+        ));
+    }
+    validate_id(&command.tenant.tenant_id)?;
+    validate_code("tenant state", &command.tenant.state)?;
+    if command.tenant.config.scheduling_policy.is_some() {
+        return Err(RepositoryError::InvalidInput(
+            "development tenant scheduling policy must be bound after publication".to_owned(),
+        ));
+    }
+    if command.tenant_principal_bindings.is_empty() {
+        return Err(RepositoryError::InvalidInput(
+            "development bootstrap requires a tenant principal binding".to_owned(),
+        ));
+    }
+    let tenant_id = ResourceId::parse_expected(&command.tenant.tenant_id, ResourceKind::Tenant)
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let mut kinds = BTreeSet::new();
+    for binding in &command.tenant_principal_bindings {
+        if binding.tenant_id != tenant_id
+            || binding.principal_id != command.developer.principal_id
+            || binding.principal_kind == PrincipalKind::InstallationOperator
+            || !kinds.insert(binding.principal_kind)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "development bootstrap tenant principal binding is invalid".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TenantRecord {
     pub tenant_id: String,
@@ -35894,6 +36130,64 @@ mod tests {
     fn typed_payload_rejects_non_object_and_oversize() {
         assert!(TypedPayload::new(1, &vec![1, 2, 3]).is_err());
         assert!(TypedPayload::with_limit(1, &serde_json::json!({"large": "abcd"}), 4).is_err());
+    }
+
+    #[test]
+    fn development_bootstrap_requires_distinct_tenant_scoped_identity() {
+        let id = |kind| ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap();
+        let digest = |marker: char| {
+            format!("sha256:{}", marker.to_string().repeat(64))
+                .parse()
+                .unwrap()
+        };
+        let installation_principal_id = id(ResourceKind::Principal);
+        let developer_principal_id = id(ResourceKind::Principal);
+        let tenant_id = id(ResourceKind::Tenant);
+        let command = BootstrapDevelopmentProfile {
+            installation: BootstrapInstallationOperator {
+                principal_id: installation_principal_id.clone(),
+                request_id: id(ResourceKind::ServerRequest),
+                authentication_authority_digest: digest('a'),
+                subject_digest: digest('b'),
+                evidence_digest: digest('c'),
+            },
+            tenant: NewTenant {
+                tenant_id: tenant_id.to_string(),
+                state: "active".to_owned(),
+                config: TenantConfig::default(),
+            },
+            developer: NewPrincipal {
+                principal_id: developer_principal_id.clone(),
+                authentication_authority_digest: digest('a'),
+                subject_digest: digest('d'),
+                installation_bindings: PrincipalBindingsPayload {
+                    installation_bindings: Vec::new(),
+                },
+            },
+            tenant_principal_bindings: vec![NewTenantPrincipal {
+                tenant_id: tenant_id.clone(),
+                principal_id: developer_principal_id.clone(),
+                principal_kind: PrincipalKind::AgentAuthor,
+                payload: TenantPrincipalPayload {
+                    permissions: PermissionSet::new(vec![Permission::AgentRead]).unwrap(),
+                },
+            }],
+        };
+        assert!(validate_development_bootstrap(&command).is_ok());
+
+        let mut reused_operator = command.clone();
+        reused_operator.developer.principal_id = installation_principal_id;
+        assert!(matches!(
+            validate_development_bootstrap(&reused_operator),
+            Err(RepositoryError::InvalidInput(_))
+        ));
+
+        let mut mismatched_tenant = command;
+        mismatched_tenant.tenant_principal_bindings[0].tenant_id = id(ResourceKind::Tenant);
+        assert!(matches!(
+            validate_development_bootstrap(&mismatched_tenant),
+            Err(RepositoryError::InvalidInput(_))
+        ));
     }
 
     #[test]

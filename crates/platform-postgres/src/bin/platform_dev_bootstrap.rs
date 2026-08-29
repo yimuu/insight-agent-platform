@@ -12,8 +12,8 @@ use insight_platform_contracts::{
 };
 use insight_platform_postgres::{
     repository::{
-        BootstrapInstallationOperator, BootstrapOutcome, NewPrincipal, NewTenant,
-        NewTenantPrincipal, PgRepository,
+        BootstrapDevelopmentProfile, BootstrapInstallationOperator, BootstrapOutcome, NewPrincipal,
+        NewTenant, NewTenantPrincipal, PgRepository,
     },
     verify_schema,
 };
@@ -203,13 +203,59 @@ async fn run() -> Result<(), ProcessError> {
         .map_err(ProcessError::Database)?;
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
     let repository = PgRepository::new(pool);
+    let agent_author_permissions = PermissionSet::new(vec![
+        Permission::AgentRead,
+        Permission::AgentWrite,
+        Permission::AgentPublish,
+        Permission::AgentDeploy,
+        Permission::AgentActivate,
+    ])
+    .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let agent_runner_permissions =
+        PermissionSet::new(vec![Permission::AgentRead, Permission::AgentRun])
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let tenant_id = input.tenant_id.clone();
+    let developer_principal_id = input.developer_principal_id.clone();
     let outcome = repository
-        .bootstrap_installation_operator(BootstrapInstallationOperator {
-            principal_id: input.installation_principal_id,
-            request_id: input.installation_request_id,
-            authentication_authority_digest: input.installation_authentication_authority_digest,
-            subject_digest: input.installation_subject_digest,
-            evidence_digest: input.installation_evidence_digest,
+        .bootstrap_development_profile(BootstrapDevelopmentProfile {
+            installation: BootstrapInstallationOperator {
+                principal_id: input.installation_principal_id,
+                request_id: input.installation_request_id,
+                authentication_authority_digest: input.installation_authentication_authority_digest,
+                subject_digest: input.installation_subject_digest,
+                evidence_digest: input.installation_evidence_digest,
+            },
+            tenant: NewTenant {
+                tenant_id: tenant_id.to_string(),
+                state: "active".to_owned(),
+                config: TenantConfig::default(),
+            },
+            developer: NewPrincipal {
+                principal_id: developer_principal_id.clone(),
+                authentication_authority_digest: input.developer_authentication_authority_digest,
+                subject_digest: input.developer_subject_digest,
+                installation_bindings: PrincipalBindingsPayload {
+                    installation_bindings: Vec::new(),
+                },
+            },
+            tenant_principal_bindings: vec![
+                NewTenantPrincipal {
+                    tenant_id: tenant_id.clone(),
+                    principal_id: developer_principal_id.clone(),
+                    principal_kind: PrincipalKind::AgentAuthor,
+                    payload: TenantPrincipalPayload {
+                        permissions: agent_author_permissions,
+                    },
+                },
+                NewTenantPrincipal {
+                    tenant_id,
+                    principal_id: developer_principal_id,
+                    principal_kind: PrincipalKind::AgentRunner,
+                    payload: TenantPrincipalPayload {
+                        permissions: agent_runner_permissions,
+                    },
+                },
+            ],
         })
         .await
         .map_err(ProcessError::Repository)?;
@@ -220,70 +266,8 @@ async fn run() -> Result<(), ProcessError> {
             ),
         ));
     }
-    repository
-        .create_tenant(NewTenant {
-            tenant_id: input.tenant_id.to_string(),
-            state: "active".to_owned(),
-            config: TenantConfig::default(),
-        })
-        .await
-        .map_err(ProcessError::Repository)?;
-    repository
-        .create_principal(NewPrincipal {
-            principal_id: input.developer_principal_id.clone(),
-            authentication_authority_digest: input.developer_authentication_authority_digest,
-            subject_digest: input.developer_subject_digest,
-            installation_bindings: PrincipalBindingsPayload {
-                installation_bindings: Vec::new(),
-            },
-        })
-        .await
-        .map_err(ProcessError::Repository)?;
-    bind_developer(
-        &repository,
-        input.tenant_id.clone(),
-        input.developer_principal_id.clone(),
-        PrincipalKind::AgentAuthor,
-        PermissionSet::new(vec![
-            Permission::AgentRead,
-            Permission::AgentWrite,
-            Permission::AgentPublish,
-            Permission::AgentDeploy,
-            Permission::AgentActivate,
-        ])
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
-    )
-    .await?;
-    bind_developer(
-        &repository,
-        input.tenant_id,
-        input.developer_principal_id,
-        PrincipalKind::AgentRunner,
-        PermissionSet::new(vec![Permission::AgentRead, Permission::AgentRun])
-            .map_err(|_| ProcessError::InvalidConfiguration)?,
-    )
-    .await?;
     println!("development tenant and developer principal created");
     Ok(())
-}
-
-async fn bind_developer(
-    repository: &PgRepository,
-    tenant_id: ResourceId,
-    principal_id: ResourceId,
-    principal_kind: PrincipalKind,
-    permissions: PermissionSet,
-) -> Result<(), ProcessError> {
-    repository
-        .bind_tenant_principal(NewTenantPrincipal {
-            tenant_id,
-            principal_id,
-            principal_kind,
-            payload: TenantPrincipalPayload { permissions },
-        })
-        .await
-        .map(|_| ())
-        .map_err(ProcessError::Repository)
 }
 
 fn required(name: &'static str) -> Result<String, ProcessError> {
