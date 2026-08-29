@@ -37,6 +37,10 @@ current Task，不创建第二个 mutation。不同 input 不能复用旧 journa
 `submit-input` 后丢弃响应，证明第二次 CLI 调用复用 exact Receipt/If-Match，第三次调用只 GET current Task，且 journal
 不包含 Bearer token。
 
-本证据仍未关闭 M2：409/412/429/503、deadline/expired、错误 assignee、approval/reject/cancel 冲突矩阵，以及真实
-Gateway + PostgreSQL + Orchestration Worker 的 waiting Task -> submit -> Run resume P1 journey 尚未完成。因此不得把
-M2 或 spec 00–18 标记为 Verified。
+fresh P2 journey 已通过真实 Gateway、PostgreSQL 与 Orchestration Worker 发布 HumanTask Agent 并创建 Run；测试只从
+公开 Run SSE 的 `interaction.required` 投影取得 Task ID，经 `task get` 验证 pending InteractionForm 与 exact owner/schema，
+再用 `task submit-input` 提交 typed Inline response。原 SSE 随后出现 `interaction.resolved`，Run durable resume 并以该 response
+成功返回。测试不查询数据库或 internal RPC。
+
+本证据仍未关闭 M2：409/412/429/503、deadline/expired、错误 assignee，以及 approval/reject/cancel 冲突矩阵尚未完成。
+因此不得把 M2 或 spec 00–18 标记为 Verified。

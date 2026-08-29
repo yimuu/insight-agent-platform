@@ -5,6 +5,7 @@ use std::{
     env,
     fmt::Write as _,
     fs::{self, OpenOptions},
+    io::{BufRead, BufReader},
     net::TcpStream,
     path::Path,
     process::{Child, Command, Stdio},
@@ -723,4 +724,210 @@ fn public_cli_deterministic_first_run() {
         json!({"kind": "inline", "value": {"message": "after restart"}})
     );
     assert_eq!(result["schema_digest"], schema_digest);
+
+    let human_task_plan = json!({
+        "plan_version": 5,
+        "interface_contract_digest": CONTRACT_DIGEST,
+        "entry_node_id": "start",
+        "dependency_slots": {},
+        "nodes": {
+            "start": {"kind": "start", "next": "collect_input"},
+            "collect_input": {
+                "kind": "human_task",
+                "definition": {
+                    "kind": "interaction",
+                    "interaction_kind": "form",
+                    "eligible_principal_rule_digest": canonical_digest(&json!({
+                        "rule": "local_developer",
+                    })),
+                    "safe_prompt_key": "provide_message",
+                },
+                "response": {
+                    "source": "node_output",
+                    "producer_node_id": "collect_input",
+                    "port_id": "response",
+                    "schema_digest": schema_digest,
+                },
+                "timeout_milliseconds": 240_000,
+                "resume": "finish",
+            },
+            "finish": {
+                "kind": "return",
+                "value": {
+                    "source": "node_output",
+                    "producer_node_id": "collect_input",
+                    "port_id": "response",
+                    "schema_digest": schema_digest,
+                },
+            },
+        },
+    });
+    let human_task_plan_path =
+        write_canonical(fixture.path(), "human-task-plan.json", &human_task_plan);
+    let human_task_plan_upload = upload_artifact(
+        insight,
+        project,
+        &human_task_plan_path,
+        "typed_plan",
+        "human-task-plan.json",
+    );
+    let mut human_task_manifest = agent_manifest.clone();
+    human_task_manifest["create"]["display_name"] = json!("Deterministic human task agent");
+    human_task_manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
+        human_task_plan_upload["artifact_id"].clone();
+    human_task_manifest["create"]["document"]["spec"]["typed_plan_digest"] =
+        human_task_plan_upload["content_digest"].clone();
+    human_task_manifest["publish"]["plan_content_digest"] =
+        human_task_plan_upload["content_digest"].clone();
+    human_task_manifest["publish"]["artifact_id"] = human_task_plan_upload["artifact_id"].clone();
+    let human_task_manifest_path = write_canonical(
+        fixture.path(),
+        "human-task-agent.apply.json",
+        &human_task_manifest,
+    );
+    let human_task_agent = run_json(
+        insight,
+        &[
+            "apply",
+            "--file",
+            human_task_manifest_path.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+
+    let human_task_request = json!({
+        "agent_id": human_task_agent["resource_id"],
+        "input": {
+            "classification": "internal",
+            "schema_digest": schema_digest,
+            "value": {"kind": "inline", "value": {"message": "before task"}},
+        },
+        "deadline": (Utc::now() + Duration::minutes(5))
+            .to_rfc3339_opts(SecondsFormat::Micros, true),
+    });
+    let human_task_request_path =
+        write_canonical(fixture.path(), "human-task-run.json", &human_task_request);
+    let human_task_run = run_json(
+        insight,
+        &[
+            "run",
+            "create",
+            "--file",
+            human_task_request_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    let human_task_run_id = human_task_run["run_id"]
+        .as_str()
+        .expect("Human Task Run ID");
+    let mut watcher = Command::new(insight)
+        .args([
+            "run",
+            "watch",
+            human_task_run_id,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("Human Task Run watcher starts");
+    let stdout = watcher.stdout.take().expect("watcher stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let mut watch_records = Vec::new();
+    let task_id = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("Run watch ended before interaction.required"))
+            .expect("Run watch line is readable");
+        let record: Value = serde_json::from_str(&line).expect("Run watch line is closed JSON");
+        let task_id = (record["kind"] == "event"
+            && record["event"]["event_type"] == "interaction.required")
+            .then(|| record["event"]["data"]["source_id"].as_str())
+            .flatten()
+            .map(str::to_owned);
+        watch_records.push(record);
+        if let Some(task_id) = task_id {
+            break task_id;
+        }
+    };
+
+    let waiting_run = run_json(
+        insight,
+        &[
+            "run",
+            "get",
+            human_task_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(waiting_run["state"], "waiting");
+    let pending_task = run_json(
+        insight,
+        &["task", "get", &task_id, "--path", project.to_str().unwrap()],
+    );
+    assert_eq!(pending_task["task_kind"], "interaction_form");
+    assert_eq!(pending_task["state"], "pending");
+    assert_eq!(pending_task["owner"]["run_id"], human_task_run_id);
+    assert_eq!(pending_task["response_schema_digest"], schema_digest);
+
+    let task_response = json!({
+        "classification": "internal",
+        "schema_digest": schema_digest,
+        "value": {"kind": "inline", "value": {"message": "after task"}},
+    });
+    let task_response_path =
+        write_canonical(fixture.path(), "human-task-response.json", &task_response);
+    let responded_task = run_json(
+        insight,
+        &[
+            "task",
+            "submit-input",
+            &task_id,
+            "--file",
+            task_response_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(responded_task["state"], "responded");
+
+    for line in lines {
+        watch_records.push(
+            serde_json::from_str(&line.expect("Run watch line is readable"))
+                .expect("Run watch line is closed JSON"),
+        );
+    }
+    let watch_status = watcher.wait().expect("Run watcher status is readable");
+    assert!(watch_status.success(), "Human Task Run watch failed");
+    let terminal = watch_records.last().expect("Human Task terminal record");
+    assert_eq!(terminal["kind"], "terminal");
+    assert_eq!(terminal["run"]["state"], "succeeded");
+    assert!(watch_records.iter().any(|record| {
+        record["kind"] == "event"
+            && record["event"]["event_type"] == "interaction.resolved"
+            && record["event"]["data"]["source_id"] == task_id
+    }));
+    let human_task_result = run_json(
+        insight,
+        &[
+            "run",
+            "result",
+            human_task_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        human_task_result["value"],
+        json!({"kind": "inline", "value": {"message": "after task"}})
+    );
+    assert_eq!(human_task_result["schema_digest"], schema_digest);
 }

@@ -24749,13 +24749,14 @@ async fn append_resolved_orchestration_task_events(
         }),
         65_536,
     )?;
-    append_command_event_version(
+    append_command_event_version_for_run(
         transaction,
         &command.audit,
         "interaction",
         &resolved.task.task_id,
         Some(resolved.task.version),
-        &format!("interaction.{}", resolved.task.state.as_str()),
+        Some(run_id),
+        "interaction.respond",
         &payload,
     )
     .await?;
@@ -29210,9 +29211,11 @@ async fn insert_development_artifact_authority(
         INSERT INTO insight_platform.artifact_blobs (
             tenant_id, blob_id, backend, storage_binding_digest,
             security_domain_digest, object_reference_ciphertext, object_generation, key_id,
-            encryption_domain_id, content_digest, size_bytes, state, verified_at
+            encryption_domain_id, content_digest, size_bytes, state, verified_at,
+            created_at, updated_at
         ) VALUES ($1, $2, 'builtin', $3, $4, $5, 'builtin-v1',
-                  'builtin-development', $6, $7, $8, 'verified', clock_timestamp())
+                  'builtin-development', $6, $7, $8, 'verified',
+                  statement_timestamp(), statement_timestamp(), statement_timestamp())
         "#,
     )
     .bind(tenant_id.to_string())
@@ -34275,6 +34278,30 @@ async fn append_command_event_version(
     payload: &TypedPayload,
 ) -> Result<(), RepositoryError> {
     let run_id = (aggregate_kind == "run").then_some(aggregate_id);
+    append_command_event_version_for_run(
+        transaction,
+        audit,
+        aggregate_kind,
+        aggregate_id,
+        aggregate_version,
+        run_id,
+        event_type,
+        payload,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_command_event_version_for_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CommandAudit,
+    aggregate_kind: &str,
+    aggregate_id: &str,
+    aggregate_version: Option<i64>,
+    run_id: Option<&str>,
+    event_type: &str,
+    payload: &TypedPayload,
+) -> Result<(), RepositoryError> {
     let public_event_type = public_run_event_type(aggregate_kind, event_type, &payload.value);
     let public_sequence = match (run_id, public_event_type) {
         (Some(run_id), Some(_)) => {
@@ -37532,6 +37559,18 @@ mod tests {
             validate_development_bootstrap(&mismatched_tenant),
             Err(RepositoryError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn orchestration_task_response_has_a_public_resolved_projection() {
+        assert_eq!(
+            public_run_event_type("interaction", "interaction.respond", &Value::Null),
+            Some(PublicRunEventType::InteractionResolved)
+        );
+        assert_eq!(
+            public_run_event_type("interaction", "interaction.responded", &Value::Null),
+            None
+        );
     }
 
     #[test]
