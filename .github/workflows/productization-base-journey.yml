@@ -60,6 +60,17 @@ jobs:
             arguments+=(--report-directory "$RUNNER_TEMP/productization-reports")
           fi
           scripts/run-productization-base-journey.sh "${arguments[@]}"
+      - name: Preserve bounded runtime diagnostics on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: productization-${{ inputs.profile }}-failure-diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/logs/*.log
+            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/profile.json
+            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/processes.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Preserve exact-revision scenario reports
         if: ${{ always() && inputs.profile == 'base' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

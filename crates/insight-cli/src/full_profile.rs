@@ -911,7 +911,6 @@ pub(crate) fn initial_configs(
                     "schema_version": 1,
                     "process_observer": "local_unix",
                     "registration_socket_path": sandbox.runtime
-                        .join(SANDBOX_STATE_DIRECTORY)
                         .join(SANDBOX_REGISTRATION_SOCKET_FILE)
                         .display().to_string(),
                     "controller_listen_address": loopback_address(ports.sandbox_attestor),
@@ -992,7 +991,6 @@ pub(crate) fn initial_configs(
                     "authority_endpoint": format!("https://localhost:{}/", ports.sandbox_controller),
                     "authority_tls_server_name": "localhost",
                     "process_registration_attestor_socket_path": sandbox.runtime
-                        .join(SANDBOX_STATE_DIRECTORY)
                         .join(SANDBOX_REGISTRATION_SOCKET_FILE)
                         .display().to_string(),
                     "process_registration_attestor_tls_server_name": "sandbox-attestor.local",
@@ -2149,6 +2147,14 @@ mod tests {
         assert_eq!(
             configs["sandbox-attestor"].1["process_observer"],
             "local_unix"
+        );
+        assert_eq!(
+            configs["sandbox-attestor"].1["registration_socket_path"],
+            "/project/runtime/registration.sock"
+        );
+        assert_eq!(
+            configs["sandbox-executor"].1["process_registration_attestor_socket_path"],
+            "/project/runtime/registration.sock"
         );
         assert_eq!(
             configs["sandbox-controller"].1["process_isolation_attestor"]["allowed_node_cidrs"][0],
