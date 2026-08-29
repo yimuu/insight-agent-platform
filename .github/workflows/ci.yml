@@ -272,7 +272,9 @@ jobs:
     name: Affected Console
     needs: changes
     if: needs.changes.outputs.console == 'true'
-    runs-on: ubuntu-latest
+    # The Console qualification executes the checked-in bundle in the Chrome
+    # supplied by this documented GitHub runner image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -287,6 +289,7 @@ jobs:
           corepack pnpm --dir web/console test
           corepack pnpm --dir web/console build
           corepack pnpm --dir web/console lint
+          corepack pnpm --dir web/console browser:fixture:qualify
 
   mcp-interop:
     name: MCP external SDK interoperability

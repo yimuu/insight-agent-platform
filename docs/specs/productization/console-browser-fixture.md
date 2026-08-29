@@ -29,11 +29,14 @@ pnpm install --frozen-lockfile
 pnpm test
 pnpm run lint
 pnpm run build
-pnpm run browser:fixture
+pnpm run browser:fixture:qualify
 ```
 
-浏览器访问 `http://127.0.0.1:4173/`。fixture 使用固定 Run/Task 标识和内存态转换，因此每次服务重启
-都会回到 waiting/pending 初态；它只用于浏览器契约验证，不进入生产产物。
+`browser:fixture:qualify` 会自行启动 fixture、构建后的同源代理和 headless Chrome，执行完整旅程，并对
+fixture 请求日志做闭合断言。GitHub `console` job 固定在带 Chrome 的 `ubuntu-24.04` runner 上执行同一命令；
+浏览器可执行文件从显式环境变量或受限的 macOS/Linux 标准位置解析，不在 CI 中临时下载浏览器。fixture
+使用固定 Run/Task 标识和内存态转换，因此每次服务重启都会回到 waiting/pending 初态；它只用于浏览器
+契约验证，不进入生产产物。
 
 ## 证据边界
 
@@ -53,7 +56,8 @@ upstream 必须是 origin-only loopback HTTP，只有 `/readyz` 与 `/v1` 会透
 PostgreSQL/Gateway authority 中额外创建一条 Human Task Run；只有浏览器脚本返回 closed Passed evidence 时，
 `approval-task-resume` 报告才把 `console` 与顶层状态升级为 `passed`。
 
-2026-08-30 自动化和透明代理已对 stateful fixture 完整通过。随后 fresh real-Gateway 执行在进入 `init/dev` 前发现
+2026-08-30 自动化和透明代理已对 stateful fixture 完整通过，并已接入受影响 Console 的 CI job；CI 只有在
+真实 headless Chrome 旅程及请求日志闭合断言同时通过后才会成功。随后 fresh real-Gateway 执行在进入 `init/dev` 前发现
 本机 OrbStack Docker API 无响应；旧 `doctor` 因无 timeout 挂起，该缺口已修复为每条外部命令 5 秒有界失败并由真实
 无响应 daemon 验证。由于没有到达 fresh Gateway/PostgreSQL，真实 Console 项仍是 **Not run**，不得把 stateful fixture
 结果替代为 M3 通过证据。

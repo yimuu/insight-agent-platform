@@ -27,6 +27,8 @@ for marker in (
     "needs.changes.outputs.mcp_interop == 'true'",
     "needs.changes.outputs.policy == 'true'",
     "corepack pnpm --dir web/console install --frozen-lockfile",
+    "corepack pnpm --dir web/console browser:fixture:qualify",
+    "runs-on: ubuntu-24.04",
     "node-version: \"24\"",
     "workflow_dispatch:",
     "schedule:",

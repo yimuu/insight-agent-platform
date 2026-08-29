@@ -39,6 +39,9 @@ pnpm run build
 
 构建完成后，可在另一个终端运行 `pnpm run browser:fixture`。该 fixture 只服务 `dist/` 和一组
 stateful `/v1` 契约响应，用于浏览器自动化；它不进入生产 bundle，也不是 Gateway 的替代品。
+`pnpm run browser:fixture:qualify` 会自行启动 fixture 和 headless Chrome，执行同一浏览器旅程并校验请求
+日志中的认证、CAS、Receipt 与脱敏不变量；受影响 Console 的 GitHub CI 固定在带 Chrome 的
+`ubuntu-24.04` runner 上执行该闭合资格命令。
 
 同源部署时页面默认访问当前 origin 的 `/readyz` 与 `/v1`。本地 Vite 与 Gateway 分离时，Gateway 必须按
 Platform credential mode 配置受审查的 CORS origin；不得用关闭浏览器安全策略或把 token 写入 URL 的方式绕过。
@@ -51,6 +54,8 @@ Platform credential mode 配置受审查的 CORS origin；不得用关闭浏览�
 raw prompt 与 tool output 在 DOM 中均为 `[redacted]`，浏览器 console 无泄漏；刷新后 token 与 Run projection
 清空；跳转链接、main focus target、active navigation `aria-current` 也已检查。fixture 请求日志只记录凭据是否
 存在，不记录 Authorization 内容。证据边界见 [`console-browser-fixture.md`](console-browser-fixture.md)。
+该 stateful fixture 资格命令已进入受影响 Console 的 CI，不再依赖人工打开浏览器；这仍只证明 fixture
+边界，不能替代真实 Gateway/PostgreSQL authority。
 
 这仍不是 fresh PostgreSQL + 真实 Gateway 证据，尚不能关闭 M3。剩余门禁包括：
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -12,6 +12,22 @@ const required = (name) => {
 }
 
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
+
+function waitForChild(child, timeoutMilliseconds) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolveExit) => {
+    const finish = () => {
+      clearTimeout(timer)
+      child.removeListener('exit', finish)
+      resolveExit()
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish()
+    }, timeoutMilliseconds)
+    child.once('exit', finish)
+  })
+}
 
 async function unusedPort() {
   const server = createServer()
@@ -117,7 +133,18 @@ async function main() {
   const taskId = required('INSIGHT_CONSOLE_TASK_ID')
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
-  const browser = resolve(process.env.INSIGHT_CONSOLE_BROWSER_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+  const browser = [
+    process.env.INSIGHT_CONSOLE_BROWSER_BIN,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+  ]
+    .filter(Boolean)
+    .map((candidate) => resolve(candidate))
+    .find((candidate) => existsSync(candidate))
+  if (!browser) throw new Error('an executable Chromium or Chrome browser is required')
   const consoleServer = await startGatewayConsoleServer({ gatewayOrigin })
   const browserProfile = mkdtempSync(join(tmpdir(), 'insight-console-browser-'))
   const debugPort = await unusedPort()
@@ -140,6 +167,7 @@ async function main() {
   browserProcess.stderr.on('data', (chunk) => { browserErrors = `${browserErrors}${chunk}`.slice(-8192) })
 
   let client
+  let observer
   const consoleMessages = []
   try {
     const targets = await jsonEventually(`http://127.0.0.1:${debugPort}/json`, Date.now() + 20_000)
@@ -151,7 +179,7 @@ async function main() {
     await client.call('Log.enable')
     // Runtime console events are not request/response messages, so collect them through a second
     // small protocol connection dedicated to passive observation.
-    const observer = new WebSocket(page.webSocketDebuggerUrl)
+    observer = new WebSocket(page.webSocketDebuggerUrl)
     await new Promise((resolveOpen, rejectOpen) => {
       observer.addEventListener('open', resolveOpen, { once: true })
       observer.addEventListener('error', rejectOpen, { once: true })
@@ -218,12 +246,10 @@ async function main() {
       checks: ['gateway_ready', 'sse_task_discovery', 'task_mutation', 'terminal_run', 'reload_authority_read', 'memory_only_token'],
     })}\n`)
   } finally {
+    observer?.close()
     client?.close()
     browserProcess.kill('SIGTERM')
-    await Promise.race([
-      new Promise((resolveExit) => browserProcess.once('exit', resolveExit)),
-      delay(5_000).then(() => browserProcess.kill('SIGKILL')),
-    ])
+    await waitForChild(browserProcess, 5_000)
     await consoleServer.close()
     rmSync(browserProfile, { recursive: true, force: true })
   }

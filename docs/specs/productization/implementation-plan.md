@@ -293,6 +293,11 @@ SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。1
 Gateway/PostgreSQL 或 Gateway restart；正式部署、telemetry、慢依赖和 accessibility audit 仍未完成，详见
 [`m3-console.md`](m3-console.md)，故不得标记 M3 或 spec00～18 为 Verified。
 
+同一 stateful fixture 浏览器 journey 现由 `browser:fixture:qualify` 自行监督 fixture、同源代理和 headless
+Chrome，并闭合检查 readiness 无凭据、全部 `/v1` 请求有凭据、Task mutation 的 exact ETag/Receipt 以及日志不含
+原始 token。受影响 Console 的 CI 固定使用 GitHub `ubuntu-24.04` runner 中预装的 Chrome 执行该命令；它消除了
+人工浏览器证据漂移，但不扩大下述真实 authority 证据边界。
+
 Console 的 fresh authority runner 已加入 base journey 的显式 `--console-browser` 模式：它从用户选定的全局 Node
 旁解析 Corepack，构建静态 bundle，以仅转发 `/readyz`/`/v1` 的 loopback 同源代理连接真实 Runtime Gateway，并在
 独立 Human Task Run 上由 headless Chromium 完成 SSE Task 发现、typed mutation、terminal result、刷新清空内存态
