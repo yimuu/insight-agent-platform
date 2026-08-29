@@ -4,6 +4,10 @@
 //! host prerequisites and create project-local development state, but all future business
 //! mutations must use the public Gateway `/v1` contract.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use rcgen::{KeyPair, PublicKeyData, PKCS_RSA_SHA256};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -15,11 +19,20 @@ use std::{
     process::Command as ProcessCommand,
     time::{SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
+use x509_parser::{prelude::FromDer as _, public_key::PublicKey, x509::SubjectPublicKeyInfo};
 
 const PROJECT_DIRECTORY: &str = ".insight";
 const PROJECT_STATE_FILE: &str = "project.json";
 const PROJECT_GITIGNORE_FILE: &str = ".gitignore";
 const PROJECT_KIND: &str = "insight.dev.project/v1";
+const IDENTITY_DIRECTORY: &str = "identity";
+const IDENTITY_PRIVATE_KEY_FILE: &str = "local-issuer-private-key.pem";
+const IDENTITY_JWKS_FILE: &str = "local-issuer-jwks.json";
+const IDENTITY_BOOTSTRAP_CONFIG_FILE: &str = "development-bootstrap.json";
+const IDENTITY_ACCESS_TOKEN_FILE: &str = "developer-access-token.jwt";
+const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
+const LOCAL_ACCESS_TOKEN_TTL_SECONDS: i64 = 900;
 const EXPECTED_RUSTC_PREFIX: &str = "rustc 1.94.1";
 const DEFAULT_PORTS: &[u16] = &[5432, 4222, 8080];
 
@@ -31,6 +44,9 @@ pub enum CliCommand {
     Init {
         root: PathBuf,
         project_name: Option<String>,
+    },
+    Token {
+        root: PathBuf,
     },
     Help,
 }
@@ -46,6 +62,17 @@ pub enum CliError {
     MissingProjectName(String),
     ProjectAlreadyInitialized(String),
     InitializeProject {
+        path: String,
+        source: std::io::Error,
+    },
+    ReadLocalIdentity {
+        path: String,
+        source: std::io::Error,
+    },
+    InvalidLocalIdentity {
+        path: String,
+    },
+    RotateLocalAccessToken {
         path: String,
         source: std::io::Error,
     },
@@ -82,6 +109,21 @@ impl std::fmt::Display for CliError {
                     "cannot initialize local project state at {path}: {source}"
                 )
             }
+            Self::ReadLocalIdentity { path, source } => {
+                write!(
+                    formatter,
+                    "cannot read local identity state at {path}: {source}"
+                )
+            }
+            Self::InvalidLocalIdentity { path } => {
+                write!(formatter, "local identity state at {path} is invalid")
+            }
+            Self::RotateLocalAccessToken { path, source } => {
+                write!(
+                    formatter,
+                    "cannot rotate local access token at {path}: {source}"
+                )
+            }
             Self::InvalidClock => write!(formatter, "local project clock is before the Unix epoch"),
             Self::DoctorFailed { .. } => {
                 write!(
@@ -97,6 +139,8 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InitializeProject { source, .. } => Some(source),
+            Self::ReadLocalIdentity { source, .. }
+            | Self::RotateLocalAccessToken { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -112,7 +156,12 @@ impl CliError {
             | Self::UnsupportedOption(_)
             | Self::InvalidProjectName(_)
             | Self::MissingProjectName(_) => 2,
-            Self::DoctorFailed { .. } | Self::InitializeProject { .. } | Self::InvalidClock => 1,
+            Self::DoctorFailed { .. }
+            | Self::InitializeProject { .. }
+            | Self::ReadLocalIdentity { .. }
+            | Self::InvalidLocalIdentity { .. }
+            | Self::RotateLocalAccessToken { .. }
+            | Self::InvalidClock => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
     }
@@ -133,6 +182,7 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         "doctor" => parse_doctor(&arguments[1..]),
         "init" => parse_init(&arguments[1..]),
+        "token" => parse_token(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
 }
@@ -182,6 +232,30 @@ fn parse_init(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     })
 }
 
+fn parse_token(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let mut root = None;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let Some(value) = arguments.get(cursor + 1) else {
+                    return Err(CliError::MissingValue("--path"));
+                };
+                root = Some(PathBuf::from(value));
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    Ok(CliCommand::Token {
+        root: root.unwrap_or_else(|| PathBuf::from(".")),
+    })
+}
+
 fn lossy(value: &OsString) -> String {
     value.to_string_lossy().into_owned()
 }
@@ -192,12 +266,42 @@ pub struct LocalProjectState {
     pub kind: String,
     pub project_name: String,
     pub created_at_unix_seconds: u64,
+    pub identity: LocalIdentityState,
     pub profiles: BTreeMap<String, LocalProfileState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalIdentityState {
+    pub schema_version: u32,
+    pub issuer: String,
+    pub audience: String,
+    pub key_id: String,
+    pub jwks_digest: String,
+    pub authentication_authority_digest: String,
+    pub tenant_id: String,
+    pub developer_principal_id: String,
+    pub developer_subject: String,
+    pub installation_principal_id: String,
+    pub installation_request_id: String,
+    pub bootstrap_config_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalProfileState {
     pub state: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalAccessTokenClaims<'a> {
+    iss: &'a str,
+    aud: &'a str,
+    sub: &'a str,
+    jti: String,
+    iat: i64,
+    exp: i64,
+    tenant_id: &'a str,
+    principal_kind: &'static str,
+    authn_strength: &'static str,
 }
 
 pub fn initialize_project(
@@ -220,11 +324,23 @@ pub fn initialize_project(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CliError::InvalidClock)?
         .as_secs();
+    fs::create_dir(&state_directory).map_err(|source| CliError::InitializeProject {
+        path: state_directory.display().to_string(),
+        source,
+    })?;
+    let identity = match initialize_local_identity(&state_directory, created_at_unix_seconds) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&state_directory);
+            return Err(error);
+        }
+    };
     let state = LocalProjectState {
         schema_version: 1,
         kind: PROJECT_KIND.to_owned(),
         project_name: name,
         created_at_unix_seconds,
+        identity,
         profiles: BTreeMap::from([
             (
                 "base".to_owned(),
@@ -240,10 +356,6 @@ pub fn initialize_project(
             ),
         ]),
     };
-    fs::create_dir(&state_directory).map_err(|source| CliError::InitializeProject {
-        path: state_directory.display().to_string(),
-        source,
-    })?;
     let result = write_project_state(&state_directory, &state);
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&state_directory);
@@ -286,6 +398,423 @@ fn write_project_state(state_directory: &Path, state: &LocalProjectState) -> Res
     write_new(&state_path, &encoded)
 }
 
+fn initialize_local_identity(
+    state_directory: &Path,
+    issued_at_unix_seconds: u64,
+) -> Result<LocalIdentityState, CliError> {
+    let identity_directory = state_directory.join(IDENTITY_DIRECTORY);
+    fs::create_dir(&identity_directory).map_err(|source| CliError::InitializeProject {
+        path: identity_directory.display().to_string(),
+        source,
+    })?;
+    let issuer_nonce = Uuid::now_v7();
+    let issuer = format!("https://local.insight.platform/{issuer_nonce}");
+    let key_id = format!("local-oidc-{issuer_nonce}");
+    let tenant_id = fresh_resource_id(ResourceKind::Tenant).to_string();
+    let developer_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
+    let installation_principal_id = fresh_resource_id(ResourceKind::Principal).to_string();
+    let installation_request_id = fresh_resource_id(ResourceKind::ServerRequest).to_string();
+    let developer_subject = format!("developer:{issuer_nonce}");
+    let installation_subject = format!("bootstrap:{issuer_nonce}");
+    let authentication_authority_digest = tagged_digest(
+        "oidc_authentication_authority_v1",
+        &issuer,
+        &identity_directory,
+    )?;
+    let developer_subject_digest =
+        tagged_digest("oidc_subject_v1", &developer_subject, &identity_directory)?;
+    let installation_subject_digest = tagged_digest(
+        "oidc_subject_v1",
+        &installation_subject,
+        &identity_directory,
+    )?;
+    let installation_evidence_digest = tagged_digest(
+        "local_development_bootstrap_evidence_v1",
+        &issuer,
+        &identity_directory,
+    )?;
+
+    let key_pair =
+        KeyPair::generate_for(&PKCS_RSA_SHA256).map_err(|_| CliError::InitializeProject {
+            path: identity_directory.display().to_string(),
+            source: std::io::Error::other("cannot generate local RS256 issuer key"),
+        })?;
+    let jwks = build_local_jwks(&key_pair, &key_id, &identity_directory)?;
+    let jwks_digest = canonical_digest(&jwks).map_err(|_| {
+        invalid_local_identity(&identity_directory, "cannot canonicalize local JWKS")
+    })?;
+    let bootstrap_config = serde_json::json!({
+        "schema_version": 1,
+        "environment_class": "development",
+        "installation": {
+            "principal_id": installation_principal_id,
+            "request_id": installation_request_id,
+            "authentication_authority_digest": authentication_authority_digest,
+            "subject_digest": installation_subject_digest,
+            "evidence_digest": installation_evidence_digest,
+        },
+        "developer": {
+            "tenant_id": tenant_id,
+            "principal_id": developer_principal_id,
+            "authentication_authority_digest": authentication_authority_digest,
+            "subject_digest": developer_subject_digest,
+        },
+    });
+    let bootstrap_config_digest = canonical_digest(&bootstrap_config).map_err(|_| {
+        invalid_local_identity(
+            &identity_directory,
+            "cannot canonicalize development bootstrap config",
+        )
+    })?;
+    let identity = LocalIdentityState {
+        schema_version: 1,
+        issuer,
+        audience: LOCAL_OIDC_AUDIENCE.to_owned(),
+        key_id,
+        jwks_digest,
+        authentication_authority_digest,
+        tenant_id,
+        developer_principal_id,
+        developer_subject,
+        installation_principal_id,
+        installation_request_id,
+        bootstrap_config_digest,
+    };
+    write_sensitive_new(
+        &identity_directory.join(IDENTITY_PRIVATE_KEY_FILE),
+        key_pair.serialize_pem().as_bytes(),
+    )?;
+    let jwks_bytes =
+        serde_json::to_vec_pretty(&jwks).map_err(|error| CliError::InitializeProject {
+            path: identity_directory
+                .join(IDENTITY_JWKS_FILE)
+                .display()
+                .to_string(),
+            source: std::io::Error::other(error),
+        })?;
+    write_new(&identity_directory.join(IDENTITY_JWKS_FILE), &jwks_bytes)?;
+    let bootstrap_bytes = serde_json::to_vec_pretty(&bootstrap_config).map_err(|error| {
+        CliError::InitializeProject {
+            path: identity_directory
+                .join(IDENTITY_BOOTSTRAP_CONFIG_FILE)
+                .display()
+                .to_string(),
+            source: std::io::Error::other(error),
+        }
+    })?;
+    write_new(
+        &identity_directory.join(IDENTITY_BOOTSTRAP_CONFIG_FILE),
+        &bootstrap_bytes,
+    )?;
+    let private_key_der = key_pair.serialize_der();
+    let private_key_der = pkcs1_private_key_from_pkcs8(&private_key_der).ok_or_else(|| {
+        invalid_local_identity(
+            &identity_directory,
+            "cannot convert local issuer key to RSA private-key form",
+        )
+    })?;
+    issue_initial_local_access_token(
+        &identity_directory,
+        &identity,
+        private_key_der,
+        issued_at_unix_seconds,
+    )?;
+    Ok(identity)
+}
+
+fn fresh_resource_id(kind: ResourceKind) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, Uuid::now_v7()).expect("UUID v7 creates a valid resource ID")
+}
+
+fn tagged_digest(tag: &str, value: &str, identity_directory: &Path) -> Result<String, CliError> {
+    canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "tag": tag,
+        "value": value,
+    }))
+    .map_err(|_| {
+        invalid_local_identity(identity_directory, "cannot construct local identity digest")
+    })
+}
+
+fn build_local_jwks(
+    key_pair: &KeyPair,
+    key_id: &str,
+    identity_directory: &Path,
+) -> Result<serde_json::Value, CliError> {
+    let public_key_info = key_pair.subject_public_key_info();
+    let (_, public_key_info) = SubjectPublicKeyInfo::from_der(&public_key_info).map_err(|_| {
+        invalid_local_identity(identity_directory, "cannot parse local issuer public key")
+    })?;
+    let PublicKey::RSA(public_key) = public_key_info.parsed().map_err(|_| {
+        invalid_local_identity(identity_directory, "cannot parse local issuer RSA key")
+    })?
+    else {
+        return Err(invalid_local_identity(
+            identity_directory,
+            "local issuer key is not RSA",
+        ));
+    };
+    let modulus = positive_integer(public_key.modulus).ok_or_else(|| {
+        invalid_local_identity(identity_directory, "local issuer RSA modulus is invalid")
+    })?;
+    let exponent = positive_integer(public_key.exponent).ok_or_else(|| {
+        invalid_local_identity(identity_directory, "local issuer RSA exponent is invalid")
+    })?;
+    Ok(serde_json::json!({
+        "keys": [{
+            "alg": "RS256",
+            "e": URL_SAFE_NO_PAD.encode(exponent),
+            "kid": key_id,
+            "kty": "RSA",
+            "n": URL_SAFE_NO_PAD.encode(modulus),
+            "use": "sig",
+        }],
+    }))
+}
+
+fn positive_integer(value: &[u8]) -> Option<&[u8]> {
+    let value = value.strip_prefix(&[0]).unwrap_or(value);
+    (!value.is_empty()).then_some(value)
+}
+
+fn pkcs1_private_key_from_pkcs8(value: &[u8]) -> Option<&[u8]> {
+    let (outer, remainder) = der_tlv(value, 0x30)?;
+    if !remainder.is_empty() {
+        return None;
+    }
+    let (_, outer) = der_tlv(outer, 0x02)?;
+    let (_, outer) = der_tlv(outer, 0x30)?;
+    let (private_key, _) = der_tlv(outer, 0x04)?;
+    Some(private_key)
+}
+
+fn der_tlv(value: &[u8], expected_tag: u8) -> Option<(&[u8], &[u8])> {
+    let (&tag, remaining) = value.split_first()?;
+    if tag != expected_tag {
+        return None;
+    }
+    let (&first_length, remaining) = remaining.split_first()?;
+    let (length, remaining) = if first_length & 0x80 == 0 {
+        (usize::from(first_length), remaining)
+    } else {
+        let length_bytes = usize::from(first_length & 0x7f);
+        if length_bytes == 0 || length_bytes > std::mem::size_of::<usize>() {
+            return None;
+        }
+        let (encoded_length, remaining) = remaining.split_at_checked(length_bytes)?;
+        let length = encoded_length.iter().try_fold(0usize, |length, byte| {
+            length.checked_mul(256)?.checked_add(usize::from(*byte))
+        })?;
+        (length, remaining)
+    };
+    let (content, remaining) = remaining.split_at_checked(length)?;
+    Some((content, remaining))
+}
+
+fn issue_initial_local_access_token(
+    identity_directory: &Path,
+    identity: &LocalIdentityState,
+    private_key_der: &[u8],
+    issued_at_unix_seconds: u64,
+) -> Result<(), CliError> {
+    let token = sign_local_access_token(identity, private_key_der, issued_at_unix_seconds)
+        .map_err(|_| {
+            invalid_local_identity(
+                identity_directory,
+                "cannot sign local developer access token",
+            )
+        })?;
+    write_sensitive_new(
+        &identity_directory.join(IDENTITY_ACCESS_TOKEN_FILE),
+        token.as_bytes(),
+    )
+}
+
+fn sign_local_access_token(
+    identity: &LocalIdentityState,
+    private_key_der: &[u8],
+    issued_at_unix_seconds: u64,
+) -> Result<String, ()> {
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+    let issued_at = i64::try_from(issued_at_unix_seconds).map_err(|_| ())?;
+    let expires_at = issued_at
+        .checked_add(LOCAL_ACCESS_TOKEN_TTL_SECONDS)
+        .ok_or(())?;
+    let claims = LocalAccessTokenClaims {
+        iss: &identity.issuer,
+        aud: &identity.audience,
+        sub: &identity.developer_subject,
+        jti: format!("local-token-{}", Uuid::now_v7()),
+        iat: issued_at,
+        exp: expires_at,
+        tenant_id: &identity.tenant_id,
+        principal_kind: "agent_author",
+        authn_strength: "single_factor",
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(identity.key_id.clone());
+    header.typ = Some("JWT".to_owned());
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_der(private_key_der),
+    )
+    .map_err(|_| ())
+}
+
+fn rotate_local_access_token(root: &Path, issued_at: SystemTime) -> Result<String, CliError> {
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let state = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity(&state_directory, &state.identity)?;
+    let private_key_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_PRIVATE_KEY_FILE);
+    let private_key = read_bounded_identity_file(&private_key_path)?;
+    let key_pair = KeyPair::from_pem(std::str::from_utf8(&private_key).map_err(|_| {
+        CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        }
+    })?)
+    .map_err(|_| CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    })?;
+    if !key_pair.is_compatible(&PKCS_RSA_SHA256) {
+        return Err(CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        });
+    }
+    let jwks =
+        build_local_jwks(&key_pair, &state.identity.key_id, &state_directory).map_err(|_| {
+            CliError::InvalidLocalIdentity {
+                path: state_directory.display().to_string(),
+            }
+        })?;
+    let jwks_digest = canonical_digest(&jwks).map_err(|_| CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    })?;
+    if jwks_digest != state.identity.jwks_digest {
+        return Err(CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        });
+    }
+    let private_key_der = key_pair.serialize_der();
+    let private_key_der = pkcs1_private_key_from_pkcs8(&private_key_der).ok_or_else(|| {
+        CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        }
+    })?;
+    let issued_at = issued_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CliError::InvalidClock)?
+        .as_secs();
+    let token =
+        sign_local_access_token(&state.identity, private_key_der, issued_at).map_err(|_| {
+            CliError::InvalidLocalIdentity {
+                path: state_directory.display().to_string(),
+            }
+        })?;
+    write_sensitive_replace(
+        &state_directory
+            .join(IDENTITY_DIRECTORY)
+            .join(IDENTITY_ACCESS_TOKEN_FILE),
+        token.as_bytes(),
+    )?;
+    Ok(token)
+}
+
+fn load_local_project_state(state_directory: &Path) -> Result<LocalProjectState, CliError> {
+    let path = state_directory.join(PROJECT_STATE_FILE);
+    let bytes = read_bounded_identity_file(&path)?;
+    serde_json::from_slice(&bytes).map_err(|_| CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    })
+}
+
+fn validate_loaded_local_identity(
+    state_directory: &Path,
+    identity: &LocalIdentityState,
+) -> Result<(), CliError> {
+    let invalid = || CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    };
+    if identity.schema_version != 1
+        || identity.issuer.is_empty()
+        || identity.audience != LOCAL_OIDC_AUDIENCE
+        || identity.key_id.is_empty()
+        || identity.developer_subject.is_empty()
+        || ResourceId::parse_expected(&identity.tenant_id, ResourceKind::Tenant).is_err()
+        || ResourceId::parse_expected(&identity.developer_principal_id, ResourceKind::Principal)
+            .is_err()
+        || ResourceId::parse_expected(&identity.installation_principal_id, ResourceKind::Principal)
+            .is_err()
+        || ResourceId::parse_expected(
+            &identity.installation_request_id,
+            ResourceKind::ServerRequest,
+        )
+        .is_err()
+        || identity
+            .jwks_digest
+            .parse::<insight_platform_contracts::Sha256Digest>()
+            .is_err()
+        || identity
+            .authentication_authority_digest
+            .parse::<insight_platform_contracts::Sha256Digest>()
+            .is_err()
+        || identity
+            .bootstrap_config_digest
+            .parse::<insight_platform_contracts::Sha256Digest>()
+            .is_err()
+    {
+        return Err(invalid());
+    }
+    let jwks_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_JWKS_FILE);
+    let jwks: serde_json::Value =
+        serde_json::from_slice(&read_bounded_identity_file(&jwks_path)?).map_err(|_| invalid())?;
+    if canonical_digest(&jwks).ok().as_deref() != Some(identity.jwks_digest.as_str()) {
+        return Err(invalid());
+    }
+    let bootstrap_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_BOOTSTRAP_CONFIG_FILE);
+    let bootstrap: serde_json::Value =
+        serde_json::from_slice(&read_bounded_identity_file(&bootstrap_path)?)
+            .map_err(|_| invalid())?;
+    if canonical_digest(&bootstrap).ok().as_deref()
+        != Some(identity.bootstrap_config_digest.as_str())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn read_bounded_identity_file(path: &Path) -> Result<Vec<u8>, CliError> {
+    const MAX_IDENTITY_FILE_BYTES: u64 = 65_536;
+
+    let metadata = fs::metadata(path).map_err(|source| CliError::ReadLocalIdentity {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_IDENTITY_FILE_BYTES {
+        return Err(CliError::InvalidLocalIdentity {
+            path: path.display().to_string(),
+        });
+    }
+    fs::read(path).map_err(|source| CliError::ReadLocalIdentity {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+fn invalid_local_identity(identity_directory: &Path, reason: &str) -> CliError {
+    CliError::InitializeProject {
+        path: identity_directory.display().to_string(),
+        source: std::io::Error::other(reason),
+    }
+}
+
 fn write_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -301,6 +830,62 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
             path: path.display().to_string(),
             source,
         })
+}
+
+fn write_sensitive_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .map_err(|source| CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        })?;
+    file.write_all(contents)
+        .and_then(|_| file.sync_all())
+        .map_err(|source| CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        })
+}
+
+fn write_sensitive_replace(path: &Path, contents: &[u8]) -> Result<(), CliError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::now_v7()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let result = (|| {
+        let mut file =
+            options
+                .open(&temporary)
+                .map_err(|source| CliError::RotateLocalAccessToken {
+                    path: temporary.display().to_string(),
+                    source,
+                })?;
+        file.write_all(contents)
+            .and_then(|_| file.sync_all())
+            .map_err(|source| CliError::RotateLocalAccessToken {
+                path: temporary.display().to_string(),
+                source,
+            })?;
+        fs::rename(&temporary, path).map_err(|source| CliError::RotateLocalAccessToken {
+            path: path.display().to_string(),
+            source,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub trait DoctorProbe {
@@ -490,11 +1075,20 @@ pub fn execute(
                 root.join(PROJECT_DIRECTORY).display()
             ))
         }
+        CliCommand::Token { root } => {
+            let root = if root.is_absolute() {
+                root
+            } else {
+                current_directory.join(root)
+            };
+            let token = rotate_local_access_token(&root, SystemTime::now())?;
+            Ok(format!("{token}\n"))
+        }
     }
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n\n`dev`, `status`, `logs`, and `stop` are added with the real M1 role closure; they are not aliases for the legacy runtime.\n"
+    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `dev`, `status`, `logs`, and `stop` are added with the real M1 role closure; they are not aliases for the legacy runtime.\n"
 }
 
 fn render_doctor_report(report: &DoctorReport) -> String {
@@ -526,6 +1120,11 @@ fn render_doctor_report(report: &DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use insight_platform_api::{
+        authentication::ExternalCredentialVerifier, oidc::InstalledOidcVerifierConfig,
+    };
+    use insight_platform_contracts::Sha256Digest;
     use std::{collections::BTreeMap, fs};
     use tempfile::TempDir;
 
@@ -618,12 +1217,8 @@ mod tests {
     #[test]
     fn init_writes_gitignored_closed_local_state() {
         let directory = TempDir::new().unwrap();
-        let state = initialize_project(
-            directory.path(),
-            Some("demo-project"),
-            UNIX_EPOCH + std::time::Duration::from_secs(42),
-        )
-        .unwrap();
+        let state =
+            initialize_project(directory.path(), Some("demo-project"), SystemTime::now()).unwrap();
         assert_eq!(state.kind, PROJECT_KIND);
         assert_eq!(state.profiles.len(), 2);
         let root = directory.path().join(PROJECT_DIRECTORY);
@@ -634,6 +1229,71 @@ mod tests {
         let persisted: LocalProjectState =
             serde_json::from_slice(&fs::read(root.join(PROJECT_STATE_FILE)).unwrap()).unwrap();
         assert_eq!(persisted, state);
+        let private_key = root
+            .join(IDENTITY_DIRECTORY)
+            .join(IDENTITY_PRIVATE_KEY_FILE);
+        let token = root
+            .join(IDENTITY_DIRECTORY)
+            .join(IDENTITY_ACCESS_TOKEN_FILE);
+        assert!(private_key.is_file());
+        assert!(token.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(&private_key).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(
+                fs::metadata(&token).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+        let jwks: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(IDENTITY_DIRECTORY).join(IDENTITY_JWKS_FILE)).unwrap(),
+        )
+        .unwrap();
+        let verifier = InstalledOidcVerifierConfig {
+            issuer: persisted.identity.issuer.clone(),
+            audience: persisted.identity.audience.clone(),
+            jwks_digest: persisted.identity.jwks_digest.parse().unwrap(),
+            jwks: jwks.clone(),
+        }
+        .install()
+        .unwrap();
+        let verified = verifier
+            .verify(&fs::read_to_string(&token).unwrap(), Utc::now())
+            .unwrap();
+        assert_eq!(verified.tenant_id.to_string(), persisted.identity.tenant_id);
+        assert_eq!(
+            verified.authentication_authority_digest,
+            persisted
+                .identity
+                .authentication_authority_digest
+                .parse::<Sha256Digest>()
+                .unwrap()
+        );
+        let bootstrap: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                root.join(IDENTITY_DIRECTORY)
+                    .join(IDENTITY_BOOTSTRAP_CONFIG_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_digest(&bootstrap).unwrap(),
+            persisted.identity.bootstrap_config_digest
+        );
+        for path in [
+            root.join(PROJECT_STATE_FILE),
+            root.join(IDENTITY_DIRECTORY).join(IDENTITY_JWKS_FILE),
+            root.join(IDENTITY_DIRECTORY)
+                .join(IDENTITY_BOOTSTRAP_CONFIG_FILE),
+        ] {
+            assert!(!fs::read_to_string(path).unwrap().contains("PRIVATE KEY"));
+        }
     }
 
     #[test]
@@ -644,6 +1304,33 @@ mod tests {
             initialize_project(directory.path(), Some("demo"), UNIX_EPOCH),
             Err(CliError::ProjectAlreadyInitialized(_))
         ));
+    }
+
+    #[test]
+    fn token_rotates_a_verifier_accepted_short_lived_credential() {
+        let directory = TempDir::new().unwrap();
+        let state = initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let identity_directory = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(IDENTITY_DIRECTORY);
+        let token_path = identity_directory.join(IDENTITY_ACCESS_TOKEN_FILE);
+        let original = fs::read_to_string(&token_path).unwrap();
+        let rotated = rotate_local_access_token(directory.path(), SystemTime::now()).unwrap();
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), rotated);
+        assert_ne!(original, rotated);
+        let jwks: serde_json::Value =
+            serde_json::from_slice(&fs::read(identity_directory.join(IDENTITY_JWKS_FILE)).unwrap())
+                .unwrap();
+        let verifier = InstalledOidcVerifierConfig {
+            issuer: state.identity.issuer,
+            audience: state.identity.audience,
+            jwks_digest: state.identity.jwks_digest.parse().unwrap(),
+            jwks,
+        }
+        .install()
+        .unwrap();
+        assert!(verifier.verify(&rotated, Utc::now()).is_ok());
     }
 
     #[test]
@@ -662,5 +1349,20 @@ mod tests {
             parse_command(&arguments),
             Err(CliError::MissingValue("--path"))
         ));
+    }
+
+    #[test]
+    fn command_parser_accepts_token_path() {
+        let arguments = vec![
+            OsString::from("token"),
+            OsString::from("--path"),
+            OsString::from("demo"),
+        ];
+        assert_eq!(
+            parse_command(&arguments).unwrap(),
+            CliCommand::Token {
+                root: PathBuf::from("demo"),
+            }
+        );
     }
 }

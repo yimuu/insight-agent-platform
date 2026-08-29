@@ -2362,9 +2362,17 @@ dependencies = [
 name = "insight-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "chrono",
+ "insight-platform-api",
+ "insight-platform-contracts",
+ "jsonwebtoken",
+ "rcgen",
  "serde",
  "serde_json",
  "tempfile",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]

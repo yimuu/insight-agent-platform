@@ -11,8 +11,16 @@ name = "insight"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+chrono.workspace = true
+insight-platform-contracts.workspace = true
+jsonwebtoken.workspace = true
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
+insight-platform-api.workspace = true
 tempfile.workspace = true
