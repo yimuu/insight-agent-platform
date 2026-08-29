@@ -921,6 +921,7 @@ mod tests {
                     }
                     Err(error) => panic!("accept watch timeout fixture: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 let (head, _) = read_request(&mut stream);
                 if head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")) {
                     write_empty_sse_response(&mut stream);
