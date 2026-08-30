@@ -67,7 +67,7 @@ impl ArtifactLifecycleEvidence {
                 check("controlled_download", "passed", "CLI and independent raw HTTP reads returned the exact canonical bytes, Content-Length, media type and sha256 digest"),
             ],
             "failure_probes": [
-                check("digest_mismatch", "passed", "a real upload whose bytes differed from expected_digest reached Artifact rejected and verification Operation failed"),
+                check("digest_mismatch", "passed", "a real upload whose bytes differed from expected_digest failed verification, entered the non-readable quarantined safety gate and exposed no content"),
                 check("wrong_tenant_read", "passed", "the Artifact read authority rejected the exact valid ArtifactRef when only tenant_id was replaced by another valid tenant identifier"),
             ],
         })
@@ -382,16 +382,16 @@ fn prove_digest_mismatch(project: &Path, bytes: &[u8]) {
         );
         thread::sleep(StdDuration::from_millis(100));
     }
-    let rejected = client
+    let quarantined = client
         .get(format!("{base_url}/v1/artifacts/{artifact_id}"))
         .bearer_auth(token)
         .header("accept", "application/json")
         .send()
-        .expect("rejected Artifact read completes");
-    assert_eq!(rejected.status(), StatusCode::OK);
-    let rejected: Value = rejected.json().expect("rejected Artifact is JSON");
-    assert_eq!(rejected["state"], "rejected");
-    assert!(rejected["content"].is_null());
+        .expect("quarantined Artifact read completes");
+    assert_eq!(quarantined.status(), StatusCode::OK);
+    let quarantined: Value = quarantined.json().expect("quarantined Artifact is JSON");
+    assert_eq!(quarantined["state"], "quarantined");
+    assert!(quarantined["content"].is_null());
 }
 
 fn canonical_digest_bytes(bytes: &[u8]) -> String {
