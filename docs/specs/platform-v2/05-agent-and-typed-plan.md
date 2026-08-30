@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-25 |
+| 状态 | Accepted / CR-204 |
+| 日期 | 2026-08-30 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
+
+> CR-204 impact：Agent Deployment create body提交resolved slot intent，但不提交本次command才生成的`adep`、`xcb`或
+> binding digest。resolution transaction预留这些identity并物化完整`AgentDeploymentClosure`后再验证和持久化。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -442,6 +445,8 @@ ContextBindingSnapshot。`entry_node_id`/`entry_node_kind`必须与exact Plan Re
 Deployment closure digest；Run admission不得重新读取Artifact或接受调用方提供的内部入口。candidate集合规范排序、非空（除明确
 optional slot）且有硬上限。Deployment validation计算完整dependency closure、Interface兼容、Effect/Policy、Secret
 purpose coverage、data region/classification、循环、预算、worker/runtime availability与conformance evidence。
+每个slot外层`binding_digest`按`{slot_id, requirement_digest, target}`的canonical JSON计算；Context target中的
+`ContextBindingSnapshot.binding_digest`按12的closed snapshot计算。两者均为服务端派生事实，不属于create request。
 
 生命周期为：
 

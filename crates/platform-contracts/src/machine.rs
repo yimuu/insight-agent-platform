@@ -1232,7 +1232,7 @@ components:
       properties:
         resource_version_id: {$ref: "#/components/schemas/PublicManagementVersionId"}
         environment: {type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$"}
-        closure: {$ref: "#/components/schemas/DeploymentClosure"}
+        closure: {$ref: "#/components/schemas/CreateDeploymentClosureV1"}
     ResourceViewV1:
       type: object
       additionalProperties: false
@@ -1362,6 +1362,70 @@ components:
       properties: {resource_kind: {const: sandbox_profile}, spec: {type: object}}
     DeploymentClosure:
       $ref: ./schemas/deployment-closure.schema.json
+    CreateDeploymentClosureV1:
+      oneOf:
+        - {$ref: "#/components/schemas/AgentDeploymentClosureInputV1"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/SkillDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/CapabilityDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ContextDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/McpDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ModelDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/PolicyDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/SandboxProfileDeploymentClosure"}
+    AgentDeploymentClosureInputV1:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, bindings]
+      properties:
+        resource_kind: {const: agent}
+        bindings:
+          type: object
+          additionalProperties: false
+          required: [interface, plan, entry_node_id, entry_node_kind, slots, policies, execution_profile]
+          properties:
+            interface: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactVersionRef"}
+            plan: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactVersionRef"}
+            entry_node_id: {type: string, minLength: 1, maxLength: 128}
+            entry_node_kind: {type: string, enum: [start, compute, branch, fork, join, map, loop, error_boundary, model_loop, capability_call, context_query, child_agent_call, human_task, timer_wait, signal_wait, return, raise]}
+            slots:
+              type: array
+              maxItems: 512
+              items: {$ref: "#/components/schemas/FrozenSlotBindingInputV1"}
+            policies:
+              type: array
+              maxItems: 64
+              items: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+            execution_profile: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+    FrozenSlotBindingInputV1:
+      type: object
+      additionalProperties: false
+      required: [slot_id, requirement_digest, target]
+      properties:
+        slot_id: {type: string, minLength: 1, maxLength: 128}
+        requirement_digest: {$ref: "./schemas/nominal/digest.schema.json"}
+        target:
+          oneOf:
+            - {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/0"}
+            - {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/1"}
+            - {$ref: "#/components/schemas/ContextSlotTargetInputV1"}
+            - {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/3"}
+            - {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/4"}
+    ContextSlotTargetInputV1:
+      type: object
+      additionalProperties: false
+      required: [kind, binding]
+      properties:
+        kind: {const: context}
+        binding:
+          type: object
+          additionalProperties: false
+          required: [context_deployment, consistency, allowed_projection, authorization_policy, ranking_policy]
+          properties:
+            context_deployment: {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/2/properties/binding/properties/context_deployment"}
+            consistency: {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/2/properties/binding/properties/consistency"}
+            allowed_projection: {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/2/properties/binding/properties/allowed_projection"}
+            authorization_policy: {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/2/properties/binding/properties/authorization_policy"}
+            ranking_policy: {$ref: "./schemas/frozen-slot-binding.schema.json#/properties/target/oneOf/2/properties/binding/properties/ranking_policy"}
     RunId:
       type: string
       pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

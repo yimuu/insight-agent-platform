@@ -2078,6 +2078,19 @@ impl ResourceApplication for PgResources {
         }
         let expected_resource_version = i64::try_from(intent.expected_resource_version)
             .map_err(|_| ResourceApplicationError::Invalid)?;
+        let deployment_id = new_id(
+            intent
+                .resource_kind
+                .deployment_kind()
+                .ok_or(ResourceApplicationError::Invalid)?,
+        )?;
+        let context_binding_ids = (0..intent.request.closure.context_binding_count())
+            .map(|_| new_id(ResourceKind::ContextBinding))
+            .collect::<Result<Vec<_>, _>>()?;
+        let closure = intent
+            .request
+            .closure
+            .materialize(&deployment_id, context_binding_ids)?;
         let audit = CommandAudit {
             trace: intent.principal.trace,
             tenant_id: intent.principal.tenant_id,
@@ -2098,16 +2111,11 @@ impl ResourceApplication for PgResources {
         let outcome = transaction
             .create_deployment(CreateDeployment {
                 audit,
-                deployment_id: new_id(
-                    intent
-                        .resource_kind
-                        .deployment_kind()
-                        .ok_or(ResourceApplicationError::Invalid)?,
-                )?,
+                deployment_id,
                 resource_id: intent.resource_id.clone(),
                 resource_version_id: intent.request.resource_version_id,
                 environment: intent.request.environment,
-                closure: intent.request.closure,
+                closure,
                 expected_resource_version,
             })
             .await

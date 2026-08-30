@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-27 |
+| 状态 | Accepted / CR-204 |
+| 日期 | 2026-08-30 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-204 impact：`POST .../deployments`的create DTO与persisted/read closure有意分离。Agent Context slot request省略
+> server-generated `adep/xcb`和derived digests；Gateway materialize后才向repository提交完整closed closure。
 
 > CR-203 impact：public Agent create/draft-update/publish DTO与route不新增caller-selected Version ID。Agent Draft提交的typed
 > Plan v5绑定`interface_contract_digest`；publish在同一command中生成Interface/Plan UUIDv7并保持原有响应矩阵。Deployment
@@ -126,6 +129,11 @@ Published Version和Deployment immutable。activate/suspend都必须携带Resour
 Resource active binding并使gate为`Enabled`，suspend仅在path Deployment仍为active binding时将Resource gate设为`Suspended`。
 它们只影响未来Run；已存Run使用冻结binding，Deployment row不被修改。validate/discovery/build返回Job
 Operation，不建业务Operation aggregate。首版不暴露mutable Draft Version identity，也不提供尚未发布Version的GET route。
+
+`CreateDeploymentRequestV1.closure`使用closed create-input union，不是`DeploymentViewV1.closure`的字段复制。非Agent variant可直接
+提交完整exact closure；Agent Context slot只接受`context_deployment + consistency + allowed_projection + authorization_policy +
+ranking_policy`。Gateway生成owner `adep`、逐slot `xcb`和两层canonical digest，repository只持久化物化后的完整
+`DeploymentClosure`。未知字段、caller-selected internal identity/digest、数量或kind不匹配均在业务写入前返回`invalid_request`。
 
 CR-202明确`POST .../draft:validate`只在Gateway 的tenant authorization transaction内创建一个
 `RegistryValidation` Job并返回它的Operation projection；HTTP handler、CLI和Operation polling不得生成或提交

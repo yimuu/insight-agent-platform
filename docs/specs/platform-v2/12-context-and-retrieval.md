@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-204 |
+| 日期 | 2026-08-30 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
+
+> CR-204 impact：public Agent Deployment request中的Context slot只提交exact Context Deployment、consistency、projection及
+> Policy intent；`context_binding_id`、`owner_agent_deployment_id`和binding digests由resolution authority生成。
 
 > CR-197 impact：ContextQuery/Dataset/subscription refresh Job复制其admission trace ID；MCP Host/Egress内部hop传播同一trace ID与新span。
 > Remote Context请求不向第三方转发平台trace header，query、URI、tenant/source identity仍不得成为trace attribute。
@@ -227,6 +230,9 @@ digest的closed snapshot，不是独立current row、Resource或生命周期。`
 Context Deployment同tenant；Run admission把完整snapshot复制到RunBindings并重新验证digest。Binding不能跨Agent Deployment复用
 或在Run admission后修改。Agent Deployment validation必须在同一事务验证exact Context Deployment、Dataset/Policy closure与
 binding snapshot；不得只保存裸`xcb`、另建Binding表、延迟补写或从active head重建Binding。
+public create body不得包含`xcb`、owner `adep`、Context snapshot digest或外层slot digest；closed request DTO收到这些字段即拒绝。
+Gateway在提交repository command前预留一个`adep`及每个Context slot各一个`xcb`，按slot规范顺序物化完整snapshot；Receipt winner
+持有第一次提交的完整closure，重放必须返回相同identity和digest。
 
 `PinAtRunAdmission`不能只复制策略文本。Run admission必须在同一事务读取ContextDataset root的exact active `dgen`，并把
 `(context_binding_id, binding_digest, dataset_id, generation_id, generation_digest)`写入RunBindings的规范排序

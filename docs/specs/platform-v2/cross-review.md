@@ -1,10 +1,37 @@
-# Platform v2 00～18 Cross-review（CR-203）
+# Platform v2 00～18 Cross-review（CR-204）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-29 |
-| 输入 | 00～18 live tree、implementation-plan、CR-203 Agent publication identity review、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | Accepted / CR-204 |
+| 日期 | 2026-08-30 |
+| 输入 | 00～18 live tree、implementation-plan、CR-204 Agent Context binding identity review、ADR-0001、ADR-0002、AGENTS.md |
+
+### CR-204 Agent Context binding identity cross-review
+
+public Agent Deployment create曾复用persisted `DeploymentClosure`，要求客户端提交只有本次command才能生成的owner `adep`、
+每个Context slot的`xcb`及两层binding digest。route没有reserve-ID操作，Gateway又只能在解析body后生成Deployment ID，因此合法
+public客户端无法创建带Context slot的Agent。这是02/05/12持久化快照与17 create intent混用造成的P0身份环。
+
+CR-204保留完整persisted/read closure，只拆分create DTO：调用方提交exact Context binding intent；Gateway按slot规范顺序预留
+一个`adep`和每个Context slot一个`xcb`，由nominal Rust owner构造Context snapshot并规范计算内外digest，再把完整closure交给
+repository transaction。Receipt request digest仍绑定原始intent，winner返回第一次提交的完整Deployment，重放不得泄漏新预留identity。
+
+| Spec | CR-204 结论 |
+|---|---|
+| 00 | 保持In Progress；记录P0身份环及修复，不升级Verified或改变L4～L6状态 |
+| 01 | control/durable/execution plane不变；Gateway只做typed materialization，不执行用户代码或成为durable authority |
+| 02 | 明确create intent与persisted closure边界；服务端生成嵌套identity/digest，Deployment仍是唯一immutable authority |
+| 03～04 | Receipt/Event/Outbox、tenant/permission/lock/CAS不变；重放返回原winner且新生成的候选ID不产生业务写入 |
+| 05 | Agent slot input省略server fields；外层digest绑定完整`slot_id + requirement_digest + target` |
+| 06～11 | Run/worker/Subagent/Capability/Skill消费的完整RunBindings和Deployment closure不变 |
+| 12 | Context snapshot digest、tenant/policy/deployment validation不变；`xcb`由Agent resolution transaction生成 |
+| 13～16 | MCP/Sandbox/Artifact/Model contract与capacity/security boundary不变 |
+| 17 | OpenAPI create-input union与read closure分离；unknown/server-owned fields在写入前fail closed |
+| 18 | 增加DTO closedness、materialization、owner/digest与Receipt replay测试；production L4～L6仍未执行 |
+
+复核覆盖state ownership、IDs与closed JSON、errors、transaction/Event/Receipt、permission、capacity、recovery和fixtures。CR-204
+不增加table、aggregate、ResourceKind、JobKind、WorkClass、ComponentRole、Secret路径、route或兼容fallback；PostgreSQL仍是
+Deployment/Receipt authority，NATS仍只携带wake。受影响合同按02→05→12→17→18完成复核并恢复Accepted，授权clean-cut实现。
 
 ### CR-203 Agent publication identity cycle cross-review
 

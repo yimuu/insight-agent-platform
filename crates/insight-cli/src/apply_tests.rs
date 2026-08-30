@@ -389,7 +389,8 @@ mod tests {
             .clone()
             .resolve(&published)
             .unwrap();
-        let closure_digest = deployment_closure_digest_v1(&closure).unwrap();
+        let materialized_closure = closure.materialized(&deployment_id, Vec::new()).unwrap();
+        let closure_digest = deployment_closure_digest_v1(&materialized_closure).unwrap();
         let deployment_etag = deployment_etag(&deployment_id, &closure_digest);
         let operation_etag = operation_etag(&operation_id.to_string(), 2);
         let responses = vec![
@@ -524,7 +525,7 @@ mod tests {
                     resource_kind: RegistryResourceKind::Policy,
                     resource_version_id: version_id.clone(),
                     environment: "local".to_owned(),
-                    closure: closure.clone(),
+                    closure: materialized_closure,
                     closure_digest,
                     created_at: "2026-08-29T00:00:02.000000Z".parse().unwrap(),
                     etag: deployment_etag,
@@ -967,13 +968,45 @@ mod tests {
         let resolved = ApplyDeploymentClosure::Agent(ApplyAgentDeploymentBindings {
             entry_node_id: "start".to_owned(),
             entry_node_kind: PlanNodeKind::Start,
-            slots: Vec::new(),
+            slots: vec![FrozenSlotBindingInputV1 {
+                slot_id: "catalog".to_owned(),
+                requirement_digest: digest('0'),
+                target: FrozenSlotTargetInputV1::Context {
+                    binding: Box::new(ContextBindingInputV1 {
+                        context_deployment: exact_deployment(
+                            ResourceKind::ContextDeployment,
+                            '0',
+                        ),
+                        consistency: ContextConsistencyPolicy::ExternalObservation,
+                        allowed_projection: vec!["title".to_owned()],
+                        authorization_policy: exact_version(ResourceKind::PolicyRevision, '0'),
+                        ranking_policy: exact_version(ResourceKind::PolicyRevision, '0'),
+                    }),
+                },
+            }],
             policies: vec![policy_binding('3')],
             execution_profile: policy_binding('4'),
         })
         .resolve(&[agent_interface.clone(), agent_plan.clone()])
         .unwrap();
-        let DeploymentClosure::Agent(closure) = resolved else {
+        let wire = serde_json::to_string(&resolved).unwrap();
+        assert!(!wire.contains("context_binding_id"));
+        assert!(!wire.contains("owner_agent_deployment_id"));
+        assert!(!wire.contains("binding_digest"));
+        let deployment_id = id(ResourceKind::AgentDeployment);
+        let materialized = resolved
+            .materialized(
+                &deployment_id,
+                vec![id(ResourceKind::ContextBinding)],
+            )
+            .unwrap();
+        assert_eq!(
+            resolved
+                .expected_response(&deployment_id, &materialized)
+                .unwrap(),
+            materialized
+        );
+        let CreateDeploymentClosureV1::Agent(closure) = resolved else {
             panic!("Agent closure resolved to another Resource kind");
         };
         assert_eq!(closure.interface.revision_id, agent_interface.resource_version_id);
@@ -989,7 +1022,7 @@ mod tests {
         })
         .resolve(std::slice::from_ref(&skill_revision))
         .unwrap();
-        let DeploymentClosure::Skill(closure) = resolved else {
+        let CreateDeploymentClosureV1::Skill(closure) = resolved else {
             panic!("Skill closure resolved to another Resource kind");
         };
         assert_eq!(closure.skill_revision.revision_id, skill_revision.resource_version_id);
@@ -1014,7 +1047,7 @@ mod tests {
         )
         .resolve(std::slice::from_ref(&capability_revision))
         .unwrap();
-        let DeploymentClosure::CapabilityInterface(closure) = resolved else {
+        let CreateDeploymentClosureV1::CapabilityInterface(closure) = resolved else {
             panic!("Capability closure resolved to another Resource kind");
         };
         assert_eq!(closure.interface.revision_id, capability_revision.resource_version_id);
@@ -1046,7 +1079,7 @@ mod tests {
         )
         .resolve(std::slice::from_ref(&context_revision))
         .unwrap();
-        let DeploymentClosure::ContextSourceInterface(closure) = resolved else {
+        let CreateDeploymentClosureV1::ContextSourceInterface(closure) = resolved else {
             panic!("Context closure resolved to another Resource kind");
         };
         assert_eq!(closure.interface.revision_id, context_revision.resource_version_id);
@@ -1075,7 +1108,7 @@ mod tests {
         })
         .resolve(std::slice::from_ref(&mcp_revision))
         .unwrap();
-        let DeploymentClosure::McpServer(closure) = resolved else {
+        let CreateDeploymentClosureV1::McpServer(closure) = resolved else {
             panic!("MCP closure resolved to another Resource kind");
         };
         assert_eq!(closure.server_revision.revision_id, mcp_revision.resource_version_id);
@@ -1099,7 +1132,7 @@ mod tests {
         })
         .resolve(std::slice::from_ref(&model_revision))
         .unwrap();
-        let DeploymentClosure::ModelProfile(closure) = resolved else {
+        let CreateDeploymentClosureV1::ModelProfile(closure) = resolved else {
             panic!("Model closure resolved to another Resource kind");
         };
         assert_eq!(closure.profile_revision.revision_id, model_revision.resource_version_id);
@@ -1112,7 +1145,7 @@ mod tests {
         })
         .resolve(std::slice::from_ref(&policy_revision))
         .unwrap();
-        let DeploymentClosure::Policy(closure) = resolved else {
+        let CreateDeploymentClosureV1::Policy(closure) = resolved else {
             panic!("Policy closure resolved to another Resource kind");
         };
         assert_eq!(closure.policy_revision.revision_id, policy_revision.resource_version_id);
@@ -1126,7 +1159,7 @@ mod tests {
         })
         .resolve(std::slice::from_ref(&sandbox_revision))
         .unwrap();
-        let DeploymentClosure::SandboxProfile(closure) = resolved else {
+        let CreateDeploymentClosureV1::SandboxProfile(closure) = resolved else {
             panic!("Sandbox closure resolved to another Resource kind");
         };
         assert_eq!(closure.profile_revision.revision_id, sandbox_revision.resource_version_id);

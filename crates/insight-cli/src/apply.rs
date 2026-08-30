@@ -15,11 +15,12 @@ use crate::{
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, AdministrativeGate, AgentDeploymentClosure, ArtifactRef,
     CapabilityBackendBinding, CapabilityDeploymentClosure, ClosedJsonValue, ContextBackendBinding,
-    ContextDeploymentClosure, DeploymentClosure, EntityLifecycle, ExactDeploymentRef,
-    ExactPolicyBinding, ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, JsonLimits,
-    McpDeploymentClosure, McpTransportBinding, ModelDeploymentClosure, OperationViewV1,
-    PlanNodeKind, PolicyDeploymentClosure, PublicJobKind, PublicJobState, PublicJobTarget,
-    RegistryResourceKind, ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
+    ContextBindingSnapshot, ContextConsistencyPolicy, ContextDeploymentClosure, DeploymentClosure,
+    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef,
+    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JsonLimits, McpDeploymentClosure,
+    McpTransportBinding, ModelDeploymentClosure, OperationViewV1, PlanNodeKind,
+    PolicyDeploymentClosure, PublicJobKind, PublicJobState, PublicJobTarget, RegistryResourceKind,
+    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
     SandboxProfileDeploymentClosure, Sha256Digest, SkillDeploymentClosure, UtcTimestamp,
 };
 use reqwest::StatusCode;
@@ -220,26 +221,28 @@ impl ApplyDeploymentClosure {
     fn resolve(
         self,
         published: &[PublishedResourceVersionSummaryV1],
-    ) -> Result<DeploymentClosure, ApplyError> {
+    ) -> Result<CreateDeploymentClosureV1, ApplyError> {
         let exact = |kind| published_exact_version(published, kind);
         let closure = match self {
-            Self::Agent(bindings) => DeploymentClosure::Agent(AgentDeploymentClosure {
-                interface: exact(ResourceKind::AgentInterfaceRevision)?,
-                plan: exact(ResourceKind::AgentPlanRevision)?,
-                entry_node_id: bindings.entry_node_id,
-                entry_node_kind: bindings.entry_node_kind,
-                slots: bindings.slots,
-                policies: bindings.policies,
-                execution_profile: bindings.execution_profile,
-            }),
-            Self::Skill(bindings) => DeploymentClosure::Skill(SkillDeploymentClosure {
+            Self::Agent(bindings) => {
+                CreateDeploymentClosureV1::Agent(AgentDeploymentClosureInputV1 {
+                    interface: exact(ResourceKind::AgentInterfaceRevision)?,
+                    plan: exact(ResourceKind::AgentPlanRevision)?,
+                    entry_node_id: bindings.entry_node_id,
+                    entry_node_kind: bindings.entry_node_kind,
+                    slots: bindings.slots,
+                    policies: bindings.policies,
+                    execution_profile: bindings.execution_profile,
+                })
+            }
+            Self::Skill(bindings) => CreateDeploymentClosureV1::Skill(SkillDeploymentClosure {
                 skill_revision: exact(ResourceKind::SkillRevision)?,
                 requirements: bindings.requirements,
                 selection_policy: bindings.selection_policy,
                 qualification_evidence: bindings.qualification_evidence,
             }),
             Self::CapabilityInterface(bindings) => {
-                DeploymentClosure::CapabilityInterface(CapabilityDeploymentClosure {
+                CreateDeploymentClosureV1::CapabilityInterface(CapabilityDeploymentClosure {
                     implementation: bindings.implementation,
                     interface: exact(ResourceKind::CapabilityInterfaceRevision)?,
                     backend: bindings.backend,
@@ -249,7 +252,7 @@ impl ApplyDeploymentClosure {
                 })
             }
             Self::ContextSourceInterface(bindings) => {
-                DeploymentClosure::ContextSourceInterface(ContextDeploymentClosure {
+                CreateDeploymentClosureV1::ContextSourceInterface(ContextDeploymentClosure {
                     implementation: bindings.implementation,
                     interface: exact(ResourceKind::ContextSourceInterfaceRevision)?,
                     required_worker_manifest_digest: bindings.required_worker_manifest_digest,
@@ -266,18 +269,20 @@ impl ApplyDeploymentClosure {
                     conformance_evidence: bindings.conformance_evidence,
                 })
             }
-            Self::McpServer(bindings) => DeploymentClosure::McpServer(McpDeploymentClosure {
-                server_revision: exact(ResourceKind::McpServerRevision)?,
-                server_identity_digest: bindings.server_identity_digest,
-                transport: bindings.transport,
-                protocol_policy: bindings.protocol_policy,
-                trust_policy: bindings.trust_policy,
-                auth_policy: bindings.auth_policy,
-                secret_bindings: bindings.secret_bindings,
-                conformance_evidence: bindings.conformance_evidence,
-            }),
+            Self::McpServer(bindings) => {
+                CreateDeploymentClosureV1::McpServer(McpDeploymentClosure {
+                    server_revision: exact(ResourceKind::McpServerRevision)?,
+                    server_identity_digest: bindings.server_identity_digest,
+                    transport: bindings.transport,
+                    protocol_policy: bindings.protocol_policy,
+                    trust_policy: bindings.trust_policy,
+                    auth_policy: bindings.auth_policy,
+                    secret_bindings: bindings.secret_bindings,
+                    conformance_evidence: bindings.conformance_evidence,
+                })
+            }
             Self::ModelProfile(bindings) => {
-                DeploymentClosure::ModelProfile(ModelDeploymentClosure {
+                CreateDeploymentClosureV1::ModelProfile(ModelDeploymentClosure {
                     profile_revision: exact(ResourceKind::ModelProfileRevision)?,
                     provider_deployment: bindings.provider_deployment,
                     data_policy: bindings.data_policy,
@@ -287,13 +292,13 @@ impl ApplyDeploymentClosure {
                     generation_defaults: bindings.generation_defaults,
                 })
             }
-            Self::Policy(bindings) => DeploymentClosure::Policy(PolicyDeploymentClosure {
+            Self::Policy(bindings) => CreateDeploymentClosureV1::Policy(PolicyDeploymentClosure {
                 policy_revision: exact(ResourceKind::PolicyRevision)?,
                 applicability_digest: bindings.applicability_digest,
                 qualification_evidence: bindings.qualification_evidence,
             }),
             Self::SandboxProfile(bindings) => {
-                DeploymentClosure::SandboxProfile(SandboxProfileDeploymentClosure {
+                CreateDeploymentClosureV1::SandboxProfile(SandboxProfileDeploymentClosure {
                     profile_revision: exact(ResourceKind::SandboxProfileRevision)?,
                     runtime_revision: bindings.runtime_revision,
                     policy_bindings: bindings.policy_bindings,
@@ -301,10 +306,264 @@ impl ApplyDeploymentClosure {
                 })
             }
         };
-        closure.validate().map_err(|error| {
-            ApplyError::InvalidManifest(format!("resolved Deployment closure: {error}"))
-        })?;
+        closure.validate()?;
         Ok(closure)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "resource_kind",
+    content = "bindings",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum CreateDeploymentClosureV1 {
+    Agent(AgentDeploymentClosureInputV1),
+    Skill(SkillDeploymentClosure),
+    CapabilityInterface(CapabilityDeploymentClosure),
+    ContextSourceInterface(ContextDeploymentClosure),
+    McpServer(McpDeploymentClosure),
+    ModelProfile(ModelDeploymentClosure),
+    Policy(PolicyDeploymentClosure),
+    SandboxProfile(SandboxProfileDeploymentClosure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDeploymentClosureInputV1 {
+    interface: ExactVersionRef,
+    plan: ExactVersionRef,
+    entry_node_id: String,
+    entry_node_kind: PlanNodeKind,
+    slots: Vec<FrozenSlotBindingInputV1>,
+    policies: Vec<ExactPolicyBinding>,
+    execution_profile: ExactPolicyBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenSlotBindingInputV1 {
+    slot_id: String,
+    requirement_digest: Sha256Digest,
+    target: FrozenSlotTargetInputV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum FrozenSlotTargetInputV1 {
+    Model {
+        candidates: Vec<ExactDeploymentRef>,
+        selection_policy: ExactPolicyBinding,
+    },
+    Capability {
+        candidates: Vec<ExactDeploymentRef>,
+        selection_policy: ExactPolicyBinding,
+        tool_alias: Option<String>,
+    },
+    Context {
+        binding: Box<ContextBindingInputV1>,
+    },
+    ChildAgent {
+        candidates: Vec<ExactDeploymentRef>,
+        selection_policy: ExactPolicyBinding,
+    },
+    Skill {
+        candidates: Vec<ExactDeploymentRef>,
+        selection_policy: ExactPolicyBinding,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContextBindingInputV1 {
+    context_deployment: ExactDeploymentRef,
+    consistency: ContextConsistencyPolicy,
+    allowed_projection: Vec<String>,
+    authorization_policy: ExactVersionRef,
+    ranking_policy: ExactVersionRef,
+}
+
+impl CreateDeploymentClosureV1 {
+    fn validate(&self) -> Result<(), ApplyError> {
+        let deployment_kind = self.resource_kind().deployment_kind().ok_or_else(|| {
+            ApplyError::InvalidManifest("Resource kind cannot be deployed".to_owned())
+        })?;
+        let deployment_id = ResourceId::from_uuid_v7(deployment_kind, uuid::Uuid::now_v7())
+            .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?;
+        let context_ids = (0..self.context_binding_count())
+            .map(|_| {
+                ResourceId::from_uuid_v7(ResourceKind::ContextBinding, uuid::Uuid::now_v7())
+                    .map_err(|error| ApplyError::InvalidManifest(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.materialized(&deployment_id, context_ids)?
+            .validate()
+            .map_err(|error| {
+                ApplyError::InvalidManifest(format!("resolved Deployment closure: {error}"))
+            })
+    }
+
+    const fn resource_kind(&self) -> RegistryResourceKind {
+        match self {
+            Self::Agent(_) => RegistryResourceKind::Agent,
+            Self::Skill(_) => RegistryResourceKind::Skill,
+            Self::CapabilityInterface(_) => RegistryResourceKind::CapabilityInterface,
+            Self::ContextSourceInterface(_) => RegistryResourceKind::ContextSourceInterface,
+            Self::McpServer(_) => RegistryResourceKind::McpServer,
+            Self::ModelProfile(_) => RegistryResourceKind::ModelProfile,
+            Self::Policy(_) => RegistryResourceKind::Policy,
+            Self::SandboxProfile(_) => RegistryResourceKind::SandboxProfile,
+        }
+    }
+
+    fn context_binding_count(&self) -> usize {
+        match self {
+            Self::Agent(agent) => agent
+                .slots
+                .iter()
+                .filter(|slot| matches!(slot.target, FrozenSlotTargetInputV1::Context { .. }))
+                .count(),
+            _ => 0,
+        }
+    }
+
+    fn expected_response(
+        &self,
+        deployment_id: &ResourceId,
+        actual: &DeploymentClosure,
+    ) -> Result<DeploymentClosure, ApplyError> {
+        let context_binding_ids = match actual {
+            DeploymentClosure::Agent(agent) => agent
+                .slots
+                .iter()
+                .filter_map(|slot| match &slot.target {
+                    FrozenSlotTarget::Context { binding } => {
+                        Some(binding.context_binding_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.materialized(deployment_id, context_binding_ids)
+    }
+
+    fn materialized(
+        &self,
+        deployment_id: &ResourceId,
+        context_binding_ids: Vec<ResourceId>,
+    ) -> Result<DeploymentClosure, ApplyError> {
+        let closure = match self {
+            Self::Agent(agent) => {
+                if context_binding_ids.len() != self.context_binding_count() {
+                    return Err(ApplyError::InvalidResponse(
+                        "Agent Deployment returned a different Context binding count".to_owned(),
+                    ));
+                }
+                let mut ids = context_binding_ids.into_iter();
+                let slots = agent
+                    .slots
+                    .iter()
+                    .cloned()
+                    .map(|slot| slot.materialize(deployment_id, &mut ids))
+                    .collect::<Result<Vec<_>, _>>()?;
+                DeploymentClosure::Agent(AgentDeploymentClosure {
+                    interface: agent.interface.clone(),
+                    plan: agent.plan.clone(),
+                    entry_node_id: agent.entry_node_id.clone(),
+                    entry_node_kind: agent.entry_node_kind,
+                    slots,
+                    policies: agent.policies.clone(),
+                    execution_profile: agent.execution_profile.clone(),
+                })
+            }
+            Self::Skill(closure) => DeploymentClosure::Skill(closure.clone()),
+            Self::CapabilityInterface(closure) => {
+                DeploymentClosure::CapabilityInterface(closure.clone())
+            }
+            Self::ContextSourceInterface(closure) => {
+                DeploymentClosure::ContextSourceInterface(closure.clone())
+            }
+            Self::McpServer(closure) => DeploymentClosure::McpServer(closure.clone()),
+            Self::ModelProfile(closure) => DeploymentClosure::ModelProfile(closure.clone()),
+            Self::Policy(closure) => DeploymentClosure::Policy(closure.clone()),
+            Self::SandboxProfile(closure) => DeploymentClosure::SandboxProfile(closure.clone()),
+        };
+        Ok(closure)
+    }
+}
+
+impl FrozenSlotBindingInputV1 {
+    fn materialize(
+        self,
+        deployment_id: &ResourceId,
+        context_binding_ids: &mut impl Iterator<Item = ResourceId>,
+    ) -> Result<FrozenSlotBinding, ApplyError> {
+        let target = match self.target {
+            FrozenSlotTargetInputV1::Model {
+                candidates,
+                selection_policy,
+            } => FrozenSlotTarget::Model {
+                candidates,
+                selection_policy,
+            },
+            FrozenSlotTargetInputV1::Capability {
+                candidates,
+                selection_policy,
+                tool_alias,
+            } => FrozenSlotTarget::Capability {
+                candidates,
+                selection_policy,
+                tool_alias,
+            },
+            FrozenSlotTargetInputV1::Context { binding } => FrozenSlotTarget::Context {
+                binding: Box::new(
+                    ContextBindingSnapshot::build(
+                        context_binding_ids.next().ok_or_else(|| {
+                            ApplyError::InvalidResponse(
+                                "Agent Deployment omitted a Context binding identity".to_owned(),
+                            )
+                        })?,
+                        deployment_id.clone(),
+                        binding.context_deployment,
+                        binding.consistency,
+                        binding.allowed_projection,
+                        binding.authorization_policy,
+                        binding.ranking_policy,
+                    )
+                    .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?,
+                ),
+            },
+            FrozenSlotTargetInputV1::ChildAgent {
+                candidates,
+                selection_policy,
+            } => FrozenSlotTarget::ChildAgent {
+                candidates,
+                selection_policy,
+            },
+            FrozenSlotTargetInputV1::Skill {
+                candidates,
+                selection_policy,
+            } => FrozenSlotTarget::Skill {
+                candidates,
+                selection_policy,
+            },
+        };
+        let binding_digest = canonical_digest(&serde_json::json!({
+            "slot_id": &self.slot_id,
+            "requirement_digest": &self.requirement_digest,
+            "target": &target,
+        }))
+        .map_err(|error| ApplyError::InvalidManifest(error.to_string()))?
+        .parse()
+        .map_err(|error| ApplyError::InvalidManifest(format!("slot binding digest: {error}")))?;
+        Ok(FrozenSlotBinding {
+            slot_id: self.slot_id,
+            requirement_digest: self.requirement_digest,
+            target,
+            binding_digest,
+        })
     }
 }
 
@@ -313,7 +572,7 @@ impl ApplyDeploymentClosure {
 struct ApplyAgentDeploymentBindings {
     entry_node_id: String,
     entry_node_kind: PlanNodeKind,
-    slots: Vec<FrozenSlotBinding>,
+    slots: Vec<FrozenSlotBindingInputV1>,
     policies: Vec<ExactPolicyBinding>,
     execution_profile: ExactPolicyBinding,
 }
@@ -433,7 +692,7 @@ struct PublishResourceDraftResponseV1 {
 struct CreateDeploymentRequestV1<'a> {
     resource_version_id: &'a ResourceId,
     environment: &'a str,
-    closure: &'a DeploymentClosure,
+    closure: &'a CreateDeploymentClosureV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1261,10 +1520,11 @@ fn validate_deployment_response(
     resource_id: &ResourceId,
     resource_version_id: &ResourceId,
     environment: &str,
-    closure: &DeploymentClosure,
+    closure: &CreateDeploymentClosureV1,
 ) -> Result<(), ApplyError> {
     let body = &response.body;
-    let closure_digest = deployment_closure_digest_v1(closure)?;
+    let expected_closure = closure.expected_response(&body.deployment_id, &body.closure)?;
+    let closure_digest = deployment_closure_digest_v1(&expected_closure)?;
     if body.schema_version != 1
         || body.deployment_id.kind()
             != kind.deployment_kind().ok_or_else(|| {
@@ -1274,7 +1534,7 @@ fn validate_deployment_response(
         || body.resource_kind != kind
         || &body.resource_version_id != resource_version_id
         || body.environment != environment
-        || &body.closure != closure
+        || body.closure != expected_closure
         || body.closure_digest != closure_digest
         || body.etag != response.etag
         || body.created_at.as_str().is_empty()

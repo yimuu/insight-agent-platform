@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-204 |
+| 日期 | 2026-08-30 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
+
+> CR-204 impact：Deployment create request只表达调用方可知的exact binding intent；`deployment_id`、嵌套identity和
+> 派生digest由同一resolution transaction预留/计算。持久化Deployment及read response仍使用完整immutable exact closure。
 
 > CR-200 impact：`ArtifactIo` closed document升级v3，新增exact write storage binding digest与tenant encryption domain ID；仍由同一immutable
 > Policy ResourceVersion和TenantConfig exact slot拥有，process catalog只声明可支持的binding material。
@@ -153,6 +156,10 @@ struct Deployment {
 Deployment是一经创建就不可变的exact runnable closure：它不复制Version definition，只冻结环境相关backend、
 credential reference、region（若该typed closure需要）、runtime/protocol和exact dependency。Deployment不拥有可变state、
 projection version或另一个current head；可绑定性由它引用的immutable closure与Secret/policy安全门禁共同决定。
+
+create request不是持久化closure的逐字段镜像。凡字段依赖本次command才产生的identity（例如Agent Context slot的
+`adep` owner与`xcb`）或可由typed intent规范派生（例如binding digest），都必须由服务端在同一事务物化；public caller不得
+预选或覆盖。Receipt重放返回第一次提交的相同Deployment及嵌套identity，不能重新分配后产生第二个closure。
 
 closed Deployment closure matrix至少包含Agent、Skill、Capability、Context、MCP、Model Provider/Profile、Policy与Sandbox Profile；
 每个variant必须携带其owner exact Revision。definition-only variant仍必须冻结selection/requirement/applicability或qualification evidence，

@@ -1,10 +1,19 @@
-# Platform v2 四阶段实现计划（CR-203）
+# Platform v2 四阶段实现计划（CR-204）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-203 contract implemented; fresh public first-Run pending |
-| 日期 | 2026-08-29 |
-| 合同输入 | 00～18、cross-review CR-203、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-204 contract implementation; fresh public first-Run pending |
+| 日期 | 2026-08-30 |
+| 合同输入 | 00～18、cross-review CR-204、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-30 CR-204：Agent Context Deployment create不得要求客户端提交本次command生成的`adep/xcb`或派生digest。
+> 实现顺序为authoritative Rust DTO与OpenAPI → Gateway materialization → CLI manifest/response validation → closedness、digest、
+> Receipt replay与fresh lifecycle evidence。persisted/read `DeploymentClosure`不变，不增加reserve-ID route或兼容旧request wire。
+
+> 2026-08-30 CR-204 implementation evidence：public create-input union、Gateway `adep/xcb` materialization、CLI manifest与
+> response exact reconstruction已实现；OpenAPI/manifest生成物同步更新，caller-selected owner/digest因closed DTO被拒绝，Context
+> binding数量与ID kind不匹配fail closed。Platform API 44/44、Gateway 9/9、CLI 62/62、machine contract 6/6、strict Clippy、
+> Platform v1 checker与58-crate boundary scan通过。本批未运行fresh PostgreSQL或L4～L6，不据此升级00～18为Verified。
 
 > 2026-08-29 CR-203：fresh public first-Run发现Plan v4预先依赖server-generated Interface Revision ID。00～18已完成
 > identity/digest/owner/batch/error/transaction/permission/recovery/fixture cross-review并恢复实现授权。实现必须升级Plan v5，

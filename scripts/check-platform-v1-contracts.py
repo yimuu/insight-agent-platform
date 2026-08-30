@@ -295,12 +295,31 @@ def check_foundation_surfaces(errors):
         "        enum: [agents, skills, capabilities, contexts, models, mcp-servers, policies, sandboxes]",
         '      pattern: "^(aif|arev|srev|cirev|xirev|mdrev|mrev|prev|sxrev)_',
         '      pattern: "^(adep|skdep|cdep|xdep|mdep|mcdep|pdep|sxdep)_',
-        "        closure: {$ref: \"#/components/schemas/DeploymentClosure\"}",
+        "        closure: {$ref: \"#/components/schemas/CreateDeploymentClosureV1\"}",
         "    DeploymentClosure:",
         "      $ref: ./schemas/deployment-closure.schema.json",
+        "    CreateDeploymentClosureV1:",
+        "    AgentDeploymentClosureInputV1:",
+        "    FrozenSlotBindingInputV1:",
+        "    ContextSlotTargetInputV1:",
     ]
     if any(fragment not in openapi for fragment in management_contract):
         errors.append("public Resource lifecycle OpenAPI contract is incomplete or nominally drifted")
+    context_input_start = openapi.find("    ContextSlotTargetInputV1:")
+    context_input_end = openapi.find("\n    RunId:", context_input_start)
+    if context_input_start < 0 or context_input_end < 0:
+        errors.append("Agent Context deployment input schema is missing")
+    else:
+        context_input = openapi[context_input_start:context_input_end]
+        for server_owned in (
+            "context_binding_id",
+            "owner_agent_deployment_id",
+            "binding_digest",
+        ):
+            if server_owned in context_input:
+                errors.append(
+                    f"Agent Context deployment input exposes server-owned {server_owned}"
+                )
     if "  /resources" in openapi or "generic arbitrary JSON" in openapi:
         errors.append("OpenAPI must not expose a generic arbitrary-Resource registry")
     callback_contract = [

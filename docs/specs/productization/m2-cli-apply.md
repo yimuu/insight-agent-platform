@@ -35,6 +35,10 @@ manifest 使用 deny-unknown-fields、strict JSON depth/item/property/string lim
 Deployment bindings 只省略本次生命周期尚未生成的 self Version ref。CLI 在 publish 成功后按下表从 authority
 响应生成 exact `ExactVersionRef`：
 
+Agent Context slot还必须省略本次Deployment create才生成的`context_binding_id`、`owner_agent_deployment_id`、Context
+snapshot digest和外层slot digest。manifest只提交exact Context binding intent；CLI校验响应中每个server-generated `xcb`
+均归属返回的`adep`，并用相同canonical规则重建完整closure与digest，不能自行预留或接受漂移。
+
 | Resource | authority 生成并填入的 self ref | Deployment 主 Version |
 |---|---|---|
 | Agent | Interface Revision、Plan Revision | Plan Revision |
