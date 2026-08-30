@@ -671,7 +671,7 @@ fn upload_wasm(
             "--classification",
             "internal",
             "--media-type",
-            "application/wasm",
+            "application/octet-stream",
             "--display-name",
             name,
             "--timeout-seconds",
