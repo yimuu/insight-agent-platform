@@ -19,6 +19,8 @@ use tempfile::TempDir;
 mod approval_task_resume;
 #[path = "artifact_lifecycle_and_rejection.rs"]
 mod artifact_lifecycle_and_rejection;
+#[path = "context_retrieval_and_citation.rs"]
+mod context_retrieval_and_citation;
 #[path = "subagent_quota_and_cancel.rs"]
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
@@ -902,6 +904,16 @@ fn public_cli_deterministic_first_run() {
         &agent_report,
         &qualification_ref,
     );
+    let mut context_evidence =
+        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
+            context_retrieval_and_citation::run(
+                insight,
+                project,
+                fixture.path(),
+                &authoring_ref,
+                &qualification_ref,
+            )
+        });
     let approval_evidence = approval_task_resume::run(
         insight,
         project,
@@ -913,6 +925,9 @@ fn public_cli_deterministic_first_run() {
             &timer_signal_evidence.run_id,
             &subagent_evidence.run_id,
             plan_artifact_id,
+            context_evidence
+                .as_ref()
+                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
     let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
@@ -929,6 +944,9 @@ fn public_cli_deterministic_first_run() {
     if approval_evidence.console_passed {
         timer_signal_evidence.mark_console_passed();
         subagent_evidence.mark_console_passed();
+        if let Some(context_evidence) = &mut context_evidence {
+            context_evidence.mark_console_passed();
+        }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
 
@@ -1136,6 +1154,14 @@ fn public_cli_deterministic_first_run() {
                     .expect("Artifact scenario report is canonicalizable"),
             )
             .expect("Artifact scenario report is writable");
+        }
+        if let Some(context_evidence) = context_evidence {
+            fs::write(
+                report_directory.join("context-retrieval-and-citation.json"),
+                serde_jcs::to_vec(&context_evidence.report(&revision))
+                    .expect("Context scenario report is canonicalizable"),
+            )
+            .expect("Context scenario report is writable");
         }
     }
 }

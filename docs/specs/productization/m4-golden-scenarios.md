@@ -86,6 +86,14 @@ generation read route不可达。场景必须等待typed `context_dataset_genera
 校验同一immutable Version；禁止从PostgreSQL或mutable active head旁路发现。该typed result及fresh PostgreSQL正负夹具现已
 交付，Context public journey可直接消费；这仍不是该场景的Passed report。
 
+2026-08-30 本地 fresh `full` profile 已补齐 `context-retrieval-and-citation` 的完整实现闭包：public Management API
+发布 Context Interface/Implementation、创建并激活 exact Context Deployment、触发 Dataset build Operation，并只从其
+typed result发现 immutable Generation；CLI 创建并观察引用该 Generation 的 Run，真实 Console按 exact Run ID展示内容与
+`observation_only` citation。失败探针覆盖过期 build admission 与 exact-only citation policy拒绝。场景启动前由受控
+fresh-profile fixture建立 Context tenant/deployment 三条 durable quota authority；它不预写 Resource/Version/Deployment，
+也不替代 public authoring path。本地执行已通过，但 working tree 尚未产生 exact-revision canonical report，因此当前证据
+计数仍保持五份，不在本段升级 M4 状态。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console

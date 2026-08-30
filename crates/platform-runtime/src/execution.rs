@@ -449,7 +449,10 @@ where
     async fn execute(&self, active: ActiveOrchestrationJob) -> ExecutionDisposition {
         match self.start(&active).await {
             Ok((started, fence)) => self.drive_started(&active, started, fence).await,
-            Err(_) => ExecutionDisposition::GenerationAbandoned,
+            Err(failure) => {
+                eprintln!("orchestration generation start abandoned: {failure:?}");
+                ExecutionDisposition::GenerationAbandoned
+            }
         }
     }
 }
@@ -545,6 +548,14 @@ fn validate_started_job(
     claimed: &JobRecord,
     started: &JobRecord,
 ) -> Result<(), GenerationStoreFailure> {
+    let expected_attempt_no = if claimed.started_at.is_some() && claimed.attempt_no > 0 {
+        claimed.attempt_no
+    } else {
+        claimed
+            .attempt_no
+            .checked_add(1)
+            .ok_or(GenerationStoreFailure::InvariantViolation)?
+    };
     if started.tenant_id != claimed.tenant_id
         || started.job_id != claimed.job_id
         || started.worker_id != claimed.worker_id
@@ -552,7 +563,7 @@ fn validate_started_job(
         || started.lease_epoch != claimed.lease_epoch
         || started.state != "running"
         || started.version <= claimed.version
-        || started.attempt_no != claimed.attempt_no + 1
+        || started.attempt_no != expected_attempt_no
         || started.started_at.is_none()
     {
         return Err(GenerationStoreFailure::InvariantViolation);
@@ -626,7 +637,9 @@ mod tests {
             }
             job.state = "running".to_owned();
             job.version += 1;
-            job.attempt_no += 1;
+            if job.started_at.is_none() || job.attempt_no == 0 {
+                job.attempt_no += 1;
+            }
             job.started_at = Some(Utc::now());
             job.updated_at = Utc::now();
             Ok(CommandOutcome::Applied(job.clone()))
@@ -773,6 +786,13 @@ mod tests {
         }
     }
 
+    fn claimed_continuation() -> ClaimedOrchestrationJob {
+        let mut claimed = claimed();
+        claimed.job.attempt_no = 1;
+        claimed.job.started_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        claimed
+    }
+
     fn pools() -> LocalWorkerPools {
         LocalWorkerPools::new(
             WorkerManifest {
@@ -855,6 +875,36 @@ mod tests {
             ExecutionDisposition::GenerationSettled
         );
         assert!(handler.commit_version.load(Ordering::Acquire) >= 4);
+        assert_eq!(pools.snapshot().business_available, 1);
+    }
+
+    #[tokio::test]
+    async fn continuation_start_preserves_the_existing_physical_attempt() {
+        let claimed = claimed_continuation();
+        let store = Arc::new(RecordingStore {
+            job: Mutex::new(claimed.job.clone()),
+            heartbeats: AtomicU64::new(0),
+        });
+        let handler = Arc::new(RecordingHandler::new());
+        let pools = pools();
+        let executor = Arc::new(
+            LeaseFencedOrchestrationExecutor::new(
+                Arc::clone(&store),
+                Arc::clone(&handler),
+                Arc::new(UuidCoordinatorIdentityFactory),
+                config(),
+            )
+            .unwrap(),
+        );
+        let active = active(claimed, CancellationToken::new(), &pools);
+        let execution = tokio::spawn(async move { executor.execute(active).await });
+        handler.wait_running().await;
+        handler.release.notify_one();
+        assert_eq!(
+            execution.await.unwrap(),
+            ExecutionDisposition::GenerationSettled
+        );
+        assert_eq!(store.job.lock().unwrap().attempt_no, 1);
         assert_eq!(pools.snapshot().business_available, 1);
     }
 

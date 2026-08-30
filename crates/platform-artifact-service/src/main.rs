@@ -132,11 +132,17 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
         &self,
         request: StageWorkloadArtifactRequest,
     ) -> Result<StagedWorkloadArtifact, ArtifactWorkloadStageError> {
-        let preflight = self
+        let preflight = match self
             .repository
             .authorize_workload_artifact_stage(&request)
             .await
-            .map_err(map_stage_repository_error)?;
+        {
+            Ok(preflight) => preflight,
+            Err(failure) => {
+                eprintln!("workload Artifact stage preflight failed: {failure}");
+                return Err(map_stage_repository_error(failure));
+            }
+        };
         let WorkloadArtifactStagePreflight::Authorized(authorized) = preflight else {
             let WorkloadArtifactStagePreflight::Replayed(staged) = preflight else {
                 unreachable!("closed preflight has two variants");
@@ -202,12 +208,14 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
             backend_evidence_digest: staged.backend_evidence_digest,
             staged_at,
         };
-        match self
-            .repository
-            .stage_workload_artifact(command)
-            .await
-            .map_err(map_stage_repository_error)?
-        {
+        let outcome = match self.repository.stage_workload_artifact(command).await {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                eprintln!("workload Artifact stage commit failed: {failure}");
+                return Err(map_stage_repository_error(failure));
+            }
+        };
+        match outcome {
             CommandOutcome::Applied(staged) | CommandOutcome::Replayed(staged) => Ok(staged),
         }
     }
@@ -757,7 +765,10 @@ async fn run() -> Result<(), ProcessError> {
     tokio::select! {
         result = &mut controller_server => result.map_err(|_| ProcessError::RpcUnavailable),
         result = &mut guest_server => result.map_err(|_| ProcessError::RpcUnavailable),
-        result = &mut scan_worker => result.map_err(|_| ProcessError::WorkerUnavailable),
+        result = &mut scan_worker => result.map_err(|reason| {
+            eprintln!("Artifact Data Worker stopped: {reason}");
+            ProcessError::WorkerUnavailable
+        }),
         result = &mut observability => result.map_err(|_| ProcessError::ObservabilityUnavailable),
         _ = &mut postgres_read_health => Err(ProcessError::DependencyObserverUnavailable),
         _ = &mut postgres_work_health => Err(ProcessError::DependencyObserverUnavailable),

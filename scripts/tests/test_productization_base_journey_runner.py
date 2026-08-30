@@ -35,6 +35,21 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn(build, source)
         self.assertLess(source.index(install), source.index(build))
 
+    def test_default_project_uses_short_unix_socket_safe_path(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn(
+            'mktemp -d "/tmp/insight-productization.XXXXXX"',
+            source,
+        )
+        self.assertNotIn('${TMPDIR:-/tmp}/insight-productization', source)
+
+    def test_cleanup_can_derive_compose_project_before_process_state_exists(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn('"$project/.insight/project.json"', source)
+        self.assertIn('if processes.is_file():', source)
+        self.assertIn('tenant_id = identity.get("identity", {}).get("tenant_id", "")', source)
+        self.assertIn('project = f"insight-{match.group(1)}" if match else ""', source)
+
     def test_unknown_option_fails_before_build_or_mutation(self) -> None:
         result = self.run_runner("--unknown")
         self.assertEqual(result.returncode, 2)

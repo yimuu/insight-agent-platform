@@ -128,7 +128,10 @@ if [[ -n "$orphaned_processes" ]]; then
 fi
 
 if [[ -z "$project" ]]; then
-  project="$(mktemp -d "${TMPDIR:-/tmp}/insight-productization-base.XXXXXX")"
+  # Keep the default project path short enough for the Sandbox attestor's Unix
+  # registration socket. macOS TMPDIR paths commonly exceed the 100-byte
+  # closed socket-path limit once `.insight/runtime/registration.sock` is added.
+  project="$(mktemp -d "/tmp/insight-productization.XXXXXX")"
 fi
 project="$(cd "$(dirname "$project")" && pwd)/$(basename "$project")"
 if [[ -n "$report_directory" ]]; then
@@ -142,27 +145,39 @@ cleanup() {
   if [[ -x "$insight_bin" && -d "$project/.insight" ]]; then
     "$insight_bin" stop --path "$project"
   fi
-  if [[ "$keep_dependencies" == false && -f "$project/.insight/runtime/processes.json" ]]; then
-    compose_project="$(python3 - "$project/.insight/runtime/processes.json" <<'PY'
+  if [[ "$keep_dependencies" == false && -f "$project/.insight/project.json" ]]; then
+    if compose_project="$(python3 - \
+      "$project/.insight/project.json" \
+      "$project/.insight/runtime/processes.json" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
-value = json.loads(pathlib.Path(sys.argv[1]).read_text())
-project = value.get("compose_project", "")
+identity = json.loads(pathlib.Path(sys.argv[1]).read_text())
+processes = pathlib.Path(sys.argv[2])
+if processes.is_file():
+    project = json.loads(processes.read_text()).get("compose_project", "")
+else:
+    tenant_id = identity.get("identity", {}).get("tenant_id", "")
+    match = re.fullmatch(
+        r"ten_([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        tenant_id,
+    )
+    project = f"insight-{match.group(1)}" if match else ""
 if not re.fullmatch(r"insight-[0-9a-f]{8}", project):
     raise SystemExit("refusing to clean an unexpected Compose project")
 print(project)
 PY
-)"
-    INSIGHT_DEV_NATS_CA_PATH="$project/.insight/runtime/tls/ca.pem" \
-    INSIGHT_DEV_NATS_SERVER_CERT_PATH="$project/.insight/runtime/tls/nats-server.pem" \
-    INSIGHT_DEV_NATS_SERVER_KEY_PATH="$project/.insight/runtime/tls/nats-server-key.pem" \
-      docker compose \
-      --project-name "$compose_project" \
-      --file "$workspace/deploy/dev/compose.yaml" \
-      down
+)"; then
+      INSIGHT_DEV_NATS_CA_PATH="$project/.insight/runtime/tls/ca.pem" \
+      INSIGHT_DEV_NATS_SERVER_CERT_PATH="$project/.insight/runtime/tls/nats-server.pem" \
+      INSIGHT_DEV_NATS_SERVER_KEY_PATH="$project/.insight/runtime/tls/nats-server-key.pem" \
+        docker compose \
+        --project-name "$compose_project" \
+        --file "$workspace/deploy/dev/compose.yaml" \
+        down
+    fi
   fi
   echo "fresh project retained at $project"
 }

@@ -5289,6 +5289,8 @@ impl PgRepository {
         source_binding_digests: Option<Vec<String>>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        let registry_validation_permissions =
+            authorized_principal_id.map(|_| registry_validation_write_permission_map());
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
@@ -5329,7 +5331,7 @@ impl PgRepository {
                       AND binding.state = 'active' AND principal.state = 'active'
                       AND binding.permissions_schema_version = 1
                       AND binding.permissions -> 'permissions'
-                          ? (candidate.payload ->> 'resource_kind' || '.write')
+                          ? ($7::jsonb ->> (candidate.payload ->> 'resource_kind'))
                 )
               )
             ORDER BY priority DESC, COALESCE(retry_at, scheduled_at), job_id
@@ -5343,6 +5345,7 @@ impl PgRepository {
         .bind(job_kinds.map(|kinds| kinds.to_vec()))
         .bind(authorized_principal_id.map(ToString::to_string))
         .bind(source_binding_digests)
+        .bind(registry_validation_permissions)
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -5358,8 +5361,13 @@ impl PgRepository {
                 hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
                     .expect("positive Job lease hard maximum"),
             };
+            // `started_at` can be set by a synchronous pre-worker phase while the durable
+            // worker attempt count is still zero (for example, Artifact upload completion
+            // handing the same Operation Job to its scan worker). Only a previously consumed
+            // worker attempt is a continuation; otherwise this must take the normal first-claim
+            // transition which increments `attempt_no` on start.
             let is_continuation =
-                current.state == JobState::Ready.as_str() && current.started_at.is_some();
+                current.state == JobState::Ready.as_str() && has_started_worker_attempt(&current);
             let next = if is_continuation {
                 decide_job_claim_continuation(
                     &current_projection,
@@ -5461,7 +5469,7 @@ impl PgRepository {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let next = if current.started_at.is_some() {
+        let next = if has_started_worker_attempt(&current) {
             decide_job_resume(
                 &job_projection(&current)?,
                 &domain_job_fence(&command)?,
@@ -7439,7 +7447,7 @@ impl PgSchedulerTransaction {
                 hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
                     .expect("positive Job lease hard maximum"),
             };
-            let next = if locked.started_at.is_some() {
+            let next = if has_started_worker_attempt(locked) {
                 decide_job_claim_continuation(
                     &job_projection(locked)?,
                     database_now,
@@ -7554,7 +7562,7 @@ impl PgSchedulerTransaction {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let next = if current.started_at.is_some() {
+        let next = if has_started_worker_attempt(&current) {
             decide_job_resume(
                 &job_projection(&current)?,
                 &domain_job_fence(&command.fence)?,
@@ -35492,6 +35500,20 @@ fn write_permission(kind: RegistryResourceKind) -> Permission {
     }
 }
 
+fn registry_validation_write_permission_map() -> Value {
+    Value::Object(
+        RegistryResourceKind::ALL
+            .iter()
+            .map(|kind| {
+                (
+                    kind.as_str().to_owned(),
+                    Value::String(write_permission(*kind).to_string()),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn read_permission(kind: RegistryResourceKind) -> Permission {
     match kind {
         RegistryResourceKind::Agent => Permission::AgentRead,
@@ -37798,6 +37820,10 @@ pub(crate) fn task_projection(record: &TaskRecord) -> Result<TaskProjection, Rep
     Ok(projection)
 }
 
+fn has_started_worker_attempt(record: &JobRecord) -> bool {
+    record.started_at.is_some() && record.attempt_no > 0
+}
+
 pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, RepositoryError> {
     let tenant_id = record
         .tenant_id
@@ -38215,6 +38241,25 @@ mod tests {
     fn typed_payload_rejects_non_object_and_oversize() {
         assert!(TypedPayload::new(1, &vec![1, 2, 3]).is_err());
         assert!(TypedPayload::with_limit(1, &serde_json::json!({"large": "abcd"}), 4).is_err());
+    }
+
+    #[test]
+    fn registry_validation_claim_permissions_follow_the_domain_permission_map() {
+        let permissions = registry_validation_write_permission_map();
+        for kind in RegistryResourceKind::ALL {
+            assert_eq!(
+                permissions[kind.as_str()],
+                write_permission(*kind).to_string()
+            );
+        }
+        assert_eq!(
+            permissions[RegistryResourceKind::ContextSourceInterface.as_str()],
+            Permission::ContextWrite.to_string()
+        );
+        assert_eq!(
+            permissions[RegistryResourceKind::CapabilityImplementation.as_str()],
+            Permission::CapabilityWrite.to_string()
+        );
     }
 
     #[test]

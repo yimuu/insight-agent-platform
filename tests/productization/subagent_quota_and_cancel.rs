@@ -412,7 +412,6 @@ fn apply_parent(
         "slot_id": "child_worker",
         "requirement_digest": requirement_digest,
         "target": target,
-        "binding_digest": canonical_digest(&json!({"slot_id": "child_worker", "requirement_digest": requirement_digest, "target": target})),
     });
     let plan = json!({
         "plan_version": 5,

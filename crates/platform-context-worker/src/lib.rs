@@ -307,7 +307,10 @@ impl ContextWorkerDriver {
                     match self.recover_once().await {
                         Ok(_) => {}
                         Err(failure) if failure.is_transient_repository_race() => {}
-                        Err(failure) => return Err(failure),
+                        Err(failure) => {
+                            eprintln!("platform-context-worker recovery failed: {failure}");
+                            return Err(failure);
+                        }
                     }
                     match self.drive_once(&mut active).await {
                         Ok(claimed) => {
@@ -320,7 +323,10 @@ impl ContextWorkerDriver {
                                 _ = tokio::time::sleep(self.config.timing.failure_backoff) => {}
                             }
                         }
-                        Err(failure) => return Err(failure),
+                        Err(failure) => {
+                            eprintln!("platform-context-worker claim scan failed: {failure}");
+                            return Err(failure);
+                        }
                     }
                 }
             }
@@ -1674,7 +1680,9 @@ impl fmt::Display for ContextWorkerError {
                 formatter.write_str("Context Worker drain requires process termination")
             }
             Self::Identity(_) => formatter.write_str("Context Worker identity generation failed"),
-            Self::Repository(_) => formatter.write_str("Context durable authority failed"),
+            Self::Repository(failure) => {
+                write!(formatter, "Context durable authority failed: {failure}")
+            }
         }
     }
 }

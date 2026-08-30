@@ -8,7 +8,7 @@ use insight_platform_context::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, ContextDatasetGenerationSpec, ResourceId, ResourceKind,
-    Sha256Digest, WorkClass,
+    Sha256Digest, TraceFlags, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_postgres::{
@@ -18,6 +18,7 @@ use insight_platform_postgres::{
         RepositoryError,
     },
 };
+use insight_platform_rpc_trace::{scope_trace, RpcTraceContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc, time::Duration};
@@ -287,6 +288,8 @@ impl ContextDatasetBuilderDriver {
             .await?;
         let count = claims.len();
         for claim in claims {
+            let trace = RpcTraceContext::start(claim.trace, TraceFlags::NotSampled)
+                .map_err(|_| ContextDatasetBuilderError::CorruptClaim)?;
             let permit = Arc::clone(&self.capacity)
                 .try_acquire_owned()
                 .map_err(|_| ContextDatasetBuilderError::CorruptClaim)?;
@@ -296,9 +299,18 @@ impl ContextDatasetBuilderDriver {
             let config = self.config.clone();
             active.spawn(async move {
                 let _permit = permit;
-                execute_claim(repository, stager, sources, config, claim)
-                    .await
-                    .is_ok()
+                match scope_trace(
+                    trace,
+                    execute_claim(repository, stager, sources, config, claim),
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(failure) => {
+                        eprintln!("platform-context-dataset-worker abandoned execution: {failure}");
+                        false
+                    }
+                }
             });
         }
         Ok((count, recovered))

@@ -64,10 +64,15 @@ where
         job: StartedOrchestrationJob,
     ) -> Result<Self::Outcome, GenerationHandlerError> {
         let fence = fence_from_started(&job)?;
-        self.materializer
+        let result = self
+            .materializer
             .materialize_plan(job.started(), &fence)
             .await
-            .map_err(map_materializer_error)
+            .map_err(map_materializer_error);
+        if let Err(failure) = result {
+            eprintln!("orchestration plan materialization failed: {failure:?}");
+        }
+        result
     }
 
     async fn commit(
@@ -131,9 +136,15 @@ fn map_driver_disposition(
 ) -> GenerationHandlerDisposition {
     match result {
         Ok(()) => GenerationHandlerDisposition::Committed,
-        Err(DurablePlanDriverError::FenceLost) => GenerationHandlerDisposition::FenceLost,
-        Err(DurablePlanDriverError::Unavailable | DurablePlanDriverError::InvariantViolation) => {
-            GenerationHandlerDisposition::NotCommitted
+        Err(failure) => {
+            eprintln!("orchestration plan commit failed: {failure:?}");
+            match failure {
+                DurablePlanDriverError::FenceLost => GenerationHandlerDisposition::FenceLost,
+                DurablePlanDriverError::Unavailable
+                | DurablePlanDriverError::InvariantViolation => {
+                    GenerationHandlerDisposition::NotCommitted
+                }
+            }
         }
     }
 }

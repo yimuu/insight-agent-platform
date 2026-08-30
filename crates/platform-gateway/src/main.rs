@@ -248,11 +248,16 @@ impl ProcessRole {
                     "agents"
                         | "skills"
                         | "capabilities"
+                        | "capability-implementations"
                         | "contexts"
+                        | "context-implementations"
                         | "context-datasets"
                         | "models"
+                        | "model-providers"
                         | "mcp-servers"
                         | "policies"
+                        | "sandbox-runtimes"
+                        | "sandbox-packages"
                         | "sandboxes"
                 ),
                 Self::RuntimeApi => matches!(noun, "runs" | "tasks" | "artifacts"),
@@ -2357,18 +2362,18 @@ fn public_single_version_kind(
     match kind {
         Kind::Skill => Ok(ResourceKind::SkillRevision),
         Kind::CapabilityInterface => Ok(ResourceKind::CapabilityInterfaceRevision),
+        Kind::CapabilityImplementation => Ok(ResourceKind::CapabilityImplementationRevision),
         Kind::ContextSourceInterface => Ok(ResourceKind::ContextSourceInterfaceRevision),
+        Kind::ContextSourceImplementation => Ok(ResourceKind::ContextSourceImplementationRevision),
+        Kind::ContextDataset => Ok(ResourceKind::DatasetGeneration),
         Kind::McpServer => Ok(ResourceKind::McpServerRevision),
+        Kind::ModelProvider => Ok(ResourceKind::ModelProviderRevision),
         Kind::ModelProfile => Ok(ResourceKind::ModelProfileRevision),
         Kind::Policy => Ok(ResourceKind::PolicyRevision),
+        Kind::SandboxRuntime => Ok(ResourceKind::SandboxRuntimeRevision),
+        Kind::SandboxPackage => Ok(ResourceKind::SandboxPackageRevision),
         Kind::SandboxProfile => Ok(ResourceKind::SandboxProfileRevision),
-        Kind::Agent
-        | Kind::CapabilityImplementation
-        | Kind::ContextSourceImplementation
-        | Kind::ContextDataset
-        | Kind::ModelProvider
-        | Kind::SandboxRuntime
-        | Kind::SandboxPackage => Err(ResourceApplicationError::Invalid),
+        Kind::Agent => Err(ResourceApplicationError::Invalid),
     }
 }
 
@@ -3045,6 +3050,45 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn every_single_version_resource_has_a_public_publish_kind() {
+        use insight_platform_contracts::RegistryResourceKind as Kind;
+
+        for (resource_kind, version_kind) in [
+            (Kind::Skill, ResourceKind::SkillRevision),
+            (
+                Kind::CapabilityInterface,
+                ResourceKind::CapabilityInterfaceRevision,
+            ),
+            (
+                Kind::CapabilityImplementation,
+                ResourceKind::CapabilityImplementationRevision,
+            ),
+            (
+                Kind::ContextSourceInterface,
+                ResourceKind::ContextSourceInterfaceRevision,
+            ),
+            (
+                Kind::ContextSourceImplementation,
+                ResourceKind::ContextSourceImplementationRevision,
+            ),
+            (Kind::ContextDataset, ResourceKind::DatasetGeneration),
+            (Kind::McpServer, ResourceKind::McpServerRevision),
+            (Kind::ModelProvider, ResourceKind::ModelProviderRevision),
+            (Kind::ModelProfile, ResourceKind::ModelProfileRevision),
+            (Kind::Policy, ResourceKind::PolicyRevision),
+            (Kind::SandboxRuntime, ResourceKind::SandboxRuntimeRevision),
+            (Kind::SandboxPackage, ResourceKind::SandboxPackageRevision),
+            (Kind::SandboxProfile, ResourceKind::SandboxProfileRevision),
+        ] {
+            assert_eq!(public_single_version_kind(resource_kind), Ok(version_kind));
+        }
+        assert_eq!(
+            public_single_version_kind(Kind::Agent),
+            Err(ResourceApplicationError::Invalid)
+        );
+    }
+
     fn oidc_config() -> InstalledOidcVerifierConfig {
         let keys = serde_json::json!({"keys": [{
             "kty": "RSA", "kid": "key-1", "use": "sig", "alg": "RS256",
@@ -3262,6 +3306,31 @@ mod tests {
         for (uri, management_status, runtime_status) in [
             (
                 "/v1/agents/res_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/capability-implementations/cimpl_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/context-implementations/ximpl_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/model-providers/mpr_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/sandbox-runtimes/srt_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/sandbox-packages/spkg_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
                 401,
                 404,
             ),

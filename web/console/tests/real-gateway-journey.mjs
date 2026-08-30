@@ -135,6 +135,7 @@ async function main() {
   const timerSignalRunId = process.env.INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID
   const subagentRunId = process.env.INSIGHT_CONSOLE_SUBAGENT_RUN_ID
   const artifactId = process.env.INSIGHT_CONSOLE_ARTIFACT_ID
+  const contextRunId = process.env.INSIGHT_CONSOLE_CONTEXT_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const browser = [
@@ -241,6 +242,16 @@ async function main() {
         'exact Ready Artifact authority and controlled-download action',
       )
     }
+    if (contextRunId) {
+      await evaluate(client, clickText('Runs'))
+      await evaluate(client, setInput('input[placeholder="run_…"]', contextRunId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await waitFor(
+        client,
+        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('local deterministic context item') && document.body.innerText.includes('observation_only')`,
+        'exact Context Run and citation projection',
+      )
+    }
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
@@ -292,12 +303,14 @@ async function main() {
       timer_signal_run_id: timerSignalRunId,
       subagent_run_id: subagentRunId,
       artifact_id: artifactId,
+      context_run_id: contextRunId,
       checks: [
         'gateway_ready',
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
         ...(timerSignalRunId ? ['timer_signal_run_read'] : []),
         ...(subagentRunId ? ['subagent_run_read'] : []),
         ...(artifactId ? ['artifact_ready_read'] : []),
+        ...(contextRunId ? ['context_run_read'] : []),
         'sse_task_discovery',
         'task_mutation',
         'terminal_run',
