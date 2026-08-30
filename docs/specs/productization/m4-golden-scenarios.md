@@ -46,29 +46,19 @@ terminal Run、durable SSE、exact binding、Orchestration Worker replacement、
 并从同一明确 fresh base authority 生成 `approval-task-resume` report。独立
 [`timer_signal_restart_recovery.rs`](../../../tests/productization/timer_signal_restart_recovery.rs) 又覆盖 TimerWait 到期、
 SignalWait exact key、Worker 缺席时两次相同 Receipt 的 204 replay、durable ready continuation、替代 Worker 恢复与 terminal
-result，生成第三份 `timer-signal-restart-recovery` report。远端 fresh Linux journey 已为 Human Task 场景补齐真实
-Console，使其完整 Passed；deterministic 与 Timer/Signal 两份报告仍缺各自场景的 Console，后者还诚实保留 stale
-Job fence 为 `not_run`，因此必须保持 `incomplete`。其余七条场景尚未产生报告。
+result，生成第三份 `timer-signal-restart-recovery` report。远端 fresh Linux journey 已为 Human Task、deterministic
+和 Timer/Signal 三条场景补齐真实 Console；前两条完整 Passed，Timer/Signal 仍因 stale Job fence 为 `not_run`
+而保持 `incomplete`。其余七条场景尚未产生报告。
 
 这一区分防止把一个覆盖多项行为的集成测试误报为十条黄金场景，或用普通单元测试替代 fresh base/full
 profile evidence。
 
-Git revision `591baf00c9b5bac04826f84b58ee96032aa2749b` 的 fresh Linux run `33279353000` 已使
-`approval-task-resume` 成为第一份完整 Passed report：CLI、raw `/v1` 和真实 Console entrypoint，三项 assertion
-以及 Task replay/stale fence 均 Passed。`deterministic-first-run` 与 `timer-signal-restart-recovery` 仍分别保留
-Console，以及 Console/stale Job fence 的 `not_run`，因此继续 Incomplete。下载 artifact 后的 canonical report
-摘要与 SHA-256 见 [`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余九条没有全部
-Passed 而失败。
-
-后续 runner 已把 exact deterministic Run ID 传入同一个真实 Console 会话；浏览器在 Task mutation 前必须从 public
-authority 读取该 Run 的 `succeeded` 与预期 Inline result，才允许将 `deterministic-first-run` 的 Console entrypoint
-记为 Passed。该增量已通过 stateful browser regression 和 Rust fixture 编译，但尚未取得新的 fresh remote report；
-因此上述 revision `591baf00...` 的 deterministic 报告仍保持 Incomplete，不能预先升级。
-
-Timer/Signal 子旅程现调整为先完成 replacement-Worker recovery，再把 exact Timer/Signal Run ID 交给同一真实
-Console session；浏览器必须读取 `succeeded` 与 `resume after signal` Inline result，报告才会把该场景的 Console
-entrypoint 记为 Passed。报告仍固定保留未执行的 `stale_job_fence`，所以即使 Console 通过也只能是 Incomplete。
-该增量已通过 stateful browser regression 与 Rust fixture 编译，fresh remote report 尚待下一次 base journey。
+Git revision `972a37f67cf22406c5064418aa1d759cc16e3c72` 的 fresh Linux run `33281976729` 已使
+`approval-task-resume` 和 `deterministic-first-run` 成为两份完整 Passed report：CLI、raw `/v1`、真实 Console、
+全部 assertion 与 failure probe 均 Passed。同一 Console session 也读取了 replacement-Worker 恢复后的 exact
+Timer/Signal Run；该报告的 Console entrypoint 已 Passed，但 `stale_job_fence` 仍为 `not_run`，所以顶层继续
+Incomplete。下载 artifact 后的 canonical report 摘要与 SHA-256 见
+[`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余八条没有全部 Passed 而失败。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 

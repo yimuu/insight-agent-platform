@@ -321,15 +321,13 @@ run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gat
 目标，因此 M1/M3/M4 继续 In Progress。完整摘要、artifact digest 与边界见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
-下一增量已要求同一真实 Console session 在 Human Task mutation 前按 exact ID 读取 deterministic Run，并核验其
-`succeeded` authority 与 Inline result；只有该浏览器检查实际运行时，deterministic report 才会把 Console entrypoint
-和顶层状态升级为 Passed。stateful browser regression、Console build/lint 与 Rust productization fixture 编译已通过，
-fresh remote evidence 尚待下一次 base journey，故当前已记录报告不变。
-
-同一浏览器入口也已接收先完成的 exact Timer/Signal Run ID，并在 Task mutation 前重读其 replacement-Worker
-恢复后的 terminal authority/result。Timer/Signal report 只会升级 Console entrypoint，`stale_job_fence` 继续
-`not_run`，因此顶层仍必须 Incomplete。该顺序调整已通过 stateful Chrome regression 和 Rust fixture 编译，尚未
-取得新的 fresh remote evidence。
+2026-08-30 exact revision `972a37f67cf22406c5064418aa1d759cc16e3c72` 的 fresh Linux run
+`33281976729` / job `99178547427` 已让同一真实 Console session 按 exact ID 读取 deterministic 与 Timer/Signal
+两个 Run，并分别核验 `succeeded` authority 与预期 Inline result。`deterministic-first-run` 因此成为第二条完整
+Passed report；Timer/Signal 的 Console entrypoint 也 Passed，但 `stale_job_fence` 继续诚实保持 `not_run`，故该报告
+顶层仍为 Incomplete。核心步骤约 9 分 36 秒，使用了受控 Cargo cache；因尚无独立 first Run commit timestamp 和
+无缓存机器证据，不据此宣称 G1 cold clone 门禁 Passed。精确报告摘要与 digest 见
+[`base-journey-evidence.md`](base-journey-evidence.md)。
 
 ### 6.1 工作项
 
@@ -357,11 +355,12 @@ fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 f
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
 `approval-task-resume` report；启用真实浏览器时该报告已可完整 Passed。Timer/Signal restart fixture 会产出第三份
-`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据，其余七条 fixture/report、deterministic 与
-Timer/Signal 各自的 Console entrypoint、Timer/Signal stale-fence probe 与 full profile 场景仍未交付。
+`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据；其余七条 fixture/report、Timer/Signal
+stale-fence probe 与 full profile 场景仍未交付。
 
-远端 fresh base run `33279353000` 已将 `approval-task-resume` 升级为第一份完整 Passed report；严格 M4 checker
-仍会因另外九条未全部 Passed 而失败。精确报告摘要见
+远端 fresh base run `33281976729` 已使 `approval-task-resume` 与 `deterministic-first-run` 两份报告完整 Passed；
+`timer-signal-restart-recovery` 只剩 `stale_job_fence` 为 Not run。严格 M4 checker 仍会因另外八条未全部
+Passed 而失败。精确报告摘要见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
 ### 7.1 工作项
