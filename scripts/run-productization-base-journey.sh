@@ -187,6 +187,11 @@ fi
 "$insight_bin" init --path "$project" --name "productization-$profile"
 "$insight_bin" dev --path "$project" --profile "$profile"
 "$insight_bin" status --path "$project"
+# The full profile can spend longer than the deliberately short local token TTL
+# compiling and starting every role. Rotate only after the runtime is ready so
+# the public journey receives a fresh credential. Never print the bearer token
+# into CI logs; the CLI persists it with the existing private-file permissions.
+"$insight_bin" token --path "$project" >/dev/null
 
 test_environment=(
   "PLATFORM_INSIGHT_BIN=$insight_bin"
