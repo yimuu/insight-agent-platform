@@ -10,6 +10,7 @@ use insight_platform_sandbox::{
     ManagedMcpSandboxSecretDeliveryEvidence, ManagedMcpSandboxSecretDeliveryRequest,
     ManagedMcpSandboxSecretReservationOutcome, PreparedManagedMcpSandboxSession, ScopedSecretGrant,
 };
+use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
     sync::{
@@ -90,6 +91,8 @@ fn fixture(policy: SecretResolutionPolicy) -> Fixture {
             trust_policy: trust_policy.clone(),
             data_policy: data_policy.clone(),
             region: region.clone(),
+            development_loopback: false,
+            trusted_root_pem: None,
         },
         request: ModelProviderWireRequest {
             schema_version: 2,
@@ -355,6 +358,45 @@ struct FixtureTransport {
     chunks: Mutex<Option<Vec<Vec<u8>>>>,
 }
 
+struct LoopbackFixtureTransport {
+    expected_port: u16,
+    called: AtomicBool,
+}
+
+#[async_trait]
+impl PinnedModelProviderHttpTransport for LoopbackFixtureTransport {
+    async fn open(
+        &self,
+        request: PinnedHttpRequest,
+    ) -> Result<PinnedHttpResponse, ModelAdapterFailure> {
+        assert_eq!(request.url.host_str(), Some("localhost"));
+        assert_eq!(request.url.port(), Some(self.expected_port));
+        assert_eq!(request.dns_host, "localhost");
+        assert_eq!(
+            request.addresses,
+            vec![SocketAddr::new(
+                Ipv4Addr::LOCALHOST.into(),
+                self.expected_port
+            )]
+        );
+        assert!(request.trusted_root_pem.is_some());
+        self.called.store(true, Ordering::SeqCst);
+        Ok(PinnedHttpResponse {
+            status_code: 200,
+            content_type: "text/event-stream".to_owned(),
+            body: stream::empty().boxed(),
+        })
+    }
+}
+
+fn fixture_root_pem() -> String {
+    let mut parameters = CertificateParams::default();
+    parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    CertifiedIssuer::self_signed(parameters, KeyPair::generate().unwrap())
+        .unwrap()
+        .pem()
+}
+
 impl FixtureTransport {
     fn complete(chunks: Vec<Vec<u8>>) -> Self {
         Self {
@@ -550,6 +592,53 @@ async fn mixed_public_and_private_dns_answers_fail_closed_before_secret_resoluti
     );
     assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
     assert!(!transport.validated.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn explicit_development_endpoint_allows_only_root_bound_localhost() {
+    let mut fixture = pinned_fixture();
+    let port = 18_443;
+    fixture.entry.endpoint.host = "localhost".to_owned();
+    fixture.entry.endpoint.port = port;
+    fixture.entry.endpoint_identity_digest = fixture.entry.endpoint.canonical_digest().unwrap();
+    fixture.entry.development_loopback = true;
+    fixture.entry.trusted_root_pem = Some(fixture_root_pem());
+    fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
+    let transport = Arc::new(LoopbackFixtureTransport {
+        expected_port: port,
+        called: AtomicBool::new(false),
+    });
+    let broker = ReqwestModelProviderEgressBroker::with_transport(
+        InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+        successful_secrets(),
+        Arc::new(FixtureDnsResolver {
+            addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
+        }),
+        transport.clone(),
+        ModelProviderEgressLimits {
+            maximum_in_flight: 2,
+            maximum_dns_answers: 4,
+            maximum_secret_material_bytes: 128,
+        },
+    )
+    .unwrap();
+    let response = broker.open(fixture.request).await.unwrap();
+    assert_eq!(response.status_code, 200);
+    assert!(transport.called.load(Ordering::SeqCst));
+
+    let mut missing_root = fixture.entry;
+    missing_root.trusted_root_pem = None;
+    assert_eq!(
+        missing_root.validate(),
+        Err(EgressConfigurationError::InvalidEndpoint)
+    );
+    missing_root.trusted_root_pem = Some(fixture_root_pem());
+    missing_root.endpoint.host = "api.example.com".to_owned();
+    missing_root.endpoint_identity_digest = missing_root.endpoint.canonical_digest().unwrap();
+    assert_eq!(
+        missing_root.validate(),
+        Err(EgressConfigurationError::InvalidEndpoint)
+    );
 }
 
 #[tokio::test]

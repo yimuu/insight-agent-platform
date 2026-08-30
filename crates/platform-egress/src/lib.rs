@@ -113,6 +113,10 @@ pub struct InstalledModelProviderEndpoint {
     pub trust_policy: ExactVersionRef,
     pub data_policy: ExactVersionRef,
     pub region: DataRegion,
+    #[serde(default)]
+    pub development_loopback: bool,
+    #[serde(default)]
+    pub trusted_root_pem: Option<String>,
 }
 
 impl InstalledModelProviderEndpoint {
@@ -133,6 +137,12 @@ impl InstalledModelProviderEndpoint {
             || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
             || !valid_broker_base_path(&self.endpoint.base_path)
             || parse_endpoint_host(&self.endpoint.host).is_err()
+            || self
+                .trusted_root_pem
+                .as_ref()
+                .is_some_and(|pem| !valid_model_trust_roots(pem))
+            || (self.development_loopback
+                && (self.endpoint.host != "localhost" || self.trusted_root_pem.is_none()))
         {
             return Err(EgressConfigurationError::InvalidEndpoint);
         }
@@ -174,6 +184,12 @@ impl InstalledModelProviderEndpoint {
                 .count()
                 == 1
     }
+}
+
+fn valid_model_trust_roots(pem: &str) -> bool {
+    pem.len() <= 65_536
+        && reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+            .is_ok_and(|roots| !roots.is_empty())
 }
 
 #[derive(Debug, Clone)]
@@ -727,6 +743,7 @@ struct PinnedHttpRequest {
     maximum_response_bytes: u64,
     deadline: DateTime<Utc>,
     cancellation: CancellationToken,
+    trusted_root_pem: Option<String>,
 }
 
 struct PinnedHttpResponse {
@@ -752,7 +769,7 @@ impl PinnedModelProviderHttpTransport for ReqwestPinnedModelProviderHttpTranspor
         &self,
         request: PinnedHttpRequest,
     ) -> Result<PinnedHttpResponse, ModelAdapterFailure> {
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .no_proxy()
@@ -760,7 +777,15 @@ impl PinnedModelProviderHttpTransport for ReqwestPinnedModelProviderHttpTranspor
             .connect_timeout(request.connect_timeout)
             .timeout(request.total_timeout)
             .pool_max_idle_per_host(0)
-            .resolve_to_addrs(&request.dns_host, &request.addresses)
+            .resolve_to_addrs(&request.dns_host, &request.addresses);
+        if let Some(pem) = &request.trusted_root_pem {
+            for root in reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+                .map_err(|_| rejected_before_dispatch("model_egress_trust_root_rejected"))?
+            {
+                client = client.add_root_certificate(root);
+            }
+        }
+        let client = client
             .build()
             .map_err(|_| rejected_before_dispatch("model_egress_client_build_failed"))?;
         let outbound = client
@@ -920,10 +945,11 @@ impl ReqwestModelProviderEgressBroker {
 
     async fn resolve_addresses(
         &self,
-        endpoint: &CanonicalHttpEndpoint,
+        entry: &InstalledModelProviderEndpoint,
         cancellation: &CancellationToken,
         deadline: DateTime<Utc>,
     ) -> Result<(String, Vec<SocketAddr>), ModelAdapterFailure> {
+        let endpoint = &entry.endpoint;
         let host = parse_endpoint_host(&endpoint.host)
             .map_err(|_| rejected_before_dispatch("model_egress_invalid_endpoint"))?;
         let (dns_host, mut addresses) = match host {
@@ -958,7 +984,9 @@ impl ReqwestModelProviderEgressBroker {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != endpoint.port
+                    || (!is_public_destination_ip(address.ip())
+                        && !(entry.development_loopback && address.ip().is_loopback()))
             })
         {
             return Err(rejected_before_dispatch("model_egress_destination_denied"));
@@ -1011,11 +1039,7 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         let entry = self.catalog.resolve(&request)?;
         let registration = self.register(request.identity(), request.deadline)?;
         let (dns_host, addresses) = self
-            .resolve_addresses(
-                &entry.endpoint,
-                &registration.cancellation,
-                request.deadline,
-            )
+            .resolve_addresses(&entry, &registration.cancellation, request.deadline)
             .await?;
         let credential = self
             .resolve_credential(&request, &entry, &registration.cancellation)
@@ -1054,6 +1078,7 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
             maximum_response_bytes: u64::from(request.maximum_response_bytes),
             deadline: request.deadline,
             cancellation: registration.cancellation.clone(),
+            trusted_root_pem: entry.trusted_root_pem.clone(),
         };
         let response = self.transport.open(outbound).await?;
         let body = guarded_response_body(
