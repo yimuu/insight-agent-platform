@@ -10,6 +10,9 @@
 > CR-205 impact：P1 management matrix必须逐一覆盖十三个closed noun，并证明四个definition-only noun可publish exact
 > Version但不能创建Deployment；Model Provider可创建exact Deployment。fresh full场景不得用SQL fixture替代这些authoring步骤。
 
+> CR-206 impact：Operation正负矩阵增加typed result：Context Dataset成功必须公开与exact generation read一致的`dgen + digest`；
+> queued/running/failed不得暴露result，其他Job不得携带generation variant，payload/created Version漂移必须fail closed。
+
 > CR-203 impact：增加public Agent authoring P1 fixture：调用方只持有Draft内容和Artifact，不能预知Version ID；publish后
 > Interface/Plan exact IDs不同且同属一个Agent publish batch，fresh Run materialization以Plan v5 contract digest与exact owner
 > 双重校验成功。wrong digest、cross-Agent Interface/Plan拼接、旧Plan v4均须在Node/Job写入前fail closed。

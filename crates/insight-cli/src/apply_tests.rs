@@ -519,7 +519,7 @@ mod tests {
                     },
                     state: PublicJobState::Succeeded,
                     progress: None,
-                    result: Some(SafeJobResult {
+                    result: Some(SafeJobResult::Digest {
                         result_digest: digest('5'),
                     }),
                     error: None,
@@ -749,7 +749,7 @@ mod tests {
                     },
                     state: PublicJobState::Succeeded,
                     progress: None,
-                    result: Some(SafeJobResult {
+                    result: Some(SafeJobResult::Digest {
                         result_digest: digest('d'),
                     }),
                     error: None,

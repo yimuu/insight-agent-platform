@@ -816,7 +816,7 @@ mod tests {
             },
             state: PublicJobState::Succeeded,
             progress: None,
-            result: Some(SafeJobResult {
+            result: Some(SafeJobResult::Digest {
                 result_digest:
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .parse::<Sha256Digest>()

@@ -1,10 +1,34 @@
-# Platform v2 00～18 Cross-review（CR-205）
+# Platform v2 00～18 Cross-review（CR-206）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-205 |
+| 状态 | Accepted / CR-206 |
 | 日期 | 2026-08-30 |
-| 输入 | 00～18 live tree、implementation-plan、CR-205 internal definition authoring review、ADR-0001、ADR-0002、AGENTS.md |
+| 输入 | 00～18 live tree、implementation-plan、CR-206 Context Dataset result discovery review、ADR-0001、ADR-0002、AGENTS.md |
+
+### CR-206 Context Dataset generation discovery cross-review
+
+fresh Context golden scenario审计确认：build admission把预留`dset`放入Operation target，但成功Operation只有opaque
+`result_digest`；唯一generation read route还要求调用方提供`dgen`。没有list/head/read-result入口时，合法public客户端无法
+发现成功事务创建的Version，因而会被迫查询业务数据库。这与17的公开journey和12的exact citation证据合同冲突。
+
+CR-206不增加mutable Dataset head/list API，而把`SafeJobResult`升级为closed tagged union。普通成功Job使用`digest`；
+`ContextDatasetBuild`成功使用`context_dataset_generation { result_digest, generation_id }`。`generation_id`只从同一个Job
+admission冻结的artifact preallocation投影，成功事务已重验并以它创建Version；projection不得扫描active head或另建result row。
+
+| Spec | CR-206 结论 |
+|---|---|
+| 00～02 | 路线、plane、Resource/Version authority不变；00保持In Progress |
+| 03 | Operation继续是Job projection；typed result只是terminal safe payload，不是第二aggregate |
+| 04～11 | tenant/policy/Run/worker/Capability/Skill合同不变，不增加permission、quota或work kind |
+| 12 | 成功build公开frozen `dgen`，客户端再读取exact immutable generation；失败不暴露预分配 |
+| 13～16 | MCP/Sandbox/Artifact/Model合同不变；Artifact identity/locator仍不进入Operation result |
+| 17 | result union按Job kind-target-state闭合；generic digest与generation variant不可互换 |
+| 18 | 增加positive generation discovery/read与wrong kind/state/ID/payload drift负向矩阵；L4～L6不变 |
+
+复核覆盖state ownership、ID/schema、errors、transaction/Event/Receipt、permission、capacity、recovery与fixtures。CR-206不增加
+table、aggregate、route、ResourceKind、JobKind、WorkClass、Secret或兼容fallback；受影响合同按03→12→17→18复核并恢复Accepted，
+授权clean-cut实现。
 
 ### CR-205 internal definition authoring cross-review
 

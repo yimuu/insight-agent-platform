@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-205 |
+| 状态 | Accepted / CR-206 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
+
+> CR-206 impact：Dataset build成功Operation必须从该Job已冻结的artifact preallocation投影exact `generation_id`，并以
+> terminal `result_digest`绑定生成内容。客户端随后读取`/context-datasets/{dset}/versions/{dgen}`；失败/非terminal不得
+> 暴露generation result，也不增加mutable head/list API。
 
 > CR-205 impact：`context-implementations`是closed definition-only management noun。它发布绑定exact Context Interface
 > Revision与installed adapter contract的immutable Version；Context Deployment随后才能合法引用，Worker startup配置不能伪造该业务事实。

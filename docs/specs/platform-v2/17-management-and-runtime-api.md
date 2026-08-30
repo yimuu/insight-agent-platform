@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-205 |
+| 状态 | Accepted / CR-206 |
 | 日期 | 2026-08-30 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-206 impact：`SafeJobResult`升级为closed tagged union。`digest`保持普通成功Operation的安全摘要；
+> `context_dataset_generation`只允许`ContextDatasetBuild + ContextDataset target + succeeded`，并携带exact `generation_id`
+> 与`result_digest`。该ID来自同一Job frozen payload，不能从mutable active head补查。
 
 > CR-205 impact：Management `ResourceNoun`从八类可调用owner扩为十三类closed authoring kind，新增
 > `capability-implementations | context-implementations | model-providers | sandbox-runtimes | sandbox-packages`。前两类及
@@ -203,6 +207,22 @@ struct OperationViewV1 {
 `PublicJobKind`/`PublicJobTarget` 从03的closed Job kind-owner registry生成安全子集。首版public kind只包含
 `ResourceValidation | McpDiscovery | ContextDatasetBuild | ArtifactVerify | ArtifactDelete`；target是该Job的typed direct
 owner投影，可为ResourceVersion、Deployment、ContextDataset或Artifact，不限于Artifact。kind-target非法组合fail closed。
+
+`SafeJobResult`是closed tagged union：
+
+```rust
+enum SafeJobResult {
+    Digest { result_digest: Digest },
+    ContextDatasetGeneration {
+        result_digest: Digest,
+        generation_id: DatasetGenerationId,
+    },
+}
+```
+
+只有terminal succeeded `ContextDatasetBuild`使用第二个variant；其`generation_id`来自该Job admission时冻结的预分配，
+并与成功事务实际创建的Version一致。其他kind携带generation variant、Context build只返回generic digest、或非terminal带result
+均按corrupt authority fail closed。
 
 Job internal lease、payload、credential、retry evidence、object locator和diagnostic不进public view。Operation没有独立ETag/state/owner/table；
 视图ETag直接来自Job projection version。取消必须调用owner-specific command，不提供generic Operation mutation。

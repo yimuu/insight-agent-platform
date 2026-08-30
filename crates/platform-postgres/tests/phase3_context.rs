@@ -55,12 +55,12 @@ use insight_platform_contracts::{
     ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
     FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
     PermissionSet, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, SandboxArtifactIoPolicyDocument, SchedulerPriority,
-    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicJobKind,
+    PublishedVersionPayload, QuotaDimension, ReadOperation, RegistryResourceKind, ResourceDocument,
+    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, SafeJobResult,
+    SandboxArtifactIoPolicyDocument, SchedulerPriority, SchedulingPolicyDocument, Sha256Digest,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
+    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -988,10 +988,6 @@ async fn seed_policy_versions(
     }
 }
 
-async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
-    seed_fixture_with_backend(pool, repository, ContextFixtureBackend::SqlCatalog).await
-}
-
 async fn seed_fixture_with_native_adapter(
     pool: &PgPool,
     repository: &PgRepository,
@@ -1063,6 +1059,7 @@ async fn seed_fixture_with_backend(
                     Permission::CapabilityInvoke,
                     Permission::ContextQuery,
                     Permission::ContextWrite,
+                    Permission::OperationRead,
                     Permission::RuntimeControl,
                 ])
                 .unwrap(),
@@ -2879,11 +2876,11 @@ fn text2sql_invocation_command(
 }
 
 #[test]
-fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
+fn context_dataset_build_is_fenced_recoverable_and_publicly_discoverable() {
     // These tests share one real database in the workspace gate. Serialize the fixture builder
     // and assign each scenario a disjoint nominal-ID namespace while preserving its internal
     // concurrency and cross-process visibility.
-    let _fixture_namespace = select_fixture_namespace(0xa0f6);
+    let _fixture_namespace = select_fixture_namespace(0xa0f7);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 * 1024 * 1024)
@@ -2903,7 +2900,15 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .unwrap();
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
-    let fixture = seed_fixture(&pool, &repository).await;
+    let fixture = seed_fixture_with_native_adapter(
+        &pool,
+        &repository,
+        Some((
+            named_digest("dataset-native-installed-adapter"),
+            named_digest("dataset-native-adapter-contract"),
+        )),
+    )
+    .await;
 
     let dataset_id = id(ResourceKind::ContextDataset, 0x700);
     let mut build_audit = audit(
@@ -2932,6 +2937,9 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         CommandOutcome::Applied(job) => job,
         CommandOutcome::Replayed(_) => panic!("first Dataset build must apply"),
     };
+    let original_payload: ContextDatasetBuildJobPayload =
+        serde_json::from_value(original_job.payload.value.clone()).unwrap();
+    let source_binding_digest = original_payload.source_binding.canonical_digest.clone();
     let empty_dataset_roots: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM insight_platform.resources WHERE tenant_id = $1 AND resource_id = $2",
     )
@@ -2994,7 +3002,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                 lease_milliseconds: 30_000,
                 lease_token_digests: vec![lease_token_digest.clone()],
             },
-            std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+            std::slice::from_ref(&source_binding_digest),
         )
         .await
         .unwrap()
@@ -3025,7 +3033,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
             .recover_expired_context_dataset_build_jobs_for_sources(
                 1,
                 1,
-                std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+                std::slice::from_ref(&source_binding_digest),
             )
             .await
             .unwrap(),
@@ -3050,7 +3058,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
                 lease_milliseconds: 30_000,
                 lease_token_digests: vec![replacement_token.clone()],
             },
-            std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+            std::slice::from_ref(&source_binding_digest),
         )
         .await
         .unwrap()
@@ -3200,6 +3208,64 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     .await
     .unwrap();
     assert_eq!(active_generation, completion.generation_id.to_string());
+    let public_operation = repository
+        .read_public_operation(&ReadOperation {
+            tenant_id: fixture.tenant_id.clone(),
+            principal_id: fixture.principal_id.clone(),
+            principal_kind: PrincipalKind::AgentRunner,
+            operation_id: original_job.job_id.parse().unwrap(),
+            request_digest: named_digest("context-dataset-operation-read"),
+            deadline: Utc::now() + Duration::minutes(1),
+        })
+        .await
+        .unwrap();
+    assert_eq!(public_operation.kind, PublicJobKind::ContextDatasetBuild);
+    assert!(matches!(
+        public_operation.result,
+        Some(SafeJobResult::ContextDatasetGeneration {
+            generation_id,
+            result_digest: _,
+        }) if generation_id == first_generation_id
+    ));
+    let mut drifted_operation_payload = original_payload.clone();
+    drifted_operation_payload.job_id = id(ResourceKind::Job, 0x7f0);
+    let drifted_operation_payload =
+        TypedPayload::from_versioned(1, &drifted_operation_payload, 1_048_576).unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET payload_schema_version = $3, payload = $4, payload_digest = $5 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original_job.job_id.clone())
+    .bind(drifted_operation_payload.schema_version)
+    .bind(&drifted_operation_payload.value)
+    .bind(&drifted_operation_payload.digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        repository
+            .read_public_operation(&ReadOperation {
+                tenant_id: fixture.tenant_id.clone(),
+                principal_id: fixture.principal_id.clone(),
+                principal_kind: PrincipalKind::AgentRunner,
+                operation_id: original_job.job_id.parse().unwrap(),
+                request_digest: named_digest("context-dataset-drifted-operation-read"),
+                deadline: Utc::now() + Duration::minutes(1),
+            })
+            .await,
+        Err(insight_platform_postgres::operation_repository::OperationReadError::CorruptAuthority)
+    ));
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET payload_schema_version = $3, payload = $4, payload_digest = $5 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(original_job.job_id.clone())
+    .bind(original_job.payload.schema_version)
+    .bind(&original_job.payload.value)
+    .bind(&original_job.payload.digest)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert!(matches!(
         repository.commit_context_dataset_build(completion).await,
         Err(RepositoryError::StaleFence | RepositoryError::Conflict(_))
@@ -3581,6 +3647,39 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         after_rejection,
         (2, second_generation_id.to_string(), 2, 0)
     );
+
+        }))
+        .unwrap();
+}
+
+#[test]
+fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
+    let _fixture_namespace = select_fixture_namespace(0xa0f6);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(runtime.spawn(async {
+    let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+        eprintln!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture skipped");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let repository = PgRepository::new(pool.clone());
+    let fixture = seed_fixture_with_backend(
+        &pool,
+        &repository,
+        ContextFixtureBackend::SqlCatalog,
+    )
+    .await;
 
     let command = create_command(&fixture, 0x100);
     let mut cross_tenant = command.clone();

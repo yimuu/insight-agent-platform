@@ -62,9 +62,15 @@ pub struct BoundedOperationProgress {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SafeJobResult {
-    pub result_digest: Sha256Digest,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SafeJobResult {
+    Digest {
+        result_digest: Sha256Digest,
+    },
+    ContextDatasetGeneration {
+        result_digest: Sha256Digest,
+        generation_id: ResourceId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +140,31 @@ impl OperationViewV1 {
             || self.error.is_some() && self.state != PublicJobState::Failed
         {
             return Err(OperationViewError::InvalidView);
+        }
+        match (&self.result, self.kind, self.state) {
+            (
+                Some(SafeJobResult::ContextDatasetGeneration { generation_id, .. }),
+                PublicJobKind::ContextDatasetBuild,
+                PublicJobState::Succeeded,
+            ) if generation_id.kind() == ResourceKind::DatasetGeneration => {}
+            (Some(SafeJobResult::Digest { .. }), PublicJobKind::ContextDatasetBuild, _)
+            | (
+                Some(SafeJobResult::ContextDatasetGeneration { .. }),
+                PublicJobKind::ResourceValidation
+                | PublicJobKind::McpDiscovery
+                | PublicJobKind::ArtifactVerify
+                | PublicJobKind::ArtifactDelete,
+                _,
+            )
+            | (
+                Some(SafeJobResult::ContextDatasetGeneration { .. }),
+                PublicJobKind::ContextDatasetBuild,
+                _,
+            )
+            | (None, PublicJobKind::ContextDatasetBuild, PublicJobState::Succeeded) => {
+                return Err(OperationViewError::InvalidView)
+            }
+            (Some(SafeJobResult::Digest { .. }), _, _) | (None, _, _) => {}
         }
         if let Some(failure) = &self.error {
             if failure.code.is_empty()
@@ -225,6 +256,10 @@ mod tests {
         .unwrap()
     }
 
+    fn digest() -> Sha256Digest {
+        format!("sha256:{}", "a".repeat(64)).parse().unwrap()
+    }
+
     #[test]
     fn public_kind_target_matrix_is_closed() {
         let artifact = PublicJobTarget::Artifact {
@@ -255,5 +290,55 @@ mod tests {
             PublicJobState::from(JobState::ReconciliationRequired),
             PublicJobState::ReconciliationRequired
         );
+    }
+
+    #[test]
+    fn context_generation_result_is_closed_kind_state_and_id_bound() {
+        let operation_id = id(ResourceKind::Job, 10);
+        let timestamp = UtcTimestamp::from_datetime(Utc::now());
+        let mut view = OperationViewV1 {
+            operation_id: operation_id.clone(),
+            tenant_id: id(ResourceKind::Tenant, 11),
+            kind: PublicJobKind::ContextDatasetBuild,
+            target: PublicJobTarget::ContextDataset {
+                context_dataset_id: id(ResourceKind::ContextDataset, 12),
+            },
+            state: PublicJobState::Succeeded,
+            progress: None,
+            result: Some(SafeJobResult::ContextDatasetGeneration {
+                result_digest: digest(),
+                generation_id: id(ResourceKind::DatasetGeneration, 13),
+            }),
+            error: None,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            etag: operation_etag(&operation_id.to_string(), 1),
+        };
+        assert!(view.validate().is_ok());
+
+        view.result = Some(SafeJobResult::Digest {
+            result_digest: digest(),
+        });
+        assert!(view.validate().is_err());
+        view.result = None;
+        assert!(view.validate().is_err());
+        view.result = Some(SafeJobResult::ContextDatasetGeneration {
+            result_digest: digest(),
+            generation_id: id(ResourceKind::Job, 14),
+        });
+        assert!(view.validate().is_err());
+        view.kind = PublicJobKind::ArtifactVerify;
+        view.target = PublicJobTarget::Artifact {
+            artifact_id: id(ResourceKind::Artifact, 15),
+        };
+        view.result = Some(SafeJobResult::Digest {
+            result_digest: digest(),
+        });
+        assert!(view.validate().is_ok());
+        view.result = Some(SafeJobResult::ContextDatasetGeneration {
+            result_digest: digest(),
+            generation_id: id(ResourceKind::DatasetGeneration, 16),
+        });
+        assert!(view.validate().is_err());
     }
 }

@@ -1792,9 +1792,17 @@ components:
           oneOf:
             - type: object
               additionalProperties: false
-              required: [result_digest]
+              required: [kind, result_digest]
               properties:
+                kind: {const: digest}
                 result_digest: {$ref: "#/components/schemas/Digest"}
+            - type: object
+              additionalProperties: false
+              required: [kind, result_digest, generation_id]
+              properties:
+                kind: {const: context_dataset_generation}
+                result_digest: {$ref: "#/components/schemas/Digest"}
+                generation_id: {$ref: "#/components/schemas/DatasetGenerationId"}
             - type: "null"
         error:
           oneOf:

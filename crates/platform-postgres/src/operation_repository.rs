@@ -289,11 +289,31 @@ fn project_operation(
         return Err(OperationReadError::CorruptAuthority);
     }
     let result = match (state, job.result_digest.as_deref()) {
-        (PublicJobState::Succeeded, Some(digest)) => Some(SafeJobResult {
-            result_digest: digest
+        (PublicJobState::Succeeded, Some(digest)) => {
+            let result_digest = digest
                 .parse::<Sha256Digest>()
-                .map_err(|_| OperationReadError::CorruptAuthority)?,
-        }),
+                .map_err(|_| OperationReadError::CorruptAuthority)?;
+            if kind == PublicJobKind::ContextDatasetBuild {
+                let payload: ContextDatasetBuildJobPayload =
+                    serde_json::from_value(job.payload.value.clone())
+                        .map_err(|_| OperationReadError::CorruptAuthority)?;
+                let PublicJobTarget::ContextDataset { context_dataset_id } = &target else {
+                    return Err(OperationReadError::CorruptAuthority);
+                };
+                payload
+                    .validate_for_owner(context_dataset_id)
+                    .map_err(|_| OperationReadError::CorruptAuthority)?;
+                if payload.job_id != operation_id {
+                    return Err(OperationReadError::CorruptAuthority);
+                }
+                Some(SafeJobResult::ContextDatasetGeneration {
+                    result_digest,
+                    generation_id: payload.artifact_preallocations.generation_id,
+                })
+            } else {
+                Some(SafeJobResult::Digest { result_digest })
+            }
+        }
         (PublicJobState::Failed, Some(digest)) => {
             digest
                 .parse::<Sha256Digest>()

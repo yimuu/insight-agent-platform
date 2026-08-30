@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-202 |
-| 日期 | 2026-08-27 |
+| 状态 | Accepted / CR-206 |
+| 日期 | 2026-08-30 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
+
+> CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
+> `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
+> result digest。projection不读取mutable Dataset head，不建立第二份result authority，非该kind不得携带generation identity。
 
 > CR-198 impact：一个业务命令可拥有多个有顺序依赖的shared Job，但每个Job只有一个current-state owner。MCP discovery owner Job与其
 > 预分配的`ArtifactScan`验证Job以typed payload互相引用；stage/verify完成只通过committed Event/Outbox wake恢复owner。最终owner事务必须

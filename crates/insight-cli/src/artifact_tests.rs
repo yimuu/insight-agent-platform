@@ -721,7 +721,7 @@ mod tests {
             },
             state: PublicJobState::Succeeded,
             progress: None,
-            result: Some(SafeJobResult {
+            result: Some(SafeJobResult::Digest {
                 result_digest: digest(b"verification"),
             }),
             error: None,
@@ -910,7 +910,7 @@ mod tests {
             },
             state: PublicJobState::Succeeded,
             progress: None,
-            result: Some(SafeJobResult {
+            result: Some(SafeJobResult::Digest {
                 result_digest: digest(b"verification"),
             }),
             error: None,

@@ -1,10 +1,22 @@
-# Platform v2 四阶段实现计划（CR-205）
+# Platform v2 四阶段实现计划（CR-206）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-205 management noun implementation; fresh full scenarios pending |
+| 状态 | In Progress / CR-206 Context Dataset result discovery; fresh full scenarios pending |
 | 日期 | 2026-08-30 |
-| 合同输入 | 00～18、cross-review CR-205、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-206、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
+> projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
+> consumer tests；最后由Context golden scenario通过Operation result读取exact generation。禁止数据库查询或active-head scan补ID。
+
+> 2026-08-30 CR-206 implementation evidence：`SafeJobResult`已升级为`digest | context_dataset_generation` closed tagged
+> union，Context Dataset成功projection重验Job payload owner、Job ID与预分配`dgen`，缺失result、generic digest、错误kind/state/ID
+> 均fail closed。原先把Native Dataset build与SqlCatalog Text2SQL混在同一Deployment的PostgreSQL夹具已拆成两个exact backend
+> 场景；fresh PostgreSQL 16唯一baseline上的phase3 Context 4/4通过，其中成功Operation返回与实际immutable generation一致的
+> `dgen`，失败rebuild不替换active generation。Contracts 102/102、PostgreSQL lib 18/18、API 44/44、CLI 64/64、Platform v1
+> checker、strict Clippy与58-crate boundary scan通过。该证据关闭CR-206实现前置；public `/v1`、CLI与Console组成的fresh
+> `context-retrieval-and-citation` report仍待实现，因此不升级M4或00～18状态。
 
 > 2026-08-30 CR-205：先扩展authoritative noun/ID/OpenAPI matrix与Gateway handler；再使CLI apply支持四个
 > definition-only lifecycle和Model Provider Deployment；最后在fresh full authority上通过Capability/Context Implementation、

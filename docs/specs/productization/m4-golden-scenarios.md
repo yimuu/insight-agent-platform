@@ -81,6 +81,11 @@ CR-205审计进一步确认，五条缺失场景共享一个authoring前置：Ca
 Runtime/Package已有领域合同但不在原八类Management noun中。实现必须先经新增closed noun发布这些exact定义；场景fixture不得
 以SQL insert、Worker进程配置或占位ID替代Resource/Version/Deployment authority。
 
+CR-206继续审计Context场景发现，build Operation虽返回预留Dataset ID，成功后却没有公开生成的Generation ID，导致既有exact
+generation read route不可达。场景必须等待typed `context_dataset_generation` Operation result，再以其中`dgen + digest`读取并
+校验同一immutable Version；禁止从PostgreSQL或mutable active head旁路发现。该typed result及fresh PostgreSQL正负夹具现已
+交付，Context public journey可直接消费；这仍不是该场景的Passed report。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console

@@ -359,6 +359,9 @@ def check_foundation_surfaces(errors):
         "    OperationViewV1:",
         "    PublicJobTarget:",
         "    PublicJobState:",
+        "                kind: {const: digest}",
+        "                kind: {const: context_dataset_generation}",
+        "                generation_id: {$ref: \"#/components/schemas/DatasetGenerationId\"}",
     ]
     if any(fragment not in openapi for fragment in operation_contract):
         errors.append("public Operation Job projection OpenAPI contract is incomplete")
