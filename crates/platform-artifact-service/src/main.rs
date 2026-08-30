@@ -29,10 +29,10 @@ use insight_platform_artifact_rpc::{
     ArtifactDataWorkerGrpcService, ArtifactGvisorGuestGrpcService, ArtifactInternalRpcLimits,
     ArtifactSandboxBrokerGrpcService, ArtifactSchedulerGrpcService, ArtifactWorkloadStageAuthority,
     ArtifactWorkloadStageError, GvisorGuestResponseMaterializer, LeasedArtifactBytes,
-    McpDiscoveryWorkerWorkloadIdentity, SandboxControllerWorkloadIdentity,
-    SchedulerRunValueResponseBroker, SchedulerSkillPackageResponseBroker,
-    SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, WasiArtifactBrokerError,
-    WasiArtifactReadRequest, WasiArtifactResponseBroker,
+    SandboxControllerWorkloadIdentity, SchedulerRunValueResponseBroker,
+    SchedulerSkillPackageResponseBroker, SchedulerTypedPlanResponseBroker,
+    SchedulerWorkloadIdentity, WasiArtifactBrokerError, WasiArtifactReadRequest,
+    WasiArtifactResponseBroker, WorkloadArtifactProducerIdentity,
 };
 use insight_platform_artifacts::{
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
@@ -41,8 +41,8 @@ use insight_platform_artifacts::{
     WorkloadArtifactStagePreflight,
 };
 use insight_platform_contracts::{
-    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, ArtifactWorkloadAudience,
-    CommandOutcome, JobKind, JsonLimits, Sha256Digest,
+    canonical_digest, checked_in_hard_limit_profile, parse_strict_json, CommandOutcome, JobKind,
+    JsonLimits, Sha256Digest,
 };
 use insight_platform_observability::{
     process_observability_router, DurableJobQueueMetrics, ProcessHttpMetrics,
@@ -184,7 +184,7 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
         let command = StageWorkloadArtifact {
             schema_version: 1,
             tenant_id: request.tenant_id,
-            caller: ArtifactWorkloadAudience::McpHost,
+            caller: authorized.caller,
             producer_job_id: request.producer_job_id,
             producer_fence: request.producer_fence,
             verification_job_id: request.verification_job_id,
@@ -601,7 +601,7 @@ async fn run() -> Result<(), ProcessError> {
         .max_decoding_message_size(maximum);
         tonic::service::interceptor::InterceptedService::new(
             service,
-            McpDiscoveryWorkerWorkloadIdentity,
+            WorkloadArtifactProducerIdentity,
         )
     };
     let guest_materializer = Arc::new(GvisorGuestMaterializer {

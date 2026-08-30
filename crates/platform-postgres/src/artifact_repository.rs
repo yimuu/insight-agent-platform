@@ -41,11 +41,11 @@ use insight_platform_artifacts::{
     StagedWorkloadArtifact, UploadGrantSnapshot, WorkloadArtifactStagePreflight,
 };
 use insight_platform_contracts::{
-    ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, BlobIntegrityState,
-    CommandOutcome, DataClassification, DeploymentClosure, Effect, ExactVersionRef,
-    FrozenSlotTarget, JobKind, JobState, Permission, PolicyKind, PrincipalKind, PrincipalSnapshot,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
+    ArtifactPurpose, ArtifactRef, ArtifactRetentionPolicy, ArtifactState, ArtifactWorkloadAudience,
+    BlobIntegrityState, CommandOutcome, DataClassification, DeploymentClosure, Effect,
+    ExactVersionRef, FrozenSlotTarget, JobKind, JobState, Permission, PolicyKind, PrincipalKind,
+    PrincipalSnapshot, PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, SandboxArtifactIoPolicyDocument, Sha256Digest, TenantConfig, WorkClass,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_orchestrator::derive_candidate_selection;
@@ -57,9 +57,12 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::{collections::BTreeSet, str::FromStr};
 
+use crate::context_dataset_repository::{
+    require_context_dataset_artifact_stage_authority,
+    wake_context_dataset_build_after_artifact_verification,
+};
 use crate::mcp_repository::{
-    require_mcp_discovery_artifact_stage_authority,
-    require_mcp_discovery_artifact_stage_request_authority,
+    require_mcp_discovery_artifact_stage_authority_for,
     wake_mcp_discovery_after_artifact_verification,
 };
 use crate::repository::ArtifactWorkerRole;
@@ -67,6 +70,122 @@ use crate::repository::ArtifactWorkerRole;
 pub struct PgArtifactTransaction {
     transaction: Transaction<'static, Postgres>,
     limits: ArtifactCommandLimits,
+}
+
+struct WorkloadArtifactStageAuthority {
+    trace: insight_platform_contracts::TraceIdentityV1,
+    principal_id: ResourceId,
+    caller: ArtifactWorkloadAudience,
+}
+
+async fn workload_artifact_producer_kind(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    producer_job_id: &ResourceId,
+) -> Result<String, RepositoryError> {
+    sqlx::query_scalar(
+        "SELECT job_kind FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(tenant_id.to_string())
+    .bind(producer_job_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::NotFound("Artifact producer Job"))
+}
+
+async fn require_workload_artifact_stage_request_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &StageWorkloadArtifactRequest,
+    database_now: DateTime<Utc>,
+) -> Result<WorkloadArtifactStageAuthority, RepositoryError> {
+    require_workload_artifact_stage_authority_for(
+        transaction,
+        &request.tenant_id,
+        &request.producer_job_id,
+        &request.producer_fence,
+        &request.verification_job_id,
+        &request.artifact_id,
+        &request.blob_id,
+        database_now,
+    )
+    .await
+}
+
+async fn require_workload_artifact_stage_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &StageWorkloadArtifact,
+    database_now: DateTime<Utc>,
+) -> Result<WorkloadArtifactStageAuthority, RepositoryError> {
+    let authority = require_workload_artifact_stage_authority_for(
+        transaction,
+        &command.tenant_id,
+        &command.producer_job_id,
+        &command.producer_fence,
+        &command.verification_job_id,
+        &command.artifact_id,
+        &command.blob_id,
+        database_now,
+    )
+    .await?;
+    if authority.caller != command.caller {
+        return Err(RepositoryError::PermissionDenied);
+    }
+    Ok(authority)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn require_workload_artifact_stage_authority_for(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    producer_job_id: &ResourceId,
+    producer_fence: &insight_platform_jobs::JobFence,
+    verification_job_id: &ResourceId,
+    artifact_id: &ResourceId,
+    blob_id: &ResourceId,
+    database_now: DateTime<Utc>,
+) -> Result<WorkloadArtifactStageAuthority, RepositoryError> {
+    match workload_artifact_producer_kind(transaction, tenant_id, producer_job_id)
+        .await?
+        .as_str()
+    {
+        "mcp_discovery" => {
+            let authority = require_mcp_discovery_artifact_stage_authority_for(
+                transaction,
+                tenant_id,
+                producer_job_id,
+                producer_fence,
+                verification_job_id,
+                artifact_id,
+                blob_id,
+                database_now,
+            )
+            .await?;
+            Ok(WorkloadArtifactStageAuthority {
+                trace: authority.trace,
+                principal_id: authority.principal_id,
+                caller: ArtifactWorkloadAudience::McpHost,
+            })
+        }
+        "context_dataset_build" => {
+            let authority = require_context_dataset_artifact_stage_authority(
+                transaction,
+                tenant_id,
+                producer_job_id,
+                producer_fence,
+                verification_job_id,
+                artifact_id,
+                blob_id,
+                database_now,
+            )
+            .await?;
+            Ok(WorkloadArtifactStageAuthority {
+                trace: authority.trace,
+                principal_id: authority.principal_id,
+                caller: ArtifactWorkloadAudience::ContextWorker,
+            })
+        }
+        _ => Err(RepositoryError::PermissionDenied),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2081,7 +2200,7 @@ impl PgRepository {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        require_mcp_discovery_artifact_stage_request_authority(
+        let producer = require_workload_artifact_stage_request_authority(
             &mut transaction,
             request,
             database_now,
@@ -2136,6 +2255,7 @@ impl PgRepository {
                 )
                 .await?;
                 let authorized = AuthorizedWorkloadArtifactStage {
+                    caller: producer.caller,
                     tenant_id: request.tenant_id.clone(),
                     producer_job_id: request.producer_job_id.clone(),
                     verification_job_id: request.verification_job_id.clone(),
@@ -2189,12 +2309,9 @@ impl PgRepository {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let producer = require_mcp_discovery_artifact_stage_authority(
-            &mut transaction,
-            &command,
-            database_now,
-        )
-        .await?;
+        let producer =
+            require_workload_artifact_stage_authority(&mut transaction, &command, database_now)
+                .await?;
         let verification_job = sqlx::query(
             r#"
             SELECT state, version, worker_id, lease_token_digest, lease_expires_at,
@@ -5259,19 +5376,43 @@ impl ArtifactTransaction for PgArtifactTransaction {
         )
         .await?;
         if let Some(producer_job_id) = &current.scan.producer_job_id {
-            wake_mcp_discovery_after_artifact_verification(
+            match workload_artifact_producer_kind(
                 &mut transaction,
                 &command.audit.tenant_id,
                 producer_job_id,
-                &command.scan_job_id,
-                &command.artifact_id,
-                &command.blob_id,
-                &command.evidence.content_digest,
-                &command.evidence.canonical_digest,
-                command.evidence.disposition,
-                database_now,
             )
-            .await?;
+            .await?
+            .as_str()
+            {
+                "mcp_discovery" => {
+                    wake_mcp_discovery_after_artifact_verification(
+                        &mut transaction,
+                        &command.audit.tenant_id,
+                        producer_job_id,
+                        &command.scan_job_id,
+                        &command.artifact_id,
+                        &command.blob_id,
+                        &command.evidence.content_digest,
+                        &command.evidence.canonical_digest,
+                        command.evidence.disposition,
+                        database_now,
+                    )
+                    .await?;
+                }
+                "context_dataset_build" => {
+                    wake_context_dataset_build_after_artifact_verification(
+                        &mut transaction,
+                        &command.audit.tenant_id,
+                        producer_job_id,
+                        &command.scan_job_id,
+                        &command.artifact_id,
+                        &command.blob_id,
+                        database_now,
+                    )
+                    .await?;
+                }
+                _ => return Err(RepositoryError::PermissionDenied),
+            }
         }
         let artifact_version = to_i64(decision.artifact_version, "Artifact version")?;
         let event_type = match decision.artifact_state {

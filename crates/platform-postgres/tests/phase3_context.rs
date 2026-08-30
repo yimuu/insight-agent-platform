@@ -6,9 +6,13 @@ use insight_platform_artifact_rpc::{
     SchedulerTypedPlanResponseBroker, SchedulerWorkloadIdentity, SCHEDULER_WORKLOAD_IDENTITY,
 };
 use insight_platform_artifacts::{
+    ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobDeletionEvidence,
+    ArtifactScanDisposition, ArtifactScanEvidence, ArtifactScanEvidenceDraft, ArtifactScanRequest,
+    ArtifactScanner, ArtifactWorkerService, DeleteArtifactBlobGeneration,
     SchedulerRunValueReadError, SchedulerRunValueReadRequest, SchedulerSkillPackageReadError,
     SchedulerSkillPackageReadRequest, SchedulerTypedPlanLease, SchedulerTypedPlanReadError,
-    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver,
+    SchedulerTypedPlanReadRequest, SchedulerTypedPlanRequestResolver, StageWorkloadArtifact,
+    StageWorkloadArtifactRequest, WorkloadArtifactStagePreflight,
 };
 use insight_platform_capability_adapters::{
     CapabilityAdapterFailure, CapabilityTransportCancelOutcome, CapabilityTransportCancelRequest,
@@ -17,43 +21,46 @@ use insight_platform_capability_adapters::{
 };
 use insight_platform_context::{
     CitationLocator, ClaimContextJobs, CommitContextDatasetBuild, CommitContextOutcome,
-    ContextBackendOutcome, ContextCitation, ContextClaimSlot, ContextDatasetBuildJobPayload,
-    ContextItem, ContextObservation, ContextObservationOutput, ContextQueryRequest,
-    ContextQueryTransaction, ContextRetrievalEvidence, ContextSignalAudit, ContextWorkerAudit,
-    CreateContextQuery, NormalizedContextScore, PrepareContextDispatch,
-    ReadOnlySqlExecutionBinding, ReadOnlySqlPlan, RemoteContextFailure, RemoteContextItem,
-    RemoteContextSearchConnector, RemoteContextSearchRequest, RemoteContextSearchResponse,
-    RequestContextDatasetBuild, SqlColumnRef, SqlComparisonOperator, SqlObjectName, SqlPredicate,
-    SqlProjection, SqlProjectionExpression, SqlSource, WakeContextDispatch,
-    READONLY_DATABASE_CAPABILITY, TEXT2SQL_PLAN_VALUE_KIND,
+    ContextBackendOutcome, ContextCitation, ContextClaimSlot, ContextDatasetArtifactPreallocation,
+    ContextDatasetArtifactPreallocations, ContextDatasetBuildJobPayload, ContextItem,
+    ContextObservation, ContextObservationOutput, ContextQueryRequest, ContextQueryTransaction,
+    ContextRetrievalEvidence, ContextSignalAudit, ContextWorkerAudit, CreateContextQuery,
+    FailContextDatasetBuildVerification, NormalizedContextScore,
+    ParkContextDatasetBuildVerification, PrepareContextDispatch, ReadOnlySqlExecutionBinding,
+    ReadOnlySqlPlan, RemoteContextFailure, RemoteContextItem, RemoteContextSearchConnector,
+    RemoteContextSearchRequest, RemoteContextSearchResponse, RequestContextDatasetBuild,
+    SqlColumnRef, SqlComparisonOperator, SqlObjectName, SqlPredicate, SqlProjection,
+    SqlProjectionExpression, SqlSource, WakeContextDispatch, READONLY_DATABASE_CAPABILITY,
+    TEXT2SQL_PLAN_VALUE_KIND,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, AdministrativeGate,
-    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, AuthoringPackage,
-    CandidateSelectionMode, CandidateSelectionPolicyDocument, CanonicalHttpEndpoint,
-    CapabilityArtifactContract, CapabilityBackendBinding, CapabilityBackendContract,
-    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityBackendLimits,
-    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityDeploymentClosure,
-    CapabilityEndpointScheme, CapabilityIdempotencyKind, CapabilityImplementationResourceSpec,
-    CapabilityInterfaceLimits, CapabilityInterfaceResourceSpec, CapabilityProgressContract,
-    CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
-    CommandAudit, CommandOutcome, ContextBackendBinding, ContextBackendContract,
-    ContextBackendKind, ContextBackendLimits, ContextBindingSnapshot, ContextCitationContract,
-    ContextCitationStrength, ContextConsistencyMode, ContextConsistencyPolicy,
-    ContextDataPolicyContract, ContextDatasetGenerationSpec, ContextDeploymentClosure,
-    ContextImplementationContract, ContextImplementationResourceSpec, ContextInterfaceLimits,
-    ContextInterfaceResourceSpec, ContextLocatorKind, ContextPaginationContract, ContextQueryState,
-    ContextRankingContract, DataClassification, DataRegion, DeploymentClosure, Effect,
-    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
-    FailureCode, FailureSource, FrozenSlotBinding, FrozenSlotTarget, JobState,
-    NativeCapabilityContract, Permission, PermissionSet, PlatformFailureCode,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, QuotaDimension,
-    RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, SchedulerPriority, SchedulingPolicyDocument, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
-    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+    AgentDeploymentClosure, AgentResourceSpec, ArtifactRef, ArtifactRetentionPolicy,
+    ArtifactWorkloadAudience, AuthoringPackage, CandidateSelectionMode,
+    CandidateSelectionPolicyDocument, CanonicalHttpEndpoint, CapabilityArtifactContract,
+    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendFeatures,
+    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
+    CapabilityDataFlowPolicy, CapabilityDeploymentClosure, CapabilityEndpointScheme,
+    CapabilityIdempotencyKind, CapabilityImplementationResourceSpec, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue, CommandAudit, CommandOutcome,
+    ContextBackendBinding, ContextBackendContract, ContextBackendKind, ContextBackendLimits,
+    ContextBindingSnapshot, ContextCitationContract, ContextCitationStrength,
+    ContextConsistencyMode, ContextConsistencyPolicy, ContextDataPolicyContract,
+    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationContract,
+    ContextImplementationResourceSpec, ContextInterfaceLimits, ContextInterfaceResourceSpec,
+    ContextLocatorKind, ContextPaginationContract, ContextQueryState, ContextRankingContract,
+    DataClassification, DataRegion, DeploymentClosure, Effect, EntityLifecycle, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, ExternalLeafFailureMutationIds,
+    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotBinding, FrozenSlotTarget, JobState, NativeCapabilityContract, Permission,
+    PermissionSet, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    RunBindingsSnapshot, SandboxArtifactIoPolicyDocument, SchedulerPriority,
+    SchedulingPolicyDocument, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, WorkClass, WorkerManifest, WORKER_MANIFEST_VERSION,
+    WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -76,15 +83,16 @@ use insight_platform_orchestrator::{
     RuntimePlan, ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits,
 };
 use insight_platform_postgres::{
+    artifact_repository::{ArtifactExecutionSlot, StartedArtifactExecution},
     context_query_repository::{
         ClaimedContextExecution, DriveExpiredContextJobs, ExpiredContextRecoverySlot,
         PreparedContextExecution,
     },
     repository::{
-        ClaimJobs, DeferOrchestrationContextMutationIds, DeferOrchestrationToContextQuery,
-        JobFence as RepositoryJobFence, NewPrincipal, NewQuotaAccount, NewTenant,
-        NewTenantPrincipal, OrchestrationYieldMutationIds, PgRepository, RepositoryError,
-        ResolvedExpressionInput, SafetyScanShard, TypedPayload,
+        ArtifactWorkerRole, ClaimArtifactJobs, ClaimJobs, DeferOrchestrationContextMutationIds,
+        DeferOrchestrationToContextQuery, JobFence as RepositoryJobFence, NewPrincipal,
+        NewQuotaAccount, NewTenant, NewTenantPrincipal, OrchestrationYieldMutationIds,
+        PgRepository, RepositoryError, ResolvedExpressionInput, SafetyScanShard, TypedPayload,
     },
     verify_schema,
 };
@@ -94,6 +102,7 @@ use rcgen::{
 };
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{
     collections::BTreeMap,
@@ -130,6 +139,22 @@ fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     .unwrap()
 }
 
+fn dataset_artifact_preallocations(base: u16) -> ContextDatasetArtifactPreallocations {
+    let allocation = |offset: u16| ContextDatasetArtifactPreallocation {
+        schema_version: 1,
+        artifact_id: id(ResourceKind::Artifact, base + offset),
+        blob_id: id(ResourceKind::InternalBlob, base + offset + 1),
+        verification_job_id: id(ResourceKind::Job, base + offset + 2),
+        quota_entry_id: id(ResourceKind::QuotaLedgerEntry, base + offset + 3),
+    };
+    ContextDatasetArtifactPreallocations {
+        schema_version: 1,
+        generation_id: id(ResourceKind::DatasetGeneration, base + 8),
+        index_manifest: allocation(0),
+        validation_evidence: allocation(4),
+    }
+}
+
 fn named_digest(label: &str) -> Sha256Digest {
     let namespace = CONTEXT_FIXTURE_NAMESPACE.load(Ordering::SeqCst);
     canonical_digest(&json!({
@@ -139,6 +164,255 @@ fn named_digest(label: &str) -> Sha256Digest {
     .unwrap()
     .parse()
     .unwrap()
+}
+
+fn raw_digest(bytes: &[u8]) -> Sha256Digest {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").unwrap();
+    }
+    encoded.parse().unwrap()
+}
+
+struct ContextDatasetArtifactScanner {
+    content_digest: Sha256Digest,
+    size_bytes: u64,
+    media_type: String,
+    observed_at: DateTime<Utc>,
+    disposition: ArtifactScanDisposition,
+}
+
+impl ArtifactScanner for ContextDatasetArtifactScanner {
+    async fn scan(
+        &self,
+        request: ArtifactScanRequest,
+    ) -> Result<ArtifactScanEvidence, ArtifactBackendFailure> {
+        ArtifactScanEvidenceDraft {
+            schema_version: 1,
+            scan_kind: request.job.scan_kind,
+            scan_job_id: request.job_id,
+            scan_policy_revision: request.job.scan_policy_revision,
+            scanner_contract_digest: request.job.scanner_contract_digest,
+            ruleset_digest: request.job.ruleset_digest,
+            object_generation: request.job.object_generation,
+            content_digest: self.content_digest.clone(),
+            size_bytes: self.size_bytes,
+            verified_media_type: self.media_type.clone(),
+            disposition: self.disposition,
+            reason_class: (self.disposition != ArtifactScanDisposition::Verified)
+                .then(|| "context_dataset_fixture_rejection".to_owned()),
+            observed_at: self.observed_at,
+            expires_at: self.observed_at
+                + Duration::milliseconds(
+                    i64::try_from(request.job.evidence_ttl_milliseconds).unwrap(),
+                ),
+        }
+        .seal()
+        .map_err(|_| ArtifactBackendFailure {
+            retryable: false,
+            reason_class: "context_dataset_fixture_scan_invalid".to_owned(),
+        })
+    }
+}
+
+struct UnusedContextDatasetBlobBackend;
+
+impl ArtifactBlobBackend for UnusedContextDatasetBlobBackend {
+    async fn delete_generation(
+        &self,
+        _request: DeleteArtifactBlobGeneration,
+    ) -> Result<ArtifactBlobDeletionEvidence, ArtifactBackendFailure> {
+        Err(ArtifactBackendFailure {
+            retryable: false,
+            reason_class: "context_dataset_blob_delete_unused".to_owned(),
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_context_dataset_artifact(
+    pool: &PgPool,
+    repository: &PgRepository,
+    tenant_id: &ResourceId,
+    producer_job_id: &ResourceId,
+    producer_fence: &JobFence,
+    allocation: &ContextDatasetArtifactPreallocation,
+    media_type: &str,
+    descriptor_bytes: Vec<u8>,
+    suffix: u16,
+) -> StageWorkloadArtifactRequest {
+    let request = StageWorkloadArtifactRequest {
+        schema_version: 1,
+        tenant_id: tenant_id.clone(),
+        producer_job_id: producer_job_id.clone(),
+        producer_fence: producer_fence.clone(),
+        verification_job_id: allocation.verification_job_id.clone(),
+        artifact_id: allocation.artifact_id.clone(),
+        blob_id: allocation.blob_id.clone(),
+        descriptor_digest: raw_digest(&descriptor_bytes),
+        descriptor_bytes,
+        media_type: media_type.to_owned(),
+    };
+    let WorkloadArtifactStagePreflight::Authorized(authority) = repository
+        .authorize_workload_artifact_stage(&request)
+        .await
+        .unwrap()
+    else {
+        panic!("first Context Dataset Artifact stage must require storage evidence");
+    };
+    assert_eq!(authority.caller, ArtifactWorkloadAudience::ContextWorker);
+    let staged_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository
+            .stage_workload_artifact(StageWorkloadArtifact {
+                schema_version: 1,
+                tenant_id: tenant_id.clone(),
+                caller: ArtifactWorkloadAudience::ContextWorker,
+                producer_job_id: producer_job_id.clone(),
+                producer_fence: producer_fence.clone(),
+                verification_job_id: request.verification_job_id.clone(),
+                artifact_id: request.artifact_id.clone(),
+                blob_id: request.blob_id.clone(),
+                content_digest: request.descriptor_digest.clone(),
+                size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+                media_type: request.media_type.clone(),
+                storage_backend: "s3".to_owned(),
+                storage_binding_digest: authority.write_storage_binding_digest,
+                object_reference_ciphertext: vec![0x6b; 48],
+                object_generation: format!("context-dataset-generation-{suffix}"),
+                key_id: "context-dataset-key".to_owned(),
+                encryption_domain_id: authority.encryption_domain_id,
+                backend_evidence_digest: named_digest(&format!("context-dataset-stage-{suffix}")),
+                staged_at,
+            })
+            .await
+            .unwrap(),
+        CommandOutcome::Applied(_)
+    ));
+    request
+}
+
+async fn scan_context_dataset_artifacts(
+    pool: &PgPool,
+    repository: &PgRepository,
+    tenant_id: &ResourceId,
+    requests: &[StageWorkloadArtifactRequest],
+    suffix: u16,
+) {
+    scan_context_dataset_artifacts_with_dispositions(
+        pool,
+        repository,
+        tenant_id,
+        requests,
+        suffix,
+        &vec![ArtifactScanDisposition::Verified; requests.len()],
+    )
+    .await;
+}
+
+async fn scan_context_dataset_artifacts_with_dispositions(
+    pool: &PgPool,
+    repository: &PgRepository,
+    tenant_id: &ResourceId,
+    requests: &[StageWorkloadArtifactRequest],
+    suffix: u16,
+    dispositions: &[ArtifactScanDisposition],
+) {
+    assert_eq!(requests.len(), dispositions.len());
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, suffix);
+    let mut claims = repository
+        .claim_artifact_jobs(ClaimArtifactJobs {
+            role: ArtifactWorkerRole::DataWorker,
+            worker_id: worker_id.clone(),
+            limit: u16::try_from(requests.len()).unwrap(),
+            lease_milliseconds: 60_000,
+            lease_token_digests: (0..requests.len())
+                .map(|index| named_digest(&format!("context-dataset-scan-{suffix}-{index}")))
+                .collect(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), requests.len());
+    claims.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+    for (index, claim) in claims.into_iter().enumerate() {
+        let request = requests
+            .iter()
+            .find(|request| request.verification_job_id.to_string() == claim.job_id)
+            .unwrap();
+        let token: Sha256Digest = claim.lease_token_digest.as_ref().unwrap().parse().unwrap();
+        let started = repository
+            .start_job(RepositoryJobFence {
+                tenant_id: tenant_id.to_string(),
+                job_id: claim.job_id,
+                worker_id: worker_id.clone(),
+                lease_epoch: claim.lease_epoch,
+                expected_job_version: claim.version,
+                lease_token_digest: token.clone(),
+            })
+            .await
+            .unwrap();
+        let execution = repository
+            .load_started_artifact_execution(
+                ArtifactWorkerRole::DataWorker,
+                tenant_id.clone(),
+                request.verification_job_id.clone(),
+                JobFence {
+                    expected_version: u64::try_from(started.version).unwrap(),
+                    worker_process_generation_id: worker_id.clone(),
+                    lease_generation: u64::try_from(started.lease_epoch).unwrap(),
+                    token_digest: token,
+                },
+                ArtifactExecutionSlot {
+                    receipt_id: id(
+                        ResourceKind::Receipt,
+                        suffix + 1 + u16::try_from(index * 4).unwrap(),
+                    ),
+                    event_id: id(
+                        ResourceKind::Event,
+                        suffix + 2 + u16::try_from(index * 4).unwrap(),
+                    ),
+                    outbox_id: id(
+                        ResourceKind::OutboxEvent,
+                        suffix + 3 + u16::try_from(index * 4).unwrap(),
+                    ),
+                    duplicate_blob_cleanup_job_id: id(
+                        ResourceKind::Job,
+                        suffix + 4 + u16::try_from(index * 4).unwrap(),
+                    ),
+                    receipt_expires_at: Utc::now() + Duration::minutes(10),
+                },
+            )
+            .await
+            .unwrap();
+        let StartedArtifactExecution::Scan(execution) = execution else {
+            panic!("Context Dataset verification must start as an Artifact scan");
+        };
+        let observed_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let service = ArtifactWorkerService::new(
+            ContextDatasetArtifactScanner {
+                content_digest: request.descriptor_digest.clone(),
+                size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+                media_type: request.media_type.clone(),
+                observed_at,
+                disposition: dispositions[index],
+            },
+            UnusedContextDatasetBlobBackend,
+            repository.clone(),
+        );
+        assert!(matches!(
+            service.execute_scan(execution, observed_at).await.unwrap(),
+            CommandOutcome::Applied(_)
+        ));
+    }
 }
 
 fn closed_object_schema(property: &str) -> ClosedJsonSchema {
@@ -803,6 +1077,8 @@ async fn seed_fixture_with_backend(
     let implementation_resource = id(ResourceKind::ContextSourceImplementation, 0x13);
     let capability_resource = id(ResourceKind::CapabilityInterface, 0x14);
     let capability_implementation_resource = id(ResourceKind::CapabilityImplementation, 0x15);
+    let retention_policy_resource = id(ResourceKind::Policy, 0x16);
+    let artifact_io_policy_resource = id(ResourceKind::Policy, 0x17);
     for (resource, kind) in [
         (&policy_resource, RegistryResourceKind::Policy),
         (&agent_resource, RegistryResourceKind::Agent),
@@ -822,6 +1098,8 @@ async fn seed_fixture_with_backend(
             &capability_implementation_resource,
             RegistryResourceKind::CapabilityImplementation,
         ),
+        (&retention_policy_resource, RegistryResourceKind::Policy),
+        (&artifact_io_policy_resource, RegistryResourceKind::Policy),
     ] {
         insert_resource(pool, &tenant_id, resource, kind, &principal_id).await;
     }
@@ -941,9 +1219,182 @@ async fn seed_fixture_with_backend(
         scheduling_deployment_payload.digest.parse().unwrap(),
     )
     .unwrap();
+    let retention = ArtifactRetentionPolicy {
+        version: 1,
+        minimum_retention_seconds: 3_600,
+        gc_grace_seconds: 3_600,
+        tombstone_retention_seconds: 86_400,
+        retain_provenance_sources: true,
+        delete_requires_approval: false,
+    };
+    let retention_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x2d),
+        retention.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    insert_version(
+        pool,
+        &tenant_id,
+        &retention_policy_resource,
+        RegistryResourceKind::Policy,
+        &retention_policy,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                authoring_package: authoring(0xa6),
+                contract_digest: named_digest("retention-contract"),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::Retention,
+                rules_digest: retention.canonical_digest().unwrap(),
+                selection: None,
+                scheduling: None,
+                retention: Some(retention),
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: None,
+                sandbox_secret_resolution: None,
+            })),
+            validation: validation(),
+        },
+    )
+    .await;
+    let artifact_io = SandboxArtifactIoPolicyDocument {
+        schema_version: 3,
+        allowed_input_media_types: vec![],
+        allowed_output_media_types: vec![
+            insight_platform_context::CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE.to_owned(),
+            insight_platform_context::CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE.to_owned(),
+        ],
+        maximum_input_artifacts: 0,
+        maximum_output_artifacts: 2,
+        scanner_contract_digest: named_digest("context-dataset-scanner"),
+        verification_evidence_ttl_milliseconds: 60_000,
+        verification_retry_backoff_milliseconds: 1_000,
+        write_storage_binding_digest: named_digest("context-dataset-storage"),
+        encryption_domain_id: id(ResourceKind::EncryptionDomain, 0x2e),
+        deny_symlink: true,
+        deny_hardlink: true,
+        deny_device: true,
+        deny_fifo: true,
+        deny_socket: true,
+        deny_sparse_file: true,
+        archive_expansion_disabled: true,
+    };
+    let artifact_io_policy = ExactVersionRef::new(
+        id(ResourceKind::PolicyRevision, 0x2f),
+        artifact_io.canonical_digest().unwrap(),
+    )
+    .unwrap();
+    insert_version(
+        pool,
+        &tenant_id,
+        &artifact_io_policy_resource,
+        RegistryResourceKind::Policy,
+        &artifact_io_policy,
+        1,
+        &principal_id,
+        PublishedVersionPayload {
+            document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
+                authoring_package: authoring(0xa7),
+                contract_digest: named_digest("artifact-io-contract"),
+                dependency_versions: vec![],
+                policy_versions: vec![],
+                policy_kind: PolicyKind::ArtifactIo,
+                rules_digest: artifact_io.canonical_digest().unwrap(),
+                selection: None,
+                scheduling: None,
+                retention: None,
+                model_safety: None,
+                model_budget: None,
+                model_public_projection: None,
+                mcp_protocol: None,
+                mcp_auth: None,
+                sandbox_isolation: None,
+                sandbox_resource: None,
+                sandbox_network: None,
+                sandbox_artifact_io: Some(artifact_io),
+                sandbox_secret_resolution: None,
+            })),
+            validation: validation(),
+        },
+    )
+    .await;
+    let retention_deployment_id = id(ResourceKind::PolicyDeployment, 0x7a);
+    let retention_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: retention_policy.clone(),
+            applicability_digest: named_digest("retention-applicability"),
+            qualification_evidence: artifact(0xa2),
+        }),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &retention_deployment_id,
+        &retention_policy_resource,
+        &retention_policy.revision_id,
+        &principal_id,
+        &retention_deployment_payload,
+    )
+    .await;
+    sqlx::query("UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2")
+        .bind(tenant_id.to_string())
+        .bind(retention_policy_resource.to_string())
+        .bind(retention_deployment_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let retention_deployment = ExactDeploymentRef::new(
+        retention_deployment_id,
+        retention_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
+    let artifact_io_deployment_id = id(ResourceKind::PolicyDeployment, 0x7b);
+    let artifact_io_deployment_payload = TypedPayload::new(
+        1,
+        &DeploymentClosure::Policy(PolicyDeploymentClosure {
+            policy_revision: artifact_io_policy.clone(),
+            applicability_digest: named_digest("artifact-io-applicability"),
+            qualification_evidence: artifact(0xa2),
+        }),
+    )
+    .unwrap();
+    insert_deployment(
+        pool,
+        &tenant_id,
+        &artifact_io_deployment_id,
+        &artifact_io_policy_resource,
+        &artifact_io_policy.revision_id,
+        &principal_id,
+        &artifact_io_deployment_payload,
+    )
+    .await;
+    sqlx::query("UPDATE insight_platform.resources SET active_deployment_id = $3 WHERE tenant_id = $1 AND resource_id = $2")
+        .bind(tenant_id.to_string())
+        .bind(artifact_io_policy_resource.to_string())
+        .bind(artifact_io_deployment_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let artifact_io_deployment = ExactDeploymentRef::new(
+        artifact_io_deployment_id,
+        artifact_io_deployment_payload.digest.parse().unwrap(),
+    )
+    .unwrap();
     let tenant_config = TenantConfig {
         scheduling_policy: Some(scheduling_deployment),
-        ..TenantConfig::default()
+        artifact_retention_policy: Some(retention_deployment),
+        artifact_io_policy: Some(artifact_io_deployment),
     };
     let tenant_config_payload = TypedPayload::new(1, &tenant_config).unwrap();
     sqlx::query(
@@ -956,6 +1407,19 @@ async fn seed_fixture_with_backend(
     .execute(pool)
     .await
     .unwrap();
+    repository
+        .create_quota_account(NewQuotaAccount {
+            tenant_id: tenant_id.to_string(),
+            quota_account_id: id(ResourceKind::QuotaAccount, 0x7c).to_string(),
+            scope_kind: "tenant".to_owned(),
+            scope_id: tenant_id.to_string(),
+            work_class: WorkClass::Artifact.as_str().to_owned(),
+            metric: "artifact.staging_bytes".to_owned(),
+            limit_value: 8_388_608,
+            payload: TypedPayload::new(1, &json!({"fixture": "context-dataset-artifact"})).unwrap(),
+        })
+        .await
+        .unwrap();
 
     let interface_revision = version(ResourceKind::ContextSourceInterfaceRevision, 0x30);
     let implementation_revision = version(ResourceKind::ContextSourceImplementationRevision, 0x31);
@@ -2456,6 +2920,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         context_deployment: fixture.context_deployment.clone(),
         dataset_id: dataset_id.clone(),
         job_id: id(ResourceKind::Job, 0x704),
+        artifact_preallocations: dataset_artifact_preallocations(0xb00),
         attempt_limit: 3,
         deadline: Utc::now() + Duration::hours(1),
     };
@@ -2532,28 +2997,116 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .unwrap();
     let build_payload: ContextDatasetBuildJobPayload =
         serde_json::from_value(started.payload.value.clone()).unwrap();
+    let producer_fence = JobFence {
+        expected_version: u64::try_from(started.version).unwrap(),
+        worker_process_generation_id: worker_id,
+        lease_generation: u64::try_from(started.lease_epoch).unwrap(),
+        token_digest: lease_token_digest,
+    };
+    let index_request = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &build_payload.job_id,
+        &producer_fence,
+        &build_payload.artifact_preallocations.index_manifest,
+        &build_payload.artifact_stages.index_manifest.declared_media_type,
+        br#"{"items":[{"content":"local deterministic context item","ordinal":0}],"schema_version":1}"#.to_vec(),
+        0xb30,
+    )
+    .await;
+    let validation_request = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &build_payload.job_id,
+        &producer_fence,
+        &build_payload.artifact_preallocations.validation_evidence,
+        &build_payload
+            .artifact_stages
+            .validation_evidence
+            .declared_media_type,
+        br#"{"item_count":1,"schema_version":1,"valid":true}"#.to_vec(),
+        0xb31,
+    )
+    .await;
+    let parked = repository
+        .park_context_dataset_build_for_verification(ParkContextDatasetBuildVerification {
+            tenant_id: fixture.tenant_id.clone(),
+            job_id: build_payload.job_id.clone(),
+            dataset_id: dataset_id.clone(),
+            fence: producer_fence,
+            event_id: id(ResourceKind::Event, 0xb32),
+            outbox_id: id(ResourceKind::OutboxEvent, 0xb33),
+        })
+        .await
+        .unwrap();
+    assert_eq!(parked.state, JobState::Waiting.to_string());
+    scan_context_dataset_artifacts(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &[index_request, validation_request],
+        0xb40,
+    )
+    .await;
+    let resumed_worker = id(ResourceKind::WorkerProcessGeneration, 0xb50);
+    let resumed_token = named_digest("dataset-build-resumed-lease");
+    let resumed_claim = repository
+        .claim_context_dataset_build_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: resumed_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![resumed_token.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let resumed_started = repository
+        .start_context_dataset_build_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: resumed_claim.job_id,
+            worker_id: resumed_worker.clone(),
+            lease_epoch: resumed_claim.lease_epoch,
+            expected_job_version: resumed_claim.version,
+            lease_token_digest: resumed_token.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed_started.attempt_no, started.attempt_no);
+    let resumed_fence = JobFence {
+        expected_version: u64::try_from(resumed_started.version).unwrap(),
+        worker_process_generation_id: resumed_worker,
+        lease_generation: u64::try_from(resumed_started.lease_epoch).unwrap(),
+        token_digest: resumed_token.clone(),
+    };
+    let resolved = repository
+        .resolve_context_dataset_build(
+            fixture.tenant_id.clone(),
+            build_payload.job_id.clone(),
+            resumed_fence.clone(),
+        )
+        .await
+        .unwrap();
     let completion = CommitContextDatasetBuild {
         tenant_id: fixture.tenant_id.clone(),
-        job_id: started.job_id.parse().unwrap(),
+        job_id: build_payload.job_id.clone(),
         dataset_id: dataset_id.clone(),
-        generation_id: id(ResourceKind::DatasetGeneration, 0x731),
-        fence: insight_platform_jobs::JobFence {
-            expected_version: u64::try_from(started.version).unwrap(),
-            worker_process_generation_id: worker_id,
-            lease_generation: u64::try_from(started.lease_epoch).unwrap(),
-            token_digest: lease_token_digest.clone(),
-        },
-        lease_token_digest,
+        generation_id: build_payload.artifact_preallocations.generation_id.clone(),
+        fence: resumed_fence,
+        lease_token_digest: resumed_token,
         generation: ContextDatasetGenerationSpec {
-            context_deployment: build_payload.context_deployment,
-            source_manifest_digest: named_digest("dataset-source-manifest"),
-            parser_profile: build_payload.parser_profile,
-            chunker_profile: build_payload.chunker_profile,
-            embedding_model_deployment: build_payload.embedding_model_deployment,
-            ranking_profile: build_payload.ranking_profile,
-            index_manifest: artifact(0xa2),
-            validation_evidence: artifact(0xa2),
-            created_by_operation_id: started.job_id.parse().unwrap(),
+            context_deployment: resolved.payload.context_deployment,
+            source_manifest_digest: resolved.index_manifest.content_digest().clone(),
+            parser_profile: resolved.payload.parser_profile,
+            chunker_profile: resolved.payload.chunker_profile,
+            embedding_model_deployment: resolved.payload.embedding_model_deployment,
+            ranking_profile: resolved.payload.ranking_profile,
+            index_manifest: resolved.index_manifest,
+            validation_evidence: resolved.validation_evidence,
+            created_by_operation_id: build_payload.job_id,
         },
         event_id: id(ResourceKind::Event, 0x732),
         outbox_id: id(ResourceKind::OutboxEvent, 0x733),
@@ -2593,6 +3146,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
             context_deployment: fixture.context_deployment.clone(),
             dataset_id: dataset_id.clone(),
             job_id: id(ResourceKind::Job, 0x743),
+            artifact_preallocations: dataset_artifact_preallocations(0xb10),
             attempt_limit: 3,
             deadline: Utc::now() + Duration::hours(1),
         })
@@ -2635,30 +3189,121 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         Some(first_generation_id)
     );
     assert_eq!(rebuild_payload.expected_dataset_version, Some(1));
-    let second_generation_id = id(ResourceKind::DatasetGeneration, 0x745);
+    let rebuild_fence = JobFence {
+        expected_version: u64::try_from(rebuild_started.version).unwrap(),
+        worker_process_generation_id: rebuild_worker,
+        lease_generation: u64::try_from(rebuild_started.lease_epoch).unwrap(),
+        token_digest: rebuild_token,
+    };
+    let rebuild_index = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &rebuild_payload.job_id,
+        &rebuild_fence,
+        &rebuild_payload.artifact_preallocations.index_manifest,
+        &rebuild_payload.artifact_stages.index_manifest.declared_media_type,
+        br#"{"items":[{"content":"updated deterministic context item","ordinal":0}],"schema_version":1}"#.to_vec(),
+        0xb60,
+    )
+    .await;
+    let rebuild_validation = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &rebuild_payload.job_id,
+        &rebuild_fence,
+        &rebuild_payload
+            .artifact_preallocations
+            .validation_evidence,
+        &rebuild_payload
+            .artifact_stages
+            .validation_evidence
+            .declared_media_type,
+        br#"{"item_count":1,"schema_version":1,"valid":true}"#.to_vec(),
+        0xb61,
+    )
+    .await;
+    repository
+        .park_context_dataset_build_for_verification(ParkContextDatasetBuildVerification {
+            tenant_id: fixture.tenant_id.clone(),
+            job_id: rebuild_payload.job_id.clone(),
+            dataset_id: dataset_id.clone(),
+            fence: rebuild_fence,
+            event_id: id(ResourceKind::Event, 0xb62),
+            outbox_id: id(ResourceKind::OutboxEvent, 0xb63),
+        })
+        .await
+        .unwrap();
+    scan_context_dataset_artifacts(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &[rebuild_index, rebuild_validation],
+        0xb70,
+    )
+    .await;
+    let rebuild_resumed_worker = id(ResourceKind::WorkerProcessGeneration, 0xb80);
+    let rebuild_resumed_token = named_digest("dataset-rebuild-resumed-lease");
+    let rebuild_resumed_claim = repository
+        .claim_context_dataset_build_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: rebuild_resumed_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![rebuild_resumed_token.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let rebuild_resumed_started = repository
+        .start_context_dataset_build_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: rebuild_resumed_claim.job_id,
+            worker_id: rebuild_resumed_worker.clone(),
+            lease_epoch: rebuild_resumed_claim.lease_epoch,
+            expected_job_version: rebuild_resumed_claim.version,
+            lease_token_digest: rebuild_resumed_token.clone(),
+        })
+        .await
+        .unwrap();
+    let rebuild_resumed_fence = JobFence {
+        expected_version: u64::try_from(rebuild_resumed_started.version).unwrap(),
+        worker_process_generation_id: rebuild_resumed_worker,
+        lease_generation: u64::try_from(rebuild_resumed_started.lease_epoch).unwrap(),
+        token_digest: rebuild_resumed_token.clone(),
+    };
+    let rebuild_resolved = repository
+        .resolve_context_dataset_build(
+            fixture.tenant_id.clone(),
+            rebuild_payload.job_id.clone(),
+            rebuild_resumed_fence.clone(),
+        )
+        .await
+        .unwrap();
+    let second_generation_id = rebuild_payload
+        .artifact_preallocations
+        .generation_id
+        .clone();
     repository
         .commit_context_dataset_build(CommitContextDatasetBuild {
             tenant_id: fixture.tenant_id.clone(),
-            job_id: rebuild_started.job_id.parse().unwrap(),
+            job_id: rebuild_payload.job_id.clone(),
             dataset_id: dataset_id.clone(),
             generation_id: second_generation_id.clone(),
-            fence: insight_platform_jobs::JobFence {
-                expected_version: u64::try_from(rebuild_started.version).unwrap(),
-                worker_process_generation_id: rebuild_worker,
-                lease_generation: u64::try_from(rebuild_started.lease_epoch).unwrap(),
-                token_digest: rebuild_token.clone(),
-            },
-            lease_token_digest: rebuild_token,
+            fence: rebuild_resumed_fence,
+            lease_token_digest: rebuild_resumed_token,
             generation: ContextDatasetGenerationSpec {
-                context_deployment: rebuild_payload.context_deployment,
-                source_manifest_digest: named_digest("dataset-rebuild-source-manifest"),
-                parser_profile: rebuild_payload.parser_profile,
-                chunker_profile: rebuild_payload.chunker_profile,
-                embedding_model_deployment: rebuild_payload.embedding_model_deployment,
-                ranking_profile: rebuild_payload.ranking_profile,
-                index_manifest: artifact(0xa2),
-                validation_evidence: artifact(0xa2),
-                created_by_operation_id: rebuild_started.job_id.parse().unwrap(),
+                context_deployment: rebuild_resolved.payload.context_deployment,
+                source_manifest_digest: rebuild_resolved.index_manifest.content_digest().clone(),
+                parser_profile: rebuild_resolved.payload.parser_profile,
+                chunker_profile: rebuild_resolved.payload.chunker_profile,
+                embedding_model_deployment: rebuild_resolved.payload.embedding_model_deployment,
+                ranking_profile: rebuild_resolved.payload.ranking_profile,
+                index_manifest: rebuild_resolved.index_manifest,
+                validation_evidence: rebuild_resolved.validation_evidence,
+                created_by_operation_id: rebuild_payload.job_id,
             },
             event_id: id(ResourceKind::Event, 0x746),
             outbox_id: id(ResourceKind::OutboxEvent, 0x747),
@@ -2682,6 +3327,186 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     .await
     .unwrap();
     assert_eq!(rebuilt, (2, second_generation_id.to_string(), 2));
+
+    let mut rejected_audit = audit(
+        &fixture.tenant_id,
+        &fixture.principal_id,
+        0xc00,
+        "dataset-rejected-rebuild",
+    );
+    rejected_audit.idempotency_key_digest = named_digest("dataset-rejected-rebuild-key");
+    rejected_audit.request_digest = named_digest("dataset-rejected-rebuild-request");
+    let rejected_job = match repository
+        .request_context_dataset_build(RequestContextDatasetBuild {
+            audit: rejected_audit,
+            context_resource_id: id(ResourceKind::ContextSourceInterface, 0x12),
+            context_deployment: fixture.context_deployment.clone(),
+            dataset_id: dataset_id.clone(),
+            job_id: id(ResourceKind::Job, 0xc04),
+            artifact_preallocations: dataset_artifact_preallocations(0xc10),
+            attempt_limit: 3,
+            deadline: Utc::now() + Duration::hours(1),
+        })
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(job) => job,
+        CommandOutcome::Replayed(_) => panic!("rejected Dataset rebuild must apply"),
+    };
+    let rejected_worker = id(ResourceKind::WorkerProcessGeneration, 0xc30);
+    let rejected_token = named_digest("dataset-rejected-build-lease");
+    let rejected_claim = repository
+        .claim_context_dataset_build_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: rejected_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![rejected_token.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(rejected_claim.job_id, rejected_job.job_id);
+    let rejected_started = repository
+        .start_context_dataset_build_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: rejected_claim.job_id,
+            worker_id: rejected_worker.clone(),
+            lease_epoch: rejected_claim.lease_epoch,
+            expected_job_version: rejected_claim.version,
+            lease_token_digest: rejected_token.clone(),
+        })
+        .await
+        .unwrap();
+    let rejected_payload: ContextDatasetBuildJobPayload =
+        serde_json::from_value(rejected_started.payload.value.clone()).unwrap();
+    let rejected_fence = JobFence {
+        expected_version: u64::try_from(rejected_started.version).unwrap(),
+        worker_process_generation_id: rejected_worker,
+        lease_generation: u64::try_from(rejected_started.lease_epoch).unwrap(),
+        token_digest: rejected_token,
+    };
+    let rejected_index = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &rejected_payload.job_id,
+        &rejected_fence,
+        &rejected_payload.artifact_preallocations.index_manifest,
+        &rejected_payload.artifact_stages.index_manifest.declared_media_type,
+        br#"{"items":[{"content":"rejected context item","ordinal":0}],"schema_version":1}"#
+            .to_vec(),
+        0xc40,
+    )
+    .await;
+    let rejected_validation = stage_context_dataset_artifact(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &rejected_payload.job_id,
+        &rejected_fence,
+        &rejected_payload
+            .artifact_preallocations
+            .validation_evidence,
+        &rejected_payload
+            .artifact_stages
+            .validation_evidence
+            .declared_media_type,
+        br#"{"item_count":1,"schema_version":1,"valid":false}"#.to_vec(),
+        0xc41,
+    )
+    .await;
+    repository
+        .park_context_dataset_build_for_verification(ParkContextDatasetBuildVerification {
+            tenant_id: fixture.tenant_id.clone(),
+            job_id: rejected_payload.job_id.clone(),
+            dataset_id: dataset_id.clone(),
+            fence: rejected_fence,
+            event_id: id(ResourceKind::Event, 0xc42),
+            outbox_id: id(ResourceKind::OutboxEvent, 0xc43),
+        })
+        .await
+        .unwrap();
+    scan_context_dataset_artifacts_with_dispositions(
+        &pool,
+        &repository,
+        &fixture.tenant_id,
+        &[rejected_index, rejected_validation],
+        0xc50,
+        &[
+            ArtifactScanDisposition::Verified,
+            ArtifactScanDisposition::Rejected,
+        ],
+    )
+    .await;
+    let rejected_resumed_worker = id(ResourceKind::WorkerProcessGeneration, 0xc70);
+    let rejected_resumed_token = named_digest("dataset-rejected-resumed-lease");
+    let rejected_resumed_claim = repository
+        .claim_context_dataset_build_jobs(ClaimJobs {
+            work_class: WorkClass::Context.to_string(),
+            worker_id: rejected_resumed_worker.clone(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            lease_token_digests: vec![rejected_resumed_token.clone()],
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let rejected_resumed_started = repository
+        .start_context_dataset_build_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: rejected_resumed_claim.job_id,
+            worker_id: rejected_resumed_worker.clone(),
+            lease_epoch: rejected_resumed_claim.lease_epoch,
+            expected_job_version: rejected_resumed_claim.version,
+            lease_token_digest: rejected_resumed_token.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(rejected_resumed_started.attempt_no, 1);
+    let failed = repository
+        .fail_context_dataset_build_verification(FailContextDatasetBuildVerification {
+            tenant_id: fixture.tenant_id.clone(),
+            job_id: rejected_payload.job_id.clone(),
+            dataset_id: dataset_id.clone(),
+            fence: JobFence {
+                expected_version: u64::try_from(rejected_resumed_started.version).unwrap(),
+                worker_process_generation_id: rejected_resumed_worker,
+                lease_generation: u64::try_from(rejected_resumed_started.lease_epoch).unwrap(),
+                token_digest: rejected_resumed_token,
+            },
+            event_id: id(ResourceKind::Event, 0xc72),
+            outbox_id: id(ResourceKind::OutboxEvent, 0xc73),
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.state, JobState::Failed.to_string());
+    let after_rejection: (i64, String, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT resource.version, resource.active_version_id,
+               count(version.resource_version_id), quota.reserved_value
+        FROM insight_platform.resources AS resource
+        JOIN insight_platform.resource_versions AS version
+          ON version.tenant_id = resource.tenant_id
+         AND version.resource_id = resource.resource_id
+        JOIN insight_platform.quota_accounts AS quota
+          ON quota.tenant_id = resource.tenant_id
+         AND quota.metric = 'artifact.staging_bytes'
+        WHERE resource.tenant_id = $1 AND resource.resource_id = $2
+        GROUP BY resource.version, resource.active_version_id, quota.reserved_value
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(dataset_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_rejection,
+        (2, second_generation_id.to_string(), 2, 0)
+    );
 
     let command = create_command(&fixture, 0x100);
     let mut cross_tenant = command.clone();

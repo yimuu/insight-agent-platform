@@ -2655,6 +2655,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-invocations",
  "insight-platform-jobs",

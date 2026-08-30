@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 chrono.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-artifacts.workspace = true
 insight-platform-invocations.workspace = true
 insight-platform-jobs.workspace = true
 serde.workspace = true

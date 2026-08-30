@@ -22,6 +22,8 @@ pub const MCP_CALLBACK_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-callback-api";
 pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
+pub const CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/context-dataset-worker";
 pub const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/sandbox-executor.wasi";
 pub const GVISOR_EXECUTOR_WORKLOAD_IDENTITY: &str =
@@ -105,6 +107,7 @@ mod tests {
             MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
             MCP_CALLBACK_WORKLOAD_IDENTITY,
             CONTEXT_WORKER_WORKLOAD_IDENTITY,
+            CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
             WASI_EXECUTOR_WORKLOAD_IDENTITY,
             GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
             SANDBOX_CONTROLLER_WORKLOAD_IDENTITY,

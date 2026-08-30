@@ -52,7 +52,10 @@ use insight_platform_api::{
     },
     trace::establish_public_trace,
 };
-use insight_platform_context::RequestContextDatasetBuild;
+use insight_platform_context::{
+    ContextDatasetArtifactPreallocation, ContextDatasetArtifactPreallocations,
+    RequestContextDatasetBuild,
+};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExternalLeafFailureMutationIds,
@@ -1845,6 +1848,7 @@ impl ResourceApplication for PgResources {
                 context_deployment: exact_deployment,
                 dataset_id,
                 job_id: new_id(ResourceKind::Job)?,
+                artifact_preallocations: new_context_dataset_artifact_preallocations()?,
                 attempt_limit: 3,
                 deadline: intent.deadline,
             })
@@ -2522,6 +2526,29 @@ fn resource_view_from_record(
 fn new_id(kind: ResourceKind) -> Result<ResourceId, ResourceApplicationError> {
     ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
         .map_err(|_| ResourceApplicationError::Internal)
+}
+
+fn new_context_dataset_artifact_preallocations(
+) -> Result<ContextDatasetArtifactPreallocations, ResourceApplicationError> {
+    let allocation = || {
+        Ok(ContextDatasetArtifactPreallocation {
+            schema_version: 1,
+            artifact_id: new_id(ResourceKind::Artifact)?,
+            blob_id: new_id(ResourceKind::InternalBlob)?,
+            verification_job_id: new_id(ResourceKind::Job)?,
+            quota_entry_id: new_id(ResourceKind::QuotaLedgerEntry)?,
+        })
+    };
+    let preallocations = ContextDatasetArtifactPreallocations {
+        schema_version: 1,
+        generation_id: new_id(ResourceKind::DatasetGeneration)?,
+        index_manifest: allocation()?,
+        validation_evidence: allocation()?,
+    };
+    preallocations
+        .validate()
+        .map_err(|_| ResourceApplicationError::Internal)?;
+    Ok(preallocations)
 }
 
 fn map_resource_repository_error(error: RepositoryError) -> ResourceApplicationError {

@@ -465,6 +465,7 @@ impl StageWorkloadArtifactRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedWorkloadArtifactStage {
+    pub caller: insight_platform_contracts::ArtifactWorkloadAudience,
     pub tenant_id: ResourceId,
     pub producer_job_id: ResourceId,
     pub verification_job_id: ResourceId,
@@ -486,6 +487,11 @@ impl AuthorizedWorkloadArtifactStage {
     ) -> Result<(), ArtifactWorkError> {
         request.validate()?;
         if self.tenant_id != request.tenant_id
+            || !matches!(
+                self.caller,
+                insight_platform_contracts::ArtifactWorkloadAudience::McpHost
+                    | insight_platform_contracts::ArtifactWorkloadAudience::ContextWorker
+            )
             || self.producer_job_id != request.producer_job_id
             || self.verification_job_id != request.verification_job_id
             || self.artifact_id != request.artifact_id
@@ -550,7 +556,11 @@ impl StageWorkloadArtifact {
         awaiting.validate()?;
         if self.schema_version != 1
             || self.tenant_id.kind() != ResourceKind::Tenant
-            || self.caller != insight_platform_contracts::ArtifactWorkloadAudience::McpHost
+            || !matches!(
+                self.caller,
+                insight_platform_contracts::ArtifactWorkloadAudience::McpHost
+                    | insight_platform_contracts::ArtifactWorkloadAudience::ContextWorker
+            )
             || self.producer_job_id != awaiting.producer_job_id
             || self.verification_job_id == self.producer_job_id
             || self.producer_fence.expected_version == 0
@@ -2340,6 +2350,7 @@ mod tests {
         assert!(request.validate().is_ok());
         assert!(request.validate_for(&stage, now).is_ok());
         let authorized = AuthorizedWorkloadArtifactStage {
+            caller: insight_platform_contracts::ArtifactWorkloadAudience::McpHost,
             tenant_id: request.tenant_id.clone(),
             producer_job_id: request.producer_job_id.clone(),
             verification_job_id: request.verification_job_id.clone(),

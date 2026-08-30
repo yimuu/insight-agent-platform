@@ -15,6 +15,7 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
+    CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
 use insight_platform_sandbox::{
@@ -218,6 +219,31 @@ impl tonic::service::Interceptor for McpDiscoveryWorkerWorkloadIdentity {
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY)?;
+        require_trace_interceptor(request)
+    }
+}
+
+/// Authorizes the two independent trusted producer roles that may stage bounded workload output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkloadArtifactProducerIdentity;
+
+impl tonic::service::Interceptor for WorkloadArtifactProducerIdentity {
+    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
+        if require_exact_workload_uri(leaf.as_ref(), MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY)
+            .is_err()
+            && require_exact_workload_uri(leaf.as_ref(), CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY)
+                .is_err()
+        {
+            return Err(Status::permission_denied(
+                "workload Artifact producer identity is not authorized",
+            ));
+        }
         require_trace_interceptor(request)
     }
 }
@@ -2083,6 +2109,8 @@ mod tests {
         scheduler_key_pem: String,
         discovery_certificate_pem: String,
         discovery_key_pem: String,
+        context_dataset_certificate_pem: String,
+        context_dataset_key_pem: String,
         mcp_host_certificate_pem: String,
         mcp_host_key_pem: String,
     }
@@ -2133,6 +2161,12 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
+        let (context_dataset_certificate_pem, context_dataset_key_pem) = issue(
+            vec![SanType::URI(
+                CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY.try_into().unwrap(),
+            )],
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         let (mcp_host_certificate_pem, mcp_host_key_pem) = issue(
             vec![SanType::URI(
                 "spiffe://insight.platform/workload/mcp-host"
@@ -2153,6 +2187,8 @@ mod tests {
             scheduler_key_pem,
             discovery_certificate_pem,
             discovery_key_pem,
+            context_dataset_certificate_pem,
+            context_dataset_key_pem,
             mcp_host_certificate_pem,
             mcp_host_key_pem,
         }
@@ -2565,7 +2601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workload_stage_mtls_accepts_only_discovery_worker_before_authority() {
+    async fn workload_stage_mtls_accepts_exact_discovery_and_context_dataset_workers() {
         let fixture = mtls_fixture();
         let authority = Arc::new(RecordingStageAuthority {
             calls: AtomicUsize::new(0),
@@ -2582,7 +2618,7 @@ mod tests {
             .max_decoding_message_size(rpc_limits.maximum_message_bytes());
         let service = tonic::service::interceptor::InterceptedService::new(
             service,
-            McpDiscoveryWorkerWorkloadIdentity,
+            WorkloadArtifactProducerIdentity,
         );
         let tls = ServerTlsConfig::new()
             .identity(Identity::from_pem(
@@ -2637,6 +2673,25 @@ mod tests {
         assert_eq!(staged.artifact_id, request.artifact_id);
         assert_eq!(authority.calls.load(Ordering::Acquire), 1);
 
+        let context_channel = channel(
+            &endpoint,
+            &fixture,
+            &fixture.context_dataset_certificate_pem,
+            &fixture.context_dataset_key_pem,
+        )
+        .await;
+        let context_client = ArtifactDataWorkerGrpcClient::new(context_channel, rpc_limits);
+        let trace =
+            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
+        let context_staged = scope_trace(
+            trace,
+            context_client.stage_workload_artifact(request.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(context_staged.artifact_id, request.artifact_id);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 2);
+
         let wrong_channel = channel(
             &endpoint,
             &fixture,
@@ -2653,7 +2708,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
-        assert_eq!(authority.calls.load(Ordering::Acquire), 1);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 2);
 
         let old_host_channel = channel(
             &endpoint,
@@ -2671,9 +2726,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
-        assert_eq!(authority.calls.load(Ordering::Acquire), 1);
+        assert_eq!(authority.calls.load(Ordering::Acquire), 2);
 
         drop(client);
+        drop(context_client);
         drop(wrong);
         drop(old_host);
         shutdown_sender.send(()).unwrap();

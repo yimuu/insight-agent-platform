@@ -1,5 +1,6 @@
 use crate::ContextQueryError;
 use chrono::{DateTime, Utc};
+use insight_platform_artifacts::ArtifactAwaitingStageSnapshot;
 use insight_platform_contracts::{
     canonical_digest, ArtifactRef, ClosedJsonValue, CommandAudit, ContextBindingSnapshot,
     ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationResourceSpec,
@@ -8,13 +9,119 @@ use insight_platform_contracts::{
     PrincipalSnapshot, ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::ExactInvocationValueRef;
-use insight_platform_jobs::JobFence;
+use insight_platform_jobs::{JobFence, WakeContract};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const MAX_CONTEXT_SAFE_CODE_BYTES: usize = 128;
 pub const MAX_CONTEXT_LOCATOR_SEGMENTS: usize = 64;
 pub const MAX_CONTEXT_LOCATOR_SEGMENT_BYTES: usize = 256;
+pub const MAX_CONTEXT_DATASET_ARTIFACT_BYTES: u64 = 1_048_576;
+pub const CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE: &str =
+    "application/vnd.insight.context-index-manifest+json";
+pub const CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE: &str =
+    "application/vnd.insight.context-validation-evidence+json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetArtifactPreallocation {
+    pub schema_version: u32,
+    pub artifact_id: ResourceId,
+    pub blob_id: ResourceId,
+    pub verification_job_id: ResourceId,
+    pub quota_entry_id: ResourceId,
+}
+
+impl ContextDatasetArtifactPreallocation {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        if self.schema_version != 1
+            || self.artifact_id.kind() != ResourceKind::Artifact
+            || self.blob_id.kind() != ResourceKind::InternalBlob
+            || self.verification_job_id.kind() != ResourceKind::Job
+            || self.quota_entry_id.kind() != ResourceKind::QuotaLedgerEntry
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetArtifactPreallocations {
+    pub schema_version: u32,
+    pub generation_id: ResourceId,
+    pub index_manifest: ContextDatasetArtifactPreallocation,
+    pub validation_evidence: ContextDatasetArtifactPreallocation,
+}
+
+impl ContextDatasetArtifactPreallocations {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        self.index_manifest.validate()?;
+        self.validation_evidence.validate()?;
+        let identities = [
+            &self.index_manifest.artifact_id,
+            &self.index_manifest.blob_id,
+            &self.index_manifest.verification_job_id,
+            &self.index_manifest.quota_entry_id,
+            &self.validation_evidence.artifact_id,
+            &self.validation_evidence.blob_id,
+            &self.validation_evidence.verification_job_id,
+            &self.validation_evidence.quota_entry_id,
+        ];
+        let unique = identities
+            .iter()
+            .map(|identity| identity.to_string())
+            .collect::<BTreeSet<_>>();
+        if self.schema_version != 1
+            || self.generation_id.kind() != ResourceKind::DatasetGeneration
+            || unique.len() != identities.len()
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetArtifactStages {
+    pub schema_version: u32,
+    pub index_manifest: ArtifactAwaitingStageSnapshot,
+    pub validation_evidence: ArtifactAwaitingStageSnapshot,
+}
+
+impl ContextDatasetArtifactStages {
+    pub fn validate_for(
+        &self,
+        job_id: &ResourceId,
+        preallocations: &ContextDatasetArtifactPreallocations,
+    ) -> Result<(), ContextQueryError> {
+        preallocations.validate()?;
+        let pairs = [
+            (&self.index_manifest, &preallocations.index_manifest),
+            (
+                &self.validation_evidence,
+                &preallocations.validation_evidence,
+            ),
+        ];
+        if self.schema_version != 1
+            || pairs.iter().any(|(stage, allocation)| {
+                stage.validate().is_err()
+                    || stage.producer_job_id != *job_id
+                    || stage.artifact_id != allocation.artifact_id
+                    || stage.blob_id != allocation.blob_id
+                    || stage.quota_entry_id != allocation.quota_entry_id
+            })
+            || self.index_manifest.declared_media_type != CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE
+            || self.validation_evidence.declared_media_type
+                != CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RequestContextDatasetBuild {
@@ -23,6 +130,7 @@ pub struct RequestContextDatasetBuild {
     pub context_deployment: ExactDeploymentRef,
     pub dataset_id: ResourceId,
     pub job_id: ResourceId,
+    pub artifact_preallocations: ContextDatasetArtifactPreallocations,
     pub attempt_limit: u16,
     pub deadline: DateTime<Utc>,
 }
@@ -37,6 +145,18 @@ impl RequestContextDatasetBuild {
             || self.context_deployment.validate().is_err()
             || self.dataset_id.kind() != ResourceKind::ContextDataset
             || self.job_id.kind() != ResourceKind::Job
+            || self.artifact_preallocations.validate().is_err()
+            || [
+                &self
+                    .artifact_preallocations
+                    .index_manifest
+                    .verification_job_id,
+                &self
+                    .artifact_preallocations
+                    .validation_evidence
+                    .verification_job_id,
+            ]
+            .contains(&&self.job_id)
             || self.attempt_limit == 0
             || self.attempt_limit > 8
             || self.deadline <= now
@@ -53,6 +173,7 @@ pub struct ContextDatasetBuildJobPayload {
     pub schema_version: u32,
     pub job_id: ResourceId,
     pub dataset_id: ResourceId,
+    pub principal_id: ResourceId,
     pub context_resource_id: ResourceId,
     pub context_deployment: ExactDeploymentRef,
     pub parser_profile: ExactVersionRef,
@@ -62,6 +183,9 @@ pub struct ContextDatasetBuildJobPayload {
     pub data_policy: ExactVersionRef,
     pub expected_dataset_version: Option<u64>,
     pub expected_active_generation_id: Option<ResourceId>,
+    pub artifact_preallocations: ContextDatasetArtifactPreallocations,
+    pub artifact_stages: ContextDatasetArtifactStages,
+    pub wake_contract: Option<WakeContract>,
     pub deadline: DateTime<Utc>,
 }
 
@@ -99,6 +223,62 @@ pub struct CommitContextDatasetBuild {
     pub outbox_id: ResourceId,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParkContextDatasetBuildVerification {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub dataset_id: ResourceId,
+    pub fence: JobFence,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
+pub struct FailContextDatasetBuildVerification {
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub dataset_id: ResourceId,
+    pub fence: JobFence,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+}
+
+impl FailContextDatasetBuildVerification {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.job_id.kind() != ResourceKind::Job
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || self.fence.expected_version == 0
+            || self.fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.fence.lease_generation == 0
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
+impl ParkContextDatasetBuildVerification {
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        if self.tenant_id.kind() != ResourceKind::Tenant
+            || self.job_id.kind() != ResourceKind::Job
+            || self.dataset_id.kind() != ResourceKind::ContextDataset
+            || self.fence.expected_version == 0
+            || self.fence.worker_process_generation_id.kind()
+                != ResourceKind::WorkerProcessGeneration
+            || self.fence.lease_generation == 0
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+        {
+            return Err(ContextQueryError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
 impl CommitContextDatasetBuild {
     pub fn validate(&self) -> Result<(), ContextQueryError> {
         if self.tenant_id.kind() != ResourceKind::Tenant
@@ -127,11 +307,13 @@ impl ContextDatasetBuildJobPayload {
         closure: &ContextDeploymentClosure,
         expected_dataset_version: Option<u64>,
         expected_active_generation_id: Option<ResourceId>,
+        artifact_stages: ContextDatasetArtifactStages,
     ) -> Result<Self, ContextQueryError> {
         let payload = Self {
             schema_version: 1,
             job_id: request.job_id.clone(),
             dataset_id: request.dataset_id.clone(),
+            principal_id: request.audit.principal_id.clone(),
             context_resource_id: request.context_resource_id.clone(),
             context_deployment: request.context_deployment.clone(),
             parser_profile: closure.parser_policy.clone(),
@@ -141,6 +323,9 @@ impl ContextDatasetBuildJobPayload {
             data_policy: closure.data_policy.clone(),
             expected_dataset_version,
             expected_active_generation_id,
+            artifact_preallocations: request.artifact_preallocations.clone(),
+            artifact_stages,
+            wake_contract: None,
             deadline: request.deadline,
         };
         payload.validate_for_owner(&request.dataset_id)?;
@@ -152,6 +337,7 @@ impl ContextDatasetBuildJobPayload {
             || self.job_id.kind() != ResourceKind::Job
             || self.dataset_id.kind() != ResourceKind::ContextDataset
             || &self.dataset_id != owner
+            || self.principal_id.kind() != ResourceKind::Principal
             || self.context_resource_id.kind() != ResourceKind::ContextSourceInterface
             || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
             || self.context_deployment.validate().is_err()
@@ -175,6 +361,14 @@ impl ContextDatasetBuildJobPayload {
                 .is_some_and(|id| id.kind() != ResourceKind::DatasetGeneration)
             || self.expected_dataset_version.is_some()
                 != self.expected_active_generation_id.is_some()
+            || self
+                .artifact_stages
+                .validate_for(&self.job_id, &self.artifact_preallocations)
+                .is_err()
+            || self
+                .wake_contract
+                .as_ref()
+                .is_some_and(|wake| wake.validate(self.deadline).is_err())
         {
             return Err(ContextQueryError::InvalidJob);
         }

@@ -5264,6 +5264,15 @@ impl PgRepository {
               AND state IN ('ready', 'retry_scheduled')
               AND terminal_at IS NULL
               AND worker_id IS NULL
+              AND (
+                  attempt_no < attempt_limit
+                  OR (
+                      state = 'ready'
+                      AND attempt_no > 0
+                      AND attempt_no <= attempt_limit
+                      AND started_at IS NOT NULL
+                  )
+              )
               AND scheduled_at <= $3
               AND (retry_at IS NULL OR retry_at <= $3)
               AND deadline > $3
@@ -5302,19 +5311,29 @@ impl PgRepository {
             let current = job_from_row(candidate)?;
             validate_claimed_job_payload(&current)?;
             let current_projection = job_projection(&current)?;
-            let next = decide_job_claim(
-                &current_projection,
-                database_now,
-                command.worker_id.clone(),
-                lease_token_digest.clone(),
-                LeasePolicy {
-                    requested_milliseconds: u64::try_from(command.lease_milliseconds).map_err(
-                        |_| RepositoryError::InvalidInput("negative Job lease".to_owned()),
-                    )?,
-                    hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
-                        .expect("positive Job lease hard maximum"),
-                },
-            )?;
+            let lease_policy = LeasePolicy {
+                requested_milliseconds: u64::try_from(command.lease_milliseconds)
+                    .map_err(|_| RepositoryError::InvalidInput("negative Job lease".to_owned()))?,
+                hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                    .expect("positive Job lease hard maximum"),
+            };
+            let next = if current.started_at.is_some() {
+                decide_job_claim_continuation(
+                    &current_projection,
+                    database_now,
+                    command.worker_id.clone(),
+                    lease_token_digest.clone(),
+                    lease_policy,
+                )?
+            } else {
+                decide_job_claim(
+                    &current_projection,
+                    database_now,
+                    command.worker_id.clone(),
+                    lease_token_digest.clone(),
+                    lease_policy,
+                )?
+            };
             let lease = next.lease.as_ref().ok_or_else(|| {
                 RepositoryError::InvalidInput("claim decision did not create a lease".to_owned())
             })?;
@@ -5395,16 +5414,25 @@ impl PgRepository {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let next = decide_job_start(
-            &job_projection(&current)?,
-            &domain_job_fence(&command)?,
-            database_now,
-        )?;
+        let next = if current.started_at.is_some() {
+            decide_job_resume(
+                &job_projection(&current)?,
+                &domain_job_fence(&command)?,
+                database_now,
+            )?
+        } else {
+            decide_job_start(
+                &job_projection(&current)?,
+                &domain_job_fence(&command)?,
+                database_now,
+            )?
+        };
         let row =
             sqlx::query(
                 r#"
             UPDATE insight_platform.jobs
-            SET state = $4, version = $5, attempt_no = $6, started_at = $7,
+            SET state = $4, version = $5, attempt_no = $6,
+                started_at = COALESCE(started_at, $7),
                 updated_at = $7
             WHERE tenant_id = $1 AND job_id = $2 AND version = $3
             RETURNING *
@@ -37784,7 +37812,7 @@ pub(crate) fn job_projection(record: &JobRecord) -> Result<JobProjection, Reposi
             payload
                 .validate_for_owner(&owner_id)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
-            None
+            payload.wake_contract
         }
         WorkClass::Context if owner_id.kind() == ResourceKind::McpOperation => {
             let payload: insight_platform_context::ContextSubscriptionRefreshJobPayload =

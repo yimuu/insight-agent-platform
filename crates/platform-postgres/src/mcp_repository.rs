@@ -17,7 +17,6 @@ use insight_platform_artifacts::{
     ArtifactAwaitingStageSnapshot, ArtifactJobPayload, ArtifactMetadataSnapshot,
     ArtifactReferenceSnapshot, ArtifactScanDisposition,
 };
-use insight_platform_artifacts::{StageWorkloadArtifact, StageWorkloadArtifactRequest};
 use insight_platform_context::{
     AcceptedContextSubscriptionRefresh, AdmitContextSubscriptionRefresh,
     ContextSubscriptionAdmissionAuthority, ContextSubscriptionAdmissionError,
@@ -5388,42 +5387,6 @@ pub(crate) struct McpDiscoveryArtifactStageAuthority {
     pub principal_id: ResourceId,
 }
 
-pub(crate) async fn require_mcp_discovery_artifact_stage_authority(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &StageWorkloadArtifact,
-    database_now: DateTime<Utc>,
-) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
-    require_mcp_discovery_artifact_stage_authority_for(
-        transaction,
-        &command.tenant_id,
-        &command.producer_job_id,
-        &command.producer_fence,
-        &command.verification_job_id,
-        &command.artifact_id,
-        &command.blob_id,
-        database_now,
-    )
-    .await
-}
-
-pub(crate) async fn require_mcp_discovery_artifact_stage_request_authority(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &StageWorkloadArtifactRequest,
-    database_now: DateTime<Utc>,
-) -> Result<McpDiscoveryArtifactStageAuthority, RepositoryError> {
-    require_mcp_discovery_artifact_stage_authority_for(
-        transaction,
-        &request.tenant_id,
-        &request.producer_job_id,
-        &request.producer_fence,
-        &request.verification_job_id,
-        &request.artifact_id,
-        &request.blob_id,
-        database_now,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn wake_mcp_discovery_after_artifact_verification(
     transaction: &mut Transaction<'_, Postgres>,
@@ -5594,7 +5557,7 @@ pub(crate) async fn wake_mcp_discovery_after_artifact_verification(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn require_mcp_discovery_artifact_stage_authority_for(
+pub(crate) async fn require_mcp_discovery_artifact_stage_authority_for(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     producer_job_id: &ResourceId,
