@@ -387,12 +387,14 @@ fixture/report 与 remote full-profile workload 场景仍未交付。
 Passed report，严格门禁仍因另外五条未交付而失败。精确报告摘要见
 [`base-journey-evidence.md`](base-journey-evidence.md) 与 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-2026-08-30 本地 fresh full journey 已实现并通过 `context-retrieval-and-citation`：新增定义 noun 的 public lifecycle、
+2026-08-30 exact revision `63fa4132ba274460d94ef03a44a21cec9f5017fc` 的本地 fresh full journey 已实现并通过
+`context-retrieval-and-citation`：新增定义 noun 的 public lifecycle、
 Dataset Operation -> immutable Generation发现、exact Context binding、Native Context执行、citation投影、CLI/raw `/v1`与
 真实 Console，以及 build/citation拒绝路径均在同一 fresh authority 闭合。该运行同时修复了 registry validator permission
 映射、Dataset Worker RPC trace、Context query schema digest、Context durable quota fixture与 continuation attempt语义。
-由于本段记录的是 working-tree验证，exact-revision report与 digest 尚待 clean commit 后生成；在此之前严格 M4 仍按五份
-Passed report计算，不能提前关闭 Context 场景。
+六份 canonical report 已按 exact source revision重验，Context digest 为
+`c16c68cacfeecafae03cfd9bba3c899ea09807e7994048537fb10c12eccec067`；严格 M4 现有六份 Passed report，仍缺 Model、
+remote Capability、MCP、WASI/framework 四条，不能关闭 M4。
 
 ### 7.1 工作项
 
