@@ -328,11 +328,12 @@ run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gat
 目标，因此 M1/M3/M4 继续 In Progress。完整摘要、artifact digest 与边界见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
-2026-08-30 exact revision `972a37f67cf22406c5064418aa1d759cc16e3c72` 的 fresh Linux run
-`33281976729` / job `99178547427` 已让同一真实 Console session 按 exact ID 读取 deterministic 与 Timer/Signal
-两个 Run，并分别核验 `succeeded` authority 与预期 Inline result。`deterministic-first-run` 因此成为第二条完整
-Passed report；Timer/Signal 的 Console entrypoint 也 Passed，但 `stale_job_fence` 继续诚实保持 `not_run`，故该报告
-顶层仍为 Incomplete。核心步骤约 9 分 36 秒，使用了受控 Cargo cache；因尚无独立 first Run commit timestamp 和
+2026-08-30 exact revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的 fresh Linux run
+`33284301192` / job `99184695618` 已让同一真实 Console session 按 exact ID 读取 deterministic 与 Timer/Signal
+两个 Run，并分别核验 `succeeded` authority 与预期 Inline result；受控 PostgreSQL 探针还以只更改 lease-token
+digest 的方式证明 exact continuation 拒绝 stale Job fence，且没有改变 Job version/token，随后由 replacement Worker
+在 lease 到期后恢复。因此三份 base scenario report 均完整 Passed。核心步骤约 9 分 2 秒，使用了受控 Cargo cache；
+因尚无独立 first Run commit timestamp 和
 无缓存机器证据，不据此宣称 G1 cold clone 门禁 Passed。精确报告摘要与 digest 见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
@@ -362,12 +363,10 @@ fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 f
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
 `approval-task-resume` report；启用真实浏览器时该报告已可完整 Passed。Timer/Signal restart fixture 会产出第三份
-`timer-signal-restart-recovery` incomplete report。这不是 M4 完成证据；其余七条 fixture/report、Timer/Signal
-stale-fence probe 与 full profile 场景仍未交付。
+`timer-signal-restart-recovery` report。这不是 M4 完成证据；其余七条 fixture/report 与 full profile 场景仍未交付。
 
-远端 fresh base run `33281976729` 已使 `approval-task-resume` 与 `deterministic-first-run` 两份报告完整 Passed；
-`timer-signal-restart-recovery` 只剩 `stale_job_fence` 为 Not run。严格 M4 checker 仍会因另外八条未全部
-Passed 而失败。精确报告摘要见
+远端 fresh base run `33284301192` 已使 `approval-task-resume`、`deterministic-first-run` 与
+`timer-signal-restart-recovery` 三份报告完整 Passed。严格 M4 checker 仍会因另外七条未全部 Passed 而失败。精确报告摘要见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
 ### 7.1 工作项

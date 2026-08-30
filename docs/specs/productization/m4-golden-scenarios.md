@@ -46,19 +46,19 @@ terminal Run、durable SSE、exact binding、Orchestration Worker replacement、
 并从同一明确 fresh base authority 生成 `approval-task-resume` report。独立
 [`timer_signal_restart_recovery.rs`](../../../tests/productization/timer_signal_restart_recovery.rs) 又覆盖 TimerWait 到期、
 SignalWait exact key、Worker 缺席时两次相同 Receipt 的 204 replay、durable ready continuation、替代 Worker 恢复与 terminal
-result，生成第三份 `timer-signal-restart-recovery` report。远端 fresh Linux journey 已为 Human Task、deterministic
-和 Timer/Signal 三条场景补齐真实 Console；前两条完整 Passed，Timer/Signal 仍因 stale Job fence 为 `not_run`
-而保持 `incomplete`。其余七条场景尚未产生报告。
+result，生成第三份 `timer-signal-restart-recovery` report。受控 PostgreSQL 探针会领取 exact durable continuation，
+只替换 lease-token digest，证明 `RepositoryError::StaleFence` 且 Job version/token 不变，再由替代 Worker 在真实 lease
+到期后恢复。远端 fresh Linux journey 已为 Human Task、deterministic 和 Timer/Signal 三条场景补齐真实 Console，
+三份报告现均完整 Passed。其余七条场景尚未产生 Passed 报告。
 
 这一区分防止把一个覆盖多项行为的集成测试误报为十条黄金场景，或用普通单元测试替代 fresh base/full
 profile evidence。
 
-Git revision `972a37f67cf22406c5064418aa1d759cc16e3c72` 的 fresh Linux run `33281976729` 已使
-`approval-task-resume` 和 `deterministic-first-run` 成为两份完整 Passed report：CLI、raw `/v1`、真实 Console、
-全部 assertion 与 failure probe 均 Passed。同一 Console session 也读取了 replacement-Worker 恢复后的 exact
-Timer/Signal Run；该报告的 Console entrypoint 已 Passed，但 `stale_job_fence` 仍为 `not_run`，所以顶层继续
-Incomplete。下载 artifact 后的 canonical report 摘要与 SHA-256 见
-[`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余八条没有全部 Passed 而失败。
+Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的 fresh Linux run `33284301192` 已使
+`approval-task-resume`、`deterministic-first-run` 和 `timer-signal-restart-recovery` 成为三份完整 Passed report：
+CLI、raw `/v1`、真实 Console、全部 assertion 与 failure probe 均 Passed。下载 artifact 后的 canonical report
+摘要与 SHA-256 见 [`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余七条没有全部
+Passed 而失败。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 

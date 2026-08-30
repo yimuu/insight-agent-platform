@@ -62,12 +62,12 @@ check 全部通过，证据链接见 [`console-browser-fixture.md`](console-brow
 
 上述 stateful fixture 本身不是 fresh PostgreSQL + 真实 Gateway 证据。后续真实 authority 结果如下。
 
-Git revision `972a37f67cf22406c5064418aa1d759cc16e3c72` 的手动 GitHub run
-[`33281976729`](https://github.com/yimuu/insight-agent-platform/actions/runs/33281976729) 随后已在 fresh
+Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的手动 GitHub run
+[`33284301192`](https://github.com/yimuu/insight-agent-platform/actions/runs/33284301192) 随后已在 fresh
 `ubuntu-24.04` authority 上完成真实 Gateway/PostgreSQL 与 headless Chrome Task journey，job
-[`99178547427`](https://github.com/yimuu/insight-agent-platform/actions/runs/33281976729/job/99178547427) 为 Passed。
-其 machine-readable `approval-task-resume` 与 `deterministic-first-run` report 均完整 Passed；同一浏览器还读取
-replacement-Worker 恢复后的 exact Timer/Signal Run，使该报告只剩 `stale_job_fence` 未运行。证据摘要见
+[`99184695618`](https://github.com/yimuu/insight-agent-platform/actions/runs/33284301192/job/99184695618) 为 Passed。
+其 machine-readable `approval-task-resume`、`deterministic-first-run` 与 `timer-signal-restart-recovery` report 均
+完整 Passed；同一浏览器按 exact ID 读取 deterministic 与 replacement-Worker 恢复后的 Timer/Signal Run。证据摘要见
 [`base-journey-evidence.md`](base-journey-evidence.md)。M3 仍缺 Gateway restart 下的浏览器
 重连、正式静态部署、telemetry、慢依赖与完整 accessibility audit，故状态继续为 In Progress。
 
