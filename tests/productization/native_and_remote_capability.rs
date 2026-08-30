@@ -387,7 +387,7 @@ pub(super) fn publish_capability(
             "backend_limits": {"maximum_request_bytes": 4096, "maximum_response_bytes": 4096, "maximum_diagnostic_bytes": 1024,
                 "connect_timeout_milliseconds": 500, "first_byte_timeout_milliseconds": 1000, "idle_timeout_milliseconds": 1000, "total_timeout_milliseconds": 3000},
             "features": {"deferred": backend_kind == "sandbox", "input_required": false, "callback": false, "poll": false, "progress": false,
-                "cancellation": true, "max_remote_state_bytes": 0, "max_poll_count": 0}
+                "cancellation": true, "max_remote_state_bytes": if backend_kind == "sandbox" { 4096 } else { 0 }, "max_poll_count": 0}
         }}},
         "publish": {"kind": "single", "revision_no": 1, "content_digest": implementation_contract_digest, "artifact_id": null},
         "deployment": null
