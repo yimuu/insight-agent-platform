@@ -12,6 +12,9 @@ candidate = (ROOT / ".github/workflows/platform-production-candidate.yml").read_
 base_journey = (
     ROOT / ".github/workflows/productization-base-journey.yml"
 ).read_text(encoding="utf-8")
+journey_runner = (ROOT / "scripts/run-productization-base-journey.sh").read_text(
+    encoding="utf-8"
+)
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 failures: list[str] = []
 
@@ -89,6 +92,8 @@ for marker in (
 ):
     if marker not in base_journey:
         failures.append(f"base journey qualification misses {marker!r}")
+if "scripts/qualify-productization-first-run.py" not in journey_runner:
+    failures.append("base journey runner misses the lightweight first-Run qualifier")
 for forbidden in ("cosign sign", "docker/build-push-action@", "docker push"):
     if forbidden in base_journey:
         failures.append(

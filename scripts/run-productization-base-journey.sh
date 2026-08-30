@@ -282,13 +282,11 @@ if [[ -n "$report_directory" ]]; then
   )
 fi
 if [[ -n "$first_run_marker" ]]; then
-  test_environment+=("PLATFORM_PRODUCTIZATION_FIRST_RUN_MARKER=$first_run_marker")
-fi
+  python3 scripts/qualify-productization-first-run.py \
+    --insight-bin "$insight_bin" \
+    --project "$project" \
+    --marker "$first_run_marker"
 
-env "${test_environment[@]}" \
-  cargo test --locked --release -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
-
-if [[ -n "$north_star_report" ]]; then
   source_revision="$(git rev-parse HEAD)"
   python3 scripts/write-productization-north-star-report.py \
     --marker "$first_run_marker" \
@@ -301,6 +299,9 @@ if [[ -n "$north_star_report" ]]; then
     --source-revision "$source_revision"
   rm -f "$first_run_marker"
 fi
+
+env "${test_environment[@]}" \
+  cargo test --locked -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
 
 if [[ -n "$report_directory" ]]; then
   python3 scripts/check-productization-scenario-reports.py \

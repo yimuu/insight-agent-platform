@@ -31,6 +31,11 @@ class ClassifyCiPathsTests(unittest.TestCase):
         self.assertTrue(result["cli"])
         self.assertFalse(result["runtime"])
 
+    def test_first_run_qualifier_uses_cli_without_runtime(self) -> None:
+        result = MODULE.classify(["scripts/qualify-productization-first-run.py"])
+        self.assertTrue(result["cli"])
+        self.assertFalse(result["runtime"])
+
     def test_base_journey_runner_uses_cli_without_runtime(self) -> None:
         result = MODULE.classify(
             [
