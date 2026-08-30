@@ -4582,6 +4582,7 @@ async fn run_plan_capability_owner(pool: &PgPool, repository: &PgRepository, fix
         approval_task_id: Some(id(ResourceKind::ApprovalTask, 0x8032)),
         input_artifact_link_id: None,
         mcp_runtime: None,
+        sandbox_submission: None,
         idempotency_key_digest: digest('4'),
         request_digest: digest('5'),
         receipt_expires_at: now + Duration::minutes(30),

@@ -189,6 +189,8 @@ pub struct MergeSandboxCapabilityOutcome {
     pub job_id: ResourceId,
     pub sandbox_request_digest: Sha256Digest,
     pub expected_invocation_version: u64,
+    pub resume_mutations: insight_platform_contracts::ExternalLeafResumeMutationIds,
+    pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
 }
 
 /// Read-only durable candidate consumed by the Capability owner controller.
@@ -248,6 +250,27 @@ impl MergeSandboxCapabilityOutcome {
             "job_id": self.job_id,
             "sandbox_request_digest": self.sandbox_request_digest,
             "expected_invocation_version": self.expected_invocation_version,
+            "resume_mutations": {
+                "continuation_node_execution_id": self.resume_mutations.continuation_node_execution_id,
+                "continuation_job_id": self.resume_mutations.continuation_job_id,
+                "run_event_id": self.resume_mutations.run_event_id,
+                "run_outbox_id": self.resume_mutations.run_outbox_id,
+                "leaf_node_event_id": self.resume_mutations.leaf_node_event_id,
+                "leaf_node_outbox_id": self.resume_mutations.leaf_node_outbox_id,
+                "continuation_node_event_id": self.resume_mutations.continuation_node_event_id,
+                "continuation_node_outbox_id": self.resume_mutations.continuation_node_outbox_id,
+                "continuation_job_event_id": self.resume_mutations.continuation_job_event_id,
+                "continuation_job_outbox_id": self.resume_mutations.continuation_job_outbox_id,
+            },
+            "failure_mutations": {
+                "convergence_job_id": self.failure_mutations.convergence_job_id,
+                "run_event_id": self.failure_mutations.run_event_id,
+                "run_outbox_id": self.failure_mutations.run_outbox_id,
+                "leaf_node_event_id": self.failure_mutations.leaf_node_event_id,
+                "leaf_node_outbox_id": self.failure_mutations.leaf_node_outbox_id,
+                "convergence_job_event_id": self.failure_mutations.convergence_job_event_id,
+                "convergence_job_outbox_id": self.failure_mutations.convergence_job_outbox_id,
+            },
         }))
         .map_err(|_| SandboxControlError::Canonicalization)?
         .parse()
@@ -261,6 +284,8 @@ impl MergeSandboxCapabilityOutcome {
             || self.job_id.kind() != ResourceKind::Job
             || self.sandbox_job_id.uuid() != self.job_id.uuid()
             || self.expected_invocation_version == 0
+            || self.resume_mutations.validate().is_err()
+            || self.failure_mutations.validate().is_err()
             || self.audit.idempotency_key_digest != self.canonical_idempotency_key_digest()?
             || self.audit.request_digest != self.canonical_request_digest()?
         {

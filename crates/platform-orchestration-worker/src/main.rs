@@ -707,6 +707,7 @@ mod tests {
             },
             plan_maximum_bytes: 1_048_576,
             safety_shard: SafetyScanShard::whole(),
+            sandbox: None,
         }
     }
 

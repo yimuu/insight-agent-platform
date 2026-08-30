@@ -16,15 +16,16 @@ use insight_platform_contracts::{
     CapabilityProgressContract, CapabilityProgressDurability, CapabilityProgressMode,
     ClosedJsonSchema, CodeTrustClass, CommandAudit, CommandOutcome, DataClassification,
     DeploymentClosure, Effect, ExactDeploymentRef, ExactPolicyBinding, ExactSandboxProfileBinding,
-    ExactVersionRef, InvocationState, JsonLimits, Permission, PermissionSet,
-    PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec, PrincipalBindingsPayload,
-    PrincipalKind, PrincipalSnapshot, PublishedVersionPayload, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
-    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
-    SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxPackageResourceSpec,
-    SandboxProfileDeploymentClosure, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
-    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, Sha256Digest, TenantConfig,
-    TenantPrincipalPayload, ValidationSummary, ValueRef,
+    ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
+    InvocationState, JsonLimits, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
+    PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    SandboxAbiVersion, SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy,
+    SandboxEntrypointKind, SandboxIsolationClass, SandboxIsolationPolicyDocument,
+    SandboxNetworkPolicyDocument, SandboxPackageResourceSpec, SandboxProfileDeploymentClosure,
+    SandboxProfileResourceSpec, SandboxResourcePolicyDocument, SandboxRuntimeFamily,
+    SandboxRuntimeResourceSpec, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef,
 };
 use insight_platform_invocations::{
     CapabilityAdmissionSnapshot, CapabilityControlKind, CapabilityInvocationPayload,
@@ -83,6 +84,33 @@ fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
     )
     .parse()
     .unwrap()
+}
+
+fn resume_mutations(base: u16) -> ExternalLeafResumeMutationIds {
+    ExternalLeafResumeMutationIds {
+        continuation_node_execution_id: id(ResourceKind::NodeExecution, base),
+        continuation_job_id: id(ResourceKind::Job, base + 1),
+        run_event_id: id(ResourceKind::Event, base + 2),
+        run_outbox_id: id(ResourceKind::OutboxEvent, base + 3),
+        leaf_node_event_id: id(ResourceKind::Event, base + 4),
+        leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 5),
+        continuation_node_event_id: id(ResourceKind::Event, base + 6),
+        continuation_node_outbox_id: id(ResourceKind::OutboxEvent, base + 7),
+        continuation_job_event_id: id(ResourceKind::Event, base + 8),
+        continuation_job_outbox_id: id(ResourceKind::OutboxEvent, base + 9),
+    }
+}
+
+fn failure_mutations(base: u16) -> ExternalLeafFailureMutationIds {
+    ExternalLeafFailureMutationIds {
+        convergence_job_id: id(ResourceKind::Job, base),
+        run_event_id: id(ResourceKind::Event, base + 1),
+        run_outbox_id: id(ResourceKind::OutboxEvent, base + 2),
+        leaf_node_event_id: id(ResourceKind::Event, base + 3),
+        leaf_node_outbox_id: id(ResourceKind::OutboxEvent, base + 4),
+        convergence_job_event_id: id(ResourceKind::Event, base + 5),
+        convergence_job_outbox_id: id(ResourceKind::OutboxEvent, base + 6),
+    }
 }
 
 fn sha(character: char) -> insight_platform_contracts::Sha256Digest {
@@ -3031,6 +3059,8 @@ async fn sandbox_fixture() {
         job_id: terminal_source.job_id.clone(),
         sandbox_request_digest: terminal_source.sandbox_request_digest.clone(),
         expected_invocation_version: terminal_source.expected_invocation_version,
+        resume_mutations: resume_mutations(0x0b00),
+        failure_mutations: failure_mutations(0x0b20),
     };
     merge.audit.idempotency_key_digest = merge.canonical_idempotency_key_digest().unwrap();
     merge.audit.request_digest = merge.canonical_request_digest().unwrap();
@@ -3200,6 +3230,8 @@ async fn sandbox_fixture() {
         job_id: limit_source.job_id.clone(),
         sandbox_request_digest: limit_source.sandbox_request_digest.clone(),
         expected_invocation_version: limit_source.expected_invocation_version,
+        resume_mutations: resume_mutations(0x0c00),
+        failure_mutations: failure_mutations(0x0c20),
     };
     limit_merge.audit.idempotency_key_digest =
         limit_merge.canonical_idempotency_key_digest().unwrap();

@@ -2969,6 +2969,123 @@ impl PgRepository {
             .await?;
         }
         update_capability_invocation(&mut transaction, &current, &decision.invocation).await?;
+        let owner_node_waiting: bool = sqlx::query_scalar(
+            r#"
+            SELECT state = 'waiting'
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(current.tenant_id.to_string())
+        .bind(current.node_execution_id.to_string())
+        .bind(current.run_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .unwrap_or(false);
+        if owner_node_waiting {
+            let failure = match decision.invocation.state {
+                InvocationState::Failed => decision.invocation.payload.failure.clone(),
+                InvocationState::Cancelled => Some(Failure {
+                    code: FailureCode::Platform {
+                        code: PlatformFailureCode::CapabilityFailed,
+                    },
+                    class: FailureClass::Cancelled,
+                    retryability: Retryability::Never,
+                    safe_message: Some("Sandbox Capability execution was cancelled".to_owned()),
+                    details_ref: None,
+                    source: FailureSource::Capability,
+                }),
+                InvocationState::TimedOut => Some(Failure {
+                    code: FailureCode::Platform {
+                        code: PlatformFailureCode::DeadlineExceeded,
+                    },
+                    class: FailureClass::Deadline,
+                    retryability: Retryability::Never,
+                    safe_message: Some("Sandbox Capability execution deadline exceeded".to_owned()),
+                    details_ref: None,
+                    source: FailureSource::Capability,
+                }),
+                _ => None,
+            };
+            match &current.payload.admission.origin_key {
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. } => {
+                    if decision.invocation.state == InvocationState::Succeeded {
+                        let exact_output =
+                            decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                                RepositoryError::CorruptRow(
+                                    "Sandbox Capability success has no exact output".to_owned(),
+                                )
+                            })?;
+                        crate::repository::settle_capability_leaf_success_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &command.job_id,
+                            &exact_output.output,
+                            &command.resume_mutations,
+                            self.scope_environment_limits(),
+                            database_now,
+                        )
+                        .await?;
+                    } else if let Some(failure) = failure.as_ref() {
+                        crate::repository::settle_capability_leaf_failure_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &command.job_id,
+                            failure,
+                            &command.failure_mutations,
+                            true,
+                            database_now,
+                        )
+                        .await?;
+                    } else {
+                        crate::capability_execution_repository::release_capability_plan_leaf_permit(
+                            &mut transaction,
+                            &decision.invocation,
+                            database_now,
+                        )
+                        .await?;
+                    }
+                }
+                insight_platform_invocations::InvocationOrigin::ModelToolCall { .. } => {
+                    if decision.invocation.state == InvocationState::Succeeded {
+                        let exact_output =
+                            decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                                RepositoryError::CorruptRow(
+                                    "Sandbox Model tool success has no exact output".to_owned(),
+                                )
+                            })?;
+                        crate::repository::settle_model_tool_success_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &command.job_id,
+                            &exact_output.output,
+                            &command.resume_mutations,
+                            database_now,
+                        )
+                        .await?;
+                    } else if let Some(failure) = failure.as_ref() {
+                        crate::repository::settle_model_tool_failure_in_transaction(
+                            &mut transaction,
+                            &decision.invocation,
+                            &command.job_id,
+                            failure,
+                            &command.failure_mutations,
+                            true,
+                            database_now,
+                        )
+                        .await?;
+                    } else {
+                        crate::capability_execution_repository::release_capability_plan_leaf_permit(
+                            &mut transaction,
+                            &decision.invocation,
+                            database_now,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
         let (event_type, disposition) = match decision.invocation.state {
             InvocationState::Succeeded => ("capability.completed", "completed"),
             InvocationState::RetryScheduled => ("capability.waiting", "retry_scheduled"),

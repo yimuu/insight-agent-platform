@@ -3,7 +3,10 @@
 use crate::{CoordinatorIdentityFactory, IdentityFactoryError, SafetyDriverTiming};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use insight_platform_contracts::{CommandOutcome, HardLimitProfile, ResourceId, ResourceKind};
+use insight_platform_contracts::{
+    CommandOutcome, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
+    HardLimitProfile, ResourceId, ResourceKind,
+};
 use insight_platform_postgres::{
     repository::{
         PgRepository, RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard,
@@ -411,6 +414,27 @@ where
             job_id: candidate.job_id.clone(),
             sandbox_request_digest: candidate.sandbox_request_digest.clone(),
             expected_invocation_version: candidate.expected_invocation_version,
+            resume_mutations: ExternalLeafResumeMutationIds {
+                continuation_node_execution_id: self.new_id(ResourceKind::NodeExecution)?,
+                continuation_job_id: self.new_id(ResourceKind::Job)?,
+                run_event_id: self.new_id(ResourceKind::Event)?,
+                run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                leaf_node_event_id: self.new_id(ResourceKind::Event)?,
+                leaf_node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                continuation_node_event_id: self.new_id(ResourceKind::Event)?,
+                continuation_node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                continuation_job_event_id: self.new_id(ResourceKind::Event)?,
+                continuation_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            },
+            failure_mutations: ExternalLeafFailureMutationIds {
+                convergence_job_id: self.new_id(ResourceKind::Job)?,
+                run_event_id: self.new_id(ResourceKind::Event)?,
+                run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                leaf_node_event_id: self.new_id(ResourceKind::Event)?,
+                leaf_node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                convergence_job_event_id: self.new_id(ResourceKind::Event)?,
+                convergence_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            },
         };
         command.audit.idempotency_key_digest = command
             .canonical_idempotency_key_digest()

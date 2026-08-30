@@ -3183,7 +3183,7 @@ async fn settle_capability_quota(
     Ok(())
 }
 
-async fn release_capability_plan_leaf_permit(
+pub(crate) async fn release_capability_plan_leaf_permit(
     transaction: &mut Transaction<'_, Postgres>,
     invocation: &insight_platform_invocations::CapabilityInvocationRecord,
     database_now: DateTime<Utc>,
