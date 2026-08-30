@@ -1,6 +1,7 @@
 # M4 黄金场景证据合同
 
-状态：**In Progress**。本文件定义 M4 的 machine-readable evidence，不表示十条场景已经通过。
+状态：**Manifest gate Passed / broader M4 In Progress**。十条 required scenario 已在同一 exact revision 取得
+Passed report；具体框架 adapter 与 durable Sandbox admission 的边界见第 3 节。
 
 ## 1. 权威输入与输出
 
@@ -132,6 +133,19 @@ bounded CA root；后者只能在该 loopback 模式下启用，并在保留 exa
 同时跳过物理 token 解析。公网和普通私网行为不变，私网仍在 Secret/I/O 前拒绝。full profile 的 builtin MCP codec
 descriptor 也改为从同一 typed `McpToolCapabilityContract` 计算，不再使用占位摘要。该批仅关闭 fixture 安装与 codec
 identity 前置，尚未生成 `remote-mcp-tool-and-resource` report，因此正式计数仍为八。
+
+2026-08-30 exact revision `3f2ee593c75ff81c96a4b2968118d411ff89b2f8` 的本地 fresh `full` profile
+补齐最后两份 Passed report。`remote-mcp-tool-and-resource` 通过 public authoring/discovery、exact
+AuthorizationBinding、Streamable HTTP Tool call、Resource descriptor、remote JSON-RPC error 与 TLS rejection；
+`wasi-and-remote-framework-capability` 真实执行 production Wasmtime adapter 的 closed ABI module，证明 fuel-limit
+拒绝与 cleanup，同时让清空环境的独立 Node reference service 只经 exact Egress Deployment 返回 bounded typed
+Inline result，并证明 deny-all catalog 在 dispatch 前拒绝。真实 Chrome 按两个 exact Run ID 读取成功结果。严格 checker
+输出 `validated 10 productization scenario report(s); complete_gate=true`，报告摘要见
+[`full-journey-evidence.md`](full-journey-evidence.md)。
+
+该 manifest gate 不把证据外推为尚不存在的能力：WASI 尚未证明普通 Agent Run 到 durable Sandbox Job 的 admission
+链；reference service 是 framework-neutral HTTP 合同，不是 Agno/LangGraph SDK。Python SDK 已取消，具体生态 adapter
+继续属于 broader M4 的未完成项；真实多节点 Kubernetes、runsc、容量、混沌、restore 与 soak 仍属于未运行的 L4～L6。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
