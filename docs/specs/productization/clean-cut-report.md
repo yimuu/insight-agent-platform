@@ -1,7 +1,11 @@
 # Productization repository clean-cut report
 
-状态：**Passed（M0～M5 repository scope）**  
-切换 revision：`b8dada4ec805ffc80777ea203b9f5d72dde20b6c`  
+状态：**Passed（M0～M5 repository scope）**
+
+切换实现 revision：`b8dada4ec805ffc80777ea203b9f5d72dde20b6c`
+
+最终 journey revision：`dd0109ee14cbcc043e056edadd744de33bbf1f94`
+
 外部资格：**Not run（L4～L6）**
 
 ## 1. 产品入口闭包
@@ -30,12 +34,11 @@ candidate image 不依赖它来提供新 `/v1` 行为。该保留不构成 publi
 - `cargo test --locked -p insight-cli`：64 Passed；
 - `python3 scripts/tests/test_productization_http_lifecycle.py`：2 Passed；
 - `python3 scripts/tests/test_platform_candidate_pipeline.py`：4 Passed；
-- clean-cut 前最后一个完整功能 revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 的 full-profile
-  fresh journey：10/10 report Passed，严格 checker `complete_gate=true`，详见
+- clean-cut 后 exact revision `dd0109ee14cbcc043e056edadd744de33bbf1f94` 的 full-profile fresh journey：
+  25 个独立 role ready，10/10 report Passed，严格 checker `complete_gate=true`，测试主体 85.31 秒，详见
   [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-clean-cut 只改变默认入口、发行清单、合同状态与文档，不改变十场景业务合同。最终候选仍需在 clean-cut 后的 exact
-revision 复跑 full journey，报告按自己的 `source_revision` 保存，不通过修改历史报告伪造新 revision。
+报告按自己的 exact `source_revision` 保存；后续纯证据文档提交不改写这些 machine-readable report 的 revision。
 
 ## 3. CI 与供应链
 

@@ -143,7 +143,7 @@ Inline result，并证明 deny-all catalog 在 dispatch 前拒绝。真实 Chrom
 输出 `validated 10 productization scenario report(s); complete_gate=true`，报告摘要见
 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-2026-08-30 exact revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 的复跑把最后两项边界闭合：
+2026-08-30 exact revision `dd0109ee14cbcc043e056edadd744de33bbf1f94` 的 clean-cut 后复跑确认最后两项边界：
 普通 public Agent Run 通过 exact Sandbox Capability binding 原子创建 durable Sandbox Job，由独立 Executor 执行
 WASI 并 fenced merge typed result；独立 reference service 使用固定 `@langchain/langgraph` 1.4.13 的真实
 `StateGraph`，且无 Platform DB/internal credential。十份报告再次由严格 checker 得到 `complete_gate=true`，摘要见

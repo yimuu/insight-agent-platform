@@ -7,14 +7,14 @@
 
 最新 exact-revision 运行：
 
-- Git revision：`a70a9f99f58b8fd9fecb4c309f910aa99434b122`；
+- Git revision：`dd0109ee14cbcc043e056edadd744de33bbf1f94`；
 - 命令：`scripts/run-productization-base-journey.sh --profile full --console-browser
   --report-directory target/productization-reports --node-bin
   /Users/cc/.nvm/versions/node/v24.14.1/bin/node --browser-bin
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'`；
 - 环境：macOS Darwin 25.6.0 arm64、Rust 1.94.1、Node 24.14.1、pnpm 11.19.0、Chrome 151、
   Docker Engine 29.4.0、Compose v5.1.2；
-- 场景报告时间：`2026-08-30T17:36:15Z` 至 `17:37:39Z`；测试主体 84.80 秒；
+- 场景报告时间：`2026-08-30T17:57:52Z` 至 `17:59:17Z`；测试主体 85.31 秒；
 - 严格 report checker：`validated 10 productization scenario report(s); complete_gate=true`。
 
 runner 从不存在的 project path 执行 `doctor -> init -> dev --profile full -> status -> token ->
@@ -59,16 +59,16 @@ entrypoint、assertion与 failure probe重验通过：
 
 | 场景 | 状态 | SHA-256 |
 |---|---|---|
-| `approval-task-resume` | Passed | `0211a235db0244588721aee81c90b9783339d3ca365fb0de09ed49345fd6a6c1` |
-| `artifact-lifecycle-and-rejection` | Passed | `85ab48c2eb911db4002797de27a3551ee89ff1fd28149420d8958a8205fc0619` |
-| `context-retrieval-and-citation` | Passed | `d0ac4c0e820f1be27f32b25bfd1a2cac43b0daf4aafd586fc945a5196831de9a` |
-| `deterministic-first-run` | Passed | `9188e7fa08e38908534eefa80d9580e3a382c945dcb0f0c8fb018d9a14f8d758` |
-| `exact-model-streaming-chat` | Passed | `52b8f7cca7f8d0662f832d42a50b8219208c3304694c1ce45ed1ac07f0003fc5` |
-| `native-and-remote-capability` | Passed | `38c5453bf6b7700fec517a581b54d0d27c30c4be3278f71764ed4a153045762b` |
-| `remote-mcp-tool-and-resource` | Passed | `ed094735c3c56edf4452784ed7151a7eef6807cb294b1c0aa3633a192346fef2` |
-| `subagent-quota-and-cancel` | Passed | `d95cc9b11e3f0460161382db3a780f952dbb400e4ff1326b054c2ea7e33ebaea` |
-| `timer-signal-restart-recovery` | Passed | `9847bfe8d99f3034e20cb034d89d45820cf7d66437f0d852c71a656b871a4d5c` |
-| `wasi-and-remote-framework-capability` | Passed | `d77917f21edb7e44b6ca662ecb429e7a69c861492f48807945152fb01e755c66` |
+| `approval-task-resume` | Passed | `99029dc12c13acee618c3bd52f6806b4729d114fc3ffdcdd2dea8e6804124864` |
+| `artifact-lifecycle-and-rejection` | Passed | `ffc1ba60a04d2dd37f7efdb4524a77b599743a56e4c21babb6721e07413472e6` |
+| `context-retrieval-and-citation` | Passed | `048b966dd7dbc461886ce5a9df88dbbbef46b1639a5725475b7578e97055ca2d` |
+| `deterministic-first-run` | Passed | `a328d2558693e7b48d80e527bda77463becadf3e572fee1cd1eb37db481550d3` |
+| `exact-model-streaming-chat` | Passed | `8bb9159add36b400db5eeb7ba651b2a485032db2cb989c0c4f3529b8fac473ff` |
+| `native-and-remote-capability` | Passed | `f6372a5b4fc932e3d733c9588462f0bcd348ab9bbdfd9c46cceea9630a10af29` |
+| `remote-mcp-tool-and-resource` | Passed | `ba9fc5bad55dad94c552c1f771bce46fdeb8251811698af9fe0761d98d0fd6f2` |
+| `subagent-quota-and-cancel` | Passed | `f2d61658895ccb1b7cc57cd1a743d04a18140b2a5bba5ade0a03066c60523582` |
+| `timer-signal-restart-recovery` | Passed | `13a1cb5593f292b06618c28b53046c533a42819c64d91a5b4a927cfe99955dd8` |
+| `wasi-and-remote-framework-capability` | Passed | `29a9f66cb4c930c65a7edb4879018c1f5584b40fb3d438b9783cfa50f3c7fe51` |
 
 ## 4. 明确边界
 
