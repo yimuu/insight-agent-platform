@@ -103,8 +103,16 @@ Passed report；严格 M4 仍因 Model、remote Capability、MCP、WASI/framewor
 冻结的 exact Secret Binding metadata，只在该显式 loopback 模式下跳过物理材料解析和认证 header。普通 endpoint仍执行
 public-destination拒绝和精确凭据解析，所有开关默认关闭，生产默认
 没有任何放宽。仓库内 Node builtin HTTPS fixture 不下载依赖，只模拟 closed streaming response 与受控失败。该实现只提供
-本地受控 HTTPS fixture 的最后一跳，不创建 Provider/Deployment、不绕过 Egress exact catalog，也尚未生成
-`exact-model-streaming-chat` report。
+本地受控 HTTPS fixture 的最后一跳，不绕过 Egress exact catalog。
+
+2026-08-30 exact revision `2e4402a3a9f0574f8fea445a34f6675869d02f42` 的 fresh `full` profile 已通过
+public Management lifecycle 发布十个 exact Policy、Model Provider、Model Profile 与 Agent，由 CLI 创建并观察
+structured streaming Run，再由真实 Console 按 exact Run ID 读取结构化 Inline result。受控失败探针分别
+证明 first-byte timeout 与 Egress response byte limit fail closed。七份 canonical report 的 source revision、closed
+checks 与 digest 已由 checker 重验，Model 报告 SHA-256 为
+`7cd00a1d7ae889f57805376d62b7e2fba59c8a546863364e4cc28c3cc9812fe3`。当前已有七份 Passed report；
+严格 M4 仍因 remote Capability、MCP 与 WASI/framework 三条缺失而失败。精确摘要见
+[`full-journey-evidence.md`](full-journey-evidence.md)。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
