@@ -2,7 +2,7 @@
 set -euo pipefail
 
 workspace_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-chart_dir="$workspace_root/deploy/helm/insight-agent-platform"
+chart_dir="$workspace_root/deploy/archive/helm/insight-agent-platform"
 namespace=${BENCH_NAMESPACE:-insight-bench}
 release=${BENCH_RELEASE:-bench}
 profile=${1:?usage: run-profile.sh PROFILE VUS DURATION [RESULT_DIR]}

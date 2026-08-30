@@ -20,7 +20,7 @@ result_dir=${1:-"$terminal_bench_root/bench/results/terminal-only-gate-c-suite-$
 mkdir -p "$result_dir"
 namespace=${BENCH_NAMESPACE:-insight-bench}
 release=${BENCH_RELEASE:-bench}
-chart=${BENCH_HELM_CHART:-"$terminal_bench_root/deploy/helm/insight-agent-platform"}
+chart=${BENCH_HELM_CHART:-"$terminal_bench_root/deploy/archive/helm/insight-agent-platform"}
 stream_fixture_name=${STREAM_FIXTURE_NAME:-terminal-stream-mock}
 kubectl -n "$namespace" get service "$stream_fixture_name" >/dev/null
 

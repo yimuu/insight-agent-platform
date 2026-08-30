@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-chart="$repo_root/deploy/helm/insight-agent-platform"
+chart="$repo_root/deploy/archive/helm/insight-agent-platform"
 backend=${1:?usage: run-k8s-database-regression.sh in_memory|nats_core [RESULT_DIR]}
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 result_dir=${2:-"$repo_root/bench/results/run-stream-$backend-db-$stamp"}

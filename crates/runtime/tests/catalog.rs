@@ -168,7 +168,7 @@ fn all_checked_in_agents_compile_into_verified_immutable_revisions() {
 
 fn qualification_overlay_enabled_agents() -> BTreeSet<String> {
     let values = workspace_asset_str!(
-        "deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
+        "deploy/archive/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
     );
     let enabled_marker = "  enabled:\n";
     let enabled_start = values
@@ -185,7 +185,7 @@ fn qualification_overlay_enabled_agents() -> BTreeSet<String> {
 #[test]
 fn qualification_helm_catalog_resolves_without_a_durable_coordinator() {
     let values = workspace_asset_str!(
-        "deploy/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
+        "deploy/archive/helm/insight-agent-platform/values-terminal-only-qualification.yaml"
     );
     assert!(
         values.contains("defaultPersistenceMode: terminal_only"),

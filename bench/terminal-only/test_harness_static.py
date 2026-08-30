@@ -184,12 +184,12 @@ class HarnessStaticTests(unittest.TestCase):
         database = text(
             "bench/terminal-only/sql/gate-b-database-preflight.sql"
         )
-        values = text("deploy/helm/insight-agent-platform/values.yaml")
+        values = text("deploy/archive/helm/insight-agent-platform/values.yaml")
         c1 = text(
-            "deploy/helm/insight-agent-platform/values-benchmark-c1.yaml"
+            "deploy/archive/helm/insight-agent-platform/values-benchmark-c1.yaml"
         )
         statefulset = text(
-            "deploy/helm/insight-agent-platform/templates/"
+            "deploy/archive/helm/insight-agent-platform/templates/"
             "postgresql-statefulset.yaml"
         )
         for token in (
@@ -494,7 +494,7 @@ class HarnessStaticTests(unittest.TestCase):
     def test_fresh_namespace_creates_or_validates_secret_before_fixture(self) -> None:
         deployment = text("bench/terminal-only/deploy-stream-fixture.sh")
         overlay = text(
-            "deploy/helm/insight-agent-platform/"
+            "deploy/archive/helm/insight-agent-platform/"
             "values-terminal-only-qualification.yaml"
         )
         namespace_index = deployment.index('kubectl create namespace "$namespace"')
@@ -513,21 +513,21 @@ class HarnessStaticTests(unittest.TestCase):
         self.assertIn(
             "terminationGracePeriodSeconds: "
             "{{ .Values.runtime.terminationGracePeriodSeconds }}",
-            text("deploy/helm/insight-agent-platform/templates/deployment.yaml"),
+            text("deploy/archive/helm/insight-agent-platform/templates/deployment.yaml"),
         )
         self.assertIn(
             "must exceed runtime.shutdownHardDeadline",
-            text("deploy/helm/insight-agent-platform/templates/configmap.yaml"),
+            text("deploy/archive/helm/insight-agent-platform/templates/configmap.yaml"),
         )
 
     def test_qualification_catalog_is_terminal_only_without_disabling_production_gc(
         self,
     ) -> None:
         qualification_values = (
-            "deploy/helm/insight-agent-platform/"
+            "deploy/archive/helm/insight-agent-platform/"
             "values-terminal-only-qualification.yaml"
         )
-        ordinary_values = "deploy/helm/insight-agent-platform/values.yaml"
+        ordinary_values = "deploy/archive/helm/insight-agent-platform/values.yaml"
         qualification_agents = helm_enabled_agents(qualification_values)
 
         self.assertEqual(
@@ -555,7 +555,7 @@ class HarnessStaticTests(unittest.TestCase):
         # Production artifact GC remains configured and the runtime still
         # starts its pump whenever the durable coordinator is active.
         configmap = text(
-            "deploy/helm/insight-agent-platform/templates/configmap.yaml"
+            "deploy/archive/helm/insight-agent-platform/templates/configmap.yaml"
         )
         run_service = text("crates/runtime/src/run_service.rs")
         self.assertIn("gc_interval: 1m", configmap)

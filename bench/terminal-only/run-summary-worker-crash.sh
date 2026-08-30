@@ -42,7 +42,7 @@ result_dir=${1:-"$terminal_bench_root/bench/results/terminal-only-summary-crash-
 mkdir -p "$result_dir"
 namespace=${BENCH_NAMESPACE:-insight-bench}
 release=${BENCH_RELEASE:-bench}
-chart=${BENCH_HELM_CHART:-"$terminal_bench_root/deploy/helm/insight-agent-platform"}
+chart=${BENCH_HELM_CHART:-"$terminal_bench_root/deploy/archive/helm/insight-agent-platform"}
 deployment="${release}-insight-agent-platform"
 tenant_id="summary-crash-tenant-$batch_id"
 user_id="summary-crash-user-$batch_id"

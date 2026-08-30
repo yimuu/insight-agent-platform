@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-chart="$repo_root/deploy/helm/insight-agent-platform"
+chart="$repo_root/deploy/archive/helm/insight-agent-platform"
 profile="$chart/values-nats-core-qualification.yaml"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/insight-nats-helm.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT

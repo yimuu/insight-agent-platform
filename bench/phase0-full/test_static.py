@@ -89,12 +89,12 @@ class Phase0FullStaticTests(unittest.TestCase):
 
     def test_overlay_and_validator_reserve_full_interval(self) -> None:
         overlay = text(
-            "deploy/helm/insight-agent-platform/"
+            "deploy/archive/helm/insight-agent-platform/"
             "values-phase0-full-baseline.yaml"
         )
-        values = text("deploy/helm/insight-agent-platform/values.yaml")
+        values = text("deploy/archive/helm/insight-agent-platform/values.yaml")
         configmap = text(
-            "deploy/helm/insight-agent-platform/templates/configmap.yaml"
+            "deploy/archive/helm/insight-agent-platform/templates/configmap.yaml"
         )
         validator = text("bench/phase0-full/validate-fresh-deployment.sh")
         for token in (
