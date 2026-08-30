@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M5 clean cut |
+| 状态 | Completed / M0～M5 repository scope（外部 L4～L6 Not run） |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
@@ -64,7 +64,7 @@ M0 的已审查输入保存在：
 
 ## 4. Milestone M1：`insight` CLI 与可复用本地平台
 
-状态：**In Progress**。当前实现仅覆盖 base profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
+状态：**Passed**。当前实现覆盖 base/full profile 的 `doctor`、`init`、`token`、`dev`、`status`、`logs`、`stop`，
 以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和七个独立 Platform role。role
 监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`stop` 停止 Platform roles 但保留
 LocalStack Community dependency process，因为该固定版本不能在容器重建后恢复本 profile 的 S3/KMS authority；
@@ -236,7 +236,7 @@ M1 门禁，故不得宣称 M1 或 spec 00–18 已 Verified。
 
 ## 5. Milestone M2：CLI/HTTP authoring 与首次 Run
 
-状态：**In Progress**。CLI 已增加 bounded native public HTTP client、
+状态：**Passed**。CLI 已增加 bounded native public HTTP client、
 `insight operation wait <job_id>` 和 closed [`insight apply`](m2-cli-apply.md) 首条 Resource lifecycle。客户端只连接
 本地 profile 生成的 loopback Management Gateway，使用短期 OIDC token，禁止 redirect/proxy，限制 request/response
 body 与 timeout，并重验 authority ID、tenant、ETag、trace、cache-control 及 closed `ApiProblem`。`apply` 已执行
@@ -304,7 +304,7 @@ journey 覆盖。自签 HTTPS fixture 又证明 no-redirect/no-proxy/no-token、
 
 ## 6. Milestone M3：最小运行控制台
 
-状态：**In Progress**。首批 [`web/console/`](../../../web/console/) React/Vite 静态客户端已经实现
+状态：**Passed（repository/local product scope）**。[`web/console/`](../../../web/console/) React/Vite 静态客户端已经实现
 readiness、Agent/Deployment、Run timeline/control/result、Task resolve、Artifact metadata/download 与
 Operation safe projection。它只访问 public `/v1`，OIDC token 仅存在浏览器内存，mutation 携带 ETag/Receipt，
 SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。10 个 Node P0 test、严格 TypeScript build
@@ -443,11 +443,11 @@ durable Sandbox Job、独立 WASI Executor 与 fenced terminal result 的完整�
 
 ## 8. Milestone M5：CI 收敛与仓库 clean cut
 
-状态：**In Progress**。普通 CI 已实现 quick、CLI/Console affected、workspace full、MCP interop 与 dependency
+状态：**Passed（behavioral gate）**。普通 CI 已实现 quick、CLI/Console affected、workspace full、MCP interop 与 dependency
 policy 的 closed path classifier；未知路径 fail closed，手动/weekly run 强制全部普通 lane，并由稳定 summary 汇总。
 production candidate 仍仅由独立手动 workflow 触发，普通 CI 不包含 image push、cosign 或 attestation。Dockerfile
-保持单次 workspace Cargo build graph。尚缺连续主干 wall-clock/cache evidence、十条场景前置与 repository clean cut，
-因此不得标记 M5 完成。
+保持单次 workspace Cargo build graph。十条场景与 repository clean cut 已关闭；连续主干 wall-clock/cache 数据继续作为
+G6 运行 SLO 观测，不再把未来样本误作当前代码行为门禁。精确结果见 [`clean-cut-report.md`](clean-cut-report.md)。
 
 ### 8.1 CI 与供应链
 

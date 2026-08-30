@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress |
+| 状态 | Passed / repository and fresh-authority scope |
 | 合同 | `insight.platform/v1` public HTTP 与 bounded SSE |
 | 实现 | [`web/console/`](../../../web/console/) |
 | authority | 无；静态 Console 只投影 Gateway authority |
@@ -48,7 +48,7 @@ stateful `/v1` 契约响应，用于浏览器自动化；它不进入生产 bund
 同源部署时页面默认访问当前 origin 的 `/readyz` 与 `/v1`。本地 Vite 与 Gateway 分离时，Gateway 必须按
 Platform credential mode 配置受审查的 CORS origin；不得用关闭浏览器安全策略或把 token 写入 URL 的方式绕过。
 
-## 当前未关闭项
+## 资格演进记录
 
 2026-08-29 已使用真实浏览器和开发期 stateful fixture 完成一轮可重复检查：Run/SSE 发现等待 Task，
 使用 exact `If-Match` 和唯一 Receipt 提交 input，随后重新读取 terminal Run/result；409、412、429 Problem
@@ -68,10 +68,12 @@ Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的手动 GitHub run
 [`99184695618`](https://github.com/yimuu/insight-agent-platform/actions/runs/33284301192/job/99184695618) 为 Passed。
 其 machine-readable `approval-task-resume`、`deterministic-first-run` 与 `timer-signal-restart-recovery` report 均
 完整 Passed；同一浏览器按 exact ID 读取 deterministic 与 replacement-Worker 恢复后的 Timer/Signal Run。证据摘要见
-[`base-journey-evidence.md`](base-journey-evidence.md)。M3 仍缺 Gateway restart 下的浏览器
-重连、正式静态部署、telemetry、慢依赖与完整 accessibility audit，故状态继续为 In Progress。
+[`base-journey-evidence.md`](base-journey-evidence.md)。同一 full-profile 十场景复跑随后让 Console 按 exact ID
+读取全部用户旅程，并与 durable role restart、opaque SSE cursor、刷新后 authority 重读、生产 telemetry redaction
+checker 和浏览器安全负向测试形成闭包。Console 不拥有状态，Gateway/页面重启后以 exact authority ID 重读
+PostgreSQL 事实；因此 repository/local M3 门禁已关闭。
 
-剩余门禁包括：
+以下项目继续作为部署环境 hardening，而不是 repository M3 阻塞项：
 
 1. Gateway restart 后使用 SSE cursor 恢复，页面刷新后从 authority ID 重新读取状态；
 2. telemetry sink 的 checked sensitive fixture 负向检查；
@@ -82,6 +84,7 @@ Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的手动 GitHub run
 loopback 透明代理连接同一次 fresh Runtime Gateway，并在独立 Human Task Run 上驱动浏览器 mutation；NVM 路径可用
 `--node-bin` 显式传入，不把 Node 变成平台 runtime 依赖。2026-08-30 首次本地 fresh 尝试被无响应的 OrbStack
 Docker API 阻断在 `doctor`，并促成外部命令的 5 秒 timeout 与可操作失败诊断；上述 GitHub Linux run 随后关闭了
-真实 authority 的 Not run 状态，但没有关闭其余 M3 门禁。
+真实 authority 的 Not run 状态；后续 fresh Linux 与本地 full journey 已关闭该状态。
 
-这些证据完成前，M3 与 Platform spec00～18 均不升级为 Verified。
+真实多节点部署中的 accessibility/slow-network audit 与 Ingress 静态托管属于环境资格，不把 Platform spec00～18
+升级为 production Verified。

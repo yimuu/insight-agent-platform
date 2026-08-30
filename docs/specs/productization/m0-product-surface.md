@@ -21,8 +21,8 @@
 | Artifact 与 Operation | `/artifacts*`、`/operations/{operation_id}` | Gateway/Artifact role + shared Artifact/Job authority |
 | OAuth callback | `/mcp/oauth/callback` | Callback API；不是 Console 或 CLI 的私有回调 |
 
-OpenAPI 当前仍标记 `implementing-not-current`。这个标记是 clean-cut 现状，不得被本阶段的示例或
-Console 改写。M5 只有在 `docs/current`、默认发行物和 residual check 同时迁移后才能修改它。
+OpenAPI 已在 M5 clean cut 后标记为 `current`；`docs/current`、默认 Cargo 构建、candidate image 和 residual checker
+在同一批次迁移，不存在只改文案的提前声明。
 
 ## 2. 进程与隔离面
 
@@ -50,14 +50,13 @@ crate-boundary 全图门禁禁止这些执行依赖回流到 CLI。
 
 | profile | 目标场景 | 必要依赖 | 现状与 M1 要求 |
 |---|---|---|---|
-| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability/Registry Validation Worker role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **已覆盖首条 P2 journey**：fresh authority 上的 Artifact -> Policy/Agent -> Run -> SSE/result 已通过，停止唯一 Orchestration Worker 后创建的 durable queued Run 可由同身份替代 Worker 恢复；NATS 已使用 fresh project CA、ServerAuth/ClientAuth 证书和 client certificate verification 收紧为 mTLS，且完整 base regression 通过。其余 M1 失败矩阵与 `full` profile 仍未完成。 |
+| `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability/Registry Validation Worker role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **Passed**：fresh authority 上的 Artifact -> Policy/Agent -> Run -> SSE/result 已通过，停止唯一 Orchestration Worker 后创建的 durable queued Run 可由同身份替代 Worker 恢复；NATS 使用 fresh project CA、ServerAuth/ClientAuth 与 client certificate verification。 |
 | `full` | Model、remote Capability、MCP、Context、Artifact maintenance、WASI | `base` 加 Egress/Security、对应 worker、Artifact Maintenance 与其所需 lifecycle configuration | **已通过本地 P3**。25 个独立角色已有 closed/digest-bound 配置、持久化动态端口和只对 full 生效的单次 release build/受监督 launch；base 不额外构建这些二进制。2026-08-30 exact revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 已在 fresh profile 上使十条 manifest scenario、真实 Runtime Gateway 与 headless Chrome 全部 Passed，详见 [`full-journey-evidence.md`](full-journey-evidence.md)。真实 local attestation registry 只记录 UID/GID/PID、boot/start identity 与 project-local instance UID，不伪造 Pod/cgroup；生产 Helm 仍固定 Linux procfs/private-node 语义并拒绝 loopback。Egress 独立身份、双向 TLS、exact state key、每调用角色 SPIFFE ClientAuth、Remote HTTP/MCP dispatch、普通 Agent 到 durable Sandbox Job/WASI terminal result，以及固定 LangGraph.js `StateGraph` reference 均有场景证据。未安装的 remote lane 继续使用显式空 catalog fail closed。每个增量依赖只能由所需场景启用；外部 L4～L6 不由该结论覆盖。 |
 | `qualification` | gVisor preflight 与生产结构检查 | Kubernetes、`RuntimeClass=runsc`、restricted launcher RBAC、专用 node pool | 已有 static tooling；真实多节点 L4～L6 仍 Not run。 |
 
 ## 4. 当前启动与 bootstrap 事实
 
-- 根 README 的 `PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run` 启动的是当前旧 runtime，不可作为
-  Platform `/v1` profile 的实现；
+- 根 README 和默认 Cargo build 已切换到 `insight` CLI；旧单进程 runtime 仅保留为非默认历史源码；
 - Platform schema 由显式的 `platform-schema provision`（fresh target）或 CI 的
   `scripts/provision-platform-postgres.sh` 安装，并由 `platform-schema verify` 校验。运行时进程在启动时只验证
   schema，不能执行 DDL；重复 provision 会拒绝已有 authority，绝不尝试修补或覆盖它；
@@ -70,5 +69,5 @@ crate-boundary 全图门禁禁止这些执行依赖回流到 CLI。
 
 ## 5. M0 结论
 
-M1 从 `base` profile 开始，目标是**最小的真实多进程 closure**，而不是启动现有 19 个 worker，也不是
-复用旧单进程 runtime。profile 实现完成前，任何文档只能称其为 target，不能替换 `docs/current` Quickstart。
+M1 已从 `base` 扩展到按场景选择的 `full` 真实多进程 closure，并通过 fresh journey。M5 已将该产品面替换为
+`docs/current` Quickstart；旧单进程 runtime 不在默认构建、发行镜像或 active Helm 拓扑中。

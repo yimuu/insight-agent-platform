@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / M2 In Progress |
+| 状态 | Passed / M2 complete |
 | 日期 | 2026-08-30 |
 | owner | `crates/insight-cli/src/apply.rs` |
 | public authority | Management Gateway `/v1` |
@@ -115,11 +115,6 @@ Model Provider、Model Profile、MCP Server、Policy 与 Sandbox Profile publish
 和 semantic digest 注入对应 typed Deployment 字段。额外交叉类型 probe 用 Skill Revision 解析 Policy closure 时必须
 fail closed，防止仅凭 published list 顺序或 mutable head 选取 Version。
 
-Apply/Operation 命令面既定正常、失败、恢复、curl、13类authoring noun与九类 self closure contract matrix 已闭合。以下是更高层 M2/M4
-仍未完成的 fresh scenario 门禁：
-
-- fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 Policy/Agent publication、Run create/watch/result 与
-  Orchestration Worker restart 及新增 curl lifecycle 已形成 P2 journey；其余 Resource kinds 仍未完成。
-
-因此本文件是 Apply 子命令完成声明，不是整个 M2/M4 或 spec00～18 完成声明，也不改变 Platform v2 production
-L4～L6 状态。
+Apply/Operation 命令面的正常、失败、恢复、curl、13 类 authoring noun 与九类 self closure contract matrix 已闭合。
+后续 full-profile 十场景闭包又覆盖全部公开 authoring noun、CLI/raw HTTP/Console 与失败探针，因此 M2 已关闭。
+该结论不改变 Platform v2 production L4～L6 状态。

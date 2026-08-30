@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented subset / M2 In Progress |
+| 状态 | Passed / M2 complete |
 | public authority | Runtime Gateway `/v1/runs*` |
 | 当前命令 | `run create|get|pause|resume|cancel|result|watch` |
 
@@ -66,5 +66,5 @@ fresh macOS P2 journey 使用真实 Gateway、PostgreSQL、Artifact 与 Orchestr
 同一配置和 workload identity 的替代 Worker 恢复；watch 通过 durable SSE 得到 `succeeded`，result 返回 exact Inline
 value。该 journey 不访问数据库业务状态，也不以进程内 fixture 代替 authority。
 
-Run 命令面的上述既定负向矩阵已闭合。M2 仍受 Task、Artifact 与完整原始 HTTP lifecycle 等跨命令门禁约束，
-因此这仍不是 M2 完成声明，也不改变 spec00～18 Accepted/In Progress 状态。
+Run 命令面的上述既定负向矩阵已闭合；Task、Artifact、完整原始 HTTP lifecycle 与十场景跨命令门禁随后也已
+全部 Passed，因此 M2 已关闭。spec00～18 仍因外部 L4～L6 保持 Accepted/In Progress。

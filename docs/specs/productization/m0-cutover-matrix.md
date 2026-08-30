@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Baseline / implementation tracker |
+| 状态 | Passed / repository clean cut |
 | 日期 | 2026-08-29 |
 | 目标 | M5 以一次仓库 clean cut 取代双入口，不做 public compatibility layer |
 
@@ -20,7 +20,7 @@ contract evidence 关闭，不能只删除文档链接。
 | 文档 | `docs/current` 是唯一 current，产品化 docs 属于 specs | M5 后 `docs/current` 只描述通过 golden journey 的 target 产品 | docs link/residual checker；历史当前文档移入 `docs/archive`，不作为正向示例 |
 | CI | `.github/workflows/ci.yml` 在所有 push/PR 执行 workspace-heavy jobs；candidate 仅 `workflow_dispatch` | path-aware quick/affected/full/candidate lanes；candidate 保持手动/tag/deployment trigger | 连续主干 wall-clock、触发矩阵和 failed-cache diagnostic；docs/UI/CLI-only 不触发 image/signing |
 | 镜像与 GitOps | candidate 有 signed exact digest，environment closure 是 `built_not_promoted` | 同一 exact digest 被 promotion 使用，M5 不重建 | CandidateManifest/ReleaseBundle digest closure；promotion 与 L4～L6 是独立环境决定 |
-| 外部框架 | 没有正式 Agno/LangGraph product adapter | 两个 remote Capability reference service | reference process 仅走 typed HTTP/gRPC/MCP，不能读取 Platform DB 或被链接到 Gateway/Scheduler |
+| 外部框架 | Python SDK 与 Agno adapter 已取消 | 一个固定 LangGraph.js remote Capability reference service | reference process 仅走 typed HTTP，不能读取 Platform DB 或被链接到 Gateway/Scheduler |
 
 ## 不可接受的中间态
 

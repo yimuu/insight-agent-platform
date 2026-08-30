@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented subset / M2 In Progress |
+| 状态 | Passed / M2 complete |
 | public authority | Runtime Gateway `/v1/tasks*` |
 | 当前命令 | `task get|submit-input|approve|reject|cancel` |
 
@@ -48,5 +48,5 @@ fresh P2 journey 已通过真实 Gateway、PostgreSQL 与 Orchestration Worker �
 再用 `task submit-input` 提交 typed Inline response。原 SSE 随后出现 `interaction.resolved`，Run durable resume 并以该 response
 成功返回。测试不查询数据库或 internal RPC。
 
-Task 命令面的既定权限、过期、CAS/backpressure 与 action 冲突矩阵已闭合。M2 仍受 Artifact 与完整原始 HTTP
-lifecycle 等跨命令门禁约束，因此不得把 M2 或 spec 00–18 标记为 Verified。
+Task 命令面的既定权限、过期、CAS/backpressure 与 action 冲突矩阵已闭合；Artifact、原始 HTTP lifecycle 与
+十场景跨命令门禁随后也已 Passed，因此 M2 已关闭。spec00～18 不因此升级为 Verified。

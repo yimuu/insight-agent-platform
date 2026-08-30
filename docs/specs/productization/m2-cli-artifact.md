@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented initial lifecycle / M2 In Progress |
+| 状态 | Passed / M2 complete |
 | public authority | Runtime Gateway `/v1/artifacts*` |
 | 当前命令 | `artifact upload|get|read` |
 
@@ -64,5 +64,5 @@ ArtifactVerify Operation、读取 Ready metadata、受控下载并逐字节校�
 原文件保持不变，证明真实 public download 主路径与 no-clobber 边界。随后该 Artifact 被 scheduler 读取并完成 Agent
 publication 与 Run。该证据覆盖真实 upload/download 主路径。
 
-Artifact 命令面的既定上传、下载、恢复与负向矩阵已闭合。M2 仍受完整原始 HTTP lifecycle 和跨命令场景报告等门禁
-约束，因此本文件不单独声明 M2 或 spec00～18 已完成。
+Artifact 命令面的既定上传、下载、恢复与负向矩阵已闭合；完整原始 HTTP lifecycle 和十场景跨命令报告随后也已
+Passed，因此 M2 已关闭。spec00～18 不因此升级为 Verified。

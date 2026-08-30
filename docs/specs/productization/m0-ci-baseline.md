@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Baseline + path-aware implementation / performance not yet verified |
+| 状态 | Path-aware behavior Passed / wall-clock SLO monitored |
 | 采样日期 | 2026-08-29 |
 | 数据来源 | GitHub Actions run metadata 与 `.github/workflows/*.yml` |
 
