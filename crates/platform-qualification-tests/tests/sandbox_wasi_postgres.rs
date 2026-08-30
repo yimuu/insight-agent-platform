@@ -2636,6 +2636,25 @@ async fn sandbox_fixture() {
             if result.disposition == SandboxLeaseRecoveryDisposition::Lost
     ));
 
+    // The expired, already-dispatched execution above conservatively charges its
+    // frozen ceilings. Capture that durable baseline so the real Wasmtime path
+    // below proves its own exact usage delta instead of incorrectly treating a
+    // tenant quota account as if it belonged to only one Job.
+    let quota_used_before_execution: std::collections::BTreeMap<String, i64> = sqlx::query(
+        r#"
+        SELECT metric, used_value
+        FROM insight_platform.quota_accounts
+        WHERE tenant_id = $1 AND work_class = 'sandbox'
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| (row.get("metric"), row.get("used_value")))
+    .collect();
+
     let accepted = repository
         .accept_sandbox_execution(fixture.command.clone())
         .await
@@ -2929,10 +2948,23 @@ async fn sandbox_fixture() {
     assert!(quota.iter().all(|(_, reserved, _)| *reserved == 0));
     assert!(quota
         .iter()
-        .any(|(metric, _, used)| { metric == "durable_quota.sandbox_cpu_seconds" && *used == 1 }));
+        .any(|(metric, _, used)| {
+            metric == "durable_quota.sandbox_cpu_seconds"
+                && *used
+                    == quota_used_before_execution
+                        .get(metric)
+                        .copied()
+                        .unwrap()
+                        + 1
+        }));
     assert!(quota.iter().any(|(metric, _, used)| {
         metric == "durable_quota.sandbox_output_bytes"
-            && *used == i64::try_from(WASI_SUCCESS_OUTPUT.len()).unwrap()
+            && *used
+                == quota_used_before_execution
+                    .get(metric)
+                    .copied()
+                    .unwrap()
+                    + i64::try_from(WASI_SUCCESS_OUTPUT.len()).unwrap()
     }));
     let pending = repository
         .scan_pending_sandbox_capability_outcomes(ScanPendingSandboxCapabilityOutcomes {
