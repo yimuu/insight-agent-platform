@@ -116,6 +116,8 @@ pub struct InstalledModelProviderEndpoint {
     #[serde(default)]
     pub development_loopback: bool,
     #[serde(default)]
+    pub development_anonymous: bool,
+    #[serde(default)]
     pub trusted_root_pem: Option<String>,
 }
 
@@ -143,6 +145,7 @@ impl InstalledModelProviderEndpoint {
                 .is_some_and(|pem| !valid_model_trust_roots(pem))
             || (self.development_loopback
                 && (self.endpoint.host != "localhost" || self.trusted_root_pem.is_none()))
+            || (self.development_anonymous && !self.development_loopback)
         {
             return Err(EgressConfigurationError::InvalidEndpoint);
         }
@@ -177,12 +180,16 @@ impl InstalledModelProviderEndpoint {
             && self.trust_policy == request.trust_policy
             && self.data_policy == request.data_policy
             && self.region == request.region
-            && request
-                .secret_bindings
-                .iter()
-                .filter(|binding| binding.purpose == self.credential_purpose)
-                .count()
-                == 1
+            && if self.development_anonymous {
+                request.secret_bindings.is_empty()
+            } else {
+                request
+                    .secret_bindings
+                    .iter()
+                    .filter(|binding| binding.purpose == self.credential_purpose)
+                    .count()
+                    == 1
+            }
     }
 }
 
@@ -1041,10 +1048,15 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         let (dns_host, addresses) = self
             .resolve_addresses(&entry, &registration.cancellation, request.deadline)
             .await?;
-        let credential = self
-            .resolve_credential(&request, &entry, &registration.cancellation)
-            .await?;
-        let headers = provider_headers(request.protocol, &credential)?;
+        let credential = if entry.development_anonymous {
+            None
+        } else {
+            Some(
+                self.resolve_credential(&request, &entry, &registration.cancellation)
+                    .await?,
+            )
+        };
+        let headers = provider_headers(request.protocol, credential.as_ref())?;
         let body = canonical_json(&request.request_body)
             .map_err(|_| rejected_before_dispatch("model_egress_request_not_canonical"))?;
         if body.len() > request.maximum_request_bytes as usize
@@ -1118,11 +1130,14 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
 
 fn provider_headers(
     protocol: ModelProviderWireProtocol,
-    credential: &ResolvedSecretMaterial,
+    credential: Option<&ResolvedSecretMaterial>,
 ) -> Result<HeaderMap, ModelAdapterFailure> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    let Some(credential) = credential else {
+        return Ok(headers);
+    };
     match protocol {
         ModelProviderWireProtocol::OpenAiResponses => {
             let mut bearer = Vec::with_capacity(7 + credential.material.as_bytes().len());

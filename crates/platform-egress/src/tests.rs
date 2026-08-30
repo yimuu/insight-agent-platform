@@ -92,6 +92,7 @@ fn fixture(policy: SecretResolutionPolicy) -> Fixture {
             data_policy: data_policy.clone(),
             region: region.clone(),
             development_loopback: false,
+            development_anonymous: false,
             trusted_root_pem: None,
         },
         request: ModelProviderWireRequest {
@@ -637,6 +638,50 @@ async fn explicit_development_endpoint_allows_only_root_bound_localhost() {
     missing_root.endpoint_identity_digest = missing_root.endpoint.canonical_digest().unwrap();
     assert_eq!(
         missing_root.validate(),
+        Err(EgressConfigurationError::InvalidEndpoint)
+    );
+}
+
+#[tokio::test]
+async fn explicit_anonymous_development_endpoint_skips_secret_resolution() {
+    let mut fixture = pinned_fixture();
+    let port = 18_444;
+    fixture.entry.endpoint.host = "localhost".to_owned();
+    fixture.entry.endpoint.port = port;
+    fixture.entry.endpoint_identity_digest = fixture.entry.endpoint.canonical_digest().unwrap();
+    fixture.entry.development_loopback = true;
+    fixture.entry.development_anonymous = true;
+    fixture.entry.trusted_root_pem = Some(fixture_root_pem());
+    fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
+    fixture.request.secret_bindings.clear();
+    let secrets = successful_secrets();
+    let transport = Arc::new(LoopbackFixtureTransport {
+        expected_port: port,
+        called: AtomicBool::new(false),
+    });
+    let broker = ReqwestModelProviderEgressBroker::with_transport(
+        InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+        secrets.clone(),
+        Arc::new(FixtureDnsResolver {
+            addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
+        }),
+        transport.clone(),
+        ModelProviderEgressLimits {
+            maximum_in_flight: 2,
+            maximum_dns_answers: 4,
+            maximum_secret_material_bytes: 128,
+        },
+    )
+    .unwrap();
+    let response = broker.open(fixture.request).await.unwrap();
+    assert_eq!(response.status_code, 200);
+    assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+    assert!(transport.called.load(Ordering::SeqCst));
+
+    let mut public_anonymous = fixture.entry;
+    public_anonymous.development_loopback = false;
+    assert_eq!(
+        public_anonymous.validate(),
         Err(EgressConfigurationError::InvalidEndpoint)
     );
 }
