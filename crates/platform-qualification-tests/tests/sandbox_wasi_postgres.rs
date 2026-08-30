@@ -1488,7 +1488,16 @@ async fn insert_derived_sandbox_invocation(
     );
     payload.admission.input_artifact_link_id = Some(input_artifact_link_id.clone());
     payload.admission = seal_admission(payload.admission);
+    // Derive a fresh Ready Invocation from the immutable admission closure only. The source
+    // Invocation may already be terminal by the time later Sandbox cases are constructed, so
+    // none of its lifecycle-owned fields may leak into this independent execution.
     payload.current_job_id = None;
+    payload.approval_task_id = None;
+    payload.input_task_id = None;
+    payload.detached_pending = None;
+    payload.result = None;
+    payload.failure = None;
+    payload.reconciliation = None;
     let observed_at = database_observed_at;
     let invocation = CapabilityInvocationRecord {
         tenant_id: fixture.tenant_id.clone(),
