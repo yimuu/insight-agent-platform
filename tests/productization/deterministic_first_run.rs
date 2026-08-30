@@ -23,6 +23,8 @@ mod artifact_lifecycle_and_rejection;
 mod context_retrieval_and_citation;
 #[path = "exact_model_streaming_chat.rs"]
 mod exact_model_streaming_chat;
+#[path = "native_and_remote_capability.rs"]
+mod native_and_remote_capability;
 #[path = "subagent_quota_and_cancel.rs"]
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
@@ -899,6 +901,16 @@ fn public_cli_deterministic_first_run() {
                 &qualification_ref,
             )
         });
+    let mut capability_evidence =
+        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
+            native_and_remote_capability::run(
+                insight,
+                project,
+                fixture.path(),
+                &authoring_ref,
+                &qualification_ref,
+            )
+        });
     let (mut timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
         insight,
         project,
@@ -943,6 +955,9 @@ fn public_cli_deterministic_first_run() {
             model_evidence
                 .as_ref()
                 .map(|evidence| evidence.run_id.as_str()),
+            capability_evidence
+                .as_ref()
+                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
     let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
@@ -964,6 +979,9 @@ fn public_cli_deterministic_first_run() {
         }
         if let Some(model_evidence) = &mut model_evidence {
             model_evidence.mark_console_passed();
+        }
+        if let Some(capability_evidence) = &mut capability_evidence {
+            capability_evidence.mark_console_passed();
         }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
@@ -1188,6 +1206,14 @@ fn public_cli_deterministic_first_run() {
                     .expect("Model scenario report is canonicalizable"),
             )
             .expect("Model scenario report is writable");
+        }
+        if let Some(capability_evidence) = capability_evidence {
+            fs::write(
+                report_directory.join("native-and-remote-capability.json"),
+                serde_jcs::to_vec(&capability_evidence.report(&revision))
+                    .expect("Capability scenario report is canonicalizable"),
+            )
+            .expect("Capability scenario report is writable");
         }
     }
 }

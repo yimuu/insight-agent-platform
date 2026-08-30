@@ -68,7 +68,15 @@ pub(super) fn run(
     fixture: &Path,
     schema_digest: &str,
     agent_manifest: &Value,
-    console_authorities: (&str, &str, &str, &str, Option<&str>, Option<&str>),
+    console_authorities: (
+        &str,
+        &str,
+        &str,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ),
 ) -> ApprovalTaskEvidence {
     let (
         deterministic_run_id,
@@ -77,6 +85,7 @@ pub(super) fn run(
         artifact_id,
         context_run_id,
         model_run_id,
+        capability_run_id,
     ) = console_authorities;
     let started_at = Utc::now();
     let human_task_plan = json!({
@@ -310,6 +319,7 @@ pub(super) fn run(
                     artifact_id,
                     context_run_id,
                     model_run_id,
+                    capability_run_id,
                 ),
             );
             true
@@ -331,7 +341,15 @@ fn run_real_gateway_console_journey(
     fixture: &Path,
     schema_digest: &str,
     agent_id: &str,
-    authorities: (&str, &str, &str, &str, Option<&str>, Option<&str>),
+    authorities: (
+        &str,
+        &str,
+        &str,
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ),
 ) {
     let (
         deterministic_run_id,
@@ -340,6 +358,7 @@ fn run_real_gateway_console_journey(
         artifact_id,
         context_run_id,
         model_run_id,
+        capability_run_id,
     ) = authorities;
     let request = json!({
         "agent_id": agent_id,
@@ -425,6 +444,7 @@ fn run_real_gateway_console_journey(
         .env("INSIGHT_CONSOLE_ARTIFACT_ID", artifact_id)
         .envs(context_run_id.map(|run_id| ("INSIGHT_CONSOLE_CONTEXT_RUN_ID", run_id)))
         .envs(model_run_id.map(|run_id| ("INSIGHT_CONSOLE_MODEL_RUN_ID", run_id)))
+        .envs(capability_run_id.map(|run_id| ("INSIGHT_CONSOLE_CAPABILITY_RUN_ID", run_id)))
         .env(
             "INSIGHT_CONSOLE_TASK_RESPONSE",
             serde_json::to_string(&response).expect("Console Task response is JSON"),
@@ -458,6 +478,12 @@ fn run_real_gateway_console_journey(
     }
     if let Some(model_run_id) = model_run_id {
         assert_eq!(browser_evidence["model_run_id"], model_run_id);
+    }
+    if let Some(capability_run_id) = capability_run_id {
+        assert_eq!(browser_evidence["capability_run_id"], capability_run_id);
+        assert!(browser_evidence["checks"]
+            .as_array()
+            .is_some_and(|checks| checks.iter().any(|check| check == "capability_run_read")));
     }
 
     for line in lines {

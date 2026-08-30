@@ -132,6 +132,10 @@ pub struct InstalledCapabilityHttpEndpoint {
     pub secret_bindings: Vec<ExactSecretBindingRef>,
     pub credential_injections: Vec<InstalledHttpCredentialInjection>,
     pub limits: CapabilityBackendLimits,
+    #[serde(default)]
+    pub development_loopback: bool,
+    #[serde(default)]
+    pub trusted_root_pem: Option<String>,
 }
 
 impl InstalledCapabilityHttpEndpoint {
@@ -151,6 +155,13 @@ impl InstalledCapabilityHttpEndpoint {
             || self.endpoint.scheme != CapabilityEndpointScheme::Https
             || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
             || parse_endpoint_host(&self.endpoint.host).is_err()
+            || self
+                .trusted_root_pem
+                .as_ref()
+                .is_some_and(|pem| !super::valid_model_trust_roots(pem))
+            || (self.development_loopback
+                && (self.endpoint.host != "localhost" || self.trusted_root_pem.is_none()))
+            || (!self.development_loopback && self.trusted_root_pem.is_some())
         {
             return Err(EgressConfigurationError::InvalidEndpoint);
         }
@@ -286,6 +297,7 @@ struct PinnedCapabilityHttpRequest {
     transport_evidence_digest: Sha256Digest,
     effect: Effect,
     idempotency_kind: CapabilityIdempotencyKind,
+    trusted_root_pem: Option<String>,
 }
 
 struct PinnedCapabilityHttpResponse {
@@ -311,7 +323,7 @@ impl PinnedCapabilityHttpTransport for ReqwestPinnedCapabilityHttpTransport {
         &self,
         request: PinnedCapabilityHttpRequest,
     ) -> Result<PinnedCapabilityHttpResponse, CapabilityAdapterFailure> {
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .no_proxy()
@@ -319,7 +331,15 @@ impl PinnedCapabilityHttpTransport for ReqwestPinnedCapabilityHttpTransport {
             .connect_timeout(request.connect_timeout)
             .timeout(request.total_timeout)
             .pool_max_idle_per_host(0)
-            .resolve_to_addrs(&request.dns_host, &request.addresses)
+            .resolve_to_addrs(&request.dns_host, &request.addresses);
+        if let Some(pem) = &request.trusted_root_pem {
+            for root in reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+                .map_err(|_| before_dispatch("capability_egress_trust_root_rejected", false))?
+            {
+                client = client.add_root_certificate(root);
+            }
+        }
+        let client = client
             .build()
             .map_err(|_| before_dispatch("capability_egress_client_build_failed", false))?;
         let outbound = client
@@ -555,9 +575,10 @@ impl ReqwestCapabilityHttpEgressTransport {
 
     async fn resolve_addresses(
         &self,
-        endpoint: &CanonicalHttpEndpoint,
+        entry: &InstalledCapabilityHttpEndpoint,
         cancellation: &CancellationToken,
     ) -> Result<(String, Vec<SocketAddr>), CapabilityAdapterFailure> {
+        let endpoint = &entry.endpoint;
         let host = parse_endpoint_host(&endpoint.host)
             .map_err(|_| before_dispatch("capability_egress_invalid_endpoint", false))?;
         let (dns_host, mut addresses) = match host {
@@ -592,7 +613,9 @@ impl ReqwestCapabilityHttpEgressTransport {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !is_public_destination_ip(address.ip())
+                address.port() != endpoint.port
+                    || (!is_public_destination_ip(address.ip())
+                        && !(entry.development_loopback && address.ip().is_loopback()))
             })
         {
             return Err(before_dispatch(
@@ -683,7 +706,7 @@ impl HttpNetworkTransport for ReqwestCapabilityHttpEgressTransport {
         let entry = self.catalog.resolve(&request)?;
         let registration = self.register(request.identity.clone())?;
         let (dns_host, addresses) = self
-            .resolve_addresses(&entry.endpoint, &registration.cancellation)
+            .resolve_addresses(&entry, &registration.cancellation)
             .await?;
         let headers = self
             .resolve_headers(&request, &entry, &registration.cancellation)
@@ -730,6 +753,7 @@ impl HttpNetworkTransport for ReqwestCapabilityHttpEgressTransport {
                 transport_evidence_digest: evidence_digest.clone(),
                 effect: request.effect,
                 idempotency_kind: request.idempotency_kind,
+                trusted_root_pem: entry.trusted_root_pem.clone(),
             })
             .await?;
         drop(registration);
@@ -920,6 +944,7 @@ mod tests {
         CapabilityTransportRequestIdentity, HttpIdempotencyBinding,
     };
     use insight_platform_contracts::{ResourceId, ResourceKind, SecretResolutionPolicy};
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
     use std::{
         net::Ipv4Addr,
         str::FromStr,
@@ -1014,6 +1039,8 @@ mod tests {
                     },
                 ],
                 limits,
+                development_loopback: false,
+                trusted_root_pem: None,
             },
             request: HttpTransportRequest {
                 identity: CapabilityTransportRequestIdentity {
@@ -1213,6 +1240,47 @@ mod tests {
         })
     }
 
+    fn fixture_root_pem() -> String {
+        let mut parameters = CertificateParams::default();
+        parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        CertifiedIssuer::self_signed(parameters, KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+    }
+
+    struct LoopbackFixtureTransport {
+        expected_port: u16,
+        called: AtomicBool,
+    }
+
+    #[async_trait]
+    impl PinnedCapabilityHttpTransport for LoopbackFixtureTransport {
+        async fn round_trip(
+            &self,
+            request: PinnedCapabilityHttpRequest,
+        ) -> Result<PinnedCapabilityHttpResponse, CapabilityAdapterFailure> {
+            assert_eq!(
+                request.url.as_str(),
+                format!("https://localhost:{}/v1/invoke", self.expected_port)
+            );
+            assert_eq!(request.dns_host, "localhost");
+            assert_eq!(
+                request.addresses,
+                vec![SocketAddr::new(
+                    Ipv4Addr::LOCALHOST.into(),
+                    self.expected_port
+                )]
+            );
+            assert!(request.trusted_root_pem.is_some());
+            self.called.store(true, Ordering::SeqCst);
+            Ok(PinnedCapabilityHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"ok":true}"#.to_vec(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn exact_catalog_dns_secret_and_bounded_transport_are_composed() {
         let fixture = fixture();
@@ -1265,6 +1333,57 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.safe_code, "capability_egress_destination_denied");
         assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_development_endpoint_allows_only_root_bound_localhost() {
+        let mut fixture = fixture();
+        let port = 18_445;
+        fixture.entry.endpoint.host = "localhost".to_owned();
+        fixture.entry.endpoint.port = port;
+        fixture.entry.endpoint_identity_digest = fixture.entry.endpoint.canonical_digest().unwrap();
+        fixture.entry.development_loopback = true;
+        fixture.entry.trusted_root_pem = Some(fixture_root_pem());
+        fixture.request.endpoint = fixture.entry.endpoint.clone();
+        fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
+        let backend = Arc::new(LoopbackFixtureTransport {
+            expected_port: port,
+            called: AtomicBool::new(false),
+        });
+        let transport = ReqwestCapabilityHttpEgressTransport::with_transport(
+            InstalledCapabilityHttpEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+            secrets(),
+            Arc::new(FixtureDns {
+                addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
+                calls: AtomicUsize::new(0),
+            }),
+            backend.clone(),
+            CapabilityHttpEgressLimits {
+                maximum_in_flight: 2,
+                maximum_dns_answers: 4,
+                maximum_secret_material_bytes: 128,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            transport.round_trip(fixture.request).await.unwrap().status,
+            200
+        );
+        assert!(backend.called.load(Ordering::SeqCst));
+
+        let mut missing_root = fixture.entry;
+        missing_root.trusted_root_pem = None;
+        assert_eq!(
+            missing_root.validate(),
+            Err(EgressConfigurationError::InvalidEndpoint)
+        );
+        missing_root.trusted_root_pem = Some(fixture_root_pem());
+        missing_root.endpoint.host = "api.example.com".to_owned();
+        missing_root.endpoint_identity_digest = missing_root.endpoint.canonical_digest().unwrap();
+        assert_eq!(
+            missing_root.validate(),
+            Err(EgressConfigurationError::InvalidEndpoint)
+        );
     }
 
     #[tokio::test]

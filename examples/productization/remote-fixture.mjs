@@ -79,6 +79,18 @@ async function handleModel(request, response) {
   response.end()
 }
 
+async function handleCapability(request, response) {
+  const body = JSON.parse((await boundedBody(request)).toString('utf8'))
+  trace({kind: 'capability_request', method: request.method, path: request.url})
+  if (JSON.stringify(body).includes('fixture-capability-timeout')) return
+  response.writeHead(200, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'content-encoding': 'identity',
+  })
+  response.end(JSON.stringify(body))
+}
+
 const port = Number.parseInt(required('INSIGHT_REMOTE_FIXTURE_PORT'), 10)
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error('INSIGHT_REMOTE_FIXTURE_PORT is invalid')
@@ -93,6 +105,10 @@ const server = createServer(
     try {
       if (request.method === 'POST' && request.url === '/v1/responses') {
         await handleModel(request, response)
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/capability') {
+        await handleCapability(request, response)
         return
       }
       trace({kind: 'route_rejected', method: request.method, path: request.url})

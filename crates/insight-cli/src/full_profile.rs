@@ -11,7 +11,8 @@ use insight_platform_contracts::{
     builtin_json_grpc_response_mapping_digest, builtin_json_http_error_mapping_digest,
     builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
     builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
-    canonical_digest, ResourceKind, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
+    canonical_digest, CapabilityBackendContract, GrpcCapabilityContract, HttpCapabilityContract,
+    HttpCapabilityMethod, ResourceKind, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
     WASI_ABI_V1_RUNTIME_VERSION,
 };
 pub(crate) use insight_platform_contracts::{
@@ -377,23 +378,42 @@ pub(crate) fn initial_configs(
     });
     let model_manifest_digest = canonical_digest(&model_manifest)
         .expect("the closed local Model worker manifest is canonical JSON");
+    let capability_http_contract = CapabilityBackendContract::Http(HttpCapabilityContract {
+        method: HttpCapabilityMethod::Post,
+        protocol_contract_digest: builtin_json_http_protocol_contract_digest(),
+        request_mapping_digest: builtin_json_http_request_mapping_digest(),
+        response_mapping_digest: builtin_json_http_response_mapping_digest(),
+        error_mapping_digest: builtin_json_http_error_mapping_digest(),
+        idempotency_header: None,
+    });
     let capability_http_codecs = vec![json!({
         "codec_id": BUILTIN_JSON_CODEC_ID,
         "codec_version": BUILTIN_JSON_CODEC_VERSION,
         "module_digest": builtin_json_codec_module_digest(),
         "worker_protocol_version": 1,
-        "descriptor_digest": closed_local_digest("capability-http-descriptor"),
+        "descriptor_digest": capability_http_contract.descriptor_digest()
+            .expect("the built-in HTTP Capability descriptor is canonical"),
         "protocol_contract_digest": builtin_json_http_protocol_contract_digest(),
         "request_mapping_digest": builtin_json_http_request_mapping_digest(),
         "response_mapping_digest": builtin_json_http_response_mapping_digest(),
         "error_mapping_digest": builtin_json_http_error_mapping_digest(),
     })];
+    let capability_grpc_contract = CapabilityBackendContract::Grpc(GrpcCapabilityContract {
+        protobuf_contract_digest: builtin_json_grpc_protobuf_contract_digest(),
+        service_name: "insight.fixture.v1.Lookup".to_owned(),
+        method_name: "Get".to_owned(),
+        request_mapping_digest: builtin_json_grpc_request_mapping_digest(),
+        response_mapping_digest: builtin_json_grpc_response_mapping_digest(),
+        error_mapping_digest: builtin_json_grpc_error_mapping_digest(),
+        idempotency_metadata_key: None,
+    });
     let capability_grpc_codecs = vec![json!({
         "codec_id": BUILTIN_JSON_CODEC_ID,
         "codec_version": BUILTIN_JSON_CODEC_VERSION,
         "module_digest": builtin_json_codec_module_digest(),
         "worker_protocol_version": 1,
-        "descriptor_digest": closed_local_digest("capability-grpc-descriptor"),
+        "descriptor_digest": capability_grpc_contract.descriptor_digest()
+            .expect("the built-in gRPC Capability descriptor is canonical"),
         "protobuf_contract_digest": builtin_json_grpc_protobuf_contract_digest(),
         "service_name": "insight.fixture.v1.Lookup",
         "method_name": "Get",
