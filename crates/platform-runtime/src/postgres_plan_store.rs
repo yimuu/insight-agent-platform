@@ -2085,6 +2085,7 @@ where
 
 fn classify_repository_failure(failure: RepositoryError) -> DurablePlanDriverError {
     tracing::warn!(repository_error = %failure, "durable controller repository operation failed");
+    eprintln!("durable controller repository operation failed: {failure}");
     match failure {
         RepositoryError::Database(_) => DurablePlanDriverError::Unavailable,
         RepositoryError::NotFound(_)
