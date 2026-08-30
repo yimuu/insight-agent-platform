@@ -49,6 +49,13 @@ environment commit，以共享 BuildKit cache 构建两个 image，并为 cosign
 已有样本证明 workspace full 低于 30 分钟、cached candidate 低于 10 分钟；10/30 分钟是持续运行 SLO，后续主干
 继续采样，不把尚未发生的未来 run 当作 repository 功能缺口。
 
+可复核样本包括当前 clean-cut full run
+[`33329283633`](https://github.com/yimuu/insight-agent-platform/actions/runs/33329283633)（20m48s）、CLI affected runs
+[`33312885522`](https://github.com/yimuu/insight-agent-platform/actions/runs/33312885522)（3m31s）与
+[`33311206846`](https://github.com/yimuu/insight-agent-platform/actions/runs/33311206846)（3m34s），以及 cached candidate
+[`33183969085`](https://github.com/yimuu/insight-agent-platform/actions/runs/33183969085)（3m56s）。精确 job 分段见
+[`m0-ci-baseline.md`](m0-ci-baseline.md)。
+
 ## 4. 明确不关闭的门禁
 
 本报告不宣称 production-ready，也不关闭真实多节点 Kubernetes、`RuntimeClass=runsc`、容量、混沌、restore、24 小时

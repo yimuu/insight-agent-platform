@@ -5,7 +5,7 @@
 | 状态 | Baseline / verified from checked-in sources |
 | 日期 | 2026-08-29 |
 | 证据 | `contracts/platform-v1/openapi.yaml`、各 `crates/platform-*/Cargo.toml`、`deploy/helm/` |
-| 当前行为 | 不变；本文不声称本地 profile 已经可运行 |
+| 当前行为 | Inventory 已由 M1～M5 实施；本页清单与 `docs/current` 的 `/v1` 产品面一致 |
 
 ## 1. 公共产品面
 

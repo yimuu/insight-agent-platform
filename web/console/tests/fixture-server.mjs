@@ -8,6 +8,7 @@ const port = Number(process.env.INSIGHT_CONSOLE_FIXTURE_PORT ?? 4173)
 const host = '127.0.0.1'
 const traceId = '0123456789abcdef0123456789abcdef'
 const runId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b90'
+const emptyRunId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b95'
 const taskId = 'int_0198f1c3-8f49-7c3e-b1f3-773c28367b91'
 const deploymentId = 'adep_0198f1c3-8f49-7c3e-b1f3-773c28367b92'
 const outputId = 'val_0198f1c3-8f49-7c3e-b1f3-773c28367b93'
@@ -15,6 +16,9 @@ let taskState = 'pending'
 let runState = 'waiting'
 let taskVersion = 1
 let requestCount = 0
+const slowResponseMilliseconds = Number(process.env.INSIGHT_CONSOLE_FIXTURE_SLOW_RESPONSE_MS ?? 0)
+
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
 function headers(extra = {}) {
   return {
@@ -45,13 +49,15 @@ function problem(response, status, code, detail, retryable = false) {
   })
 }
 
-function runView() {
-  const terminal = runState === 'succeeded'
+function runView(selectedRunId = runId) {
+  const empty = selectedRunId === emptyRunId
+  const state = empty ? 'running' : runState
+  const terminal = state === 'succeeded'
   return {
     schema_version: 1,
-    run_id: runId,
+    run_id: selectedRunId,
     agent_deployment_id: deploymentId,
-    state: runState,
+    state,
     version: terminal ? 2 : 1,
     input_value_id: 'val_0198f1c3-8f49-7c3e-b1f3-773c28367b94',
     output_value_id: terminal ? outputId : null,
@@ -134,8 +140,18 @@ const server = createServer(async (request, response) => {
     problem(response, 401, 'authentication_required', 'A bearer token is required.')
     return
   }
-  if (request.method === 'GET' && url.pathname === `/v1/runs/${runId}`) {
-    sendJson(response, 200, runView(), { etag: runView().etag })
+  if (request.method === 'GET' && [runId, emptyRunId].some((id) => url.pathname === `/v1/runs/${id}`)) {
+    if (slowResponseMilliseconds > 0) await delay(slowResponseMilliseconds)
+    const selectedRunId = url.pathname.split('/').at(-1)
+    sendJson(response, 200, runView(selectedRunId), { etag: runView(selectedRunId).etag })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === `/v1/runs/${emptyRunId}/events`) {
+    response.writeHead(200, headers({
+      'content-type': 'text/event-stream',
+      'content-length': 0,
+    }))
+    response.end()
     return
   }
   if (request.method === 'GET' && url.pathname === `/v1/runs/${runId}/events`) {

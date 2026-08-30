@@ -40,6 +40,9 @@ working-tree revision 或 manifest drift 都失败。
 
 ## 3. 当前证据
 
+本节按 exact revision 保留从四份到十份报告的增量时间线。中间段落中的“其余场景尚未产生”“严格门禁失败”
+只描述该段明确 revision 的当时状态；本节最后的 clean-cut revision 与文件顶部 `Passed` 是当前结论。
+
 `deterministic_first_run.rs` 的真实 P2 journey 已覆盖 CLI、checked curl 七步 Resource lifecycle、独立 raw public HTTP、
 terminal Run、durable SSE、exact binding、Orchestration Worker replacement、Artifact S3/KMS I/O、invalid Receipt conflict、Gateway unavailable diagnostic
 与角色重启。Human Task 子旅程已提取到独立 [`approval_task_resume.rs`](../../../tests/productization/approval_task_resume.rs)，

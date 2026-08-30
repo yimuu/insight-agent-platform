@@ -20,6 +20,8 @@
 - 页面刷新清除 token 和已读取 Run projection；token 不进入 URL、`localStorage` 或 `sessionStorage`；
 - skip link 是首个可聚焦元素，目标 `main#console-main` 可接收焦点，当前导航项携带
   `aria-current="page"`，状态消息使用 atomic live region。
+- 对无 Event 的非终态 Run 显示明确空 timeline，不把“尚无 committed event”伪装成加载失败；
+- fixture 延迟 Run authority 响应时，Inspect 按钮显示 `Loading…` 并保持 disabled，响应完成后再投影 authority。
 
 ## 重现
 
@@ -44,7 +46,8 @@ fixture 请求日志做闭合断言。GitHub `console` job 固定在带 Chrome �
 `ubuntu-24.04` 的预装 Chrome 中返回 closed `passed` evidence，记录 `request_count=15`，并逐项通过
 `gateway_ready`、`sse_task_discovery`、`task_mutation`、`terminal_run`、`reload_authority_read` 与
 `memory_only_token`。workflow 后因更晚提交取代而取消，不改变已完成 job 的结果；该证据只适用于上述 exact revision
-且仅适用于 stateful fixture boundary。
+且仅适用于 stateful fixture boundary。2026-08-31 的增强 fixture 本地闭合运行返回 `request_count=17`，并新增
+`empty_run_timeline` 与 `slow_dependency_busy_state`；远端 CI 结果在对应提交完成后按 exact revision 记录。
 
 ## 证据边界
 
@@ -65,7 +68,8 @@ PostgreSQL/Gateway authority 中额外创建一条 Human Task Run；只有浏览
 `approval-task-resume` 报告才把 `console` 与顶层状态升级为 `passed`。
 
 2026-08-30 自动化和透明代理已对 stateful fixture 完整通过，并已接入受影响 Console 的 CI job；CI 只有在
-真实 headless Chrome 旅程及请求日志闭合断言同时通过后才会成功。随后 fresh real-Gateway 执行在进入 `init/dev` 前发现
-本机 OrbStack Docker API 无响应；旧 `doctor` 因无 timeout 挂起，该缺口已修复为每条外部命令 5 秒有界失败并由真实
-无响应 daemon 验证。由于没有到达 fresh Gateway/PostgreSQL，真实 Console 项仍是 **Not run**，不得把 stateful fixture
-结果替代为 M3 通过证据。
+真实 headless Chrome 旅程及请求日志闭合断言同时通过后才会成功。一次本地 fresh real-Gateway 执行在进入
+`init/dev` 前发现 OrbStack Docker API 无响应；旧 `doctor` 因无 timeout 挂起，该缺口已修复为每条外部命令 5 秒
+有界失败并由真实无响应 daemon 验证。之后 GitHub fresh Linux run `33284301192` / job `99184695618` 已在真实
+PostgreSQL + Gateway authority 上通过 Console Task journey，后续 full-profile 10 场景又按 exact ID 读取全部旅程。
+因此真实 Console 的仓库范围状态为 **Passed**；fixture 仍不替代外部多节点 Ingress 与 L4～L6 资格。

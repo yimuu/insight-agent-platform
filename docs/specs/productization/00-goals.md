@@ -7,7 +7,7 @@
 | 阶段代号 | Productization Convergence |
 | 合同输入 | Platform v2 spec00～18（Accepted / In Progress）、AGENTS.md |
 | 目标协议 | `insight.platform/v1` 与 `/v1`，不增加 `/v2` |
-| 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+| 当前行为 | Productization clean cut 已完成；当前 `/v1` 行为以 [`docs/current`](../../current/README.md) 为准 |
 | 实施计划 | [`implementation-plan.md`](implementation-plan.md) |
 
 ## 1. 阶段决策

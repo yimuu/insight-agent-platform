@@ -3,6 +3,7 @@ import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 
 const runId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b90'
+const emptyRunId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b95'
 const taskId = 'int_0198f1c3-8f49-7c3e-b1f3-773c28367b91'
 const token = 'fixture-token-not-a-credential'
 const directory = fileURLToPath(new URL('.', import.meta.url))
@@ -57,6 +58,8 @@ async function runJourney(origin) {
       INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT: 'completed',
       INSIGHT_CONSOLE_GATEWAY_ORIGIN: origin,
       INSIGHT_CONSOLE_RUN_ID: runId,
+      INSIGHT_CONSOLE_EMPTY_RUN_ID: emptyRunId,
+      INSIGHT_CONSOLE_EXPECT_SLOW_LOADING: '1',
       INSIGHT_CONSOLE_TASK_ID: taskId,
       INSIGHT_CONSOLE_TASK_RESPONSE: JSON.stringify({
         classification: 'internal',
@@ -104,7 +107,11 @@ async function main() {
   const port = await unusedPort()
   const origin = `http://127.0.0.1:${port}`
   const fixture = spawn(process.execPath, [`${directory}fixture-server.mjs`], {
-    env: { ...process.env, INSIGHT_CONSOLE_FIXTURE_PORT: String(port) },
+    env: {
+      ...process.env,
+      INSIGHT_CONSOLE_FIXTURE_PORT: String(port),
+      INSIGHT_CONSOLE_FIXTURE_SLOW_RESPONSE_MS: '750',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let fixtureOutput = ''

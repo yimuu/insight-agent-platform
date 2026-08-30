@@ -130,6 +130,8 @@ async function main() {
   const gatewayOrigin = required('INSIGHT_CONSOLE_GATEWAY_ORIGIN')
   const token = required('INSIGHT_CONSOLE_ACCESS_TOKEN')
   const runId = required('INSIGHT_CONSOLE_RUN_ID')
+  const emptyRunId = process.env.INSIGHT_CONSOLE_EMPTY_RUN_ID
+  const expectSlowLoading = process.env.INSIGHT_CONSOLE_EXPECT_SLOW_LOADING === '1'
   const taskId = required('INSIGHT_CONSOLE_TASK_ID')
   const deterministicRunId = process.env.INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID
   const timerSignalRunId = process.env.INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID
@@ -205,6 +207,25 @@ async function main() {
     await evaluate(client, setInput('input[type="password"]', token))
     await evaluate(client, `document.querySelector('.connection-form').requestSubmit()`)
     await waitFor(client, `document.body.innerText.includes('Gateway is ready.')`, 'real Gateway readiness')
+
+    if (emptyRunId) {
+      await evaluate(client, clickText('Runs'))
+      await evaluate(client, setInput('input[placeholder="run_…"]', emptyRunId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      if (expectSlowLoading) {
+        await waitFor(
+          client,
+          `document.querySelector('.search button').disabled && document.querySelector('.search button').textContent.includes('Loading')`,
+          'bounded loading state while the authority is slow',
+          500,
+        )
+      }
+      await waitFor(
+        client,
+        `document.body.innerText.includes(${jsonLiteral(emptyRunId)}) && !!document.querySelector('.empty-state') && document.body.innerText.includes('No public events in this bounded page')`,
+        'explicit empty durable timeline',
+      )
+    }
 
     if (deterministicRunId) {
       await evaluate(client, clickText('Runs'))
@@ -354,6 +375,8 @@ async function main() {
       wasi_framework_run_id: wasiFrameworkRunId,
       checks: [
         'gateway_ready',
+        ...(emptyRunId ? ['empty_run_timeline'] : []),
+        ...(expectSlowLoading ? ['slow_dependency_busy_state'] : []),
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
         ...(timerSignalRunId ? ['timer_signal_run_read'] : []),
         ...(subagentRunId ? ['subagent_run_read'] : []),

@@ -73,12 +73,15 @@ Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的手动 GitHub run
 checker 和浏览器安全负向测试形成闭包。Console 不拥有状态，Gateway/页面重启后以 exact authority ID 重读
 PostgreSQL 事实；因此 repository/local M3 门禁已关闭。
 
-以下项目继续作为部署环境 hardening，而不是 repository M3 阻塞项：
+仓库范围还完成了以下闭合检查：
 
-1. Gateway restart 后使用 SSE cursor 恢复，页面刷新后从 authority ID 重新读取状态；
+1. Platform role restart 后按 exact authority ID 与 opaque SSE cursor 重新读取状态；
 2. telemetry sink 的 checked sensitive fixture 负向检查；
-3. 空状态、慢依赖的浏览器契约测试，以及正式 accessibility audit；
-4. 静态 bundle 由 Gateway/Ingress 同源承载的部署清单与 CI lane。
+3. 空 timeline 的明确状态，以及慢 authority 响应期间 disabled/Loading 的浏览器断言；
+4. skip link、main focus target、active navigation 和 atomic live region 的基础键盘/无障碍语义。
+
+真实多节点 Ingress 的静态托管、网络整形下的 slow-network audit 和正式 accessibility audit 继续作为部署环境
+hardening，不是 repository M3 阻塞项。
 
 `scripts/run-productization-base-journey.sh --console-browser` 使用现有全局 Node/Corepack 构建静态 bundle，通过严格
 loopback 透明代理连接同一次 fresh Runtime Gateway，并在独立 Human Task Run 上驱动浏览器 mutation；NVM 路径可用

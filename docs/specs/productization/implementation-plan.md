@@ -6,7 +6,7 @@
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
-| 当前行为 | 不变；每个批次完成并取得 conformance evidence 后才可更新 `docs/current` |
+| 当前行为 | M0～M5 仓库范围已实施并完成 clean cut；当前 `/v1` 行为以 `docs/current` 为准 |
 
 ## 1. 实施原则
 
@@ -16,6 +16,9 @@ untrusted execution plane 分离。
 
 任何实现反馈若要求改变 Platform v2 observable contract，先停止该批次，按 upstream -> downstream 修订
 受影响 spec 并完成 00～18 cross-review；CLI、HTTP 示例和控制台不得自行创造第二套语义。
+
+本计划保留了按 exact revision 追加的实施时间线。段落中的“尚未完成”“仍缺”只描述其前方明确日期/revision
+对应的当时状态；各 milestone 标题处的当前状态，以及该 milestone 最后一条 exact-revision 证据，才是当前结论。
 
 ## 2. 交付物布局
 
@@ -68,9 +71,8 @@ M0 的已审查输入保存在：
 以及 fresh PostgreSQL provision/bootstrap、真实 HTTPS S3/KMS fixture 和七个独立 Platform role。role
 监听端口由本地 profile 分配，未变更源码时复用已构建的 release binaries。`stop` 停止 Platform roles 但保留
 LocalStack Community dependency process，因为该固定版本不能在容器重建后恢复本 profile 的 S3/KMS authority；
-依赖容器销毁明确不属于本地 durable restart。`full` profile 和本里程碑的其余
-退出门禁仍未完成；不得据此标记 M1 或 spec 00–18 为
-Verified。
+依赖容器销毁明确不属于本地 durable restart。后续时间线记录了 `full` profile 和其余仓库退出门禁的闭合；
+外部 L4～L6 不在 M1 范围内，且仍不据此把 spec 00–18 标记为 Verified。
 
 2026-08-29 macOS P2 journey 已在 fresh PostgreSQL/LocalStack 上只通过 public CLI 完成 Artifact upload、Policy/Agent
 publication、deterministic Run、durable SSE 与 Inline result。随后测试停止唯一 Orchestration Worker，在 Worker 缺席时
@@ -309,9 +311,10 @@ readiness、Agent/Deployment、Run timeline/control/result、Task resolve、Arti
 Operation safe projection。它只访问 public `/v1`，OIDC token 仅存在浏览器内存，mutation 携带 ETag/Receipt，
 SSE 使用 opaque cursor，DOM 投影执行 closed sensitive-field redaction。10 个 Node P0 test、严格 TypeScript build
 和 lint 已通过；开发期 stateful fixture 上的真实浏览器 journey 已覆盖 Run/SSE -> Task mutation -> terminal Run、
-409/412/429、cursor reconnect、DOM/console 脱敏、刷新清理内存态 token 和基础键盘语义。该证据不包含真实
-Gateway/PostgreSQL 或 Gateway restart；正式部署、telemetry、慢依赖和 accessibility audit 仍未完成，详见
-[`m3-console.md`](m3-console.md)，故不得标记 M3 或 spec00～18 为 Verified。
+409/412/429、cursor reconnect、DOM/console 脱敏、刷新清理内存态 token 和基础键盘语义。后续资格已增加明确
+空 timeline 与慢 authority 响应期间的 disabled/Loading 状态，并在 fresh PostgreSQL + 真实 Gateway 上完成
+Task journey 与 authority 重读。仓库范围 M3 已 Passed；真实多节点 Ingress、slow-network 与正式 accessibility audit
+仍属于外部部署资格，故不据此把 spec00～18 标记为 Verified。
 
 同一 stateful fixture 浏览器 journey 现由 `browser:fixture:qualify` 自行监督 fixture、同源代理和 headless
 Chrome，并闭合检查 readiness 无凭据、全部 `/v1` 请求有凭据、Task mutation 的 exact ETag/Receipt 以及日志不含
@@ -323,16 +326,17 @@ Chrome，并闭合检查 readiness 无凭据、全部 `/v1` 请求有凭据、Ta
 Console 的 fresh authority runner 已加入 base journey 的显式 `--console-browser` 模式：它从用户选定的全局 Node
 旁解析 Corepack，构建静态 bundle，以仅转发 `/readyz`/`/v1` 的 loopback 同源代理连接真实 Runtime Gateway，并在
 独立 Human Task Run 上由 headless Chromium 完成 SSE Task 发现、typed mutation、terminal result、刷新清空内存态
-凭据与 authority ID 重读。脚本对 stateful fixture 已通过；2026-08-30 fresh PostgreSQL/Gateway 尝试因本机 OrbStack
-Docker API 无响应而在 `doctor` 阶段终止，故真实项仍为 Not run。该失败暴露并闭合了 `doctor` 外部命令可无限等待的
-缺口：所有命令探针现在 5 秒 fail closed，真实无响应 daemon 在约 6 秒内返回 `docker_engine=failed` 的可操作 JSON，
-不再挂住 CLI。M3 的真实 Gateway、Gateway restart、telemetry、慢依赖、accessibility 与正式部署门禁仍未完成。
+凭据与 authority ID 重读。脚本对 stateful fixture 已通过；2026-08-30 一次 fresh PostgreSQL/Gateway 尝试因本机
+OrbStack Docker API 无响应而在 `doctor` 阶段终止。该失败暴露并闭合了 `doctor` 外部命令可无限等待的缺口：所有
+命令探针现在 5 秒 fail closed，真实无响应 daemon 在约 6 秒内返回 `docker_engine=failed` 的可操作 JSON，不再挂住
+CLI。后续 fresh Linux 与 full journey 已关闭真实 Gateway、role restart、telemetry redaction、空状态和有界慢响应的
+仓库门禁；多节点 Ingress、真实 slow-network 与正式 accessibility audit 仍未执行。
 
 2026-08-30 Git revision `591baf00c9b5bac04826f84b58ee96032aa2749b` 已在 GitHub `ubuntu-24.04` 的显式手动
 run `33279353000` / job `99171748184` 完成首个 fresh PostgreSQL + 真实 Gateway + headless Chrome journey。
 `approval-task-resume` 的 CLI、raw HTTP、Console、三项 assertion 与两项 failure probe 均 Passed，成为第一条完整
-黄金场景报告；另外两份 base 报告继续诚实保持 Incomplete。核心步骤约 14 分 1 秒，仍超过 G1 的 10 分钟 cold
-目标，因此 M1/M3/M4 继续 In Progress。完整摘要、artifact digest 与边界见
+黄金场景报告；该 revision 的另外两份 base 报告继续诚实保持 Incomplete。后续 exact revision 的 full-profile
+10/10 fresh journey 已关闭仓库范围 M1/M3/M4；早期约 14 分 1 秒的 cold 样本只保留为性能基线。完整摘要、artifact digest 与边界见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
 2026-08-30 exact revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的 fresh Linux run
