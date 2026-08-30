@@ -396,12 +396,13 @@ Dataset Operation -> immutable Generation发现、exact Context binding、Native
 `c16c68cacfeecafae03cfd9bba3c899ea09807e7994048537fb10c12eccec067`；严格 M4 现有六份 Passed report，仍缺 Model、
 remote Capability、MCP、WASI/framework 四条，不能关闭 M4。
 
-随后 `exact-model-streaming-chat` 已形成第七份 exact-revision Passed report。下一条
-`native-and-remote-capability` 的实现与本地 fresh/full/Console 验证已完成：public authoring lifecycle 建立 exact
+随后 `exact-model-streaming-chat` 已形成第七份 exact-revision Passed report。2026-08-30 exact revision
+`b0d8a3247a0ce09f3946312359f0a8cb078f937e` 又使 `native-and-remote-capability` 成为第八份 Passed report：
+public authoring lifecycle 建立 exact
 Interface/Implementation/Deployment，Native 与 Remote Worker 分别执行冻结 binding，Remote HTTP 仅经 Egress 到显式
 安装 CA root 的 localhost TLS fixture；非幂等 response timeout 收敛到 durable reconciliation，catalog rejection
-在 dispatch 前 fail closed。该批必须先提交实现，再从 clean exact revision 生成第八份 canonical report；在 report
-checker 重验前不能把严格 M4 的正式计数从七提升为八。
+在 dispatch 前 fail closed。checker 已重验同一 source revision 的八份 closed report，Capability 报告 SHA-256 为
+`59741f0dfcbe9306d4703b3073de4015f310e85f757f15414f7027354b50031b`；严格 M4 仍缺 MCP 与 WASI/framework 两条。
 
 ### 7.1 工作项
 

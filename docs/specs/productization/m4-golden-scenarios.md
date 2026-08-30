@@ -114,15 +114,17 @@ checks 与 digest 已由 checker 重验，Model 报告 SHA-256 为
 严格 M4 仍因 remote Capability、MCP 与 WASI/framework 三条缺失而失败。精确摘要见
 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-`native-and-remote-capability` 的实现闭包现已进入仓库：fixture 只通过 public Management lifecycle
+2026-08-30 exact revision `b0d8a3247a0ce09f3946312359f0a8cb078f937e` 已使
+`native-and-remote-capability` 成为第八份完整 Passed report：fixture 只通过 public Management lifecycle
 发布 Capability Interface、Implementation、Deployment 与 Agent，并冻结 Native builtin echo 和 Remote HTTP
 两个 exact Deployment。远端调用经 Egress 的显式 localhost TLS development endpoint 到达仓库内 Node fixture；该
 例外默认关闭，要求 host 精确为 `localhost` 且安装 bounded CA root，普通 endpoint 仍执行 public-destination
 拒绝。成功路径证明 Native typed output 成为 Remote typed input；失败路径分别证明非幂等 first-byte timeout
 进入 `reconciliation_required` 且不伪造 Run result，以及从 installed Egress catalog 移除同一 Deployment 后在
-dispatch 前失败。真实 Console 还会按 exact Run ID 读取成功结果。上述实现已通过本地 fresh `full` 与 headless
-Chrome，但 canonical report 必须在实现 commit 固定后重新生成；在该 exact-revision 资格运行落盘前，本节仍按
-七份 Passed report 计数，不提前升级严格 M4 状态。
+dispatch 前失败。真实 Console 还按 exact Run ID 读取成功结果。八份 canonical report 已由 checker 按同一
+source revision 重验，Capability 报告 SHA-256 为
+`59741f0dfcbe9306d4703b3073de4015f310e85f757f15414f7027354b50031b`。严格 M4 现仅缺 MCP 与
+WASI/framework 两条，仍保持 In Progress。精确摘要见 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
