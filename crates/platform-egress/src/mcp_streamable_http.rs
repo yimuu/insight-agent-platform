@@ -862,6 +862,10 @@ pub struct InstalledMcpStreamableHttpEndpoint {
     pub auth_policy: ExactVersionRef,
     pub token_credential_purpose: SecretPurpose,
     pub trusted_root_pem: String,
+    #[serde(default)]
+    pub development_loopback: bool,
+    #[serde(default)]
+    pub development_anonymous: bool,
 }
 
 impl InstalledMcpStreamableHttpEndpoint {
@@ -880,6 +884,8 @@ impl InstalledMcpStreamableHttpEndpoint {
             || !valid_mcp_path(&self.endpoint.base_path)
             || self.trusted_root_pem.is_empty()
             || self.trusted_root_pem.len() > MAX_MCP_TRUST_BUNDLE_BYTES
+            || (self.development_loopback && self.endpoint.host != "localhost")
+            || (self.development_anonymous && !self.development_loopback)
         {
             return Err(EgressConfigurationError::InvalidEndpoint);
         }
@@ -1441,8 +1447,11 @@ impl ReqwestMcpStreamableHttpConnector {
         self
     }
 
-    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+    fn destination_allowed(&self, address: &SocketAddr, development_loopback: bool) -> bool {
         if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        if development_loopback && address.ip().is_loopback() {
             return true;
         }
         #[cfg(any(test, feature = "protocol-fixtures"))]
@@ -1461,8 +1470,9 @@ impl ReqwestMcpStreamableHttpConnector {
 
     async fn resolve_addresses(
         &self,
-        endpoint: &CanonicalHttpEndpoint,
+        entry: &InstalledMcpStreamableHttpEndpoint,
     ) -> Result<(String, Vec<SocketAddr>), McpTransportFailure> {
+        let endpoint = &entry.endpoint;
         let host = parse_endpoint_host(&endpoint.host)
             .map_err(|_| rejected("mcp_egress_invalid_endpoint"))?;
         let (dns_host, mut addresses) = match host {
@@ -1492,7 +1502,8 @@ impl ReqwestMcpStreamableHttpConnector {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !self.destination_allowed(address)
+                address.port() != endpoint.port
+                    || !self.destination_allowed(address, entry.development_loopback)
             })
         {
             return Err(rejected("mcp_egress_destination_denied"));
@@ -1502,8 +1513,21 @@ impl ReqwestMcpStreamableHttpConnector {
 
     async fn resolve_headers(
         &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
         request: &McpStreamableHttpRequest,
     ) -> Result<HeaderMap, McpTransportFailure> {
+        let protocol_version = HeaderValue::from_str(&request.protocol_version)
+            .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+        if entry.development_anonymous {
+            return Ok(headers);
+        }
         let resolved = self
             .secrets
             .resolve(&request.tenant_id, &request.token_secret_binding)
@@ -1531,50 +1555,15 @@ impl ReqwestMcpStreamableHttpConnector {
         bearer.fill(0);
         let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
         authorization.set_sensitive(true);
-        let protocol_version = HeaderValue::from_str(&request.protocol_version)
-            .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
-        );
         headers.insert(AUTHORIZATION, authorization);
-        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
         Ok(headers)
     }
 
     async fn resolve_resource_refresh_headers(
         &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
         request: &McpResourceRefreshTransportRequest,
     ) -> Result<HeaderMap, McpTransportFailure> {
-        let resolved = self
-            .secrets
-            .resolve(&request.tenant_id, &request.token_secret_binding)
-            .await
-            .map_err(|failure| match failure {
-                SecretMaterialResolutionError::Unavailable => {
-                    retryable("mcp_egress_secret_unavailable")
-                }
-                SecretMaterialResolutionError::NotFound
-                | SecretMaterialResolutionError::Revoked
-                | SecretMaterialResolutionError::InvalidEvidence => {
-                    rejected("mcp_egress_secret_rejected")
-                }
-            })?;
-        if !resolved.validate_for(
-            &request.token_secret_binding,
-            self.limits.maximum_secret_material_bytes,
-        ) {
-            return Err(rejected("mcp_egress_secret_rejected"));
-        }
-        let mut bearer = Vec::with_capacity(7 + resolved.material.as_bytes().len());
-        bearer.extend_from_slice(b"Bearer ");
-        bearer.extend_from_slice(resolved.material.as_bytes());
-        let parsed = HeaderValue::from_bytes(&bearer);
-        bearer.fill(0);
-        let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
-        authorization.set_sensitive(true);
         let protocol_version = HeaderValue::from_str(&request.protocol_version)
             .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
         let mut headers = HeaderMap::new();
@@ -1583,16 +1572,10 @@ impl ReqwestMcpStreamableHttpConnector {
             ACCEPT,
             HeaderValue::from_static("application/json, text/event-stream"),
         );
-        headers.insert(AUTHORIZATION, authorization);
         headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
-        Ok(headers)
-    }
-
-    async fn resolve_discovery_headers(
-        &self,
-        request: &McpDiscoveryTransportRequest,
-        protocol_version: &str,
-    ) -> Result<HeaderMap, McpTransportFailure> {
+        if entry.development_anonymous {
+            return Ok(headers);
+        }
         let resolved = self
             .secrets
             .resolve(&request.tenant_id, &request.token_secret_binding)
@@ -1620,6 +1603,16 @@ impl ReqwestMcpStreamableHttpConnector {
         bearer.fill(0);
         let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
         authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        Ok(headers)
+    }
+
+    async fn resolve_discovery_headers(
+        &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
+        request: &McpDiscoveryTransportRequest,
+        protocol_version: &str,
+    ) -> Result<HeaderMap, McpTransportFailure> {
         let protocol_version = HeaderValue::from_str(protocol_version)
             .map_err(|_| rejected("mcp_egress_invalid_protocol_version"))?;
         let mut headers = HeaderMap::new();
@@ -1628,8 +1621,38 @@ impl ReqwestMcpStreamableHttpConnector {
             ACCEPT,
             HeaderValue::from_static("application/json, text/event-stream"),
         );
-        headers.insert(AUTHORIZATION, authorization);
         headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+        if entry.development_anonymous {
+            return Ok(headers);
+        }
+        let resolved = self
+            .secrets
+            .resolve(&request.tenant_id, &request.token_secret_binding)
+            .await
+            .map_err(|failure| match failure {
+                SecretMaterialResolutionError::Unavailable => {
+                    retryable("mcp_egress_secret_unavailable")
+                }
+                SecretMaterialResolutionError::NotFound
+                | SecretMaterialResolutionError::Revoked
+                | SecretMaterialResolutionError::InvalidEvidence => {
+                    rejected("mcp_egress_secret_rejected")
+                }
+            })?;
+        if !resolved.validate_for(
+            &request.token_secret_binding,
+            self.limits.maximum_secret_material_bytes,
+        ) {
+            return Err(rejected("mcp_egress_secret_rejected"));
+        }
+        let mut bearer = Vec::with_capacity(7 + resolved.material.as_bytes().len());
+        bearer.extend_from_slice(b"Bearer ");
+        bearer.extend_from_slice(resolved.material.as_bytes());
+        let parsed = HeaderValue::from_bytes(&bearer);
+        bearer.fill(0);
+        let mut authorization = parsed.map_err(|_| rejected("mcp_egress_secret_rejected"))?;
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
         Ok(headers)
     }
 
@@ -2189,8 +2212,8 @@ impl McpStreamableHttpConnector for ReqwestMcpStreamableHttpConnector {
         validate_request(&request, Utc::now())?;
         let entry = self.catalog.resolve(&request)?;
         let _permit = self.acquire().await?;
-        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
-        let headers = self.resolve_headers(&request).await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry).await?;
+        let headers = self.resolve_headers(&entry, &request).await?;
         let external_identity = external_identity(&request, &addresses)?;
         let now = Utc::now();
         let remaining = (request.transport_deadline - now)
@@ -2372,8 +2395,8 @@ impl McpStreamableHttpConnector for ReqwestMcpStreamableHttpConnector {
         }
         let entry = self.catalog.resolve(&request)?;
         let _permit = self.acquire().await?;
-        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
-        let headers = self.resolve_headers(&request).await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry).await?;
+        let headers = self.resolve_headers(&entry, &request).await?;
         let transport_identity = external_identity(&request, &addresses)?;
         let continuation = request
             .continuation
@@ -2478,14 +2501,14 @@ impl McpDiscoveryTransportConnector for ReqwestMcpStreamableHttpConnector {
         validate_discovery_request(&request, Utc::now())?;
         let entry = self.catalog.resolve_discovery(&request)?;
         let _permit = self.acquire().await?;
-        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry).await?;
         let proposed_version = request
             .offered_versions
             .last()
             .ok_or_else(|| rejected("mcp_egress_discovery_protocol_missing"))?
             .clone();
         let headers = self
-            .resolve_discovery_headers(&request, &proposed_version)
+            .resolve_discovery_headers(&entry, &request, &proposed_version)
             .await?;
         let external_identity = discovery_external_identity(&request, &addresses)?;
         let remaining = (request.deadline - Utc::now())
@@ -2743,8 +2766,10 @@ impl McpResourceRefreshConnector for ReqwestMcpStreamableHttpConnector {
         validate_resource_refresh_request(&request, Utc::now())?;
         let entry = self.catalog.resolve_resource_refresh(&request)?;
         let _permit = self.acquire().await?;
-        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
-        let headers = self.resolve_resource_refresh_headers(&request).await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry).await?;
+        let headers = self
+            .resolve_resource_refresh_headers(&entry, &request)
+            .await?;
         let external_identity = resource_refresh_external_identity(&request, &addresses)?;
         let remaining = (request.deadline - Utc::now())
             .to_std()
@@ -3284,8 +3309,11 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
         self
     }
 
-    fn destination_allowed(&self, address: &SocketAddr) -> bool {
+    fn destination_allowed(&self, address: &SocketAddr, development_loopback: bool) -> bool {
         if is_public_destination_ip(address.ip()) {
+            return true;
+        }
+        if development_loopback && address.ip().is_loopback() {
             return true;
         }
         #[cfg(any(test, feature = "protocol-fixtures"))]
@@ -3304,8 +3332,9 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
 
     async fn resolve_addresses(
         &self,
-        endpoint: &CanonicalHttpEndpoint,
+        entry: &InstalledMcpStreamableHttpEndpoint,
     ) -> Result<(String, Vec<SocketAddr>), McpTransportFailure> {
+        let endpoint = &entry.endpoint;
         let host = parse_endpoint_host(&endpoint.host)
             .map_err(|_| rejected("mcp_egress_subscription_invalid_endpoint"))?;
         let (dns_host, mut addresses) = match host {
@@ -3334,7 +3363,8 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
         if addresses.is_empty()
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
-                address.port() != endpoint.port || !self.destination_allowed(address)
+                address.port() != endpoint.port
+                    || !self.destination_allowed(address, entry.development_loopback)
             })
         {
             return Err(rejected("mcp_egress_subscription_destination_denied"));
@@ -3344,8 +3374,21 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
 
     async fn resolve_headers(
         &self,
+        entry: &InstalledMcpStreamableHttpEndpoint,
         request: &McpStreamableHttpSubscriptionRequest,
     ) -> Result<HeaderMap, McpTransportFailure> {
+        let protocol_version = HeaderValue::from_str(&request.protocol_version)
+            .map_err(|_| rejected("mcp_egress_subscription_protocol_version_invalid"))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+        if entry.development_anonymous {
+            return Ok(headers);
+        }
         let resolved = self
             .secrets
             .resolve(&request.tenant_id, &request.token_secret_binding)
@@ -3374,16 +3417,7 @@ impl ReqwestMcpStreamableHttpSubscriptionConnector {
         let mut authorization =
             parsed.map_err(|_| rejected("mcp_egress_subscription_secret_rejected"))?;
         authorization.set_sensitive(true);
-        let protocol_version = HeaderValue::from_str(&request.protocol_version)
-            .map_err(|_| rejected("mcp_egress_subscription_protocol_version_invalid"))?;
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/json, text/event-stream"),
-        );
         headers.insert(AUTHORIZATION, authorization);
-        headers.insert(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
         Ok(headers)
     }
 
@@ -3445,8 +3479,8 @@ impl McpStreamableHttpSubscriptionConnector for ReqwestMcpStreamableHttpSubscrip
             .clone()
             .try_acquire_owned()
             .map_err(|_| retryable("mcp_egress_subscription_capacity"))?;
-        let (dns_host, addresses) = self.resolve_addresses(&entry.endpoint).await?;
-        let headers = self.resolve_headers(&request).await?;
+        let (dns_host, addresses) = self.resolve_addresses(&entry).await?;
+        let headers = self.resolve_headers(&entry, &request).await?;
         let external_identity = subscription_external_identity(&request, &addresses)?;
         let now = Utc::now();
         let remaining = (request.deadline - now)
@@ -5549,6 +5583,10 @@ mod tests {
         responses: Mutex<Vec<PinnedMcpHttpResponse>>,
         observed: Mutex<Vec<ObservedRequest>>,
         calls: AtomicUsize,
+        expected_url: String,
+        expected_dns_host: String,
+        expected_addresses: Vec<SocketAddr>,
+        expect_authorization: bool,
     }
 
     struct SubscriptionFixtureHttpTransport {
@@ -5637,6 +5675,29 @@ mod tests {
                 responses: Mutex::new(responses),
                 observed: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
+                expected_url: "https://mcp.example.com/mcp".to_owned(),
+                expected_dns_host: "mcp.example.com".to_owned(),
+                expected_addresses: vec![SocketAddr::new(
+                    IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                    443,
+                )],
+                expect_authorization: true,
+            }
+        }
+
+        fn development(mut responses: Vec<PinnedMcpHttpResponse>, port: u16) -> Self {
+            responses.reverse();
+            Self {
+                responses: Mutex::new(responses),
+                observed: Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+                expected_url: format!("https://localhost:{port}/mcp"),
+                expected_dns_host: "localhost".to_owned(),
+                expected_addresses: vec![SocketAddr::new(
+                    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    port,
+                )],
+                expect_authorization: false,
             }
         }
     }
@@ -5648,20 +5709,18 @@ mod tests {
             request: PinnedMcpHttpRequest,
         ) -> Result<PinnedMcpHttpResponse, McpTransportFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(request.url.as_str(), "https://mcp.example.com/mcp");
-            assert_eq!(request.dns_host, "mcp.example.com");
-            assert_eq!(
-                request.addresses,
-                vec![SocketAddr::new(
-                    IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-                    443
-                )]
-            );
-            assert_eq!(
-                request.headers.get(AUTHORIZATION).unwrap().as_bytes(),
-                b"Bearer mcp-token-canary"
-            );
-            assert!(request.headers.get(AUTHORIZATION).unwrap().is_sensitive());
+            assert_eq!(request.url.as_str(), self.expected_url);
+            assert_eq!(request.dns_host, self.expected_dns_host);
+            assert_eq!(request.addresses, self.expected_addresses);
+            if self.expect_authorization {
+                assert_eq!(
+                    request.headers.get(AUTHORIZATION).unwrap().as_bytes(),
+                    b"Bearer mcp-token-canary"
+                );
+                assert!(request.headers.get(AUTHORIZATION).unwrap().is_sensitive());
+            } else {
+                assert!(!request.headers.contains_key(AUTHORIZATION));
+            }
             assert_eq!(
                 request
                     .headers
@@ -5770,6 +5829,8 @@ mod tests {
                 auth_policy: auth_policy.clone(),
                 token_credential_purpose: purpose,
                 trusted_root_pem: trusted_root_pem(),
+                development_loopback: false,
+                development_anonymous: false,
             },
             request: McpStreamableHttpRequest {
                 tenant_id: id(ResourceKind::Tenant, 10),
@@ -6199,6 +6260,85 @@ mod tests {
             let wire = String::from_utf8_lossy(&request.body);
             !wire.contains("artifact_id") && !wire.contains("blob_id")
         }));
+    }
+
+    #[tokio::test]
+    async fn explicit_development_endpoint_is_root_bound_loopback_and_anonymous() {
+        let mut fixture = fixture();
+        fixture.entry.endpoint.host = "localhost".to_owned();
+        fixture.entry.endpoint.port = 18_446;
+        fixture.entry.endpoint_identity_digest = fixture.entry.endpoint.canonical_digest().unwrap();
+        fixture.entry.development_loopback = true;
+        fixture.entry.development_anonymous = true;
+        fixture.request.endpoint = fixture.entry.endpoint.clone();
+        fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
+        let request = discovery_request(&fixture);
+        let initialize_id = format!(
+            "{}:{}:discovery:initialize",
+            request.job_id, request.physical_attempt
+        );
+        let tools_id = format!(
+            "{}:{}:discovery:tools:1",
+            request.job_id, request.physical_attempt
+        );
+        let transport = Arc::new(FixtureHttpTransport::development(
+            vec![response(
+                StatusCode::OK,
+                headers(Some("application/json"), Some("development-session")),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": initialize_id,
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "capabilities": {"tools": {}},
+                        "protocolVersion": MCP_PROTOCOL_BASELINE,
+                        "serverInfo": {"name": "fixture", "version": "1"}
+                    }
+                }))
+                .unwrap(),
+            ),
+            response(StatusCode::ACCEPTED, HeaderMap::new(), Vec::new()),
+            response(
+                StatusCode::OK,
+                headers(Some("application/json"), None),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": tools_id,
+                    "jsonrpc": "2.0",
+                    "result": {"tools": [{"inputSchema": {"type": "object"}, "name": "fixture_lookup"}]}
+                }))
+                .unwrap(),
+            )],
+            fixture.entry.endpoint.port,
+        ));
+        let secret_resolver = secrets();
+        let connector = connector(
+            &fixture,
+            secret_resolver.clone(),
+            Arc::new(FixtureDns {
+                addresses: vec![SocketAddr::new(
+                    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    fixture.entry.endpoint.port,
+                )],
+            }),
+            transport.clone(),
+        );
+        let discovered = connector.discover(request).await.unwrap();
+        assert_eq!(discovered.descriptor_count, 1);
+        assert_eq!(secret_resolver.calls.load(Ordering::SeqCst), 0);
+
+        let mut public_anonymous = fixture.entry.clone();
+        public_anonymous.endpoint.host = "mcp.example.com".to_owned();
+        public_anonymous.endpoint_identity_digest =
+            public_anonymous.endpoint.canonical_digest().unwrap();
+        assert_eq!(
+            public_anonymous.validate(),
+            Err(EgressConfigurationError::InvalidEndpoint)
+        );
+        let mut anonymous_without_loopback = fixture.entry;
+        anonymous_without_loopback.development_loopback = false;
+        assert_eq!(
+            anonymous_without_loopback.validate(),
+            Err(EgressConfigurationError::InvalidEndpoint)
+        );
     }
 
     #[tokio::test]

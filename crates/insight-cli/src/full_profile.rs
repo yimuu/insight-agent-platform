@@ -12,8 +12,8 @@ use insight_platform_contracts::{
     builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
     builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
     canonical_digest, CapabilityBackendContract, GrpcCapabilityContract, HttpCapabilityContract,
-    HttpCapabilityMethod, ResourceKind, BUILTIN_JSON_CODEC_ID, BUILTIN_JSON_CODEC_VERSION,
-    WASI_ABI_V1_RUNTIME_VERSION,
+    HttpCapabilityMethod, McpToolCapabilityContract, ResourceKind, BUILTIN_JSON_CODEC_ID,
+    BUILTIN_JSON_CODEC_VERSION, WASI_ABI_V1_RUNTIME_VERSION,
 };
 pub(crate) use insight_platform_contracts::{
     CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
@@ -421,18 +421,39 @@ pub(crate) fn initial_configs(
         "response_mapping_digest": builtin_json_grpc_response_mapping_digest(),
         "error_mapping_digest": builtin_json_grpc_error_mapping_digest(),
     })];
+    let capability_mcp_contract = McpToolCapabilityContract {
+        remote_tool_name: "fixture_lookup".to_owned(),
+        remote_input_schema_digest: closed_local_digest("capability-mcp-input-schema")
+            .parse()
+            .expect("the built-in MCP input schema digest is valid"),
+        output_mapping_digest: builtin_json_mcp_output_mapping_digest(),
+        protocol_profile: insight_platform_contracts::ExactVersionRef::new(
+            fresh_resource_id(ResourceKind::PolicyRevision),
+            closed_local_digest("capability-mcp-protocol-profile")
+                .parse()
+                .expect("the built-in MCP protocol profile digest is valid"),
+        )
+        .expect("the built-in MCP protocol profile is exact"),
+        discovery_semantic_evidence_digest: closed_local_digest("capability-mcp-discovery")
+            .parse()
+            .expect("the built-in MCP discovery digest is valid"),
+        supports_task: false,
+        supports_progress: true,
+    };
+    let capability_mcp_backend = CapabilityBackendContract::Mcp(capability_mcp_contract.clone());
     let capability_mcp_codecs = vec![json!({
         "codec_id": BUILTIN_JSON_CODEC_ID,
         "codec_version": BUILTIN_JSON_CODEC_VERSION,
         "module_digest": builtin_json_codec_module_digest(),
         "worker_protocol_version": 1,
-        "descriptor_digest": closed_local_digest("capability-mcp-descriptor"),
-        "remote_tool_name": "fixture_lookup",
-        "remote_input_schema_digest": closed_local_digest("capability-mcp-input-schema"),
-        "output_mapping_digest": builtin_json_mcp_output_mapping_digest(),
-        "protocol_profile_id": fresh_resource_id(ResourceKind::PolicyRevision),
-        "protocol_profile_digest": closed_local_digest("capability-mcp-protocol-profile"),
-        "discovery_semantic_evidence_digest": closed_local_digest("capability-mcp-discovery"),
+        "descriptor_digest": capability_mcp_backend.descriptor_digest()
+            .expect("the built-in MCP Capability descriptor is canonical"),
+        "remote_tool_name": capability_mcp_contract.remote_tool_name,
+        "remote_input_schema_digest": capability_mcp_contract.remote_input_schema_digest,
+        "output_mapping_digest": capability_mcp_contract.output_mapping_digest,
+        "protocol_profile_id": capability_mcp_contract.protocol_profile.revision_id,
+        "protocol_profile_digest": capability_mcp_contract.protocol_profile.semantic_digest,
+        "discovery_semantic_evidence_digest": capability_mcp_contract.discovery_semantic_evidence_digest,
     })];
     let capability_closure = json!({
         "schema_version": 1,

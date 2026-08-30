@@ -3442,6 +3442,8 @@ async fn run_logical_subscription_worker_process_l3(
             auth_policy: fixture.auth_policy.clone(),
             token_credential_purpose: fixture.token_purpose.clone(),
             trusted_root_pem: tls.ca.clone(),
+            development_loopback: false,
+            development_anonymous: false,
         },
         control_prefix: control_prefix.clone(),
         resource_uri: active_subscription.payload.binding.resource_uri.clone(),
@@ -3693,6 +3695,8 @@ async fn run_discovery_worker_process_l3(
             auth_policy: fixture.auth_policy.clone(),
             token_credential_purpose: fixture.token_purpose.clone(),
             trusted_root_pem: tls.ca.clone(),
+            development_loopback: false,
+            development_anonymous: false,
         },
         control_prefix: control_prefix.clone(),
         resource_uri: "mcp://catalog.example.test/discovery".to_owned(),
@@ -4134,6 +4138,8 @@ async fn run_subscription_protocol_process_l3(
         auth_policy: fixture.auth_policy.clone(),
         token_credential_purpose: fixture.token_purpose.clone(),
         trusted_root_pem: tls.ca.clone(),
+        development_loopback: false,
+        development_anonymous: false,
     };
     let protocol_config = ProtocolEgressFixtureConfig {
         egress_address,

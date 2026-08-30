@@ -404,6 +404,12 @@ Interface/Implementation/Deployment，Native 与 Remote Worker 分别执行冻�
 在 dispatch 前 fail closed。checker 已重验同一 source revision 的八份 closed report，Capability 报告 SHA-256 为
 `59741f0dfcbe9306d4703b3073de4015f310e85f757f15414f7027354b50031b`；严格 M4 仍缺 MCP 与 WASI/framework 两条。
 
+MCP 场景的下一批先补齐本地受控安装边界：Streamable HTTP installed catalog 只有在显式 loopback 开关、host
+精确为 `localhost` 且安装有效 CA root 时才允许回环；anonymous 仅能作为该模式的子开关并跳过物理 Secret解析，
+普通 endpoint仍保持 public-destination 与 Secret fail-closed。Remote Capability Worker 的 builtin MCP codec descriptor
+改由 exact typed contract生成，消除 placeholder digest。该批是 discovery/Tool/Resource真实旅程的前置，不是第九份
+Passed report。
+
 ### 7.1 工作项
 
 1. 按 goals G4 顺序交付 scenario manifest、示例、自动 smoke、故障注入点和用户文档；

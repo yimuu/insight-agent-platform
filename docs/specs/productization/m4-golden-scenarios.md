@@ -126,6 +126,13 @@ source revision 重验，Capability 报告 SHA-256 为
 `59741f0dfcbe9306d4703b3073de4015f310e85f757f15414f7027354b50031b`。严格 M4 现仅缺 MCP 与
 WASI/framework 两条，仍保持 In Progress。精确摘要见 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
+下一条 MCP 场景的本地受控 endpoint 前置已经闭合：installed Streamable HTTP endpoint 新增默认关闭的
+`development_loopback` 与 `development_anonymous`。前者只允许 host 精确为 `localhost` 且继续要求非空、可解析、
+bounded CA root；后者只能在该 loopback 模式下启用，并在保留 exact AuthorizationBinding/SecretBinding metadata 的
+同时跳过物理 token 解析。公网和普通私网行为不变，私网仍在 Secret/I/O 前拒绝。full profile 的 builtin MCP codec
+descriptor 也改为从同一 typed `McpToolCapabilityContract` 计算，不再使用占位摘要。该批仅关闭 fixture 安装与 codec
+identity 前置，尚未生成 `remote-mcp-tool-and-resource` report，因此正式计数仍为八。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console
