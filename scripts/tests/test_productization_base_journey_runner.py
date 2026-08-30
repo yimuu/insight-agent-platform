@@ -55,11 +55,22 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
 
     def test_full_profile_can_emit_full_scenario_reports(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/productization-base-journey.yml").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("describes base-profile scenarios only", source)
         self.assertIn(
             '"PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY=$report_directory"', source
         )
         self.assertIn('"PLATFORM_PRODUCTIZATION_PROFILE=$profile"', source)
+        self.assertNotIn("inputs.profile == 'base'", workflow)
+        self.assertIn(
+            '--report-directory "$RUNNER_TEMP/productization-reports"', workflow
+        )
+        self.assertIn(
+            "productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

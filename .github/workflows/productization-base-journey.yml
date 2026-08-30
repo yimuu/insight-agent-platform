@@ -55,10 +55,8 @@ jobs:
             --console-browser
             --node-bin "$(command -v node)"
             --browser-bin "$(command -v google-chrome)"
+            --report-directory "$RUNNER_TEMP/productization-reports"
           )
-          if [[ "${{ inputs.profile }}" == "base" ]]; then
-            arguments+=(--report-directory "$RUNNER_TEMP/productization-reports")
-          fi
           scripts/run-productization-base-journey.sh "${arguments[@]}"
       - name: Preserve bounded runtime diagnostics on failure
         if: ${{ failure() }}
@@ -72,10 +70,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Preserve exact-revision scenario reports
-        if: ${{ always() && inputs.profile == 'base' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-base-scenario-reports-${{ github.sha }}
+          name: productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}
           path: ${{ runner.temp }}/productization-reports/*.json
           if-no-files-found: warn
           retention-days: 14
