@@ -1753,6 +1753,49 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(waited.run.active_work_count, 0);
     assert_eq!(waited.settled_quota_account_ids, vec![QUOTA_ACCOUNT_ID]);
     assert_eq!(waited.job.wake_kind.as_deref(), Some("timer"));
+
+    // A ChildAgentCall may admit a child with one physical attempt. Entering a
+    // durable wait does not consume another attempt, so the convergence scan
+    // must leave the armed continuation live even when attempt_no == limit.
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET attempt_limit = 1 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&waited.job.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    assert!(scheduler
+        .drive_orchestration_convergence(orchestration_convergence(
+            ["79e0", "79e1", "79e2", "79e3"],
+            ["79e4", "79e5", "79e6", "79e7", "79e8", "79e9"],
+        ))
+        .await
+        .unwrap()
+        .is_empty());
+    scheduler.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(&waited.job.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "waiting"
+    );
+    // The surrounding fixture later exercises three distinct physical starts.
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET attempt_limit = 3 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&waited.job.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler

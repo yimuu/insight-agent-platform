@@ -17,8 +17,9 @@ use insight_platform_artifacts::{
     SchedulerRunValueReader, SchedulerRunValueRequestResolver, MAX_SCHEDULER_RUN_VALUE_BYTES,
 };
 use insight_platform_contracts::{
-    canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, Failure, ResourceId,
-    ResourceKind, Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
+    canonical_digest, canonical_json, parse_strict_json, ClosedJsonValue, Failure, FailureClass,
+    FailureCode, FailureSource, PlatformFailureCode, ResourceId, ResourceKind, Retryability,
+    Sha256Digest, ValueRef, MODEL_JSON_LIMITS,
 };
 use insight_platform_orchestrator::{
     derive_candidate_selection, ChildBudget, CommittedExpressionInput, DurableWaitKind,
@@ -31,7 +32,8 @@ use insight_platform_postgres::repository::{
     DeferOrchestrationToTask, DerivedExpressionFailureEvidence, DispatchModelToolCapabilities,
     FailOrchestrationJob, JobFence, MaterializedTerminalValue, ModelToolCapabilityAdmission,
     OrchestrationFailureCause, OrchestrationYield, OrchestrationYieldMutationIds, PgRepository,
-    RepositoryError, ResolvedExpressionInput, YieldOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+    RepositoryError, ResolvedExpressionInput, YieldOrchestrationJob, MAX_DESCENDANT_RUNS,
+    MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
@@ -483,6 +485,76 @@ where
             .map_err(|_| DurablePlanDriverError::InvariantViolation)
     }
 
+    async fn commit_failure(
+        &self,
+        job: &StartedOrchestrationJob,
+        fence: JobFence,
+        materialized: crate::MaterializedTypedPlan,
+        cause: OrchestrationFailureCause,
+        operation: &'static str,
+    ) -> Result<(), DurablePlanDriverError> {
+        let requirements = self
+            .repository
+            .load_failure_mutation_requirements(&fence, &materialized.plan, &cause)
+            .await
+            .map_err(classify_repository_failure)?;
+        let request_digest: Sha256Digest = canonical_digest(&json!({
+            "cause": cause,
+            "job_id": fence.job_id,
+            "lease_generation": fence.lease_epoch,
+            "operation": operation,
+            "plan_digest": materialized.request.artifact.content_digest(),
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let wake_request_digest: Sha256Digest = canonical_digest(&json!({
+            "job_id": fence.job_id,
+            "operation": "orchestration.failure.wake",
+            "request_digest": request_digest,
+        }))
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+        .parse()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let mutations = allocate_controller_step_mutations(
+            self.identities.as_ref(),
+            &requirements,
+            wake_request_digest,
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let command = FailOrchestrationJob {
+            fence,
+            plan: materialized.plan,
+            cause,
+            derived_expression: None,
+            idempotency_key_digest: self
+                .identities
+                .new_lease_token_digest()
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+            request_digest,
+            receipt_expires_at: job.started().deadline,
+            mutations,
+        };
+        let mut transaction = self
+            .repository
+            .begin_scheduler_transaction()
+            .await
+            .map_err(classify_repository_failure)?;
+        match transaction.fail_orchestration_job(command).await {
+            Ok(_) => transaction
+                .commit()
+                .await
+                .map_err(classify_repository_failure),
+            Err(failure) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(classify_repository_failure)?;
+                Err(classify_repository_failure(failure))
+            }
+        }
+    }
+
     async fn commit_capability_dispatch(
         &self,
         job: &StartedOrchestrationJob,
@@ -906,6 +978,31 @@ where
             maximum_artifact_bytes: budget.maximum_artifact_bytes,
             maximum_descendant_runs: budget.maximum_descendant_runs,
         };
+        if !child_descendant_budget_fits_hard_limit(child_budget.maximum_descendant_runs) {
+            return self
+                .commit_failure(
+                    job,
+                    command.fence,
+                    command.materialized,
+                    OrchestrationFailureCause::Admission {
+                        failure: Failure {
+                            code: FailureCode::Platform {
+                                code: PlatformFailureCode::BudgetExhausted,
+                            },
+                            class: FailureClass::Quota,
+                            retryability: Retryability::Never,
+                            safe_message: Some(
+                                "child agent descendant budget exceeds the remaining hard limit"
+                                    .to_owned(),
+                            ),
+                            details_ref: None,
+                            source: FailureSource::Plan,
+                        },
+                    },
+                    "orchestration.child.admission.fail",
+                )
+                .await;
+        }
         let child_input_value_id = self.new_id(ResourceKind::RunValue)?;
         let request_digest: Sha256Digest = canonical_digest(&json!({
             "input_content_digest": input.content_digest,
@@ -1166,6 +1263,10 @@ where
             }
         }
     }
+}
+
+fn child_descendant_budget_fits_hard_limit(requested_descendants: u32) -> bool {
+    requested_descendants < MAX_DESCENDANT_RUNS
 }
 
 #[async_trait]
@@ -1665,66 +1766,14 @@ where
         materialized: crate::MaterializedTypedPlan,
         failure: Failure,
     ) -> Result<(), DurablePlanDriverError> {
-        let requirements = self
-            .repository
-            .load_committed_failure_mutation_requirements(&fence, &materialized.plan, &failure)
-            .await
-            .map_err(classify_repository_failure)?;
-        let request_digest: Sha256Digest = canonical_digest(&json!({
-            "failure": failure,
-            "job_id": fence.job_id,
-            "lease_generation": fence.lease_epoch,
-            "operation": "orchestration.external_leaf_failure.converge",
-            "plan_digest": materialized.request.artifact.content_digest(),
-        }))
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
-        .parse()
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
-        let wake_request_digest: Sha256Digest = canonical_digest(&json!({
-            "job_id": fence.job_id,
-            "operation": "orchestration.external_leaf_failure.wake",
-            "request_digest": request_digest,
-        }))
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?
-        .parse()
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
-        let mutations = allocate_controller_step_mutations(
-            self.identities.as_ref(),
-            &requirements,
-            wake_request_digest,
-        )
-        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
-        let command = FailOrchestrationJob {
+        self.commit_failure(
+            job,
             fence,
-            plan: materialized.plan,
-            cause: OrchestrationFailureCause::Committed { failure },
-            derived_expression: None,
-            idempotency_key_digest: self
-                .identities
-                .new_lease_token_digest()
-                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
-            request_digest,
-            receipt_expires_at: job.started().deadline,
-            mutations,
-        };
-        let mut transaction = self
-            .repository
-            .begin_scheduler_transaction()
-            .await
-            .map_err(classify_repository_failure)?;
-        match transaction.fail_orchestration_job(command).await {
-            Ok(_) => transaction
-                .commit()
-                .await
-                .map_err(classify_repository_failure),
-            Err(failure) => {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(classify_repository_failure)?;
-                Err(classify_repository_failure(failure))
-            }
-        }
+            materialized,
+            OrchestrationFailureCause::Committed { failure },
+            "orchestration.external_leaf_failure.converge",
+        )
+        .await
     }
 
     async fn commit_model_tool_continuation(
@@ -2037,6 +2086,16 @@ mod tests {
     use insight_platform_orchestrator::ExactDataPortRef;
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn child_descendant_budget_reserves_capacity_for_the_child_run() {
+        assert!(child_descendant_budget_fits_hard_limit(
+            MAX_DESCENDANT_RUNS - 1
+        ));
+        assert!(!child_descendant_budget_fits_hard_limit(
+            MAX_DESCENDANT_RUNS
+        ));
+    }
 
     fn id(value: &str) -> ResourceId {
         value.parse().unwrap()

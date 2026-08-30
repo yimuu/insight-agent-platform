@@ -7,7 +7,8 @@ use insight_platform_postgres::artifact_repository::{
     ArtifactRecoverySlot, DriveExpiredArtifactJobs, RecoveredArtifactJob,
 };
 use insight_platform_postgres::repository::{
-    ConvergedOrchestrationRun, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
+    CancellingOrchestrationChildRun, ChildRunCancellationSlot, ConvergedOrchestrationRun,
+    DriveChildRunCancellations, DriveDueOrchestrationRetries, DriveDueOrchestrationWaits,
     DriveExpiredOrchestrationJobs, DriveExpiredOrchestrationTasks, DriveOrchestrationConvergence,
     DriveTerminalChildRuns, DueOrchestrationRetrySlot, DueOrchestrationWaitSlot,
     ExpiredOrchestrationRecoverySlot, ExpiredOrchestrationTaskSlot, OrchestrationConvergenceSlot,
@@ -65,6 +66,11 @@ pub trait OrchestrationSafetyStore: Send + Sync + 'static {
         &self,
         command: DriveTerminalChildRuns,
     ) -> Result<Vec<ResolvedOrchestrationChildRun>, Self::Error>;
+
+    async fn drive_child_cancellations(
+        &self,
+        command: DriveChildRunCancellations,
+    ) -> Result<Vec<CancellingOrchestrationChildRun>, Self::Error>;
 }
 
 #[async_trait]
@@ -133,6 +139,16 @@ impl OrchestrationSafetyStore for PgRepository {
         let resolved = transaction.drive_terminal_child_runs(command).await?;
         transaction.commit().await?;
         Ok(resolved)
+    }
+
+    async fn drive_child_cancellations(
+        &self,
+        command: DriveChildRunCancellations,
+    ) -> Result<Vec<CancellingOrchestrationChildRun>, Self::Error> {
+        let mut transaction = self.begin_scheduler_transaction().await?;
+        let cancelling = transaction.drive_child_run_cancellations(command).await?;
+        transaction.commit().await?;
+        Ok(cancelling)
     }
 }
 
@@ -455,6 +471,7 @@ where
         metrics: &SafetyMetrics,
     ) -> Result<(), SafetyDriveFailure> {
         let results = [
+            self.drive_child_cancellations(metrics).await,
             self.drive_terminal_children(metrics).await,
             self.drive_expired_jobs(cursors, metrics).await,
             self.drive_due_retries(cursors, metrics).await,
@@ -626,6 +643,38 @@ where
             .await
             .map_err(|_| SafetyDriveFailure::StoreUnavailable)?;
         observe_page(&page, &mut cursors.expired_tasks, metrics);
+        Ok(())
+    }
+
+    async fn drive_child_cancellations(
+        &self,
+        metrics: &SafetyMetrics,
+    ) -> Result<(), SafetyDriveFailure> {
+        let Some(_permit) = self.try_control_permit(metrics)? else {
+            return Ok(());
+        };
+        let command = DriveChildRunCancellations {
+            limit: self.config.batch_size,
+            slots: (0..self.config.batch_size)
+                .map(|_| child_cancellation_slot(self.identities.as_ref()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(identity_failure)?,
+        };
+        metrics.scan_attempts.fetch_add(1, Ordering::Relaxed);
+        let cancelling = self
+            .store
+            .drive_child_cancellations(command)
+            .await
+            .map_err(|failure| {
+                tracing::warn!(error = %failure, "child Run cancellation safety scan failed");
+                SafetyDriveFailure::StoreUnavailable
+            })?;
+        metrics
+            .mutations
+            .fetch_add(cancelling.len() as u64, Ordering::Relaxed);
+        if cancelling.len() == usize::from(self.config.batch_size) {
+            metrics.full_pages.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -920,6 +969,17 @@ fn terminal_child_slot(
     })
 }
 
+fn child_cancellation_slot(
+    identities: &impl CoordinatorIdentityFactory,
+) -> Result<ChildRunCancellationSlot, IdentityFactoryError> {
+    Ok(ChildRunCancellationSlot {
+        child_link_event_id: new_id(identities, ResourceKind::Event)?,
+        child_link_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+        child_run_event_id: new_id(identities, ResourceKind::Event)?,
+        child_run_outbox_id: new_id(identities, ResourceKind::OutboxEvent)?,
+    })
+}
+
 fn artifact_recovery_slot(
     identities: &impl CoordinatorIdentityFactory,
 ) -> Result<ArtifactRecoverySlot, IdentityFactoryError> {
@@ -1075,6 +1135,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingStore {
         expired_job_after: Mutex<Vec<Option<SafetyScanCursor>>>,
+        child_cancellation_limits: Mutex<Vec<u16>>,
     }
 
     #[derive(Default)]
@@ -1132,6 +1193,17 @@ mod tests {
             &self,
             _command: DriveTerminalChildRuns,
         ) -> Result<Vec<ResolvedOrchestrationChildRun>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn drive_child_cancellations(
+            &self,
+            command: DriveChildRunCancellations,
+        ) -> Result<Vec<CancellingOrchestrationChildRun>, Self::Error> {
+            self.child_cancellation_limits
+                .lock()
+                .unwrap()
+                .push(command.limit);
             Ok(Vec::new())
         }
     }
@@ -1277,6 +1349,7 @@ mod tests {
         assert!(observations.len() >= 2);
         assert!(observations[0].is_none());
         assert_eq!(observations[1], Some(cursor()));
+        assert!(store.child_cancellation_limits.lock().unwrap().len() >= 2);
         let snapshot = driver.shutdown().await.unwrap();
         assert_eq!(snapshot.lifecycle, SafetyDriverLifecycle::Stopped);
         assert!(snapshot.scan_attempts >= 8);

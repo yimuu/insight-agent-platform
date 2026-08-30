@@ -3218,19 +3218,17 @@ impl PgRepository {
         Ok(requirements)
     }
 
-    /// Plans the exact mutation shape for a typed failure already committed by an external-leaf
-    /// owner. The convergence Job is the only runnable owner at this point; its payload prevents
-    /// the leaf's `None` dispatch from being evaluated a second time.
-    pub async fn load_committed_failure_mutation_requirements(
+    /// Plans the exact mutation shape for a typed failure. External-leaf convergence must bind the
+    /// failure already committed in the Job payload; a controller admission rejection instead
+    /// proves an untouched initial Job payload and is closed again by `derive_orchestration_failure`.
+    pub async fn load_failure_mutation_requirements(
         &self,
         fence: &JobFence,
         plan: &RuntimePlan,
-        failure: &Failure,
+        cause: &OrchestrationFailureCause,
     ) -> Result<ControllerMutationRequirements, RepositoryError> {
         fence.validate()?;
-        failure
-            .validate(1_024)
-            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        cause.validate()?;
         plan.validate(self.plan_limits)
             .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
         let plan_digest = plan.canonical_digest(self.plan_limits)?;
@@ -3244,18 +3242,24 @@ impl PgRepository {
         require_exact_running_job_fence(&observed, fence, database_now)?;
         let payload: OrchestrationJobPayload =
             decode_typed_payload(&observed.payload, "failure convergence orchestration Job")?;
-        if payload.convergence_failure.as_ref() != Some(failure) {
-            return Err(RepositoryError::Conflict("failure convergence Job payload"));
+        if let OrchestrationFailureCause::Committed { failure } = cause {
+            if payload.convergence_failure.as_ref() != Some(failure) {
+                return Err(RepositoryError::Conflict("failure convergence Job payload"));
+            }
+        } else if payload.wake_contract.is_some()
+            || payload.convergence_failure.is_some()
+            || payload.model_tool_continuation.is_some()
+        {
+            return Err(RepositoryError::Conflict(
+                "admission failure orchestration Job payload",
+            ));
         }
         let parents = lock_running_orchestration_job_parents(&mut transaction, &observed).await?;
         require_exact_runtime_plan(&mut transaction, &parents.run, plan, &plan_digest).await?;
         let source_node =
             load_controller_source_node(&mut transaction, &observed, &parents, plan).await?;
         let runtime_node = plan.node(&source_node.plan_node_key)?;
-        let cause = OrchestrationFailureCause::Committed {
-            failure: failure.clone(),
-        };
-        let (derived_failure, _) = derive_orchestration_failure(&cause, runtime_node)?;
+        let (derived_failure, _) = derive_orchestration_failure(cause, runtime_node)?;
         require_failure_references(&mut transaction, &parents.run, &derived_failure).await?;
         let error_route = find_matching_error_boundary(
             &mut transaction,
@@ -11008,7 +11012,7 @@ impl PgSchedulerTransaction {
         &mut self,
         command: DriveChildRunCancellations,
     ) -> Result<Vec<CancellingOrchestrationChildRun>, RepositoryError> {
-        command.validate(self.limits)?;
+        command.validate(self.recovery_batch_limit)?;
         let mut transaction = self.transaction.begin().await?;
         let rows = sqlx::query(
             r#"
@@ -12273,10 +12277,7 @@ impl PgSchedulerTransaction {
                   run.deadline <= $1 OR job.deadline <= $1 OR
                   (
                       job.attempt_no >= job.attempt_limit AND
-                      (
-                          job.state IN ('waiting', 'cancelling') OR
-                          (job.state = 'running' AND job.lease_expires_at <= $1)
-                      )
+                      job.state = 'running' AND job.lease_expires_at <= $1
                   )
               )
               AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
@@ -16660,6 +16661,24 @@ fn derive_orchestration_failure(
             ) {
                 return Err(RepositoryError::InvalidInput(
                     "controller Node failure must be derived from its exact observation".to_owned(),
+                ));
+            }
+            Ok((failure.clone(), None))
+        }
+        OrchestrationFailureCause::Admission { failure } => {
+            if !matches!(runtime_node, RuntimeNode::ChildAgentCall { .. })
+                || !matches!(
+                    failure.code,
+                    FailureCode::Platform {
+                        code: PlatformFailureCode::BudgetExhausted
+                    }
+                )
+                || failure.class != FailureClass::Quota
+                || failure.retryability != Retryability::Never
+                || failure.source != FailureSource::Plan
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "admission failure is inconsistent with the exact Plan node".to_owned(),
                 ));
             }
             Ok((failure.clone(), None))
@@ -31245,12 +31264,13 @@ impl ApplyOrchestrationControllerStep {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrchestrationFailureCause {
     Committed { failure: Failure },
+    Admission { failure: Failure },
     Controller { observation: ControllerObservation },
 }
 
 impl OrchestrationFailureCause {
     fn validate(&self) -> Result<(), RepositoryError> {
-        if let Self::Committed { failure } = self {
+        if let Self::Committed { failure } | Self::Admission { failure } = self {
             failure
                 .validate(1_024)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
@@ -32772,13 +32792,13 @@ pub struct DriveChildRunCancellations {
 }
 
 impl DriveChildRunCancellations {
-    fn validate(&self, limits: SchedulerHardLimits) -> Result<(), RepositoryError> {
+    fn validate(&self, maximum_batch: u16) -> Result<(), RepositoryError> {
         if self.limit == 0
-            || self.limit > limits.maximum_batch
+            || self.limit > maximum_batch
             || self.slots.len() != usize::from(self.limit)
         {
             return Err(RepositoryError::InvalidInput(
-                "child Run cancellation scan is outside the scheduler bound".to_owned(),
+                "child Run cancellation scan is outside the recovery bound".to_owned(),
             ));
         }
         let mut unique = BTreeSet::new();
@@ -38277,6 +38297,25 @@ mod tests {
             })
             .collect();
         let command = DriveTerminalChildRuns { limit: 65, slots };
+        assert!(command.validate(1_000).is_ok());
+        assert!(matches!(
+            command.validate(64),
+            Err(RepositoryError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn child_cancellation_scan_uses_the_recovery_batch_limit() {
+        let new_id = |kind| ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap();
+        let slots = (0..65)
+            .map(|_| ChildRunCancellationSlot {
+                child_link_event_id: new_id(ResourceKind::Event),
+                child_link_outbox_id: new_id(ResourceKind::OutboxEvent),
+                child_run_event_id: new_id(ResourceKind::Event),
+                child_run_outbox_id: new_id(ResourceKind::OutboxEvent),
+            })
+            .collect();
+        let command = DriveChildRunCancellations { limit: 65, slots };
         assert!(command.validate(1_000).is_ok());
         assert!(matches!(
             command.validate(64),

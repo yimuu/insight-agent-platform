@@ -2092,7 +2092,8 @@ pub fn decide_orchestration_convergence(
                 JobState::Cancelled,
                 facts.control.clone(),
             )
-        } else if facts.job_attempt_count >= facts.job_attempt_limit
+        } else if facts.job_state == JobState::Running
+            && facts.job_attempt_count >= facts.job_attempt_limit
             && facts
                 .lease_expires_at
                 .is_none_or(|expires_at| database_now >= expires_at)
@@ -3971,6 +3972,27 @@ mod tests {
         );
         assert_eq!(timeout_convergence.run_state, RunState::TimedOut);
         assert_eq!(timeout_convergence.control.timeout_generation, 1);
+
+        let deferred_attempt = decide_orchestration_convergence(
+            OrchestrationConvergenceFacts {
+                run_state: RunState::Waiting,
+                run_version: 4,
+                run_deadline: observed + chrono::Duration::minutes(1),
+                control: control(),
+                node_state: NodeExecutionState::Waiting,
+                job_state: JobState::Waiting,
+                job_attempt_count: 1,
+                job_attempt_limit: 1,
+                job_deadline: observed + chrono::Duration::minutes(1),
+                lease_expires_at: None,
+            },
+            observed,
+        )
+        .unwrap();
+        assert!(
+            deferred_attempt.is_none(),
+            "a durable wait resumes the same physical attempt and remains live at its attempt limit"
+        );
 
         assert_eq!(
             decide_timeout(
