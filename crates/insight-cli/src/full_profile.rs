@@ -429,6 +429,25 @@ pub(crate) fn initial_configs(
     });
     let dataset_source_manifest_digest = canonical_digest(&dataset_index)
         .expect("the closed local Context Dataset source is canonical JSON");
+    let context_worker_manifest = json!({
+        "manifest_version": 1,
+        "worker_role": "context-worker",
+        "work_class": "context",
+        "adapter_runtime_digest": digests.context_adapter,
+        "protocol_version": 1,
+        "max_concurrency": 4,
+        "critical_control_reserved_slots": 1,
+    });
+    let context_worker_manifest_digest = canonical_digest(&context_worker_manifest)
+        .expect("the closed local Context Worker manifest is canonical JSON");
+    let dataset_source_binding_value = json!({
+        "adapter_contract_digest": digests.context_contract,
+        "installed_adapter_digest": digests.context_adapter,
+        "required_worker_manifest_digest": context_worker_manifest_digest,
+        "schema_version": 1,
+    });
+    let dataset_source_binding_digest = canonical_digest(&dataset_source_binding_value)
+        .expect("the closed local Context Dataset source binding is canonical JSON");
     BTreeMap::from([
         (
             "context-native".to_owned(),
@@ -437,15 +456,7 @@ pub(crate) fn initial_configs(
                 json!({
                     "schema_version": 1,
                     "observability_listen_address": loopback_address(ports.context_native_observability),
-                    "worker_manifest": {
-                        "manifest_version": 1,
-                        "worker_role": "context-worker",
-                        "work_class": "context",
-                        "adapter_runtime_digest": digests.context_adapter,
-                        "protocol_version": 1,
-                        "max_concurrency": 4,
-                        "critical_control_reserved_slots": 1,
-                    },
+                    "worker_manifest": context_worker_manifest,
                     "native_catalog": {
                         "schema_version": 1,
                         "installed_adapter_digest": digests.context_adapter,
@@ -1046,7 +1057,13 @@ pub(crate) fn initial_configs(
                     "drain_grace_milliseconds": 30000,
                     "sources": [{
                         "schema_version": 1,
-                        "context_deployment_digest": digests.context_contract,
+                        "binding": {
+                            "schema_version": 1,
+                            "required_worker_manifest_digest": context_worker_manifest_digest,
+                            "adapter_contract_digest": digests.context_contract,
+                            "installed_adapter_digest": digests.context_adapter,
+                            "canonical_digest": dataset_source_binding_digest,
+                        },
                         "source_manifest_digest": dataset_source_manifest_digest,
                         "items": [dataset_content],
                     }],
@@ -2273,7 +2290,7 @@ mod tests {
             "127.0.0.1:31024"
         );
         assert_eq!(
-            configs["context-dataset"].1["sources"][0]["context_deployment_digest"],
+            configs["context-dataset"].1["sources"][0]["binding"]["adapter_contract_digest"],
             contract
         );
     }

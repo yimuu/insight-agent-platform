@@ -68,8 +68,10 @@ Passed 而失败。
 负向路径。五份 full report 下载后重验通过；严格 M4 gate 仍因 Model、remote Capability、MCP、Context、WASI/framework
 五条场景缺失而失败。精确摘要见 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-Context 场景的 Dataset 前置闭包现已补为独立 `platform-context-dataset-worker`：它只按 exact Context
-Deployment digest 领取 `ContextDatasetBuild`，使用独立 PostgreSQL pool/Deployment/ServiceAccount/NetworkPolicy 和
+Context 场景的 Dataset 前置闭包现已补为独立 `platform-context-dataset-worker`：它只按冻结的 qualified Worker manifest、
+Implementation adapter contract 与 installed adapter 三元摘要领取 `ContextDatasetBuild`；不能使用完整 Context Deployment
+closure digest 作为进程能力身份，因为该摘要还包含 tenant 动态 Revision/Policy IDs。该进程使用独立 PostgreSQL
+pool/Deployment/ServiceAccount/NetworkPolicy 和
 队列指标，并仅通过带专用 workload identity 的 mTLS 调用 Artifact Data Worker。fresh PostgreSQL 16 fixture 已覆盖
 未安装 digest 零 claim、运行中 Worker 丢失后的新 physical attempt、Artifact verification durable wait 的同-attempt
 恢复、完整 generation 发布、重建以及失败验证不替换 active generation。该证据尚未通过 public `/v1`、CLI 与真实

@@ -20,9 +20,9 @@ impl PgRepository {
         &self,
         limit: u16,
         retry_backoff_milliseconds: i64,
-        context_deployment_digests: &[Sha256Digest],
+        source_binding_digests: &[Sha256Digest],
     ) -> Result<u64, RepositoryError> {
-        let supported = validated_supported_digests(context_deployment_digests)?;
+        let supported = validated_supported_digests(source_binding_digests)?;
         if limit == 0
             || limit > 256
             || retry_backoff_milliseconds <= 0
@@ -44,7 +44,7 @@ impl PgRepository {
               AND owner_kind = 'context_dataset' AND owner_id <> ''
               AND state IN ('leased', 'running') AND terminal_at IS NULL
               AND lease_expires_at <= $1
-              AND payload #>> '{context_deployment,deployment_digest}' = ANY($2::text[])
+              AND payload #>> '{source_binding,canonical_digest}' = ANY($2::text[])
             ORDER BY lease_expires_at, tenant_id, job_id
             FOR UPDATE SKIP LOCKED
             LIMIT $3
@@ -70,7 +70,7 @@ impl PgRepository {
             if payload.job_id.to_string() != current.job_id
                 || !supported
                     .iter()
-                    .any(|digest| digest == payload.context_deployment.deployment_digest.as_str())
+                    .any(|digest| digest == payload.source_binding.canonical_digest.as_str())
             {
                 return Err(RepositoryError::CorruptRow(
                     "Context Dataset recovery closure drifted".to_owned(),
@@ -192,20 +192,20 @@ impl PgRepository {
 }
 
 fn validated_supported_digests(
-    context_deployment_digests: &[Sha256Digest],
+    source_binding_digests: &[Sha256Digest],
 ) -> Result<Vec<String>, RepositoryError> {
-    if context_deployment_digests.is_empty() || context_deployment_digests.len() > 64 {
+    if source_binding_digests.is_empty() || source_binding_digests.len() > 64 {
         return Err(RepositoryError::InvalidInput(
             "Context Dataset recovery source closure is invalid".to_owned(),
         ));
     }
-    let mut supported = context_deployment_digests
+    let mut supported = source_binding_digests
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     supported.sort();
     supported.dedup();
-    if supported.len() != context_deployment_digests.len() {
+    if supported.len() != source_binding_digests.len() {
         return Err(RepositoryError::InvalidInput(
             "Context Dataset recovery source closure contains duplicates".to_owned(),
         ));

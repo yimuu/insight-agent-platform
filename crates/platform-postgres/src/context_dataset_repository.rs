@@ -84,6 +84,19 @@ impl PgRepository {
             &DeploymentClosure::ContextSourceInterface(closure.clone()),
         )
         .await?;
+        let implementation = crate::invocation_repository::load_enabled_exact_published_version(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &closure.implementation,
+            insight_platform_contracts::RegistryResourceKind::ContextSourceImplementation,
+        )
+        .await?;
+        let ResourceDocument::ContextSourceImplementation(implementation) = implementation.document
+        else {
+            return Err(RepositoryError::CorruptRow(
+                "Context Implementation revision contains the wrong document".to_owned(),
+            ));
+        };
         let (expected_dataset_version, expected_active_generation_id) =
             lock_dataset_build_target(&mut transaction, &command).await?;
         let active_build: bool = sqlx::query_scalar(
@@ -175,6 +188,7 @@ impl PgRepository {
         let payload = ContextDatasetBuildJobPayload::from_request(
             &command,
             &closure,
+            &implementation,
             expected_dataset_version,
             expected_active_generation_id,
             artifact_stages.clone(),

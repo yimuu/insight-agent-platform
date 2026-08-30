@@ -2,11 +2,12 @@ use crate::ContextQueryError;
 use chrono::{DateTime, Utc};
 use insight_platform_artifacts::ArtifactAwaitingStageSnapshot;
 use insight_platform_contracts::{
-    canonical_digest, ArtifactRef, ClosedJsonValue, CommandAudit, ContextBindingSnapshot,
-    ContextDatasetGenerationSpec, ContextDeploymentClosure, ContextImplementationResourceSpec,
-    ContextInterfaceResourceSpec, ContextLocatorKind, DataClassification,
-    ExactDatasetGenerationRef, ExactDeploymentRef, ExactVersionRef, HardLimitProfile, JsonLimits,
-    PrincipalSnapshot, ResourceId, ResourceKind, Sha256Digest, ValueRef,
+    canonical_digest, ArtifactRef, ClosedJsonValue, CommandAudit, ContextBackendBinding,
+    ContextBackendContract, ContextBindingSnapshot, ContextDatasetGenerationSpec,
+    ContextDeploymentClosure, ContextImplementationResourceSpec, ContextInterfaceResourceSpec,
+    ContextLocatorKind, DataClassification, ExactDatasetGenerationRef, ExactDeploymentRef,
+    ExactVersionRef, HardLimitProfile, JsonLimits, PrincipalSnapshot, ResourceId, ResourceKind,
+    Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::ExactInvocationValueRef;
 use insight_platform_jobs::{JobFence, WakeContract};
@@ -21,6 +22,81 @@ pub const CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE: &str =
     "application/vnd.insight.context-index-manifest+json";
 pub const CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE: &str =
     "application/vnd.insight.context-validation-evidence+json";
+
+/// Exact immutable NativeCatalog identity understood by one Dataset Builder process.
+///
+/// This is deliberately distinct from the Context Deployment closure digest: the latter also
+/// contains tenant-authored revision IDs and policies, while dispatch compatibility is owned by
+/// the qualified Worker manifest plus the implementation and installed adapter identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDatasetBuildSourceBinding {
+    pub schema_version: u32,
+    pub required_worker_manifest_digest: Sha256Digest,
+    pub adapter_contract_digest: Sha256Digest,
+    pub installed_adapter_digest: Sha256Digest,
+    pub canonical_digest: Sha256Digest,
+}
+
+impl ContextDatasetBuildSourceBinding {
+    pub fn from_deployment(
+        closure: &ContextDeploymentClosure,
+        implementation: &ContextImplementationResourceSpec,
+    ) -> Result<Self, ContextQueryError> {
+        let ContextBackendContract::NativeCatalog {
+            adapter_contract_digest,
+        } = &implementation.contract.backend
+        else {
+            return Err(ContextQueryError::InvalidBinding);
+        };
+        let ContextBackendBinding::NativeCatalog {
+            installed_adapter_digest,
+        } = &closure.backend
+        else {
+            return Err(ContextQueryError::InvalidBinding);
+        };
+        if implementation.interface_revision != closure.interface
+            || implementation.backend_kind != closure.backend.kind()
+            || implementation
+                .contract
+                .validate_binding(&closure.backend)
+                .is_err()
+        {
+            return Err(ContextQueryError::InvalidBinding);
+        }
+        let value = serde_json::json!({
+            "adapter_contract_digest": adapter_contract_digest,
+            "installed_adapter_digest": installed_adapter_digest,
+            "required_worker_manifest_digest": closure.required_worker_manifest_digest,
+            "schema_version": 1,
+        });
+        let canonical_digest = canonical_digest(&value)
+            .map_err(|_| ContextQueryError::Canonicalization)?
+            .parse()
+            .map_err(|_| ContextQueryError::Canonicalization)?;
+        Ok(Self {
+            schema_version: 1,
+            required_worker_manifest_digest: closure.required_worker_manifest_digest.clone(),
+            adapter_contract_digest: adapter_contract_digest.clone(),
+            installed_adapter_digest: installed_adapter_digest.clone(),
+            canonical_digest,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ContextQueryError> {
+        let value = serde_json::json!({
+            "adapter_contract_digest": self.adapter_contract_digest,
+            "installed_adapter_digest": self.installed_adapter_digest,
+            "required_worker_manifest_digest": self.required_worker_manifest_digest,
+            "schema_version": self.schema_version,
+        });
+        let expected = canonical_digest(&value).map_err(|_| ContextQueryError::Canonicalization)?;
+        if self.schema_version != 1 || expected != self.canonical_digest.as_str() {
+            return Err(ContextQueryError::InvalidBinding);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +252,7 @@ pub struct ContextDatasetBuildJobPayload {
     pub principal_id: ResourceId,
     pub context_resource_id: ResourceId,
     pub context_deployment: ExactDeploymentRef,
+    pub source_binding: ContextDatasetBuildSourceBinding,
     pub parser_profile: ExactVersionRef,
     pub chunker_profile: ExactVersionRef,
     pub embedding_model_deployment: Option<ExactDeploymentRef>,
@@ -305,6 +382,7 @@ impl ContextDatasetBuildJobPayload {
     pub fn from_request(
         request: &RequestContextDatasetBuild,
         closure: &ContextDeploymentClosure,
+        implementation: &ContextImplementationResourceSpec,
         expected_dataset_version: Option<u64>,
         expected_active_generation_id: Option<ResourceId>,
         artifact_stages: ContextDatasetArtifactStages,
@@ -316,6 +394,10 @@ impl ContextDatasetBuildJobPayload {
             principal_id: request.audit.principal_id.clone(),
             context_resource_id: request.context_resource_id.clone(),
             context_deployment: request.context_deployment.clone(),
+            source_binding: ContextDatasetBuildSourceBinding::from_deployment(
+                closure,
+                implementation,
+            )?,
             parser_profile: closure.parser_policy.clone(),
             chunker_profile: closure.chunker_policy.clone(),
             embedding_model_deployment: closure.embedding_model_deployment.clone(),
@@ -341,6 +423,7 @@ impl ContextDatasetBuildJobPayload {
             || self.context_resource_id.kind() != ResourceKind::ContextSourceInterface
             || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
             || self.context_deployment.validate().is_err()
+            || self.source_binding.validate().is_err()
             || self.parser_profile.resource_kind != ResourceKind::PolicyRevision
             || self.chunker_profile.resource_kind != ResourceKind::PolicyRevision
             || self.ranking_profile.resource_kind != ResourceKind::PolicyRevision

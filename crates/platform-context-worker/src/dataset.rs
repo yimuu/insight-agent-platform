@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use insight_platform_artifacts::{StageWorkloadArtifactRequest, StagedWorkloadArtifact};
 use insight_platform_context::{
-    CommitContextDatasetBuild, ContextDatasetBuildJobPayload, FailContextDatasetBuildVerification,
-    ParkContextDatasetBuildVerification, CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE,
-    CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE, MAX_CONTEXT_DATASET_ARTIFACT_BYTES,
+    CommitContextDatasetBuild, ContextDatasetBuildJobPayload, ContextDatasetBuildSourceBinding,
+    FailContextDatasetBuildVerification, ParkContextDatasetBuildVerification,
+    CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE, CONTEXT_DATASET_VALIDATION_EVIDENCE_MEDIA_TYPE,
+    MAX_CONTEXT_DATASET_ARTIFACT_BYTES,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, ContextDatasetGenerationSpec, ResourceId, ResourceKind,
@@ -30,7 +31,7 @@ pub const CONTEXT_DATASET_BUILDER_ROLE: &str = "context-dataset-worker";
 #[serde(deny_unknown_fields)]
 pub struct ContextDatasetBuilderSource {
     pub schema_version: u32,
-    pub context_deployment_digest: Sha256Digest,
+    pub binding: ContextDatasetBuildSourceBinding,
     pub source_manifest_digest: Sha256Digest,
     pub items: Vec<Value>,
 }
@@ -39,6 +40,7 @@ impl ContextDatasetBuilderSource {
     pub fn validate(&self) -> Result<(), ContextDatasetBuilderError> {
         let (index_value, validation_value) = self.descriptor_values()?;
         if self.schema_version != 1
+            || self.binding.validate().is_err()
             || self.items.is_empty()
             || self.items.len() > 256
             || canonical_digest(&index_value).ok().as_deref()
@@ -216,13 +218,14 @@ impl ContextDatasetBuilderDriver {
             return Err(ContextDatasetBuilderError::InvalidConfiguration);
         }
         sources.sort_by(|left, right| {
-            left.context_deployment_digest
-                .cmp(&right.context_deployment_digest)
+            left.binding
+                .canonical_digest
+                .cmp(&right.binding.canonical_digest)
         });
         let mut identities = BTreeSet::new();
         for source in &sources {
             source.validate()?;
-            if !identities.insert(source.context_deployment_digest.clone()) {
+            if !identities.insert(source.binding.canonical_digest.clone()) {
                 return Err(ContextDatasetBuilderError::InvalidConfiguration);
             }
         }
@@ -247,7 +250,7 @@ impl ContextDatasetBuilderDriver {
         let supported = self
             .sources
             .iter()
-            .map(|source| source.context_deployment_digest.clone())
+            .map(|source| source.binding.canonical_digest.clone())
             .collect::<Vec<_>>();
         let recovered = self
             .repository
@@ -405,9 +408,7 @@ async fn execute_claim(
     }
     let source = sources
         .iter()
-        .find(|source| {
-            source.context_deployment_digest == payload.context_deployment.deployment_digest
-        })
+        .find(|source| source.binding == payload.source_binding)
         .ok_or(ContextDatasetBuilderError::CorruptClaim)?;
     let descriptors = source.descriptors()?;
     let mut fence = JobFence {
@@ -705,9 +706,24 @@ mod tests {
             "items": [{"content": content.clone(), "ordinal": 0}],
             "schema_version": 1,
         });
+        let required_worker_manifest_digest = digest(&json!({"worker": "context"}));
+        let adapter_contract_digest = digest(&json!({"contract": "context"}));
+        let installed_adapter_digest = digest(&json!({"adapter": "context"}));
+        let binding_digest = digest(&json!({
+            "adapter_contract_digest": adapter_contract_digest,
+            "installed_adapter_digest": installed_adapter_digest,
+            "required_worker_manifest_digest": required_worker_manifest_digest,
+            "schema_version": 1,
+        }));
         ContextDatasetBuilderSource {
             schema_version: 1,
-            context_deployment_digest: digest(&json!({"deployment": "context"})),
+            binding: ContextDatasetBuildSourceBinding {
+                schema_version: 1,
+                required_worker_manifest_digest,
+                adapter_contract_digest,
+                installed_adapter_digest,
+                canonical_digest: binding_digest,
+            },
             source_manifest_digest: digest(&index),
             items: vec![content],
         }
@@ -731,18 +747,27 @@ mod tests {
 
     #[test]
     fn source_manifest_binds_the_exact_canonical_index() {
-        let source = source();
-        source.validate().unwrap();
-        let descriptors = source.descriptors().unwrap();
-        assert_eq!(descriptors[0].digest, source.source_manifest_digest);
+        let configured_source = source();
+        configured_source.validate().unwrap();
+        let descriptors = configured_source.descriptors().unwrap();
+        assert_eq!(
+            descriptors[0].digest,
+            configured_source.source_manifest_digest
+        );
         assert_eq!(
             descriptors[0].media_type,
             CONTEXT_DATASET_INDEX_MANIFEST_MEDIA_TYPE
         );
-        let mut drifted = source;
+        let mut drifted = configured_source;
         drifted.items[0] = json!({"text": "changed"});
         assert!(matches!(
             drifted.validate(),
+            Err(ContextDatasetBuilderError::InvalidConfiguration)
+        ));
+        let mut drifted_binding = source();
+        drifted_binding.binding.installed_adapter_digest = digest(&json!({"adapter": "other"}));
+        assert!(matches!(
+            drifted_binding.validate(),
             Err(ContextDatasetBuilderError::InvalidConfiguration)
         ));
     }

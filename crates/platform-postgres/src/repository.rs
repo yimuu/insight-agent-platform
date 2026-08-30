@@ -5250,24 +5250,24 @@ impl PgRepository {
     pub async fn claim_context_dataset_build_jobs_for_sources(
         &self,
         command: ClaimJobs,
-        context_deployment_digests: &[Sha256Digest],
+        source_binding_digests: &[Sha256Digest],
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         command.validate()?;
         if command.work_class != WorkClass::Context.as_str()
-            || context_deployment_digests.is_empty()
-            || context_deployment_digests.len() > 64
+            || source_binding_digests.is_empty()
+            || source_binding_digests.len() > 64
         {
             return Err(RepositoryError::InvalidInput(
                 "Context Dataset source claim closure is invalid".to_owned(),
             ));
         }
-        let mut unique = context_deployment_digests
+        let mut unique = source_binding_digests
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         unique.sort();
         unique.dedup();
-        if unique.len() != context_deployment_digests.len() {
+        if unique.len() != source_binding_digests.len() {
             return Err(RepositoryError::InvalidInput(
                 "Context Dataset source claim closure contains duplicates".to_owned(),
             ));
@@ -5286,7 +5286,7 @@ impl PgRepository {
         command: ClaimJobs,
         job_kinds: Option<&'static [&'static str]>,
         authorized_principal_id: Option<&ResourceId>,
-        context_deployment_digests: Option<Vec<String>>,
+        source_binding_digests: Option<Vec<String>>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -5315,7 +5315,7 @@ impl PgRepository {
               AND ($4::text[] IS NULL OR job_kind = ANY($4::text[]))
               AND (
                 $6::text[] IS NULL
-                OR payload #>> '{context_deployment,deployment_digest}' = ANY($6::text[])
+                OR payload #>> '{source_binding,canonical_digest}' = ANY($6::text[])
               )
               AND (
                 $5::text IS NULL OR EXISTS (
@@ -5342,7 +5342,7 @@ impl PgRepository {
         .bind(database_now)
         .bind(job_kinds.map(|kinds| kinds.to_vec()))
         .bind(authorized_principal_id.map(ToString::to_string))
-        .bind(context_deployment_digests)
+        .bind(source_binding_digests)
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
