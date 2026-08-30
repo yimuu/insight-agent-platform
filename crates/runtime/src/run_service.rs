@@ -1845,6 +1845,7 @@ struct RunServiceInner {
     terminal: RwLock<Option<TerminalOnlyRunEngine>>,
     conversation_store: RwLock<Option<Arc<dyn TerminalOnlyStore>>>,
     conversation_config: RwLock<Option<TerminalOnlyRunConfig>>,
+    full_conversation_maintenance: AsyncMutex<()>,
     full_conversation_mutations: Vec<Arc<AsyncMutex<()>>>,
     full_conversation_streams: Mutex<BTreeMap<String, Vec<Weak<ConversationStreamPrivacyInner>>>>,
     /// Process-local coalescing state. `true` records a trigger that arrived
@@ -2119,6 +2120,7 @@ impl RunService {
                 terminal: RwLock::new(None),
                 conversation_store: RwLock::new(None),
                 conversation_config: RwLock::new(None),
+                full_conversation_maintenance: AsyncMutex::new(()),
                 full_conversation_mutations: (0..64)
                     .map(|_| Arc::new(AsyncMutex::new(())))
                     .collect(),
@@ -8186,6 +8188,10 @@ impl RunServiceInner {
         &self,
         include_retention: bool,
     ) -> Result<(), ServiceError> {
+        // The periodic pump and explicit qualification pass share the same
+        // process owner. Serialize them so one pass cannot leave rows leased
+        // from the other pass while reporting that the cycle is complete.
+        let _maintenance = self.full_conversation_maintenance.lock().await;
         let Some(FullConversationMaintenanceComponents {
             store,
             artifact_store,
