@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Insight Platform API
-  version: 1.0.0-implementing
+  version: 1.0.0
   description: >-
-    Target insight.platform/v1 contract. Operations remain implementing-not-current until
-    qualification and clean replacement are complete.
-x-insight-contract-status: implementing-not-current
+    Current insight.platform/v1 public contract. Production L4-L6 qualification remains a
+    separately reported deployment gate and does not change this repository contract status.
+x-insight-contract-status: current
 x-insight-trace-contract:
   request-header:
     name: traceparent

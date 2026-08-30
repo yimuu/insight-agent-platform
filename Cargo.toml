@@ -62,7 +62,7 @@ members = [
 exclude = [
     "crates/platform-sandbox-microvm",
 ]
-default-members = ["."]
+default-members = ["crates/insight-cli"]
 resolver = "2"
 
 [workspace.package]

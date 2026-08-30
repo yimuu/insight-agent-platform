@@ -10,6 +10,7 @@
 | [`reviews/`](reviews/) | 特定时间点的代码、依赖和整改快照 |
 | [`qualifications/`](qualifications/README.md) | 已完成的容量、故障与发布资格验收记录 |
 | [`migrations/`](migrations/) | 旧 DSL 或运行时切换说明 |
+| [`current-dsl-v1/`](current-dsl-v1/) | clean cut 前的 `insight.agent/v1` 当前使用与运维文档快照 |
 
 归档文档保留原始标题、日期和大部分正文，以便理解当时为什么作出某项决定。文件中的状态、示例、
 代码路径、依赖版本、验证结果和未完成事项不应直接用于当前实现。

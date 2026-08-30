@@ -133,6 +133,36 @@ report_matches \
   '(Region/SSA|RegionYield|Branch/Phi|runtime-local-only|scope_scheduler|mark_incomplete_interrupted|api_version:[[:space:]]*insight\.agent/v2|type:[[:space:]]*switch([[:space:]]|$)|core\.branch_end|formal_v2|legacy scheduler|migrations/durable|schema_migrations|migration manifest|自动(执行|运行).*(migration|迁移))' \
   README.md docs/README.md docs/current/*.md docs/qualifications/*.md
 
+# M5 product-surface closure. Historical source and deployment material may remain only under
+# explicit archive paths; the default Cargo build, candidate image and current contract must be
+# the clean-cut Platform `/v1` product.
+if ! grep -Fq 'default-members = ["crates/insight-cli"]' Cargo.toml; then
+  fail "Cargo default-members does not select the insight CLI"
+fi
+if grep -Fq -- '--bin insight-agent-platform' Dockerfile || \
+   grep -Fq '/usr/local/bin/insight-agent-platform' Dockerfile; then
+  fail "candidate image still builds or launches the archived single-process runtime"
+fi
+if ! grep -Fq 'ENTRYPOINT ["/usr/local/bin/platform-gateway"]' Dockerfile; then
+  fail "candidate runtime image does not default to the Platform Gateway"
+fi
+if [[ -d deploy/helm/insight-agent-platform ]]; then
+  fail "archived single-process Helm chart remains in active deploy/helm"
+fi
+if ! grep -Fq 'x-insight-contract-status: current' contracts/platform-v1/openapi.yaml; then
+  fail "Platform OpenAPI is not marked current after repository clean cut"
+fi
+for current_doc in README.md architecture.md cli.md api.md http-authoring.md console.md mcp.md operations.md; do
+  if [[ ! -f "docs/current/$current_doc" ]]; then
+    fail "current product documentation is missing docs/current/$current_doc"
+  fi
+done
+report_matches \
+  "current product documentation contains a positive old-runtime instruction" \
+  -nEH \
+  '(PLATFORM_CONFIG=config/platform\.quickstart\.yaml|api_version:[[:space:]]*insight\.agent/v1|cargo run[[:space:]]*$|terminal_only persistence|DSL v1 指南)' \
+  docs/current/*.md
+
 if ((failed != 0)); then
   exit 1
 fi

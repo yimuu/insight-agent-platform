@@ -18,7 +18,7 @@ COPY --from=planner /workspace/recipe.json recipe.json
 # dependency skeleton. This layer remains reusable when ordinary Rust source files change.
 COPY proto ./proto
 RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
-    --bin insight-agent-platform \
+    --bin insight \
     --bin platform-callback-api \
     --bin platform-gateway \
     --bin platform-model-worker \
@@ -53,7 +53,7 @@ COPY contracts ./contracts
 COPY database ./database
 
 RUN cargo build --locked --release --workspace \
-    --bin insight-agent-platform \
+    --bin insight \
     --bin platform-callback-api \
     --bin platform-gateway \
     --bin platform-model-worker \
@@ -92,7 +92,7 @@ WORKDIR /app
 
 FROM runtime-base AS runtime
 
-COPY --from=builder /workspace/target/release/insight-agent-platform /usr/local/bin/insight-agent-platform
+COPY --from=builder /workspace/target/release/insight /usr/local/bin/insight
 COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/bin/platform-callback-api
 COPY --from=builder /workspace/target/release/platform-gateway /usr/local/bin/platform-gateway
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker
@@ -117,8 +117,6 @@ COPY --from=builder /workspace/target/release/platform-security-authority /usr/l
 COPY --from=builder /workspace/target/release/platform-sandbox-controller /usr/local/bin/platform-sandbox-controller
 COPY --from=builder /workspace/target/release/platform-sandbox-attestor /usr/local/bin/platform-sandbox-attestor
 COPY --from=builder /workspace/target/release/platform-sandbox-executor /usr/local/bin/platform-sandbox-executor
-COPY agents /app/agents
-COPY config /app/config
 COPY database /app/database
 
 RUN mkdir -p /data/artifacts \
@@ -126,10 +124,9 @@ RUN mkdir -p /data/artifacts \
 
 USER 10001:10001
 
-ENV PLATFORM_CONFIG=/app/config/platform.yaml
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/local/bin/insight-agent-platform"]
+ENTRYPOINT ["/usr/local/bin/platform-gateway"]
 
 # The gVisor RuntimeClass isolates this single-Job image. Runtime dependencies are resolved only
 # while publishing this immutable image; the guest never invokes a package manager.

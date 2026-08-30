@@ -145,6 +145,10 @@ ALLOWED_INTERNAL = {
 # permitting that edge in the shipped dependency graph. Every resolved dep-kind must be `dev`;
 # adding the same crate as a normal or build dependency remains a boundary failure.
 ALLOWED_DEV_INTERNAL = {
+    # The archived root runtime retains only a cross-cutover qualification fixture for the public
+    # WASI adapter. This is dev-only and does not make the default CLI or candidate image depend on
+    # the archived runtime.
+    "root": {"sandbox_wasi_executor"},
     # The MCP service production-process fixture stands up the real Egress RPC service and must
     # implement its three leaf connector traits. These edges are test-only; the shipped Host still
     # reaches provider/MCP networks solely through the egress_rpc dependency.

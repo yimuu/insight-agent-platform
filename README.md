@@ -1,149 +1,66 @@
 # Insight Agent Platform
 
-Insight Agent Platform 是一个以 Rust 实现的 DSL v1 图执行运行时。Agent 作者编写结构化 YAML，
-平台在启动时将其编译为不可变、类型化的 Canonical Plan；Deployment Revision 同时冻结 `full`
-或 `terminal_only` persistence policy。`full` 使用数据库驱动的 scheduler、checkpoint、
-lease/fence 与恢复；显式 opt-in 的 `terminal_only` 在 owner 进程内执行，只持久化 admission 和
-最终结果，进程失败会中断未完成 Run。Quickstart 和平台默认值继续为 `full`。
+Insight Agent Platform 是面向关键业务 Agent 的高保证 durable execution backend。当前公共协议是
+`insight.platform/v1` 与 `/v1`：Resource、immutable ResourceVersion、Deployment、Run、Invocation、Job、Task、
+Event、Receipt 和 Artifact 分别由 PostgreSQL 与独立 worker 持有，不依赖 Gateway 进程内状态。
 
-当前只支持 `insight.agent/v1`，不提供旧 DSL 或旧运行内核兼容层。
+旧 `insight.agent/v1` DSL runtime 已退出默认构建、镜像和当前文档；历史源码与文档仅用于追溯，不构成兼容层。
 
-## MCP 支持
+## 本地快速启动
 
-平台已完整实现 MCP `2026-07-28` modern Host/Client 与 Server profile，以及独立协商的官方
-Tasks extension；`2025-11-25` 作为显式开启、与 modern path 隔离的 legacy client profile。
-Client 支持 stdio 与 Streamable HTTP，覆盖 Tools、Resources、Prompts、Completion、
-Subscriptions、durable Elicitation 和 HTTP Authorization；Server 通过独立 `/mcp` endpoint
-只暴露显式授权的 Agent、Action、Resource 与 Prompt。
-
-MCP 不绕过平台既有的 schema、effect、tenant、Deployment Revision、持久化与公开策略。
-配置示例、profile 矩阵、安全边界和 API 见
-[MCP 使用、运行与安全合同](docs/current/mcp.md)。
-
-## 快速启动
-
-仓库要求 Rust `1.94.1`。Quickstart 只启用本地 `action_demo`，不需要模型密钥：
-
-首次启动或明确重建数据库时：
+前置条件：Rust 1.94.1、Docker Engine/Compose。Console 和 LangGraph.js 参考集成另外使用已有的 Node.js 24 与
+Corepack；Node 不是 Rust 平台服务运行时。
 
 ```bash
-bash scripts/provision-sqlite-schema.sh
-PLATFORM_CONFIG=config/platform.quickstart.yaml cargo run
+cargo build --locked
+cargo run --locked -p insight-cli --bin insight -- doctor
+cargo run --locked -p insight-cli --bin insight -- init --path ./insight-local
+cargo run --locked -p insight-cli --bin insight -- dev --path ./insight-local --profile base
 ```
 
-第一条命令在服务启动前从
-[`database/durable/sqlite/schema.sql`](database/durable/sqlite/schema.sql) 创建
-`data/quickstart.sqlite3`。服务本身不会创建数据库文件或表；如果目标文件已经存在，provisioner
-会拒绝覆盖。已按当前 contract provision 的数据库在普通服务重启时直接运行第二条命令；只有明确
-重建或 Schema contract 变化时，才先移动/删除 pre-1.0 开发数据库并重新执行 provisioner。
-
-服务默认监听 `127.0.0.1:3000`：
+`init` 生成显式的非生产 OIDC、mTLS、配置摘要和本地 project；`dev` 预置 fresh PostgreSQL schema并监督独立
+Gateway、Orchestration、Artifact 和 worker 角色。服务进程不会隐式建表。运行后可用：
 
 ```bash
-curl http://127.0.0.1:3000/health/ready
-
-curl -X POST http://127.0.0.1:3000/v1/agents/action_demo/runs \
-  -H 'content-type: application/json' \
-  -H 'x-request-id: example-1' \
-  -d '{"text":"hello durable graph"}'
+cargo run --locked -p insight-cli --bin insight -- status --path ./insight-local
+cargo run --locked -p insight-cli --bin insight -- token --path ./insight-local
+cargo run --locked -p insight-cli --bin insight -- apply --path ./insight-local --file request.json
+cargo run --locked -p insight-cli --bin insight -- run create --path ./insight-local --file run.json
+cargo run --locked -p insight-cli --bin insight -- stop --path ./insight-local
 ```
 
-创建接口返回 `202 Accepted` 和 `run_id`。随后查询：
+完整、可复制的 Resource lifecycle curl 示例见
+[`examples/productization/http-resource-lifecycle.sh`](examples/productization/http-resource-lifecycle.sh)。CLI 会输出
+每个 authority ID，并保留 Problem code、request ID、Receipt、ETag 与 retryability；不会通过 SQL 或内部 RPC 走捷径。
 
-```bash
-curl http://127.0.0.1:3000/v1/runs/RUN_ID
-```
+## 产品面
 
-## 最小 Agent
+- [`insight` CLI](docs/current/cli.md)：本地 profile、Resource lifecycle、Run、Task、Artifact 和 Operation；
+- [公开 HTTP API](docs/current/api.md)：authoritative OpenAPI、认证、Receipt/CAS、SSE 与 Problem；
+- [运行控制台](docs/current/console.md)：只访问 public `/v1` 的静态 React 客户端；
+- [架构](docs/current/architecture.md)：Control、durable orchestration 与 Sandbox execution plane；
+- [运维](docs/current/operations.md)：base/full profile、镜像、GitOps 与资格边界；
+- [黄金场景证据](docs/specs/productization/full-journey-evidence.md)：fresh authority 上 10/10 Passed。
 
-```yaml
-api_version: insight.agent/v1
-kind: agent
+Python SDK 已取消。仓库提供固定 `@langchain/langgraph` 1.4.13 的独立 remote Capability reference；它不链接进
+Gateway/Worker，也不获得平台数据库凭据。
 
-inputs:
-  text: string
+## 验证边界
 
-output: TextMetrics
-
-types:
-  TextMetrics:
-    fields:
-      characters: integer
-      words: integer
-      lines: integer
-
-workflow:
-  steps:
-    - type: action
-      id: analyze_text
-      call: example.text_metrics
-      inputs:
-        text: $text
-      response: TextMetrics
-
-    - return: $analyze_text
-```
-
-完整示例见 [`agents/`](agents) 和 [`tests/fixtures/dsl/`](tests/fixtures/dsl)。
-
-## 模型选择
-
-LLM 步骤直接选择 Provider route 和 Provider 侧模型 ID，不使用业务别名：
-
-```yaml
-- type: llm
-  id: answer
-  model:
-    provider: dashscope-cn
-    id: qwen3.6-flash
-  messages:
-    - role: user
-      content: [{text: "请总结输入"}]
-  parameters:
-    temperature: 0.3
-    enable_thinking: false
-  response: Answer
-```
-
-Provider route 与模型通过 durable `/v1/admin/providers/**` 管理。内置 Catalog 只提供可导入的
-template，不会因进程启动自动注册 live route。Operator 显式创建 Draft、导入逐项模型、validation、
-发布 Provider Revision 并 activate；Agent Deployment 随后冻结 exact Provider Revision、模型 ID、
-adapter/worker 和 credential reference。平台不会自动跨区域切换，也不存在 `models.yaml`、通配符或
-`auto_import`。Action-only Quickstart 无需 Provider route 或模型密钥。
-
-## 文档
-
-- [文档首页](docs/README.md)：阅读路线、现行文档与历史档案边界；
-- [架构概览](docs/current/architecture.md)：执行模型、核心不变量与权威边界；
-- [DSL v1 指南](docs/current/dsl.md)：Agent 结构、类型、表达式和控制流；
-- [HTTP 与 SSE API](docs/current/api.md)：路由、幂等要求和响应流；
-- [原始 `/v1` HTTP authoring](docs/current/http-authoring.md)：checked curl Resource lifecycle、Receipt、CAS 与 Problem；
-- [MCP 使用、运行与安全合同](docs/current/mcp.md)：profiles、传输、授权、交互与安全边界；
-- [Agent 与 Provider 管理面](docs/current/management.md)：Draft、Revision、Deployment、调试与安全门；
-- [部署与运维](docs/current/operations.md)：Schema 预置、配置、存储、认证和生命周期；
-- [开发指南](docs/current/development.md)：代码导航和验证命令；
-- [变更记录](CHANGELOG.md)：发布版本的重要变化与兼容性说明。
-
-当前行为由上述文档、公开 schema、编译器与 verifier、数据库约束及测试共同定义。历史设计、
-实施计划、评审和已完成资格验收记录集中保存在
-[`docs/archive/`](docs/archive/README.md)，不代表当前生产合同。
-
-## 验证
+本地产品化 P0～P4 已覆盖真实 PostgreSQL/NATS/Object Storage、25 个独立角色、公开 `/v1`、CLI、headless
+Chrome、durable restart、MCP、Artifact、WASI 和 LangGraph.js。真实多节点 Kubernetes、runsc、容量、混沌、restore、
+soak 与 production GitOps promotion 仍是明确的外部 L4～L6 门禁，当前为 **Not run**；Platform spec00～18 因此继续
+保持 Accepted/In Progress，而不是 Verified。
 
 ```bash
 bash scripts/check-cutover-residuals.sh
-bash scripts/check-crate-boundaries.sh
-bash scripts/check-public-api-baseline.sh
-cargo fmt --all -- --check
-cargo check --locked --workspace --all-targets --all-features
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-targets --all-features
-cargo test --locked --workspace --doc --all-features
+python3 scripts/check-productization-ci.py
+cargo check --locked --workspace --all-targets
 ```
 
-CI 使用同一组 workspace 门禁，并在 PostgreSQL 16 上运行数据库合同与 real-process
-restart/shutdown 测试，同时执行依赖策略检查。具体环境要求见[开发指南](docs/current/development.md)。
+历史 DSL 文档位于 [`docs/archive/current-dsl-v1/`](docs/archive/current-dsl-v1/)，旧 Helm 拓扑位于
+[`deploy/archive/helm/insight-agent-platform/`](deploy/archive/helm/insight-agent-platform/)。
 
 ## License
 
-本项目采用 [Apache License 2.0](LICENSE)。
+[Apache License 2.0](LICENSE)
