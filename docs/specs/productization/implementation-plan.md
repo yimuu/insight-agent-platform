@@ -191,6 +191,12 @@ remote fixture dispatch 或 OAuth lifecycle，因此仍不得标记 M1/M4 或 sp
 Passed composition evidence，但没有产生七条 full-only report；精确事实与边界见
 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
+2026-08-30 exact revision `5a12a3deb8658e1dd496313b3f5bab9e352d5efe` 的 fresh full Linux run
+`33290248516` / job `99200524415` 在 24 角色 ready 后进一步执行真实 Artifact lifecycle/rejection fixture：Ready、typed
+link、受控下载、digest mismatch 与 wrong-tenant read 均由 CLI、raw `/v1` 和真实 Console 观察。该 run 生成并重验五份
+Passed report；核心步骤约 20 分 48 秒。剩余 Model、remote Capability、MCP、Context、WASI/framework 五条仍未交付，
+精确摘要与 digest 见 [`full-journey-evidence.md`](full-journey-evidence.md)。
+
 2026-08-30 full 配置生成器的 dependency audit 进一步闭合了执行面边界：`insight` 不再为读取配置常量而链接
 Capability Worker、Egress RPC、Sandbox RPC 或 Wasmtime adapter。跨进程必须一致的 workload identity、内置 JSON
 codec 描述摘要和 WASI ABI runtime version 由无执行能力的 `platform-contracts` 统一拥有，各独立 Worker/RPC/Executor
@@ -370,12 +376,15 @@ fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 f
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
 `approval-task-resume` report；启用真实浏览器时该报告已可完整 Passed。Timer/Signal restart fixture 会产出第三份
-`timer-signal-restart-recovery` report，Subagent fixture 会产出第四份 `subagent-quota-and-cancel` report。这不是 M4
-完成证据；其余六条 fixture/report 与 full profile 场景仍未交付。
+`timer-signal-restart-recovery` report，Subagent fixture 会产出第四份 `subagent-quota-and-cancel` report，full profile
+的 Artifact fixture 会产出第五份 `artifact-lifecycle-and-rejection` report。这不是 M4 完成证据；其余五条
+fixture/report 与 remote full-profile workload 场景仍未交付。
 
 远端 fresh base run `33289764921` 已使 `approval-task-resume`、`deterministic-first-run`、
 `subagent-quota-and-cancel` 与 `timer-signal-restart-recovery` 四份报告完整 Passed。严格 M4 checker 仍会因另外六条
-未全部 Passed 而失败。精确报告摘要见 [`base-journey-evidence.md`](base-journey-evidence.md)。
+未全部 Passed 而失败。随后 full run `33290248516` 又使 `artifact-lifecycle-and-rejection` Passed，因此当前共有五份
+Passed report，严格门禁仍因另外五条未交付而失败。精确报告摘要见
+[`base-journey-evidence.md`](base-journey-evidence.md) 与 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
 ### 7.1 工作项
 

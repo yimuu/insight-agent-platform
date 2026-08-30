@@ -63,6 +63,11 @@ failure probe 均 Passed。下载 artifact 后的 canonical report 摘要与 SHA
 [`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余六条没有全部
 Passed 而失败。
 
+同一 revision 的 fresh full Linux run `33290248516` 又使 `artifact-lifecycle-and-rejection` 完整 Passed：CLI、raw
+`/v1` 与真实 Console 共同观察 Ready Artifact、typed link 和受控下载，并执行 digest mismatch 与 wrong-tenant read
+负向路径。五份 full report 下载后重验通过；严格 M4 gate 仍因 Model、remote Capability、MCP、Context、WASI/framework
+五条场景缺失而失败。精确摘要见 [`full-journey-evidence.md`](full-journey-evidence.md)。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console
