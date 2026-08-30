@@ -3063,132 +3063,146 @@ impl SandboxGatewayAuthority for PgRepository {
     ) -> Result<CommandOutcome<SandboxPhaseDecision>, Self::Error> {
         let mut transaction = self.pool().begin().await?;
         let database_now = database_now(&mut transaction).await?;
-        command.validate_at(database_now, self.sandbox_limits())?;
-        if claim_command_receipt(
+        let outcome = accept_sandbox_execution_in_transaction(
             &mut transaction,
-            &command.audit,
-            "job",
-            &command.request.sandbox_job_id.to_string(),
-            "sandbox.execute",
-        )
-        .await?
-        {
-            let current = load_sandbox_job(
-                &mut transaction,
-                &command.audit.tenant_id,
-                &command.request.job_id,
-                self.sandbox_limits(),
-            )
-            .await?;
-            require_accept_replay(&current, &command)?;
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(SandboxPhaseDecision {
-                job: current.job,
-                payload: current.payload,
-            }));
-        }
-
-        require_tenant_permission(&mut transaction, &command.audit, Permission::SandboxExecute)
-            .await?;
-        let invocation = lock_sandbox_invocation(&mut transaction, &command).await?;
-        verify_sandbox_exact_bindings(&mut transaction, &command.request, &invocation).await?;
-        let previous_sandbox = match invocation.payload.current_job_id.as_ref() {
-            Some(previous_job_id) => Some(
-                load_sandbox_job(
-                    &mut transaction,
-                    &command.request.tenant_id,
-                    previous_job_id,
-                    self.sandbox_limits(),
-                )
-                .await?,
-            ),
-            None => None,
-        };
-        lock_and_persist_artifact_grants(&mut transaction, &command, database_now).await?;
-        lock_secret_grants(&mut transaction, &command).await?;
-        reserve_sandbox_quota(&mut transaction, &command, database_now).await?;
-
-        let accepted = decide_accept(&command, database_now, self.sandbox_limits())?;
-        let deferred = decide_defer_to_sandbox(
-            &invocation,
-            detached_sandbox_source_kind(&command.request.execution_source),
-            command.request.expected_invocation_version,
-            &command.request.job_id,
-            command.request.attempt_no,
-            previous_sandbox
-                .as_ref()
-                .map(|previous| PreviousDetachedSandboxJob {
-                    job: &previous.job,
-                    attempt_no: previous.payload.request.attempt_no,
-                }),
+            command,
             database_now,
-        )?;
-        update_capability_invocation(&mut transaction, &invocation, &deferred).await?;
-        let stored_payload = SandboxJobPayload::capability_execution(accepted.payload.clone());
-        let payload = TypedPayload::from_versioned(1, &stored_payload, 1_048_576)?;
-        sqlx::query(
-            r#"
-            INSERT INTO insight_platform.jobs (
-                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
-                run_id, node_id,
-                state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
-                deadline, priority, request_digest, quota_reservation_id,
-                payload_schema_version, payload, payload_digest, created_at, updated_at,
-                trace_id
-            ) VALUES ($1, $2, 'sandbox_capability_execution', 'sandbox', 'job', $3, $4, $5, $6,
-                      'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10,
-                      $11, $12, $13, $7, $7, $14)
-            "#,
-        )
-        .bind(command.request.tenant_id.to_string())
-        .bind(command.request.job_id.to_string())
-        .bind(command.request.sandbox_job_id.to_string())
-        .bind(command.request.invocation_id.to_string())
-        .bind(invocation.run_id.to_string())
-        .bind(invocation.node_execution_id.to_string())
-        .bind(database_now)
-        .bind(command.request.deadline)
-        .bind(command.request.request_digest.to_string())
-        .bind(command.usage_reservation_id.to_string())
-        .bind(payload.schema_version)
-        .bind(&payload.value)
-        .bind(&payload.digest)
-        .bind(invocation.trace.trace_id.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        append_command_event(
-            &mut transaction,
-            &command.audit,
-            "capability_invocation",
-            &command.request.invocation_id.to_string(),
-            as_i64(deferred.version, "Invocation version")?,
-            "capability.waiting",
-            &TypedPayload::new(
-                1,
-                &serde_json::json!({
-                    "invocation_state": deferred.state,
-                    "invocation_id": command.request.invocation_id,
-                    "isolation_class": command.request.isolation_class,
-                    "job_id": command.request.job_id,
-                    "job_state": accepted.job.state,
-                    "sandbox_job_id": command.request.sandbox_job_id,
-                }),
-            )?,
-        )
-        .await?;
-        terminalize_command_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.request.job_id.to_string(),
-            "accepted",
+            self.sandbox_limits(),
         )
         .await?;
         transaction.commit().await?;
-        Ok(CommandOutcome::Applied(SandboxPhaseDecision {
-            job: accepted.job,
-            payload: accepted.payload,
-        }))
+        Ok(outcome)
     }
+}
+
+pub(crate) async fn accept_sandbox_execution_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: AcceptSandboxExecution,
+    database_now: DateTime<Utc>,
+    limits: SandboxCommandLimits,
+) -> Result<CommandOutcome<SandboxPhaseDecision>, RepositoryError> {
+    command.validate_at(database_now, limits)?;
+    if claim_command_receipt(
+        transaction,
+        &command.audit,
+        "job",
+        &command.request.sandbox_job_id.to_string(),
+        "sandbox.execute",
+    )
+    .await?
+    {
+        let current = load_sandbox_job(
+            transaction,
+            &command.audit.tenant_id,
+            &command.request.job_id,
+            limits,
+        )
+        .await?;
+        require_accept_replay(&current, &command)?;
+        return Ok(CommandOutcome::Replayed(SandboxPhaseDecision {
+            job: current.job,
+            payload: current.payload,
+        }));
+    }
+
+    require_tenant_permission(transaction, &command.audit, Permission::SandboxExecute).await?;
+    let invocation = lock_sandbox_invocation(transaction, &command).await?;
+    verify_sandbox_exact_bindings(transaction, &command.request, &invocation).await?;
+    let previous_sandbox = match invocation.payload.current_job_id.as_ref() {
+        Some(previous_job_id) => Some(
+            load_sandbox_job(
+                transaction,
+                &command.request.tenant_id,
+                previous_job_id,
+                limits,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    lock_and_persist_artifact_grants(transaction, &command, database_now).await?;
+    lock_secret_grants(transaction, &command).await?;
+    reserve_sandbox_quota(transaction, &command, database_now).await?;
+
+    let accepted = decide_accept(&command, database_now, limits)?;
+    let deferred = decide_defer_to_sandbox(
+        &invocation,
+        detached_sandbox_source_kind(&command.request.execution_source),
+        command.request.expected_invocation_version,
+        &command.request.job_id,
+        command.request.attempt_no,
+        previous_sandbox
+            .as_ref()
+            .map(|previous| PreviousDetachedSandboxJob {
+                job: &previous.job,
+                attempt_no: previous.payload.request.attempt_no,
+            }),
+        database_now,
+    )?;
+    update_capability_invocation(transaction, &invocation, &deferred).await?;
+    let stored_payload = SandboxJobPayload::capability_execution(accepted.payload.clone());
+    let payload = TypedPayload::from_versioned(1, &stored_payload, 1_048_576)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.jobs (
+            tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id,
+            run_id, node_id,
+            state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at,
+            deadline, priority, request_digest, quota_reservation_id,
+            payload_schema_version, payload, payload_digest, created_at, updated_at,
+            trace_id
+        ) VALUES ($1, $2, 'sandbox_capability_execution', 'sandbox', 'job', $3, $4, $5, $6,
+                  'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10,
+                  $11, $12, $13, $7, $7, $14)
+        "#,
+    )
+    .bind(command.request.tenant_id.to_string())
+    .bind(command.request.job_id.to_string())
+    .bind(command.request.sandbox_job_id.to_string())
+    .bind(command.request.invocation_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(database_now)
+    .bind(command.request.deadline)
+    .bind(command.request.request_digest.to_string())
+    .bind(command.usage_reservation_id.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(invocation.trace.trace_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    append_command_event(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.request.invocation_id.to_string(),
+        as_i64(deferred.version, "Invocation version")?,
+        "capability.waiting",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "invocation_state": deferred.state,
+                "invocation_id": command.request.invocation_id,
+                "isolation_class": command.request.isolation_class,
+                "job_id": command.request.job_id,
+                "job_state": accepted.job.state,
+                "sandbox_job_id": command.request.sandbox_job_id,
+            }),
+        )?,
+    )
+    .await?;
+    terminalize_command_receipt(
+        transaction,
+        &command.audit,
+        &command.request.job_id.to_string(),
+        "accepted",
+    )
+    .await?;
+    Ok(CommandOutcome::Applied(SandboxPhaseDecision {
+        job: accepted.job,
+        payload: accepted.payload,
+    }))
 }
 
 #[async_trait::async_trait]
