@@ -390,10 +390,22 @@ fn apply_parent(
     let requirement_digest = canonical_digest(
         &json!({"kind": "child_agent", "input_schema_digest": schema_digest, "output_schema_digest": schema_digest}),
     );
+    let child_closure = json!({
+        "interface": exact_version(published_version(
+            child_report,
+            "agent_interface_revision",
+        )),
+        "plan": exact_version(published_version(child_report, "agent_plan_revision")),
+        "entry_node_id": child_bindings["entry_node_id"],
+        "entry_node_kind": child_bindings["entry_node_kind"],
+        "slots": child_bindings["slots"],
+        "policies": child_bindings["policies"],
+        "execution_profile": child_bindings["execution_profile"],
+    });
     let child_deployment = json!({
         "deployment_id": child_report["deployment_id"],
         "resource_kind": "agent_deployment",
-        "deployment_digest": canonical_digest(&json!({"schema_version": 1, "resource_kind": "agent", "bindings": child_bindings})),
+        "deployment_digest": canonical_digest(&json!({"schema_version": 1, "resource_kind": "agent", "bindings": child_closure})),
     });
     let target = json!({"kind": "child_agent", "candidates": [child_deployment], "selection_policy": selection_binding});
     let slot = json!({
