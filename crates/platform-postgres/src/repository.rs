@@ -5228,6 +5228,24 @@ impl PgRepository {
             .await
     }
 
+    /// Claims only Context Dataset build work. Dataset construction has an independent
+    /// deployment, queue, connection pool, and capacity lane from online Context queries, so its
+    /// Job-kind predicate must participate in the locking query rather than being filtered after
+    /// a generic Context lease is acquired.
+    pub async fn claim_context_dataset_build_jobs(
+        &self,
+        command: ClaimJobs,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        if command.work_class != WorkClass::Context.as_str() {
+            return Err(RepositoryError::InvalidInput(
+                "Context Dataset build claim requires the Context work class".to_owned(),
+            ));
+        }
+        self.claim_jobs_filtered(command, Some(&["context_dataset_build"]), None)
+            .await
+    }
+
     async fn claim_jobs_filtered(
         &self,
         command: ClaimJobs,
@@ -5340,11 +5358,40 @@ impl PgRepository {
     }
 
     pub async fn start_job(&self, command: JobFence) -> Result<JobRecord, RepositoryError> {
+        self.start_job_filtered(command, None).await
+    }
+
+    /// Starts only a previously claimed Context Dataset build Job. Keeping this check inside the
+    /// same row-locking transaction prevents a Dataset Builder from starting online query or
+    /// subscription work even when handed a syntactically valid foreign fence.
+    pub async fn start_context_dataset_build_job(
+        &self,
+        command: JobFence,
+    ) -> Result<JobRecord, RepositoryError> {
+        self.start_job_filtered(command, Some(JobKind::ContextDatasetBuild))
+            .await
+    }
+
+    async fn start_job_filtered(
+        &self,
+        command: JobFence,
+        expected_job_kind: Option<JobKind>,
+    ) -> Result<JobRecord, RepositoryError> {
         command.validate()?;
         let mut transaction = self.pool.begin().await?;
         let current =
             load_job_for_update_by_text(&mut transaction, &command.tenant_id, &command.job_id)
                 .await?;
+        if let Some(expected) = expected_job_kind {
+            if current.work_class != WorkClass::Context.as_str()
+                || current.job_kind != expected.as_str()
+                || current.owner_kind != ResourceKind::ContextDataset.descriptor().name
+            {
+                return Err(RepositoryError::InvalidInput(
+                    "Job is not a Context Dataset build work item".to_owned(),
+                ));
+            }
+        }
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;

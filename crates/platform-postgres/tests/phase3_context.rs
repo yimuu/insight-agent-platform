@@ -2507,7 +2507,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x730);
     let lease_token_digest = named_digest("dataset-build-lease");
     let claimed = repository
-        .claim_jobs(ClaimJobs {
+        .claim_context_dataset_build_jobs(ClaimJobs {
             work_class: WorkClass::Context.to_string(),
             worker_id: worker_id.clone(),
             limit: 1,
@@ -2520,7 +2520,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .unwrap();
     assert_eq!(claimed.job_id, original_job.job_id);
     let started = repository
-        .start_job(RepositoryJobFence {
+        .start_context_dataset_build_job(RepositoryJobFence {
             tenant_id: fixture.tenant_id.to_string(),
             job_id: claimed.job_id.clone(),
             worker_id: worker_id.clone(),
@@ -2605,7 +2605,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     let rebuild_worker = id(ResourceKind::WorkerProcessGeneration, 0x744);
     let rebuild_token = named_digest("dataset-rebuild-lease");
     let rebuild_claim = repository
-        .claim_jobs(ClaimJobs {
+        .claim_context_dataset_build_jobs(ClaimJobs {
             work_class: WorkClass::Context.to_string(),
             worker_id: rebuild_worker.clone(),
             limit: 1,
@@ -2618,7 +2618,7 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         .unwrap();
     assert_eq!(rebuild_claim.job_id, rebuild_job.job_id);
     let rebuild_started = repository
-        .start_job(RepositoryJobFence {
+        .start_context_dataset_build_job(RepositoryJobFence {
             tenant_id: fixture.tenant_id.to_string(),
             job_id: rebuild_claim.job_id,
             worker_id: rebuild_worker.clone(),
