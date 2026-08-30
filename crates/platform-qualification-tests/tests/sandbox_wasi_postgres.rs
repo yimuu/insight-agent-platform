@@ -574,7 +574,12 @@ fn fixture(now: DateTime<Utc>) -> Fixture {
     .unwrap();
     let sandbox_job_id = id(ResourceKind::Job, 42);
     let invocation_id = id(ResourceKind::CapabilityInvocation, 41);
-    let deadline = now + Duration::minutes(1);
+    // The fixture deliberately exercises lease expiry, recovery, restricted-role
+    // connections and a real Wasmtime execution before constructing all derived
+    // Invocations. Keep the business deadline comfortably beyond those bounded
+    // phases so a slow shared CI runner cannot turn a state-machine assertion
+    // into an unrelated expired-record failure.
+    let deadline = now + Duration::minutes(5);
     let input_value = serde_json::json!({"question": "life"});
     let input_content_digest: Sha256Digest =
         canonical_digest(&input_value).unwrap().parse().unwrap();
@@ -2946,24 +2951,14 @@ async fn sandbox_fixture() {
     })
     .collect();
     assert!(quota.iter().all(|(_, reserved, _)| *reserved == 0));
-    assert!(quota
-        .iter()
-        .any(|(metric, _, used)| {
-            metric == "durable_quota.sandbox_cpu_seconds"
-                && *used
-                    == quota_used_before_execution
-                        .get(metric)
-                        .copied()
-                        .unwrap()
-                        + 1
-        }));
+    assert!(quota.iter().any(|(metric, _, used)| {
+        metric == "durable_quota.sandbox_cpu_seconds"
+            && *used == quota_used_before_execution.get(metric).copied().unwrap() + 1
+    }));
     assert!(quota.iter().any(|(metric, _, used)| {
         metric == "durable_quota.sandbox_output_bytes"
             && *used
-                == quota_used_before_execution
-                    .get(metric)
-                    .copied()
-                    .unwrap()
+                == quota_used_before_execution.get(metric).copied().unwrap()
                     + i64::try_from(WASI_SUCCESS_OUTPUT.len()).unwrap()
     }));
     let pending = repository
