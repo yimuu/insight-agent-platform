@@ -116,12 +116,14 @@ if [[ "$profile" == "full" || "$console_browser" == true ]]; then
     exit 2
   fi
 fi
-if [[ "$console_browser" == true ]]; then
+if [[ "$profile" == "full" || "$console_browser" == true ]]; then
   corepack_bin="$(dirname "$node_bin")/corepack"
   if [[ ! -x "$corepack_bin" ]]; then
-    echo "--console-browser requires corepack next to the selected Node.js executable" >&2
+    echo "the full profile and --console-browser require corepack next to the selected Node.js executable" >&2
     exit 2
   fi
+fi
+if [[ "$console_browser" == true ]]; then
   if [[ -z "$browser_bin" && "$(uname -s)" == "Darwin" ]]; then
     browser_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   fi
@@ -195,6 +197,14 @@ trap cleanup EXIT
 
 cd "$workspace"
 cargo build --locked --release -p insight-cli --bin insight
+if [[ "$profile" == "full" ]]; then
+  PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
+    --dir "$workspace/examples/productization/langgraph-reference" install --frozen-lockfile
+  PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
+    --dir "$workspace/examples/productization/langgraph-reference" run check
+  PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
+    --dir "$workspace/examples/productization/langgraph-reference" test
+fi
 if [[ "$console_browser" == true ]]; then
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm --dir "$workspace/web/console" install --frozen-lockfile
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm --dir "$workspace/web/console" run build

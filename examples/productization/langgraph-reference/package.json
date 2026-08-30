@@ -1,0 +1,16 @@
+{
+  "name": "@insight/langgraph-reference",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "check": "node --check graph.mjs && node --check server.mjs",
+    "test": "node --test graph.test.mjs"
+  },
+  "dependencies": {
+    "@langchain/core": "1.2.9",
+    "@langchain/langgraph": "1.4.13",
+    "zod": "4.5.4"
+  }
+}

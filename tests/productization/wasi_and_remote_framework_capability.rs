@@ -54,8 +54,8 @@ impl WasiFrameworkEvidence {
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "status": if self.console_passed { "passed" } else { "incomplete" },
             "entrypoints": [
-                check("cli", "passed", "public apply/run/watch/result completed for the independent remote framework Capability"),
-                check("http_fixture", "passed", "the bounded framework-neutral reference service was reached only through the exact Egress Deployment"),
+                check("cli", "passed", "public apply/run/watch/result completed for both the durable WASI Capability and independent LangGraph.js Capability"),
+                check("http_fixture", "passed", "the bounded LangGraph.js reference service was reached only through the exact Egress Deployment"),
                 if self.console_passed {
                     check("console", "passed", "real headless Chromium read the exact successful framework Run")
                 } else {
@@ -63,8 +63,8 @@ impl WasiFrameworkEvidence {
                 },
             ],
             "assertions": [
-                check("wasi_limit", "passed", "the production Wasmtime adapter executed the closed WASI ABI with explicit fuel, memory, I/O and wall limits"),
-                check("remote_framework_result", "passed", "the remote framework service returned a bounded typed Inline result"),
+                check("wasi_limit", "passed", "a public Agent Run admitted an exact Sandbox Capability as a durable Sandbox Job and the production Wasmtime executor returned its schema-checked result"),
+                check("remote_framework_result", "passed", "the exact LangGraph.js StateGraph returned a bounded typed Inline result"),
                 check("no_platform_database_access", "passed", "the remote service process received no database environment or platform-internal credential"),
             ],
             "failure_probes": [
@@ -1098,7 +1098,7 @@ fn start_framework_environment(
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
     let mut fixture = Command::new(node);
     fixture
-        .arg(workspace.join("examples/productization/remote-fixture.mjs"))
+        .arg(workspace.join("examples/productization/langgraph-reference/server.mjs"))
         .env_clear()
         .env(
             "INSIGHT_REMOTE_FIXTURE_PORT",
@@ -1491,19 +1491,21 @@ pub(super) fn run(
     assert_eq!(result["schema_digest"], schema_digest);
     assert_eq!(
         result["value"]["value"]["message"],
-        "framework: bounded request"
+        "langgraph: bounded request"
     );
     let requests = trace_records(&remote.trace_path);
     assert_eq!(
         requests
             .iter()
-            .filter(|record| record["kind"] == "framework_capability_request")
+            .filter(|record| record["kind"] == "langgraph_capability_request")
             .count(),
         1
     );
     assert!(requests.iter().all(|record| {
-        record["kind"] != "framework_capability_request"
-            || record["database_environment_present"] == false
+        record["kind"] != "langgraph_capability_request"
+            || (record["database_environment_present"] == false
+                && record["framework"] == "langgraph-js"
+                && record["framework_version"] == "1.4.13")
     }));
 
     let workspace = insight
@@ -1543,7 +1545,7 @@ pub(super) fn run(
     assert_eq!(
         trace_records(&remote.trace_path)
             .iter()
-            .filter(|record| record["kind"] == "framework_capability_request")
+            .filter(|record| record["kind"] == "langgraph_capability_request")
             .count(),
         1,
         "Egress rejection must happen before remote framework dispatch"

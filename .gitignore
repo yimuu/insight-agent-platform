@@ -2,6 +2,7 @@
 .superpowers/
 /target
 /tests/interop/typescript/node_modules/
+/examples/productization/langgraph-reference/node_modules/
 /data
 .env
 *.log
