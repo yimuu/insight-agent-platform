@@ -96,6 +96,8 @@ impl SandboxOutcomeStore for PgRepository {
 }
 
 fn classify_repository_failure(failure: RepositoryError) -> SandboxOutcomeStoreFailure {
+    tracing::warn!(repository_error = %failure, "Sandbox outcome controller repository operation failed");
+    eprintln!("Sandbox outcome controller repository operation failed: {failure}");
     match failure {
         RepositoryError::Database(_) => SandboxOutcomeStoreFailure::Unavailable,
         RepositoryError::NotFound(_)
