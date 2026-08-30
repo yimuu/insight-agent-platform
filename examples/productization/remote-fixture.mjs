@@ -91,6 +91,30 @@ async function handleCapability(request, response) {
   response.end(JSON.stringify(body))
 }
 
+async function handleFrameworkCapability(request, response) {
+  const body = JSON.parse((await boundedBody(request, 4096)).toString('utf8'))
+  const databaseEnvironmentPresent = Object.keys(process.env).some((name) =>
+    name === 'DATABASE_URL' || name.startsWith('PLATFORM_POSTGRES') || name.startsWith('INSIGHT_DATABASE'),
+  )
+  trace({
+    kind: 'framework_capability_request',
+    method: request.method,
+    path: request.url,
+    database_environment_present: databaseEnvironmentPresent,
+  })
+  if (databaseEnvironmentPresent || typeof body?.message !== 'string' || body.message.length < 1 || body.message.length > 256) {
+    response.writeHead(400, {'content-type': 'application/json', 'cache-control': 'no-store'})
+    response.end(JSON.stringify({error: 'invalid_framework_request'}))
+    return
+  }
+  response.writeHead(200, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'content-encoding': 'identity',
+  })
+  response.end(JSON.stringify({message: `framework: ${body.message}`}))
+}
+
 async function handleMcp(request, response) {
   const body = JSON.parse((await boundedBody(request)).toString('utf8'))
   const method = body.method
@@ -162,6 +186,10 @@ const server = createServer(
       }
       if (request.method === 'POST' && request.url === '/v1/capability') {
         await handleCapability(request, response)
+        return
+      }
+      if (request.method === 'POST' && request.url === '/v1/framework') {
+        await handleFrameworkCapability(request, response)
         return
       }
       if (request.method === 'POST' && request.url === '/mcp') {

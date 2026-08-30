@@ -2303,6 +2303,8 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-mcp-host",
  "insight-platform-postgres",
+ "insight-platform-sandbox",
+ "insight-platform-sandbox-wasi",
  "insight-resources",
  "insight-runtime",
  "insight-storage",
@@ -2327,6 +2329,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wat",
  "yaml-rust2",
  "yaml_serde",
 ]
