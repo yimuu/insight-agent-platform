@@ -292,8 +292,8 @@ async function main() {
       await evaluate(client, `document.querySelector('.search').requestSubmit()`)
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('framework: bounded request')`,
-        'exact remote framework Capability Run and bounded typed Inline result',
+        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('langgraph: bounded request')`,
+        'exact remote LangGraph Capability Run and bounded typed Inline result',
       )
     }
 
