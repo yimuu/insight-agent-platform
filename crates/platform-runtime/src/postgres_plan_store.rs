@@ -641,7 +641,11 @@ where
                     executor_worker_manifest_digest: sandbox.executor_worker_manifest_digest,
                     isolation_backend_contract_digest: sandbox.isolation_backend_contract_digest,
                     callback_audience_identity_digest: sandbox.callback_audience_identity_digest,
-                    output_value_id: self.new_id(ResourceKind::RunValue)?,
+                    output_value_id: ResourceId::from_uuid_v7(
+                        ResourceKind::RunValue,
+                        capability_job_id.uuid(),
+                    )
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
                     input_artifact_grant_id: self.new_id(ResourceKind::ArtifactGrant)?,
                     resources: sandbox.resources,
                     receipt_id: self.new_id(ResourceKind::Receipt)?,
