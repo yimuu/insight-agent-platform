@@ -36,6 +36,13 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn(build, source)
         self.assertLess(source.index(install), source.index(build))
 
+    def test_real_journey_reuses_release_dependencies(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn(
+            "cargo test --locked --release -p insight-agent-platform --test productization",
+            source,
+        )
+
     def test_default_project_uses_short_unix_socket_safe_path(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
         self.assertIn(

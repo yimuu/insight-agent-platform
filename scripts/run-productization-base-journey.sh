@@ -286,7 +286,7 @@ if [[ -n "$first_run_marker" ]]; then
 fi
 
 env "${test_environment[@]}" \
-  cargo test --locked -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
+  cargo test --locked --release -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
 
 if [[ -n "$north_star_report" ]]; then
   source_revision="$(git rev-parse HEAD)"
