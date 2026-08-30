@@ -1,7 +1,7 @@
 # M4 黄金场景证据合同
 
-状态：**Manifest gate Passed / broader M4 In Progress**。十条 required scenario 已在同一 exact revision 取得
-Passed report；具体框架 adapter 与 durable Sandbox admission 的边界见第 3 节。
+状态：**Passed**。十条 required scenario 已在同一 exact revision 取得 Passed report；普通 Agent 到 durable
+Sandbox Job 的链路与固定 LangGraph.js reference 也由同一 full-profile journey 证明。
 
 ## 1. 权威输入与输出
 
@@ -143,9 +143,12 @@ Inline result，并证明 deny-all catalog 在 dispatch 前拒绝。真实 Chrom
 输出 `validated 10 productization scenario report(s); complete_gate=true`，报告摘要见
 [`full-journey-evidence.md`](full-journey-evidence.md)。
 
-该 manifest gate 不把证据外推为尚不存在的能力：WASI 尚未证明普通 Agent Run 到 durable Sandbox Job 的 admission
-链；reference service 是 framework-neutral HTTP 合同，不是 Agno/LangGraph SDK。Python SDK 已取消，具体生态 adapter
-继续属于 broader M4 的未完成项；真实多节点 Kubernetes、runsc、容量、混沌、restore 与 soak 仍属于未运行的 L4～L6。
+2026-08-30 exact revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 的复跑把最后两项边界闭合：
+普通 public Agent Run 通过 exact Sandbox Capability binding 原子创建 durable Sandbox Job，由独立 Executor 执行
+WASI 并 fenced merge typed result；独立 reference service 使用固定 `@langchain/langgraph` 1.4.13 的真实
+`StateGraph`，且无 Platform DB/internal credential。十份报告再次由严格 checker 得到 `complete_gate=true`，摘要见
+[`full-journey-evidence.md`](full-journey-evidence.md)。Python SDK 已取消，不属于 M4 门禁；真实多节点 Kubernetes、
+runsc、容量、混沌、restore 与 soak 仍属于未运行的外部 L4～L6。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 

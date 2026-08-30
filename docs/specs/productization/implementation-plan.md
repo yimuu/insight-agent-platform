@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M1–M4 |
+| 状态 | In Progress / M5 clean cut |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
@@ -370,7 +370,7 @@ clone 门禁，精确报告摘要与 digest 见 [`base-journey-evidence.md`](bas
 
 ## 7. Milestone M4：十条黄金场景与生态复用
 
-状态：**In Progress**。已定义 closed
+状态：**Passed**。已定义 closed
 [`scenario-report/v1`](../../../examples/productization/scenario-report.schema.json) 与 manifest-aware
 [`report checker`](../../../scripts/check-productization-scenario-reports.py)。严格门禁要求同一 exact Git revision 的十份
 fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 failure probe；缺失、skip、`not_run` 或未知字段
@@ -418,16 +418,16 @@ service 使用 `env_clear` 后只获得监听、TLS 与 trace 配置，不获得
 Deployment 返回 bounded typed result。真实 Chrome 又按 exact Run ID 读取两条成功 authority。十份报告经严格 checker
 得到 `complete_gate=true`。
 
-这关闭的是十场景 manifest gate，不关闭普通 Sandbox Capability admission：Controller 仍未把逻辑 Sandbox Invocation
-原子转换为 durable Sandbox Job，因此现有 WASI 证据不能表述为 public Agent-to-Sandbox end-to-end。reference service 也
-只是 framework-neutral boundary，不是 Agno/LangGraph SDK。Python SDK 已按产品决策取消；具体框架 adapter、durable
-Sandbox admission 与外部 L4～L6 继续保持未完成。
+2026-08-30 exact revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 又完成普通 public Agent Run 到
+durable Sandbox Job、独立 WASI Executor 与 fenced terminal result 的完整闭环，并用固定
+`@langchain/langgraph` 1.4.13 的真实 `StateGraph` 替换 framework-neutral fixture。严格十报告门禁再次为
+`complete_gate=true`。Python SDK 已按产品决策取消，不属于当前门禁；外部 L4～L6 继续保持 Not run。
 
 ### 7.1 工作项
 
 1. 按 goals G4 顺序交付 scenario manifest、示例、自动 smoke、故障注入点和用户文档；
 2. 每条场景必须通过 CLI 和控制台可观察，并保留原始 HTTP fixture 证明两者未改变合同；
-3. 为 Agno 与 LangGraph 各交付一个 remote Capability reference service：
+3. 交付一个固定依赖的 LangGraph.js remote Capability reference service（Python SDK 与 Agno adapter 已取消）：
    - 作为独立进程使用 typed HTTP/gRPC 或 MCP 合同；
    - 接收 bounded input，返回 Inline 或通过平台 Artifact port 交付大结果；
    - 网络、Secret、timeout、quota、retry/UnknownOutcome 由 Platform Deployment/Policy 冻结；
@@ -438,7 +438,7 @@ Sandbox admission 与外部 L4～L6 继续保持未完成。
 
 - 十条场景全部在 fresh base/full profile 上取得 machine-readable passed report，禁止 required scenario skip；
 - 至少一条场景在外部 effect 已发出、worker 在 commit 前退出后按 effect-aware 合同收敛；
-- 两个框架适配均不链接进 Gateway/Scheduler/Worker，不获得数据库凭据；
+- LangGraph.js reference 不链接进 Gateway/Scheduler/Worker，不获得数据库凭据；
 - 故障场景能通过 CLI/控制台给出用户可操作诊断，而不是要求阅读数据库或 Rust backtrace。
 
 ## 8. Milestone M5：CI 收敛与仓库 clean cut

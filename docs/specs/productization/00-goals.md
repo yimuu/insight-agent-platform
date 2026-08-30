@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / M1–M3 |
+| 状态 | In Progress / repository clean cut |
 | 日期 | 2026-08-29 |
 | 阶段代号 | Productization Convergence |
 | 合同输入 | Platform v2 spec00～18（Accepted / In Progress）、AGENTS.md |
@@ -115,7 +115,8 @@ Control/Orchestration Plane 内执行用户代码，也不绕过 Resource -> Res
 - 定义普通 HTTP/gRPC 或 MCP remote Capability 模板，使 Agno、LangGraph 等框架运行在独立服务或受限
   Sandbox 后方；
 - 框架不能作为 Platform Gateway、Scheduler、Worker 或 durable authority 的进程内插件；
-- 首批只维护 2 个高质量参考适配，不以 Provider/Toolkit 数量作为阶段完成指标；
+- 首批维护 1 个固定依赖的 LangGraph.js 高质量参考适配；Python SDK 与 Agno adapter 已取消，不以
+  Provider/Toolkit 数量作为阶段完成指标；
 - 外部框架的可变状态、Secret 和网络访问必须服从 exact Deployment、Egress、Policy 与 Artifact 边界。
 
 ### G6：降低反馈时间与维护成本
