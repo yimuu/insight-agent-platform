@@ -2299,6 +2299,8 @@ dependencies = [
  "insight-durable",
  "insight-engine",
  "insight-mcp",
+ "insight-platform-contracts",
+ "insight-platform-postgres",
  "insight-resources",
  "insight-runtime",
  "insight-storage",

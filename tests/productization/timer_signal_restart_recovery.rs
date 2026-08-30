@@ -1,8 +1,16 @@
 use super::*;
+use insight_platform_contracts::{ResourceId, ResourceKind, Sha256Digest};
+use insight_platform_postgres::repository::{
+    ClaimOrchestrationJobs, JobFence, OrchestrationClaimSlot, PgRepository, RepositoryError,
+    StartOrchestrationJob, MAX_ORCHESTRATION_QUOTA_LINES,
+};
+use sqlx::{postgres::PgPoolOptions, Row};
+use uuid::Uuid;
 
 pub(super) struct TimerSignalEvidence {
     pub run_id: String,
     console_passed: bool,
+    stale_job_fence_passed: bool,
     started_at: chrono::DateTime<Utc>,
     finished_at: chrono::DateTime<Utc>,
 }
@@ -28,6 +36,24 @@ impl TimerSignalEvidence {
                 "set PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true to read the exact Timer/Signal Run through the real Console",
             )
         };
+        let stale_job_fence = if self.stale_job_fence_passed {
+            check(
+                "stale_job_fence",
+                "passed",
+                "the fixture claimed the exact durable ready continuation, altered only its lease-token digest, observed RepositoryError::StaleFence with the Job still leased at the same version, then let the lease expire for replacement-Worker recovery",
+            )
+        } else {
+            check(
+                "stale_job_fence",
+                "not_run",
+                "the controlled PostgreSQL lease-token probe did not run",
+            )
+        };
+        let status = if self.console_passed && self.stale_job_fence_passed {
+            "passed"
+        } else {
+            "incomplete"
+        };
         json!({
             "schema_version": 1,
             "report_kind": "insight.productization.scenario-report/v1",
@@ -43,7 +69,7 @@ impl TimerSignalEvidence {
             },
             "started_at": self.started_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
-            "status": "incomplete",
+            "status": status,
             "entrypoints": [
                 check("cli", "passed", "public insight artifact/apply/run watch/result commands completed on the fresh base authority"),
                 check("http_fixture", "passed", "raw public /v1 signal submission and exact Receipt replay both returned the closed 204 contract"),
@@ -56,7 +82,7 @@ impl TimerSignalEvidence {
             ],
             "failure_probes": [
                 check("worker_kill_before_commit", "passed", "the Worker was terminated before signal submission; the owner transaction consumed the signal and retained a durable ready continuation without a Worker"),
-                check("stale_job_fence", "not_run", "a checked stale lease-token commit requires a controlled Worker fault hook not exposed by this P2 public fixture"),
+                stale_job_fence,
             ],
         })
     }
@@ -209,6 +235,8 @@ pub(super) fn run(
     );
     assert_eq!(waiting["state"], "running");
 
+    prove_stale_job_fence(run_id);
+
     let replacement = restart_orchestration_worker(insight, project);
     let watched = run_json_lines(
         insight,
@@ -238,9 +266,124 @@ pub(super) fn run(
         TimerSignalEvidence {
             run_id: run_id.to_owned(),
             console_passed: false,
+            stale_job_fence_passed: true,
             started_at,
             finished_at: Utc::now(),
         },
         replacement,
     )
+}
+
+fn prove_stale_job_fence(run_id: &str) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("stale-fence runtime builds")
+        .block_on(async move {
+            let pool = PgPoolOptions::new()
+                .max_connections(2)
+                .connect("postgres://insight:insight@127.0.0.1:5432/insight_platform")
+                .await
+                .expect("fresh local PostgreSQL authority accepts the fault probe");
+            let repository = PgRepository::new(pool.clone());
+            let worker_id = fault_probe_id(ResourceKind::WorkerProcessGeneration);
+            let lease_token_digest = fault_probe_digest();
+            let quota_entry_ids = (0..MAX_ORCHESTRATION_QUOTA_LINES)
+                .map(|_| fault_probe_id(ResourceKind::QuotaLedgerEntry))
+                .collect::<Vec<_>>();
+            let mut transaction = repository
+                .begin_scheduler_transaction()
+                .await
+                .expect("fault-probe scheduler transaction begins");
+            let mut claimed = transaction
+                .claim_orchestration_jobs(ClaimOrchestrationJobs {
+                    worker_id: worker_id.clone(),
+                    limit: 1,
+                    lease_milliseconds: 500,
+                    slots: vec![OrchestrationClaimSlot {
+                        lease_token_digest: lease_token_digest.clone(),
+                        quota_reservation_id: fault_probe_id(ResourceKind::UsageReservation),
+                        quota_entry_ids,
+                        run_event_id: fault_probe_id(ResourceKind::Event),
+                        run_outbox_id: fault_probe_id(ResourceKind::OutboxEvent),
+                        node_event_id: fault_probe_id(ResourceKind::Event),
+                        node_outbox_id: fault_probe_id(ResourceKind::OutboxEvent),
+                        job_event_id: fault_probe_id(ResourceKind::Event),
+                        job_outbox_id: fault_probe_id(ResourceKind::OutboxEvent),
+                    }],
+                })
+                .await
+                .expect("ready continuation can be claimed");
+            transaction
+                .commit()
+                .await
+                .expect("fault-probe claim commits");
+            assert_eq!(claimed.len(), 1, "exactly one ready continuation is claimed");
+            let claimed = claimed.pop().unwrap();
+            assert_eq!(claimed.job.run_id.as_deref(), Some(run_id));
+
+            let exact_fence = JobFence {
+                tenant_id: claimed.job.tenant_id.clone(),
+                job_id: claimed.job.job_id.clone(),
+                worker_id,
+                lease_epoch: claimed.job.lease_epoch,
+                expected_job_version: claimed.job.version,
+                lease_token_digest,
+            };
+            let mut stale_fence = exact_fence.clone();
+            stale_fence.lease_token_digest = fault_probe_digest();
+            let stale_start = StartOrchestrationJob {
+                fence: stale_fence,
+                receipt_id: fault_probe_id(ResourceKind::Receipt),
+                idempotency_key_digest: fault_probe_digest(),
+                request_digest: fault_probe_digest(),
+                receipt_expires_at: Utc::now() + Duration::minutes(5),
+                job_event_id: fault_probe_id(ResourceKind::Event),
+                job_outbox_id: fault_probe_id(ResourceKind::OutboxEvent),
+                node_event_id: fault_probe_id(ResourceKind::Event),
+                node_outbox_id: fault_probe_id(ResourceKind::OutboxEvent),
+            };
+            let mut transaction = repository
+                .begin_scheduler_transaction()
+                .await
+                .expect("stale start transaction begins");
+            assert!(matches!(
+                transaction.start_orchestration_job(stale_start).await,
+                Err(RepositoryError::StaleFence)
+            ));
+            transaction
+                .rollback()
+                .await
+                .expect("stale start transaction rolls back");
+
+            let unchanged: (String, i64, String) = sqlx::query(
+                "SELECT state, version, lease_token_digest FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+            )
+            .bind(&exact_fence.tenant_id)
+            .bind(&exact_fence.job_id)
+            .fetch_one(&pool)
+            .await
+            .map(|row| {
+                (
+                    row.get("state"),
+                    row.get("version"),
+                    row.get("lease_token_digest"),
+                )
+            })
+            .expect("fenced Job remains readable");
+            assert_eq!(unchanged.0, "leased");
+            assert_eq!(unchanged.1, exact_fence.expected_job_version);
+            assert_eq!(unchanged.2, exact_fence.lease_token_digest.to_string());
+            tokio::time::sleep(StdDuration::from_millis(650)).await;
+        });
+}
+
+fn fault_probe_id(kind: ResourceKind) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, Uuid::now_v7()).expect("fault-probe typed identity")
+}
+
+fn fault_probe_digest() -> Sha256Digest {
+    digest_bytes(Uuid::new_v4().as_bytes())
+        .parse()
+        .expect("fault-probe digest")
 }
