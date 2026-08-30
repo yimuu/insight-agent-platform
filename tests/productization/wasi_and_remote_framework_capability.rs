@@ -711,10 +711,10 @@ fn provision_sandbox_quotas() {
             let payload = json!({"profile": "productization_full"});
             let payload_digest = canonical_digest(&payload);
             for (metric, limit) in [
-                ("sandbox.concurrent_executions", 8_i64),
-                ("sandbox.cpu_seconds", 10_000),
-                ("sandbox.memory_mebibytes", 65_536),
-                ("sandbox.output_bytes", 16_777_216),
+                ("durable_quota.sandbox_concurrent_executions", 8_i64),
+                ("durable_quota.sandbox_cpu_seconds", 10_000),
+                ("durable_quota.sandbox_memory_mebibytes", 65_536),
+                ("durable_quota.sandbox_output_bytes", 16_777_216),
             ] {
                 sqlx::query(
                     r#"INSERT INTO insight_platform.quota_accounts
