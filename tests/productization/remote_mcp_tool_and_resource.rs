@@ -23,9 +23,7 @@ impl McpEvidence {
     }
 
     pub(super) fn report(&self, revision: &str) -> Value {
-        let check = |id: &str, status: &str, evidence: &str| {
-            json!({"id": id, "status": status, "evidence": evidence})
-        };
+        let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
         json!({
             "schema_version": 1,
             "report_kind": "insight.productization.scenario-report/v1",
@@ -193,7 +191,18 @@ fn publish_server(
         "deployment": {"environment": "local", "closure": {"resource_kind": "mcp_server", "bindings": bindings}}
     });
     let path = write_canonical(fixture, "remote-mcp-server.apply.json", &manifest);
-    let report = run_json(insight, &["apply", "--file", path.to_str().unwrap(), "--timeout-seconds", "120", "--path", project.to_str().unwrap()]);
+    let report = run_json(
+        insight,
+        &[
+            "apply",
+            "--file",
+            path.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
     let revision = exact_version(published_version(&report, "mcp_server_revision"));
     let mut exact_bindings = bindings;
     exact_bindings["server_revision"] = revision.clone();
@@ -292,29 +301,59 @@ fn start_environment(
         "development_loopback": true,
         "development_anonymous": true
     }]);
-    let address = config["observability_listen_address"].as_str().unwrap().to_owned();
+    let address = config["observability_listen_address"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     if TcpStream::connect(&address).is_ok() {
         stop_role(project, "egress-broker");
     }
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
     let mut fixture = Command::new(node)
         .arg(workspace.join("examples/productization/remote-fixture.mjs"))
-        .env("INSIGHT_REMOTE_FIXTURE_PORT", endpoint["port"].as_u64().unwrap().to_string())
-        .env("INSIGHT_REMOTE_FIXTURE_CERT_PATH", tls.join("egress-broker.pem"))
-        .env("INSIGHT_REMOTE_FIXTURE_KEY_PATH", tls.join("egress-broker-key.pem"))
-        .env("INSIGHT_REMOTE_FIXTURE_TRACE_PATH", runtime.join("logs/remote-fixture-mcp.jsonl"))
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let ready = BufReader::new(fixture.stdout.take().unwrap()).lines().next().unwrap().unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&ready).unwrap()["status"], "ready");
-    let mut broker = native_and_remote_capability::spawn_egress(workspace, project, &config_path, &config);
+        .env(
+            "INSIGHT_REMOTE_FIXTURE_PORT",
+            endpoint["port"].as_u64().unwrap().to_string(),
+        )
+        .env(
+            "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
+            tls.join("egress-broker.pem"),
+        )
+        .env(
+            "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
+            tls.join("egress-broker-key.pem"),
+        )
+        .env(
+            "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
+            runtime.join("logs/remote-fixture-mcp.jsonl"),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = BufReader::new(fixture.stdout.take().unwrap())
+        .lines()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&ready).unwrap()["status"],
+        "ready"
+    );
+    let mut broker =
+        native_and_remote_capability::spawn_egress(workspace, project, &config_path, &config);
     native_and_remote_capability::wait_egress(&mut broker, &address);
-    McpEnvironment { broker, fixture, config_path, original_config }
+    McpEnvironment {
+        broker,
+        fixture,
+        config_path,
+        original_config,
+    }
 }
 
 fn discover(insight: &Path, project: &Path, server: &Value, authorization_id: &str) -> Value {
     let (client, base_url, token) = native_and_remote_capability::raw_management_client(project);
-    let deadline =
-        (Utc::now() + Duration::minutes(9)).to_rfc3339_opts(SecondsFormat::Micros, true);
+    let deadline = (Utc::now() + Duration::minutes(9)).to_rfc3339_opts(SecondsFormat::Micros, true);
     let response = client.post(format!("{base_url}/v1/mcp-servers/{}/deployments/{}:discover", server["resource_id"].as_str().unwrap(), server["deployment_id"].as_str().unwrap()))
         .bearer_auth(token).header("accept", "application/json").header("content-type", "application/json")
         .header("idempotency-key", "productization-mcp-discovery")
@@ -344,8 +383,22 @@ fn discover(insight: &Path, project: &Path, server: &Value, authorization_id: &s
     }
     let operation: Value = response.json().unwrap();
     let operation_id = operation["operation_id"].as_str().unwrap();
-    let terminal = run_json(insight, &["operation", "wait", operation_id, "--timeout-seconds", "120", "--path", project.to_str().unwrap()]);
-    assert_eq!(terminal["state"], "succeeded", "MCP discovery failed: {terminal}");
+    let terminal = run_json(
+        insight,
+        &[
+            "operation",
+            "wait",
+            operation_id,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        terminal["state"], "succeeded",
+        "MCP discovery failed: {terminal}"
+    );
     terminal
 }
 
@@ -365,13 +418,30 @@ fn discovery_snapshot(insight: &Path, project: &Path, fixture: &Path) -> Value {
     assert_eq!(snapshot["negotiated_capabilities"]["resources"], true);
     let artifact = &snapshot["objects_artifact"];
     let output = fixture.join("remote-mcp-discovery.json");
-    let read = run_json(insight, &["artifact", "read", artifact["artifact_id"].as_str().unwrap(), "--output", output.to_str().unwrap(), "--path", project.to_str().unwrap()]);
+    let read = run_json(
+        insight,
+        &[
+            "artifact",
+            "read",
+            artifact["artifact_id"].as_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
     assert_eq!(read["content_digest"], artifact["content_digest"]);
     let bytes = fs::read(&output).unwrap();
-    assert_eq!(u64::try_from(bytes.len()).unwrap(), artifact["byte_length"].as_u64().unwrap());
+    assert_eq!(
+        u64::try_from(bytes.len()).unwrap(),
+        artifact["byte_length"].as_u64().unwrap()
+    );
     let descriptor: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(descriptor["tools"][0]["name"], "fixture_lookup");
-    assert_eq!(descriptor["resources"][0]["uri"], "mcp://insight.fixture/productization");
+    assert_eq!(
+        descriptor["resources"][0]["uri"],
+        "mcp://insight.fixture/productization"
+    );
     let serialized = String::from_utf8(bytes).unwrap();
     for forbidden in ["authorization_binding_id", "secret_binding_id", "token"] {
         assert!(!serialized.contains(forbidden));
@@ -387,7 +457,11 @@ fn install_exact_mcp_codec(
     protocol: &Value,
     objects_digest: &Value,
 ) -> (Value, Child) {
-    let workspace = insight.parent().and_then(Path::parent).and_then(Path::parent).unwrap();
+    let workspace = insight
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap();
     let runtime = project.join(".insight/runtime");
     let tls = runtime.join("tls");
     let config_path = runtime.join("config/capability-remote.json");
@@ -415,24 +489,59 @@ fn install_exact_mcp_codec(
     stop_role(project, "capability-remote");
     fs::write(&config_path, canonical_bytes(&config)).unwrap();
     let digest = canonical_digest(&config);
-    let log = OpenOptions::new().create(true).append(true).open(runtime.join("logs/capability-remote-mcp-restart.log")).unwrap();
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.join("logs/capability-remote-mcp-restart.log"))
+        .unwrap();
     let stderr = log.try_clone().unwrap();
-    let mut child = Command::new(workspace.join("target/release/platform-capability-remote-worker"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG", &config_path)
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST", digest)
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL", DATABASE_URL)
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH", tls.join("ca.pem"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH", tls.join("capability-remote-client.pem"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH", tls.join("capability-remote-client-key.pem"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH", tls.join("ca.pem"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH", tls.join("capability-remote-client.pem"))
-        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH", tls.join("capability-remote-client-key.pem"))
-        .stdout(Stdio::from(log)).stderr(Stdio::from(stderr)).spawn().unwrap();
+    let mut child =
+        Command::new(workspace.join("target/release/platform-capability-remote-worker"))
+            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG", &config_path)
+            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST", digest)
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
+                DATABASE_URL,
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH",
+                tls.join("ca.pem"),
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
+                tls.join("capability-remote-client.pem"),
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
+                tls.join("capability-remote-client-key.pem"),
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
+                tls.join("ca.pem"),
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
+                tls.join("capability-remote-client.pem"),
+            )
+            .env(
+                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
+                tls.join("capability-remote-client-key.pem"),
+            )
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .unwrap();
     let address = config["observability_listen_address"].as_str().unwrap();
     let deadline = Instant::now() + StdDuration::from_secs(30);
     while TcpStream::connect(address).is_err() {
-        assert!(child.try_wait().unwrap().is_none(), "replacement MCP Capability worker exited");
-        assert!(Instant::now() < deadline, "replacement MCP Capability worker readiness");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "replacement MCP Capability worker exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "replacement MCP Capability worker readiness"
+        );
         thread::sleep(StdDuration::from_millis(50));
     }
     (config, child)
@@ -463,7 +572,13 @@ fn publish_agent(
         }
     });
     let plan_path = write_canonical(fixture, "remote-mcp-agent-plan.json", &plan);
-    let plan_upload = upload_artifact(insight, project, &plan_path, "typed_plan", "remote-mcp-agent-plan.json");
+    let plan_upload = upload_artifact(
+        insight,
+        project,
+        &plan_path,
+        "typed_plan",
+        "remote-mcp-agent-plan.json",
+    );
     let manifest = json!({
         "schema_version": 1, "kind": "insight.platform.apply/v1", "resource_noun": "agents",
         "create": {"display_name": "Remote MCP Tool agent", "document": {"resource_kind": "agent", "spec": {
@@ -483,8 +598,21 @@ fn publish_agent(
         }}}
     });
     let path = write_canonical(fixture, "remote-mcp-agent.apply.json", &manifest);
-    run_json(insight, &["apply", "--file", path.to_str().unwrap(), "--timeout-seconds", "120", "--path", project.to_str().unwrap()])["resource_id"]
-        .as_str().unwrap().to_owned()
+    run_json(
+        insight,
+        &[
+            "apply",
+            "--file",
+            path.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    )["resource_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 pub(super) fn run(
@@ -495,12 +623,17 @@ pub(super) fn run(
     qualification_ref: &Value,
 ) -> McpEvidence {
     let started_at = Utc::now();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let endpoint = endpoint("localhost", port, "/mcp");
     let provider_id = new_id(ResourceKind::SecretProvider);
     let protocol = protocol_document();
     let auth = auth_document(&provider_id, &endpoint);
-    let selection = json!({"schema_version": 1, "mode": "only_candidate", "route_schema_digest": null});
+    let selection =
+        json!({"schema_version": 1, "mode": "only_candidate", "route_schema_digest": null});
     let mut policies = std::collections::BTreeMap::new();
     for (role, kind, specialized) in [
         ("protocol", "protocol", Some(("mcp_protocol", protocol))),
@@ -511,9 +644,29 @@ pub(super) fn run(
         ("tls", "tls", None),
         ("trust", "trust", None),
     ] {
-        policies.insert(role, native_and_remote_capability::apply_policy(insight, project, fixture, &format!("mcp-{role}"), kind, specialized, authoring_ref, qualification_ref));
+        policies.insert(
+            role,
+            native_and_remote_capability::apply_policy(
+                insight,
+                project,
+                fixture,
+                &format!("mcp-{role}"),
+                kind,
+                specialized,
+                authoring_ref,
+                qualification_ref,
+            ),
+        );
     }
-    let (server, deployment) = publish_server(insight, project, fixture, authoring_ref, qualification_ref, &endpoint, &policies);
+    let (server, deployment) = publish_server(
+        insight,
+        project,
+        fixture,
+        authoring_ref,
+        qualification_ref,
+        &endpoint,
+        &policies,
+    );
     let authorization_id = seed_authorization(
         &deployment,
         canonical_digest(&endpoint).as_str(),
@@ -525,10 +678,16 @@ pub(super) fn run(
     let snapshot = &snapshot_record["snapshot"];
     let schema = native_and_remote_capability::value_schema("message");
     let schema_digest = schema["canonical_digest"].as_str().unwrap();
-    let descriptor: Value = serde_json::from_slice(&fs::read(fixture.join("remote-mcp-discovery.json")).unwrap()).unwrap();
+    let descriptor: Value =
+        serde_json::from_slice(&fs::read(fixture.join("remote-mcp-discovery.json")).unwrap())
+            .unwrap();
     let remote_input_schema_digest = canonical_digest(&descriptor["tools"][0]["inputSchema"]);
-    let original_remote: Value = serde_json::from_slice(&fs::read(project.join(".insight/runtime/config/capability-remote.json")).unwrap()).unwrap();
-    let output_mapping = original_remote["installed_mcp_codecs"][0]["output_mapping_digest"].clone();
+    let original_remote: Value = serde_json::from_slice(
+        &fs::read(project.join(".insight/runtime/config/capability-remote.json")).unwrap(),
+    )
+    .unwrap();
+    let output_mapping =
+        original_remote["installed_mcp_codecs"][0]["output_mapping_digest"].clone();
     let backend_contract = json!({"kind": "mcp", "contract": {
         "remote_tool_name": "fixture_lookup", "remote_input_schema_digest": remote_input_schema_digest,
         "output_mapping_digest": output_mapping, "protocol_profile": snapshot["protocol_profile"],
@@ -536,8 +695,12 @@ pub(super) fn run(
         "supports_task": false, "supports_progress": true
     }});
     let (remote_config, remote_worker) = install_exact_mcp_codec(
-        insight, project, &backend_contract, &remote_input_schema_digest,
-        &snapshot["protocol_profile"], &snapshot["objects_digest"],
+        insight,
+        project,
+        &backend_contract,
+        &remote_input_schema_digest,
+        &snapshot["protocol_profile"],
+        &snapshot["objects_digest"],
     );
     let codec = &remote_config["installed_mcp_codecs"][0];
     let backend_binding = json!({"kind": "mcp", "binding": {
@@ -549,34 +712,125 @@ pub(super) fn run(
         "discovery_snapshot_digest": snapshot["canonical_digest"], "authorization_policy": policies["auth"].revision
     }});
     let (capability_deployment, _) = native_and_remote_capability::publish_capability(
-        insight, project, fixture, "remote_mcp", "read_only", "intrinsic", "mcp",
-        backend_contract, backend_binding, &schema, &schema, authoring_ref, qualification_ref,
-        vec![policies["auth"].revision.clone(), policies["protocol"].revision.clone()],
+        insight,
+        project,
+        fixture,
+        "remote_mcp",
+        "read_only",
+        "intrinsic",
+        "mcp",
+        backend_contract,
+        backend_binding,
+        &schema,
+        &schema,
+        authoring_ref,
+        qualification_ref,
+        vec![
+            policies["auth"].revision.clone(),
+            policies["protocol"].revision.clone(),
+        ],
     );
-    native_and_remote_capability::provision_capability_quotas(&[(&capability_deployment, "capability_remote")]);
-    let agent_id = publish_agent(insight, project, fixture, &capability_deployment, &schema, &policies, authoring_ref);
-    let run_id = native_and_remote_capability::create_run(insight, project, fixture, &agent_id, schema_digest, "mcp-success", "mcp round trip");
-    assert_eq!(native_and_remote_capability::terminal(insight, project, &run_id)["state"], "succeeded");
-    let result = run_json(insight, &["run", "result", &run_id, "--path", project.to_str().unwrap()]);
+    native_and_remote_capability::provision_capability_quotas(&[(
+        &capability_deployment,
+        "capability_remote",
+    )]);
+    let agent_id = publish_agent(
+        insight,
+        project,
+        fixture,
+        &capability_deployment,
+        &schema,
+        &policies,
+        authoring_ref,
+    );
+    let run_id = native_and_remote_capability::create_run(
+        insight,
+        project,
+        fixture,
+        &agent_id,
+        schema_digest,
+        "mcp-success",
+        "mcp round trip",
+    );
+    assert_eq!(
+        native_and_remote_capability::terminal(insight, project, &run_id)["state"],
+        "succeeded"
+    );
+    let result = run_json(
+        insight,
+        &[
+            "run",
+            "result",
+            &run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
     assert_eq!(result["schema_digest"], schema_digest);
     assert_eq!(result["value"]["value"]["message"], "mcp round trip");
 
-    let remote_error_id = native_and_remote_capability::create_run(insight, project, fixture, &agent_id, schema_digest, "mcp-remote-error", "fixture-mcp-remote-error");
-    assert_eq!(native_and_remote_capability::terminal(insight, project, &remote_error_id)["state"], "failed");
+    let remote_error_id = native_and_remote_capability::create_run(
+        insight,
+        project,
+        fixture,
+        &agent_id,
+        schema_digest,
+        "mcp-remote-error",
+        "fixture-mcp-remote-error",
+    );
+    assert_eq!(
+        native_and_remote_capability::terminal(insight, project, &remote_error_id)["state"],
+        "failed"
+    );
 
     let trace_path = project.join(".insight/runtime/logs/remote-fixture-mcp.jsonl");
-    let calls_before = fs::read_to_string(&trace_path).unwrap().lines().filter(|line| line.contains("\"rpc_method\":\"tools/call\"")).count();
+    let calls_before = fs::read_to_string(&trace_path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"rpc_method\":\"tools/call\""))
+        .count();
     let _ = environment.broker.kill();
     let _ = environment.broker.wait();
-    let mut wrong_tls: Value = serde_json::from_slice(&fs::read(&environment.config_path).unwrap()).unwrap();
-    wrong_tls["mcp_streamable_http_endpoints"][0]["trusted_root_pem"] = json!(fs::read_to_string(project.join(".insight/runtime/tls/security-authority.pem")).unwrap());
-    let workspace = insight.parent().and_then(Path::parent).and_then(Path::parent).unwrap();
-    let address = wrong_tls["observability_listen_address"].as_str().unwrap().to_owned();
-    environment.broker = native_and_remote_capability::spawn_egress(workspace, project, &environment.config_path, &wrong_tls);
+    let mut wrong_tls: Value =
+        serde_json::from_slice(&fs::read(&environment.config_path).unwrap()).unwrap();
+    wrong_tls["mcp_streamable_http_endpoints"][0]["trusted_root_pem"] = json!(fs::read_to_string(
+        project.join(".insight/runtime/tls/security-authority.pem")
+    )
+    .unwrap());
+    let workspace = insight
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap();
+    let address = wrong_tls["observability_listen_address"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    environment.broker = native_and_remote_capability::spawn_egress(
+        workspace,
+        project,
+        &environment.config_path,
+        &wrong_tls,
+    );
     native_and_remote_capability::wait_egress(&mut environment.broker, &address);
-    let tls_id = native_and_remote_capability::create_run(insight, project, fixture, &agent_id, schema_digest, "mcp-tls", "mcp tls rejected");
-    assert_eq!(native_and_remote_capability::terminal(insight, project, &tls_id)["state"], "failed");
-    let calls_after = fs::read_to_string(&trace_path).unwrap().lines().filter(|line| line.contains("\"rpc_method\":\"tools/call\"")).count();
+    let tls_id = native_and_remote_capability::create_run(
+        insight,
+        project,
+        fixture,
+        &agent_id,
+        schema_digest,
+        "mcp-tls",
+        "mcp tls rejected",
+    );
+    assert_eq!(
+        native_and_remote_capability::terminal(insight, project, &tls_id)["state"],
+        "failed"
+    );
+    let calls_after = fs::read_to_string(&trace_path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"rpc_method\":\"tools/call\""))
+        .count();
     assert_eq!(calls_after, calls_before);
 
     McpEvidence {

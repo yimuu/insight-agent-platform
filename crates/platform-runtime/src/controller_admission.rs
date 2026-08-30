@@ -7,8 +7,8 @@
 use crate::{
     ControllerCapabilityAdmissionDecision, ControllerCapabilityAdmissionProvider,
     ControllerCapabilityAdmissionRequest, ControllerModelAdmissionDecision,
-    ControllerModelAdmissionProvider, ControllerModelAdmissionRequest, DurablePlanDriverError,
-    CoordinatorIdentityFactory, UuidCoordinatorIdentityFactory,
+    ControllerModelAdmissionProvider, ControllerModelAdmissionRequest, CoordinatorIdentityFactory,
+    DurablePlanDriverError, UuidCoordinatorIdentityFactory,
 };
 use async_trait::async_trait;
 use insight_platform_artifacts::{
@@ -18,8 +18,8 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, CapabilityBackendBinding,
-    DataClassification, DeploymentClosure, ExactVersionRef, FrozenSlotTarget, RunBindingsSnapshot,
-    ResourceId, ResourceKind, Sha256Digest, ValueRef,
+    DataClassification, DeploymentClosure, ExactVersionRef, FrozenSlotTarget, ResourceId,
+    ResourceKind, RunBindingsSnapshot, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{
     InvocationPolicyDecision, InvocationPolicyDecisionBundle, InvocationPolicyDisposition,
@@ -574,9 +574,10 @@ impl PostgresControllerCapabilityAdmissionProvider {
         .bind(mcp_deployment.deployment_digest.to_string())
         .bind(bindings.principal.principal_id.to_string())
         .bind(bindings.principal.principal_kind.as_str())
-        .bind(i64::try_from(bindings.principal.binding_generation).map_err(|_| {
-            DurablePlanDriverError::InvariantViolation
-        })?)
+        .bind(
+            i64::try_from(bindings.principal.binding_generation)
+                .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
+        )
         .fetch_all(self.repository.pool())
         .await
         .map_err(|_| DurablePlanDriverError::Unavailable)?;
