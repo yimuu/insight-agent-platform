@@ -15,13 +15,14 @@ use crate::{
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, AdministrativeGate, AgentDeploymentClosure, ArtifactRef,
     CapabilityBackendBinding, CapabilityDeploymentClosure, ClosedJsonValue, ContextBackendBinding,
-    ContextBindingSnapshot, ContextConsistencyPolicy, ContextDeploymentClosure, DeploymentClosure,
-    EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef,
-    ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JsonLimits, McpDeploymentClosure,
-    McpTransportBinding, ModelDeploymentClosure, OperationViewV1, PlanNodeKind,
-    PolicyDeploymentClosure, PublicJobKind, PublicJobState, PublicJobTarget, RegistryResourceKind,
-    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind,
-    SandboxProfileDeploymentClosure, Sha256Digest, SkillDeploymentClosure, UtcTimestamp,
+    ContextBindingSnapshot, ContextConsistencyPolicy, ContextDeploymentClosure, DataRegion,
+    DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
+    ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JsonLimits,
+    McpDeploymentClosure, McpTransportBinding, ModelDeploymentClosure,
+    ModelProviderDeploymentClosure, OperationViewV1, PlanNodeKind, PolicyDeploymentClosure,
+    PublicJobKind, PublicJobState, PublicJobTarget, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, SandboxProfileDeploymentClosure, Sha256Digest,
+    SkillDeploymentClosure, UtcTimestamp,
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -97,10 +98,15 @@ enum ApplyResourceNoun {
     Agents,
     Skills,
     Capabilities,
+    CapabilityImplementations,
     Contexts,
+    ContextImplementations,
     Models,
+    ModelProviders,
     McpServers,
     Policies,
+    SandboxRuntimes,
+    SandboxPackages,
     Sandboxes,
 }
 
@@ -110,10 +116,15 @@ impl ApplyResourceNoun {
             Self::Agents => "agents",
             Self::Skills => "skills",
             Self::Capabilities => "capabilities",
+            Self::CapabilityImplementations => "capability-implementations",
             Self::Contexts => "contexts",
+            Self::ContextImplementations => "context-implementations",
             Self::Models => "models",
+            Self::ModelProviders => "model-providers",
             Self::McpServers => "mcp-servers",
             Self::Policies => "policies",
+            Self::SandboxRuntimes => "sandbox-runtimes",
+            Self::SandboxPackages => "sandbox-packages",
             Self::Sandboxes => "sandboxes",
         }
     }
@@ -123,10 +134,15 @@ impl ApplyResourceNoun {
             Self::Agents => RegistryResourceKind::Agent,
             Self::Skills => RegistryResourceKind::Skill,
             Self::Capabilities => RegistryResourceKind::CapabilityInterface,
+            Self::CapabilityImplementations => RegistryResourceKind::CapabilityImplementation,
             Self::Contexts => RegistryResourceKind::ContextSourceInterface,
+            Self::ContextImplementations => RegistryResourceKind::ContextSourceImplementation,
             Self::Models => RegistryResourceKind::ModelProfile,
+            Self::ModelProviders => RegistryResourceKind::ModelProvider,
             Self::McpServers => RegistryResourceKind::McpServer,
             Self::Policies => RegistryResourceKind::Policy,
+            Self::SandboxRuntimes => RegistryResourceKind::SandboxRuntime,
+            Self::SandboxPackages => RegistryResourceKind::SandboxPackage,
             Self::Sandboxes => RegistryResourceKind::SandboxProfile,
         }
     }
@@ -136,10 +152,15 @@ impl ApplyResourceNoun {
             Self::Agents => ResourceKind::AgentPlanRevision,
             Self::Skills => ResourceKind::SkillRevision,
             Self::Capabilities => ResourceKind::CapabilityInterfaceRevision,
+            Self::CapabilityImplementations => ResourceKind::CapabilityImplementationRevision,
             Self::Contexts => ResourceKind::ContextSourceInterfaceRevision,
+            Self::ContextImplementations => ResourceKind::ContextSourceImplementationRevision,
             Self::Models => ResourceKind::ModelProfileRevision,
+            Self::ModelProviders => ResourceKind::ModelProviderRevision,
             Self::McpServers => ResourceKind::McpServerRevision,
             Self::Policies => ResourceKind::PolicyRevision,
+            Self::SandboxRuntimes => ResourceKind::SandboxRuntimeRevision,
+            Self::SandboxPackages => ResourceKind::SandboxPackageRevision,
             Self::Sandboxes => ResourceKind::SandboxProfileRevision,
         }
     }
@@ -153,7 +174,7 @@ struct ApplyManifestV1 {
     resource_noun: ApplyResourceNoun,
     create: ApplyCreateResourceRequestV1,
     publish: ApplyPublishResourceRequestV1,
-    deployment: ApplyDeploymentRequestV1,
+    deployment: Option<ApplyDeploymentRequestV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -199,6 +220,7 @@ enum ApplyDeploymentClosure {
     CapabilityInterface(ApplyCapabilityDeploymentBindings),
     ContextSourceInterface(ApplyContextDeploymentBindings),
     McpServer(ApplyMcpDeploymentBindings),
+    ModelProvider(ApplyModelProviderDeploymentBindings),
     ModelProfile(ApplyModelDeploymentBindings),
     Policy(ApplyPolicyDeploymentBindings),
     SandboxProfile(ApplySandboxDeploymentBindings),
@@ -212,6 +234,7 @@ impl ApplyDeploymentClosure {
             Self::CapabilityInterface(_) => RegistryResourceKind::CapabilityInterface,
             Self::ContextSourceInterface(_) => RegistryResourceKind::ContextSourceInterface,
             Self::McpServer(_) => RegistryResourceKind::McpServer,
+            Self::ModelProvider(_) => RegistryResourceKind::ModelProvider,
             Self::ModelProfile(_) => RegistryResourceKind::ModelProfile,
             Self::Policy(_) => RegistryResourceKind::Policy,
             Self::SandboxProfile(_) => RegistryResourceKind::SandboxProfile,
@@ -281,6 +304,20 @@ impl ApplyDeploymentClosure {
                     conformance_evidence: bindings.conformance_evidence,
                 })
             }
+            Self::ModelProvider(bindings) => {
+                CreateDeploymentClosureV1::ModelProvider(ModelProviderDeploymentClosure {
+                    provider_revision: exact(ResourceKind::ModelProviderRevision)?,
+                    endpoint_identity_digest: bindings.endpoint_identity_digest,
+                    secret_bindings: bindings.secret_bindings,
+                    protocol_policy: bindings.protocol_policy,
+                    network_policy: bindings.network_policy,
+                    tls_policy: bindings.tls_policy,
+                    trust_policy: bindings.trust_policy,
+                    data_policy: bindings.data_policy,
+                    region: bindings.region,
+                    conformance_evidence: bindings.conformance_evidence,
+                })
+            }
             Self::ModelProfile(bindings) => {
                 CreateDeploymentClosureV1::ModelProfile(ModelDeploymentClosure {
                     profile_revision: exact(ResourceKind::ModelProfileRevision)?,
@@ -324,6 +361,7 @@ enum CreateDeploymentClosureV1 {
     CapabilityInterface(CapabilityDeploymentClosure),
     ContextSourceInterface(ContextDeploymentClosure),
     McpServer(McpDeploymentClosure),
+    ModelProvider(ModelProviderDeploymentClosure),
     ModelProfile(ModelDeploymentClosure),
     Policy(PolicyDeploymentClosure),
     SandboxProfile(SandboxProfileDeploymentClosure),
@@ -411,6 +449,7 @@ impl CreateDeploymentClosureV1 {
             Self::CapabilityInterface(_) => RegistryResourceKind::CapabilityInterface,
             Self::ContextSourceInterface(_) => RegistryResourceKind::ContextSourceInterface,
             Self::McpServer(_) => RegistryResourceKind::McpServer,
+            Self::ModelProvider(_) => RegistryResourceKind::ModelProvider,
             Self::ModelProfile(_) => RegistryResourceKind::ModelProfile,
             Self::Policy(_) => RegistryResourceKind::Policy,
             Self::SandboxProfile(_) => RegistryResourceKind::SandboxProfile,
@@ -486,6 +525,7 @@ impl CreateDeploymentClosureV1 {
                 DeploymentClosure::ContextSourceInterface(closure.clone())
             }
             Self::McpServer(closure) => DeploymentClosure::McpServer(closure.clone()),
+            Self::ModelProvider(closure) => DeploymentClosure::ModelProvider(closure.clone()),
             Self::ModelProfile(closure) => DeploymentClosure::ModelProfile(closure.clone()),
             Self::Policy(closure) => DeploymentClosure::Policy(closure.clone()),
             Self::SandboxProfile(closure) => DeploymentClosure::SandboxProfile(closure.clone()),
@@ -627,6 +667,20 @@ struct ApplyMcpDeploymentBindings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ApplyModelProviderDeploymentBindings {
+    endpoint_identity_digest: Sha256Digest,
+    secret_bindings: Vec<ExactSecretBindingRef>,
+    protocol_policy: ExactVersionRef,
+    network_policy: ExactVersionRef,
+    tls_policy: ExactVersionRef,
+    trust_policy: ExactVersionRef,
+    data_policy: ExactVersionRef,
+    region: DataRegion,
+    conformance_evidence: ArtifactRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyModelDeploymentBindings {
     provider_deployment: ExactDeploymentRef,
     data_policy: ExactVersionRef,
@@ -725,8 +779,8 @@ pub struct ApplyReportV1 {
     pub resource_id: String,
     pub validation_operation_id: String,
     pub published_versions: Vec<ApplyPublishedVersionReport>,
-    pub deployment_id: String,
-    pub active_deployment_id: String,
+    pub deployment_id: Option<String>,
+    pub active_deployment_id: Option<String>,
     pub final_resource_etag: String,
     pub step_trace_ids: BTreeMap<String, String>,
 }
@@ -910,10 +964,48 @@ pub fn apply_manifest(
         .ok_or_else(|| {
             ApplyError::InvalidResponse("publish response omitted the primary Version".to_owned())
         })?;
-    let deployment_closure = manifest.deployment.closure.resolve(&published_versions)?;
+    if kind.deployment_kind().is_none() {
+        if manifest.deployment.is_some()
+            || journal.deployment_intent.is_some()
+            || journal.deployment.is_some()
+            || journal.activation_intent.is_some()
+            || journal.final_resource_etag.is_some()
+        {
+            return Err(ApplyError::InvalidResponse(
+                "definition-only apply contains Deployment state".to_owned(),
+            ));
+        }
+        return Ok(ApplyReportV1 {
+            schema_version: 1,
+            kind: "insight.platform.apply-report/v1",
+            manifest_digest: manifest_digest.to_string(),
+            resource_id: resource_id.to_string(),
+            validation_operation_id: validation_operation_id.to_string(),
+            published_versions: published_versions
+                .iter()
+                .map(|version| ApplyPublishedVersionReport {
+                    resource_version_id: version.resource_version_id.to_string(),
+                    resource_kind: version.resource_version_id.kind().to_string(),
+                    content_digest: version.content_digest.to_string(),
+                })
+                .collect(),
+            deployment_id: None,
+            active_deployment_id: None,
+            final_resource_etag: publish.resource_etag,
+            step_trace_ids: journal
+                .step_trace_ids
+                .iter()
+                .map(|(step, trace_id)| (step.clone(), trace_id.to_string()))
+                .collect(),
+        });
+    }
+    let deployment_spec = manifest.deployment.ok_or_else(|| {
+        ApplyError::InvalidManifest("deployable Resource requires deployment".to_owned())
+    })?;
+    let deployment_closure = deployment_spec.closure.resolve(&published_versions)?;
     let deployment_request = CreateDeploymentRequestV1 {
         resource_version_id: &primary_version.resource_version_id,
-        environment: &manifest.deployment.environment,
+        environment: &deployment_spec.environment,
         closure: &deployment_closure,
     };
     let deployment_intent = JournalIntent {
@@ -940,7 +1032,7 @@ pub fn apply_manifest(
             kind,
             &resource_id,
             &primary_version.resource_version_id,
-            &manifest.deployment.environment,
+            &deployment_spec.environment,
             &deployment_closure,
         )?;
         require_location(
@@ -1052,8 +1144,8 @@ pub fn apply_manifest(
         resource_id: resource_id.to_string(),
         validation_operation_id: validation_operation_id.to_string(),
         published_versions: published_version_report,
-        deployment_id: deployment_id.to_string(),
-        active_deployment_id: deployment_id.to_string(),
+        deployment_id: Some(deployment_id.to_string()),
+        active_deployment_id: Some(deployment_id.to_string()),
         final_resource_etag: journal.final_resource_etag.clone().ok_or_else(|| {
             ApplyError::InvalidResponse("apply journal omitted final Resource ETag".to_owned())
         })?,
@@ -1116,17 +1208,23 @@ fn parse_manifest(bytes: &[u8]) -> Result<(ApplyManifestV1, Sha256Digest), Apply
 
 fn validate_manifest(manifest: &ApplyManifestV1) -> Result<(), ApplyError> {
     let kind = manifest.resource_noun.resource_kind();
+    let deployment_matches = match (&manifest.deployment, kind.deployment_kind()) {
+        (Some(deployment), Some(_)) => {
+            deployment.closure.resource_kind() == kind
+                && !deployment.environment.is_empty()
+                && deployment.environment.len() <= 128
+                && deployment
+                    .environment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        }
+        (None, None) => true,
+        _ => false,
+    };
     if manifest.schema_version != 1
         || manifest.kind != APPLY_MANIFEST_KIND
         || manifest.create.document.kind() != kind
-        || manifest.deployment.closure.resource_kind() != kind
-        || manifest.deployment.environment.is_empty()
-        || manifest.deployment.environment.len() > 128
-        || !manifest
-            .deployment
-            .environment
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        || !deployment_matches
     {
         return Err(ApplyError::InvalidManifest(
             "kind, noun, document, deployment closure, or environment mismatch".to_owned(),

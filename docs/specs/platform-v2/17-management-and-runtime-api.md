@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-204 |
+| 状态 | Accepted / CR-205 |
 | 日期 | 2026-08-30 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-205 impact：Management `ResourceNoun`从八类可调用owner扩为十三类closed authoring kind，新增
+> `capability-implementations | context-implementations | model-providers | sandbox-runtimes | sandbox-packages`。前两类及
+> Sandbox Runtime/Package为definition-only；对其deployment/activate/suspend请求按不存在的kind-route fail closed。
 
 > CR-204 impact：`POST .../deployments`的create DTO与persisted/read closure有意分离。Agent Context slot request省略
 > server-generated `adep/xcb`和derived digests；Gateway materialize后才向repository提交完整closed closure。
@@ -104,10 +108,10 @@ output_too_large | internal`。domain terminal failure通过resource view/Event�
 
 ## 5. 最小Management API
 
-类型化resource kind使用同一lifecycle，但public route仍保留domain noun，不暴露generic arbitrary JSON registry：
+类型化resource kind使用同一lifecycle，但public route仍保留closed domain noun，不暴露generic arbitrary JSON registry：
 
 ```text
-POST   /v1/{agents|skills|capabilities|contexts|models|mcp-servers|policies|sandboxes}
+POST   /v1/{agents|skills|capabilities|capability-implementations|contexts|context-implementations|models|model-providers|mcp-servers|policies|sandbox-runtimes|sandbox-packages|sandboxes}
 GET    /v1/{kind}/{resource_id}
 PUT    /v1/{kind}/{resource_id}/draft
 POST   /v1/{kind}/{resource_id}/draft:validate
@@ -119,9 +123,10 @@ POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:activate
 POST   /v1/{kind}/{resource_id}/deployments/{deployment_id}:suspend
 ```
 
-上述八类public noun都必须具有closed Deployment variant；不能注册路径后对Skill、Policy或Sandbox永久返回shape error。
-Capability/Context/Model public noun分别投影其可调用Interface/Profile owner，内部Implementation/Provider等仍通过同一shared
-lifecycle管理但不增加generic arbitrary-JSON public route。ContextDataset只暴露第6节generation read/build，不暴露普通Deployment mutation。
+十三类noun都使用同一closed Resource/Version lifecycle。Agent、Skill、Capability Interface、Context Interface、Model Provider、
+Model Profile、MCP Server、Policy与Sandbox Profile具有closed Deployment variant；Capability/Context Implementation与Sandbox
+Runtime/Package是definition-only，其合法终点是enabled immutable Version，对deployment/activate/suspend请求返回`not_found`且零业务写入。
+ContextDataset只暴露第6节generation read/build，不暴露普通Resource/Deployment mutation。
 
 create/draft-update/validate/publish/deploy/activate/suspend语义由02拥有。Resource拥有唯一current editable Draft；Draft update使用
 `If-Match`并推进generation、使旧validation失效。publish以Resource ETag + draft generation + digest为fence并创建immutable Version；

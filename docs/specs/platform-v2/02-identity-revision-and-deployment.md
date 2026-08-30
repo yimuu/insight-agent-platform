@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-204 |
+| 状态 | Accepted / CR-205 |
 | 日期 | 2026-08-30 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
+
+> CR-205 impact：shared lifecycle的closed management noun覆盖全部可author的业务定义kind。Capability/Context
+> Implementation与Sandbox Runtime/Package是definition-only：publish后以enabled exact Version被依赖，不伪造Deployment；Model Provider
+> 保持自己的exact Deployment。ContextDataset仍只有build/read generation专用surface。
 
 > CR-204 impact：Deployment create request只表达调用方可知的exact binding intent；`deployment_id`、嵌套identity和
 > 派生digest由同一resolution transaction预留/计算。持久化Deployment及read response仍使用完整immutable exact closure。

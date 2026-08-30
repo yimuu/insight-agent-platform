@@ -973,7 +973,7 @@ components:
       required: true
       schema:
         type: string
-        enum: [agents, skills, capabilities, contexts, models, mcp-servers, policies, sandboxes]
+        enum: [agents, skills, capabilities, capability-implementations, contexts, context-implementations, models, model-providers, mcp-servers, policies, sandbox-runtimes, sandbox-packages, sandboxes]
     ResourceId:
       name: resource_id
       in: path
@@ -1159,16 +1159,16 @@ components:
   schemas:
     PublicManagementResourceKind:
       type: string
-      enum: [agent, skill, capability_interface, context_source_interface, model_profile, mcp_server, policy, sandbox_profile]
+      enum: [agent, skill, capability_interface, capability_implementation, context_source_interface, context_source_implementation, model_provider, model_profile, mcp_server, policy, sandbox_runtime, sandbox_package, sandbox_profile]
     PublicManagementResourceId:
       type: string
-      pattern: "^(agt|skl|cap|ctx|mdl|mcp|pol|sxp)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      pattern: "^(agt|skl|cap|cim|ctx|xim|mpr|mdl|mcp|pol|srt|spk|sxp)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     PublicManagementVersionId:
       type: string
-      pattern: "^(aif|arev|srev|cirev|xirev|mdrev|mrev|prev|sxrev)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      pattern: "^(aif|arev|srev|cirev|cimp|xirev|ximp|mprev|mdrev|mrev|prev|srrev|sprev|sxrev)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     PublicManagementDeploymentId:
       type: string
-      pattern: "^(adep|skdep|cdep|xdep|mdep|mcdep|pdep|sxdep)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      pattern: "^(adep|skdep|cdep|xdep|mpdep|mdep|mcdep|pdep|sxdep)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     CreateResourceRequestV1:
       type: object
       additionalProperties: false
@@ -1315,10 +1315,15 @@ components:
         - {$ref: "#/components/schemas/AgentResourceDocument"}
         - {$ref: "#/components/schemas/SkillResourceDocument"}
         - {$ref: "#/components/schemas/CapabilityResourceDocument"}
+        - {$ref: "#/components/schemas/CapabilityImplementationResourceDocument"}
         - {$ref: "#/components/schemas/ContextResourceDocument"}
+        - {$ref: "#/components/schemas/ContextImplementationResourceDocument"}
+        - {$ref: "#/components/schemas/ModelProviderResourceDocument"}
         - {$ref: "#/components/schemas/ModelResourceDocument"}
         - {$ref: "#/components/schemas/McpResourceDocument"}
         - {$ref: "#/components/schemas/PolicyResourceDocument"}
+        - {$ref: "#/components/schemas/SandboxRuntimeResourceDocument"}
+        - {$ref: "#/components/schemas/SandboxPackageResourceDocument"}
         - {$ref: "#/components/schemas/SandboxResourceDocument"}
     AgentResourceDocument:
       type: object
@@ -1335,11 +1340,26 @@ components:
       additionalProperties: false
       required: [resource_kind, spec]
       properties: {resource_kind: {const: capability_interface}, spec: {type: object}}
+    CapabilityImplementationResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: capability_implementation}, spec: {type: object}}
     ContextResourceDocument:
       type: object
       additionalProperties: false
       required: [resource_kind, spec]
       properties: {resource_kind: {const: context_source_interface}, spec: {type: object}}
+    ContextImplementationResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: context_source_implementation}, spec: {type: object}}
+    ModelProviderResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: model_provider}, spec: {type: object}}
     ModelResourceDocument:
       type: object
       additionalProperties: false
@@ -1355,6 +1375,16 @@ components:
       additionalProperties: false
       required: [resource_kind, spec]
       properties: {resource_kind: {const: policy}, spec: {type: object}}
+    SandboxRuntimeResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: sandbox_runtime}, spec: {type: object}}
+    SandboxPackageResourceDocument:
+      type: object
+      additionalProperties: false
+      required: [resource_kind, spec]
+      properties: {resource_kind: {const: sandbox_package}, spec: {type: object}}
     SandboxResourceDocument:
       type: object
       additionalProperties: false
@@ -1369,6 +1399,7 @@ components:
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/CapabilityDeploymentClosure"}
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ContextDeploymentClosure"}
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/McpDeploymentClosure"}
+        - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ModelProviderDeploymentClosure"}
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ModelDeploymentClosure"}
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/PolicyDeploymentClosure"}
         - {$ref: "./schemas/deployment-closure.schema.json#/$defs/SandboxProfileDeploymentClosure"}

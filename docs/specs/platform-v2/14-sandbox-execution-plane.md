@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-21 |
+| 状态 | Accepted / CR-205 |
+| 日期 | 2026-08-30 |
 | 依赖 | 03、04、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-205 impact：`sandbox-runtimes`与`sandbox-packages`加入closed definition-only management noun；它们只产生immutable
+> exact Version并由Sandbox Profile引用，不获得active Deployment或运行时代码安装语义。可执行Package仍须先按14/15发布、扫描和冻结。
 
 > CR-197 impact：Controller、Executor、attestor、Artifact broker与guest bootstrap沿用Sandbox Job trace ID并生成per-hop span；trace metadata不进入
 > guest environment、stdin、package、Artifact正文或attestation identity，也不影响Job fence/physical outcome。

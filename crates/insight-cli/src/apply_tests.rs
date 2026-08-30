@@ -6,7 +6,8 @@ mod tests {
         operation_etag, ApiProblem, ApiProblemCode, AuthoringPackage,
         CapabilityEndpointScheme, CanonicalHttpEndpoint, ClosedJsonValue, DataClassification,
         ExactDeploymentRef, ExactVersionRef, PolicyKind, PolicyResourceSpec, SafeJobFailure,
-        SafeJobResult, TraceId, ValidationSummary,
+        SafeJobResult, SandboxAbiVersion, SandboxIsolationClass, SandboxRuntimeFamily,
+        SandboxRuntimeResourceSpec, TraceId, ValidationSummary,
     };
     use std::{
         io::{ErrorKind, Read as _, Write as _},
@@ -136,6 +137,42 @@ mod tests {
                         "qualification_evidence": qualification_evidence
                     }
                 }
+            }
+        })
+    }
+
+    fn sandbox_runtime_manifest() -> serde_json::Value {
+        let document = ResourceDocument::SandboxRuntime(SandboxRuntimeResourceSpec {
+            authoring_package: AuthoringPackage {
+                artifact: evidence('1'),
+                manifest_digest: digest('2'),
+            },
+            contract_digest: digest('3'),
+            dependency_versions: Vec::new(),
+            policy_versions: Vec::new(),
+            runtime_family: SandboxRuntimeFamily::WasmWasi,
+            runtime_version: "wasmtime-46.0.2".to_owned(),
+            image_or_module_digest: digest('4'),
+            supported_isolation: vec![SandboxIsolationClass::Wasm],
+            abi: SandboxAbiVersion::V1,
+            builtin_modules_manifest_digest: digest('5'),
+            sbom_artifact: evidence('6'),
+            provenance_evidence: evidence('7'),
+            semantic_digest: digest('8'),
+        });
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": APPLY_MANIFEST_KIND,
+            "resource_noun": "sandbox-runtimes",
+            "create": {
+                "display_name": "qualified WASI runtime",
+                "document": document
+            },
+            "publish": {
+                "kind": "single",
+                "revision_no": 1,
+                "content_digest": digest('a'),
+                "artifact_id": null
             }
         })
     }
@@ -344,6 +381,258 @@ mod tests {
     }
 
     #[test]
+    fn management_noun_matrix_has_nine_deployable_and_four_definition_only_kinds() {
+        let nouns = [
+            ApplyResourceNoun::Agents,
+            ApplyResourceNoun::Skills,
+            ApplyResourceNoun::Capabilities,
+            ApplyResourceNoun::CapabilityImplementations,
+            ApplyResourceNoun::Contexts,
+            ApplyResourceNoun::ContextImplementations,
+            ApplyResourceNoun::Models,
+            ApplyResourceNoun::ModelProviders,
+            ApplyResourceNoun::McpServers,
+            ApplyResourceNoun::Policies,
+            ApplyResourceNoun::SandboxRuntimes,
+            ApplyResourceNoun::SandboxPackages,
+            ApplyResourceNoun::Sandboxes,
+        ];
+        assert_eq!(nouns.len(), 13);
+        assert_eq!(
+            nouns
+                .iter()
+                .filter(|noun| noun.resource_kind().deployment_kind().is_some())
+                .count(),
+            9
+        );
+        assert_eq!(
+            nouns
+                .iter()
+                .filter(|noun| noun.resource_kind().deployment_kind().is_none())
+                .count(),
+            4
+        );
+        let paths = nouns.map(ApplyResourceNoun::as_path);
+        let unique_paths = paths.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_paths.len(), 13);
+    }
+
+    #[test]
+    fn definition_only_apply_stops_after_exact_version_publish_and_resumes_offline() {
+        let manifest_bytes = serde_json::to_vec(&sandbox_runtime_manifest()).unwrap();
+        let (manifest, _) = parse_manifest(&manifest_bytes).unwrap();
+        assert!(manifest.deployment.is_none());
+        let tenant_id = id(ResourceKind::Tenant);
+        let resource_id = id(ResourceKind::SandboxRuntime);
+        let operation_id = id(ResourceKind::Job);
+        let version_id = id(ResourceKind::SandboxRuntimeRevision);
+        let validation = ValidationSummary {
+            validator_digest: digest('9'),
+            validated_draft_digest: digest('8'),
+            dependency_closure_digest: digest('7'),
+            security_evidence_digest: digest('6'),
+            warnings: Vec::new(),
+        };
+        let created_draft = ResourceDraftPayload {
+            display_name: manifest.create.display_name.clone(),
+            document: manifest.create.document.clone(),
+            validation: None,
+        };
+        let validated_draft = ResourceDraftPayload {
+            validation: Some(validation),
+            ..created_draft.clone()
+        };
+        let create_etag = resource_etag(&resource_id, 1);
+        let validated_etag = resource_etag(&resource_id, 2);
+        let publish_etag = resource_etag(&resource_id, 3);
+        let operation_etag = operation_etag(&operation_id.to_string(), 2);
+        let version_digest = digest('a');
+        let published = vec![PublishedResourceVersionSummaryV1 {
+            resource_version_id: version_id.clone(),
+            revision_no: 1,
+            content_digest: version_digest.clone(),
+            artifact_id: None,
+            etag: resource_version_etag(&version_id, &version_digest),
+        }];
+        let responses = vec![
+            ScriptedResponse {
+                method: "POST",
+                path: "/v1/sandbox-runtimes".to_owned(),
+                expected_if_match: None,
+                status: "201 Created",
+                etag: create_etag.clone(),
+                location: Some(format!("/v1/sandbox-runtimes/{resource_id}")),
+                body: serde_json::to_vec(&ResourceViewV1 {
+                    schema_version: 1,
+                    resource_id: resource_id.clone(),
+                    resource_kind: RegistryResourceKind::SandboxRuntime,
+                    lifecycle_state: EntityLifecycle::Active,
+                    gate_state: AdministrativeGate::Enabled,
+                    draft_generation: 1,
+                    version: 1,
+                    draft: created_draft,
+                    etag: create_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+            ScriptedResponse {
+                method: "POST",
+                path: format!("/v1/sandbox-runtimes/{resource_id}/draft:validate"),
+                expected_if_match: Some(create_etag),
+                status: "202 Accepted",
+                etag: operation_etag.clone(),
+                location: Some(format!("/v1/operations/{operation_id}")),
+                body: serde_json::to_vec(&OperationViewV1 {
+                    operation_id: operation_id.clone(),
+                    tenant_id: tenant_id.clone(),
+                    kind: PublicJobKind::ResourceValidation,
+                    target: PublicJobTarget::ResourceVersion {
+                        resource_id: resource_id.clone(),
+                        resource_version: 1,
+                    },
+                    state: PublicJobState::Queued,
+                    progress: None,
+                    result: None,
+                    error: None,
+                    created_at: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+                    updated_at: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+                    etag: operation_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+            ScriptedResponse {
+                method: "GET",
+                path: format!("/v1/operations/{operation_id}"),
+                expected_if_match: None,
+                status: "200 OK",
+                etag: operation_etag.clone(),
+                location: None,
+                body: serde_json::to_vec(&OperationViewV1 {
+                    operation_id: operation_id.clone(),
+                    tenant_id: tenant_id.clone(),
+                    kind: PublicJobKind::ResourceValidation,
+                    target: PublicJobTarget::ResourceVersion {
+                        resource_id: resource_id.clone(),
+                        resource_version: 1,
+                    },
+                    state: PublicJobState::Succeeded,
+                    progress: None,
+                    result: Some(SafeJobResult {
+                        result_digest: digest('5'),
+                    }),
+                    error: None,
+                    created_at: "2026-08-30T00:00:00.000000Z".parse().unwrap(),
+                    updated_at: "2026-08-30T00:00:01.000000Z".parse().unwrap(),
+                    etag: operation_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+            ScriptedResponse {
+                method: "GET",
+                path: format!("/v1/sandbox-runtimes/{resource_id}"),
+                expected_if_match: None,
+                status: "200 OK",
+                etag: validated_etag.clone(),
+                location: None,
+                body: serde_json::to_vec(&ResourceViewV1 {
+                    schema_version: 1,
+                    resource_id: resource_id.clone(),
+                    resource_kind: RegistryResourceKind::SandboxRuntime,
+                    lifecycle_state: EntityLifecycle::Active,
+                    gate_state: AdministrativeGate::Enabled,
+                    draft_generation: 1,
+                    version: 2,
+                    draft: validated_draft,
+                    etag: validated_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+            ScriptedResponse {
+                method: "POST",
+                path: format!("/v1/sandbox-runtimes/{resource_id}/draft:publish"),
+                expected_if_match: Some(validated_etag),
+                status: "200 OK",
+                etag: publish_etag.clone(),
+                location: None,
+                body: serde_json::to_vec(&PublishResourceDraftResponseV1 {
+                    schema_version: 1,
+                    resource_id: resource_id.clone(),
+                    resource_kind: RegistryResourceKind::SandboxRuntime,
+                    draft_generation: 1,
+                    version: 3,
+                    published_versions: published,
+                    etag: publish_etag.clone(),
+                })
+                .unwrap(),
+                assert_deployment_version: None,
+            },
+        ];
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut stream);
+                assert!(head.starts_with(&format!(
+                    "{} {} HTTP/1.1",
+                    response.method, response.path
+                )));
+                assert_eq!(
+                    header_value(&head, "if-match"),
+                    response.expected_if_match.as_deref()
+                );
+                let trace_id = if response.method == "POST" {
+                    assert!(header_value(&head, "idempotency-key")
+                        .is_some_and(|value| value.starts_with("insight-apply-v1-")));
+                    request_trace_id(&head)
+                } else {
+                    "33333333333333333333333333333333".to_owned()
+                };
+                write_response(&mut stream, &response, &trace_id);
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".to_owned(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let journals = TempDir::new().unwrap();
+        let report = apply_manifest(
+            &client,
+            &tenant_id,
+            &manifest_bytes,
+            Duration::from_secs(2),
+            journals.path(),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(report.resource_id, resource_id.to_string());
+        assert_eq!(report.deployment_id, None);
+        assert_eq!(report.active_deployment_id, None);
+        assert_eq!(report.final_resource_etag, publish_etag);
+        assert_eq!(report.published_versions.len(), 1);
+        assert_eq!(
+            report.published_versions[0].resource_version_id,
+            version_id.to_string()
+        );
+
+        let resumed = apply_manifest(
+            &client,
+            &tenant_id,
+            &manifest_bytes,
+            Duration::from_secs(2),
+            journals.path(),
+        )
+        .unwrap();
+        assert_eq!(resumed, report);
+    }
+
+    #[test]
     fn apply_executes_the_public_policy_lifecycle_and_resolves_self_version() {
         let manifest_value = policy_manifest();
         let manifest_bytes = serde_json::to_vec(&manifest_value).unwrap();
@@ -385,6 +674,8 @@ mod tests {
         }];
         let closure = manifest
             .deployment
+            .as_ref()
+            .expect("Policy manifest includes a Deployment")
             .closure
             .clone()
             .resolve(&published)
@@ -652,8 +943,11 @@ mod tests {
         .unwrap();
         assert_eq!(report.resource_id, resource_id.to_string());
         assert_eq!(report.validation_operation_id, operation_id.to_string());
-        assert_eq!(report.deployment_id, deployment_id.to_string());
-        assert_eq!(report.active_deployment_id, deployment_id.to_string());
+        assert_eq!(report.deployment_id, Some(deployment_id.to_string()));
+        assert_eq!(
+            report.active_deployment_id,
+            Some(deployment_id.to_string())
+        );
         assert_eq!(report.final_resource_etag, activated_etag);
         assert_eq!(report.published_versions.len(), 1);
         assert_eq!(
@@ -1113,6 +1407,34 @@ mod tests {
         };
         assert_eq!(closure.server_revision.revision_id, mcp_revision.resource_version_id);
         assert_eq!(closure.server_revision.semantic_digest, mcp_revision.content_digest);
+
+        let provider_revision = published(ResourceKind::ModelProviderRevision, 'e');
+        let resolved = ApplyDeploymentClosure::ModelProvider(
+            ApplyModelProviderDeploymentBindings {
+                endpoint_identity_digest: digest('f'),
+                secret_bindings: Vec::new(),
+                protocol_policy: exact_version(ResourceKind::PolicyRevision, '1'),
+                network_policy: exact_version(ResourceKind::PolicyRevision, '2'),
+                tls_policy: exact_version(ResourceKind::PolicyRevision, '3'),
+                trust_policy: exact_version(ResourceKind::PolicyRevision, '4'),
+                data_policy: exact_version(ResourceKind::PolicyRevision, '5'),
+                region: "us-east-1".parse().unwrap(),
+                conformance_evidence: evidence('6'),
+            },
+        )
+        .resolve(std::slice::from_ref(&provider_revision))
+        .unwrap();
+        let CreateDeploymentClosureV1::ModelProvider(closure) = resolved else {
+            panic!("Model Provider closure resolved to another Resource kind");
+        };
+        assert_eq!(
+            closure.provider_revision.revision_id,
+            provider_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.provider_revision.semantic_digest,
+            provider_revision.content_digest
+        );
 
         let model_revision = published(ResourceKind::ModelProfileRevision, 'e');
         let resolved = ApplyDeploymentClosure::ModelProfile(ApplyModelDeploymentBindings {

@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Implemented / M2 In Progress |
-| 日期 | 2026-08-29 |
+| 日期 | 2026-08-30 |
 | owner | `crates/insight-cli/src/apply.rs` |
 | public authority | Management Gateway `/v1` |
 
@@ -22,11 +22,13 @@ request/response 大小及 timeout，不在错误或报告中输出 token。
 
 manifest 固定为 `schema_version = 1`、`kind = insight.platform.apply/v1`，顶层只接受：
 
-- `resource_noun`：`agents`、`skills`、`capabilities`、`contexts`、`models`、`mcp-servers`、`policies` 或
-  `sandboxes`；
+- `resource_noun`：`agents`、`skills`、`capabilities`、`capability-implementations`、`contexts`、
+  `context-implementations`、`models`、`model-providers`、`mcp-servers`、`policies`、`sandbox-runtimes`、
+  `sandbox-packages`或`sandboxes`；
 - `create`：公开 `CreateResourceRequestV1` 的 `display_name + ResourceDocument`；
 - `publish`：公开 `single` 或 `agent` publish request；
-- `deployment`：`environment` 与该 Resource kind 的 typed Deployment bindings。
+- `deployment`：九类deployable Resource必须提供`environment`与对应typed Deployment bindings；四类definition-only
+  Resource必须省略。
 
 manifest 使用 deny-unknown-fields、strict JSON depth/item/property/string limits 和 1 MiB 总上限。typed
 `ResourceDocument`、digest、ArtifactRef、SecretBindingRef、Policy/Deployment/Version ref 继续由 Platform nominal type
@@ -45,12 +47,13 @@ snapshot digest和外层slot digest。manifest只提交exact Context binding int
 | Skill | Skill Revision | Skill Revision |
 | Capability | Capability Interface Revision | Capability Interface Revision |
 | Context | Context Source Interface Revision | Context Source Interface Revision |
+| Model Provider | Model Provider Revision | Model Provider Revision |
 | Model | Model Profile Revision | Model Profile Revision |
 | MCP | MCP Server Revision | MCP Server Revision |
 | Policy | Policy Revision | Policy Revision |
 | Sandbox | Sandbox Profile Revision | Sandbox Profile Revision |
 
-其他 Implementation、Policy、Provider、runtime、Secret 与 evidence binding 必须已经是 manifest 中显式给出的 exact
+其他 Implementation、Policy、runtime、Secret 与 evidence binding 必须已经是 manifest 中显式给出的 exact
 authority ref；CLI 不从 active head、名称或 mutable default 推断它们。
 
 ## 3. 执行顺序与 fence
@@ -62,8 +65,12 @@ authority ref；CLI 不从 active head、名称或 mutable default 推断它们�
 3. 轮询 `GET /v1/operations/{job_id}` 到 terminal；
 4. `GET /v1/{resource_noun}/{resource_id}`，确认 exact Draft 已具有 ValidationSummary；
 5. `POST .../draft:publish`，携带 validated Resource ETag；
-6. `POST .../deployments`，携带 publish Resource ETag 和 authority 生成的 self Version ref；
-7. `POST .../deployments/{deployment_id}:activate`，携带 publish Resource ETag。
+6. 对九类可调用 Resource，`POST .../deployments`，携带 publish Resource ETag 和 authority 生成的 self Version ref；
+7. 对九类可调用 Resource，`POST .../deployments/{deployment_id}:activate`，携带 post-Deployment Resource ETag。
+
+Capability/Context Implementation、Sandbox Runtime与Sandbox Package是四类definition-only noun；它们在第5步发布exact
+Version后即完成，不创建或激活Deployment。definition-only manifest必须省略`deployment`，report中的`deployment_id`与
+`active_deployment_id`为`null`；对这些noun调用任意Deployment route必须按不存在的kind-route返回404。
 
 每个 mutation 使用基于 canonical manifest digest 和固定 step name 的确定性 Idempotency-Key，并生成独立 W3C
 traceparent。CLI 要求响应 trace-id 与请求一致，要求 body/header ETag 一致，并检查 Location、tenant、Resource kind、
@@ -85,6 +92,10 @@ Operation terminal、publish digest 以及 Deployment self Version resolution。
 丢弃响应，确认重试复用同一 Receipt 并完成剩余 lifecycle；关闭 HTTP server 后再次 apply 会从完整 journal 返回相同
 report 且不访问网络。单独 fixture 覆盖成功 Operation envelope 和 429 closed Problem 的 retry/trace 字段保留。
 
+独立Sandbox Runtime fixture覆盖definition-only五步lifecycle，确认publish后不发送Deployment/activate请求、report的两个
+Deployment ID均为`null`，并在HTTP server关闭后只从完整journal重建同一report。13类noun矩阵固定为九类deployable与四类
+definition-only，防止后续把内部定义误当作隐式Worker配置或可调用Deployment。
+
 命令级失败 fixture 现已覆盖 create 的 409 `idempotency_conflict` 与 429 `rate_limited`、create 成功后
 validate 携带 exact If-Match/Receipt 时的 412 `precondition_failed`，并保留 closed Problem 的 status、code、
 retryability 与 retry-after。Validation Operation 的 `failed` authority 投影会保留 bounded safe code/message；
@@ -99,12 +110,12 @@ Location、cache、trace、body/header ETag、Operation terminal 与 exact Deplo
 P2 journey 已在 exact revision `939cd9e9d766ce17b242627daba7697fa3687799` 通过，并形成 `http_fixture=passed`
 的 checked incomplete 资格报告；报告只因同场景 Console 入口尚未运行而保持 incomplete。
 
-八类 closure matrix 现逐一构造 Agent Interface/Plan、Skill、Capability Interface、Context Source Interface、Model
-Profile、MCP Server、Policy 与 Sandbox Profile publish summary，确认 CLI 只把 authority 返回的 exact self Version ID
+九类 deployable closure matrix 现逐一构造 Agent Interface/Plan、Skill、Capability Interface、Context Source Interface、
+Model Provider、Model Profile、MCP Server、Policy 与 Sandbox Profile publish summary，确认 CLI 只把 authority 返回的 exact self Version ID
 和 semantic digest 注入对应 typed Deployment 字段。额外交叉类型 probe 用 Skill Revision 解析 Policy closure 时必须
 fail closed，防止仅凭 published list 顺序或 mutable head 选取 Version。
 
-Apply/Operation 命令面既定正常、失败、恢复、curl 与八类 self closure contract matrix 已闭合。以下是更高层 M2/M4
+Apply/Operation 命令面既定正常、失败、恢复、curl、13类authoring noun与九类 self closure contract matrix 已闭合。以下是更高层 M2/M4
 仍未完成的 fresh scenario 门禁：
 
 - fresh PostgreSQL + 真实 Gateway/Registry Validation Worker 的 Policy/Agent publication、Run create/watch/result 与

@@ -1,10 +1,21 @@
-# Platform v2 四阶段实现计划（CR-204）
+# Platform v2 四阶段实现计划（CR-205）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-204 contract implementation; fresh public first-Run pending |
+| 状态 | In Progress / CR-205 management noun implementation; fresh full scenarios pending |
 | 日期 | 2026-08-30 |
-| 合同输入 | 00～18、cross-review CR-204、ADR-0001、ADR-0002、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-205、ADR-0001、ADR-0002、AGENTS.md |
+
+> 2026-08-30 CR-205：先扩展authoritative noun/ID/OpenAPI matrix与Gateway handler；再使CLI apply支持四个
+> definition-only lifecycle和Model Provider Deployment；最后在fresh full authority上通过Capability/Context Implementation、
+> Model Provider、Sandbox Runtime/Package publication并继续五条M4场景。禁止SQL预写、空Deployment或Worker config冒充业务Version。
+
+> 2026-08-30 CR-205 implementation evidence：Rust/OpenAPI/CLI的closed management matrix已扩为十三类noun；Model Provider
+> 使用完整Deployment closure，Capability/Context Implementation与Sandbox Runtime/Package只发布exact Version。API在解析
+> definition-only Deployment正文前按不存在的kind-route返回404；CLI要求其manifest省略Deployment，publish后返回两个`null`
+> Deployment ID，并由Sandbox Runtime loopback fixture证明完成journal可离线重建。九类deployable self closure与13类noun
+> 矩阵、Platform API 44/44、Contracts 101/101 + checked-in 6/6 + fixture 8/8、Gateway 9/9、CLI 64/64、Platform v1 checker、
+> strict Clippy和58-crate boundary scan均通过。该证据关闭CR-205共享authoring surface实现，不证明fresh full scenario或L4～L6。
 
 > 2026-08-30 CR-204：Agent Context Deployment create不得要求客户端提交本次command生成的`adep/xcb`或派生digest。
 > 实现顺序为authoritative Rust DTO与OpenAPI → Gateway materialization → CLI manifest/response validation → closedness、digest、

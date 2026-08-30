@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-204 |
+| 状态 | Accepted / CR-205 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md)、[`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md)、[`11-skill-system.md`](11-skill-system.md) |
 | 直接下游 | 13、15、17、18 |
+
+> CR-205 impact：`context-implementations`是closed definition-only management noun。它发布绑定exact Context Interface
+> Revision与installed adapter contract的immutable Version；Context Deployment随后才能合法引用，Worker startup配置不能伪造该业务事实。
 
 > CR-204 impact：public Agent Deployment request中的Context slot只提交exact Context Deployment、consistency、projection及
 > Policy intent；`context_binding_id`、`owner_agent_deployment_id`和binding digests由resolution authority生成。

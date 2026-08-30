@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-25 |
+| 状态 | Accepted / CR-205 |
+| 日期 | 2026-08-30 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
+
+> CR-205 impact：Model Profile不能引用只存在于Worker配置的隐式Provider。`model-providers`加入closed management noun并
+> 保持普通Resource→Version→Provider Deployment生命周期；Profile Deployment只引用其exact Deployment，不从名称或active head推断。
 
 > CR-197 impact：ModelTurn/Job复制Run trace identity，tool loop所有Turn/Invocation保持同一trace ID并使用新span。Egress调用provider时剥离
 > 平台内部trace header；prompt/response/tool arguments、provider URL与tenant/model高基数identity仍不得进入trace attribute。

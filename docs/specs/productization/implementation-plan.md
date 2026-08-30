@@ -247,8 +247,9 @@ intent/result journal，在每个 mutation 前持久化 Receipt/If-Match，并�
 reconciliation-required 与无副作用 timeout，并保留 closed Problem retry metadata 和安全 terminal detail。首次 Run
 已由 fresh P2 journey 覆盖。checked `curl+jq` fixture 已执行同一七步 `/v1` lifecycle、exact Receipt replay 与
 changed-body 409 Problem，普通 CI mock authority 测试通过；exact revision
-`939cd9e9d766ce17b242627daba7697fa3687799` 的 fresh P2 也已将该 entrypoint 记录为 passed。八类 Resource self
-closure matrix 已逐一检查 exact authority ID/digest 注入与 cross-kind fail-closed，Apply/Operation 子命令合同因此闭合；
+`939cd9e9d766ce17b242627daba7697fa3687799` 的 fresh P2 也已将该 entrypoint 记录为 passed。CR-205将authoring surface扩为
+13类closed noun：九类deployable closure逐一检查exact authority ID/digest注入与cross-kind fail-closed，四类
+definition-only只执行validate/publish并以`null` Deployment ID报告；Apply/Operation子命令合同因此闭合；
 其余 M2/M4 fresh scenario 门禁仍未完成，因此不得标记 M2 或 spec 00–18 为 Verified。
 
 [`insight run`](m2-cli-run.md) 已增加 create/get/pause/resume/cancel/result/watch 命令面，并严格区分 Runtime Gateway
@@ -448,6 +449,7 @@ production candidate 仍仅由独立手动 workflow 触发，普通 CI 不包含
 | 前置 | 阻塞的工作 | 处理方式 |
 |---|---|---|
 | Platform OpenAPI 与实现 drift | CLI、Console | M0 建立生成/校验门禁，先修 owner contract 或实现 |
+| full场景依赖的内部定义无authoring surface | Model/Capability/Context/WASI场景 | CR-205扩展closed domain noun；四类definition-only只publish Version，Model Provider走exact Deployment；禁止fixture预写数据库 |
 | 本地身份和 Secret profile | CLI、Console | ADR 固定 non-production identity；禁止 production default fallback |
 | 最小 role closure 不清楚 | `insight dev` | 从黄金场景反推 required role，不合并 authority |
 | Artifact/S3/KMS 本地依赖过重 | base profile | Runtime Gateway 和 Orchestration 的现有启动闭包要求 Artifact；base 使用显式 digest-pinned、真实 HTTPS-compatible local dependency，不能用 mock 或将失败隐藏为可运行 first Run |

@@ -77,6 +77,10 @@ pool/Deployment/ServiceAccount/NetworkPolicy 和
 恢复、完整 generation 发布、重建以及失败验证不替换 active generation。该证据尚未通过 public `/v1`、CLI 与真实
 Console 生成 `context-retrieval-and-citation` report，因此该场景仍保持缺失，不能升级为 Passed。
 
+CR-205审计进一步确认，五条缺失场景共享一个authoring前置：Capability/Context Implementation、Model Provider与Sandbox
+Runtime/Package已有领域合同但不在原八类Management noun中。实现必须先经新增closed noun发布这些exact定义；场景fixture不得
+以SQL insert、Worker进程配置或占位ID替代Resource/Version/Deployment authority。
+
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：
 
 ```console

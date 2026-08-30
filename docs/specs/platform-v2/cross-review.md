@@ -1,10 +1,37 @@
-# Platform v2 00～18 Cross-review（CR-204）
+# Platform v2 00～18 Cross-review（CR-205）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-204 |
+| 状态 | Accepted / CR-205 |
 | 日期 | 2026-08-30 |
-| 输入 | 00～18 live tree、implementation-plan、CR-204 Agent Context binding identity review、ADR-0001、ADR-0002、AGENTS.md |
+| 输入 | 00～18 live tree、implementation-plan、CR-205 internal definition authoring review、ADR-0001、ADR-0002、AGENTS.md |
+
+### CR-205 internal definition authoring cross-review
+
+full-profile产品化审计发现，现有public lifecycle只暴露八类可调用owner，Capability/Context Implementation、Model Provider及
+Sandbox Runtime/Package虽已拥有nominal ResourceDocument、ResourceKind、permission与repository validation，却没有合法authoring
+surface。Interface/Profile Deployment要求其exact Version/Deployment，因此fresh客户端只能预写数据库或无法继续，五条full场景共同受阻。
+
+CR-205将五类既有kind加入closed domain noun matrix，不增加generic Resource JSON route。Capability/Context Implementation与
+Sandbox Runtime/Package是definition-only，只执行create/draft/validate/publish/read Version；Model Provider保持Deployment/activate/
+suspend。Definition-only的deployment path在kind dispatch时fail closed，不能为统一CLI流程伪造空Deployment。
+
+| Spec | CR-205 结论 |
+|---|---|
+| 00～01 | 00保持In Progress；plane与authority边界不变，不升级Verified |
+| 02 | closed noun覆盖可author shared Resource kind；Version/Deployment ownership与table budget不变 |
+| 03～08 | Job/Receipt/Event、tenant/policy、Run/worker/Subagent合同不变；validation继续使用shared Job |
+| 09 | Capability Implementation取得domain noun，仍绑定exact Interface Revision且没有独立Deployment |
+| 10～11 | Invocation/Skill只消费exact closure，不追随新增noun或active head |
+| 12～13 | Context Implementation取得domain noun；Dataset/MCP owner与query transaction不变 |
+| 14～15 | Sandbox Runtime/Package取得definition-only noun；Artifact扫描、Sandbox Profile与execution plane不变 |
+| 16 | Model Provider取得完整Resource→Version→Deployment authoring surface；Model Profile仍只绑定exact Provider Deployment |
+| 17 | OpenAPI/CLI使用十三类closed noun；四类definition-only流程不得生成Deployment/activation请求 |
+| 18 | 增加十三类矩阵、definition-only负向和fresh full场景证据；L4～L6状态不变 |
+
+复核覆盖state ownership、ID/schema、errors、transaction/Event/Receipt、permission、capacity、recovery和fixture。CR-205不增加
+table、aggregate、ResourceKind、JobKind、WorkClass、ComponentRole、Secret路径、internal RPC或兼容fallback；它只让既有domain
+kind可经共享authority合法发布。受影响合同按02→09/12/14/16→17→18复核并恢复Accepted，授权clean-cut实现。
 
 ### CR-204 Agent Context binding identity cross-review
 

@@ -14,9 +14,9 @@ use insight_platform_contracts::{
     ApiProblemCode, CapabilityDeploymentClosure, ContextBindingSnapshot, ContextConsistencyPolicy,
     ContextDeploymentClosure, DeploymentClosure, EntityLifecycle, ExactDeploymentRef,
     ExactPolicyBinding, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JsonLimits,
-    McpDeploymentClosure, ModelDeploymentClosure, OperationViewV1, PolicyDeploymentClosure,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
-    ResourceId, ResourceKind, SandboxProfileDeploymentClosure, Sha256Digest,
+    McpDeploymentClosure, ModelDeploymentClosure, ModelProviderDeploymentClosure, OperationViewV1,
+    PolicyDeploymentClosure, PublishedVersionPayload, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, SandboxProfileDeploymentClosure, Sha256Digest,
     SkillDeploymentClosure, UtcTimestamp, MAX_FIELD_ERRORS, MAX_SAFE_TEXT_BYTES,
 };
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,7 @@ pub enum CreateDeploymentClosureV1 {
     CapabilityInterface(CapabilityDeploymentClosure),
     ContextSourceInterface(ContextDeploymentClosure),
     McpServer(McpDeploymentClosure),
+    ModelProvider(ModelProviderDeploymentClosure),
     ModelProfile(ModelDeploymentClosure),
     Policy(PolicyDeploymentClosure),
     SandboxProfile(SandboxProfileDeploymentClosure),
@@ -184,6 +185,7 @@ impl CreateDeploymentClosureV1 {
             Self::CapabilityInterface(_) => RegistryResourceKind::CapabilityInterface,
             Self::ContextSourceInterface(_) => RegistryResourceKind::ContextSourceInterface,
             Self::McpServer(_) => RegistryResourceKind::McpServer,
+            Self::ModelProvider(_) => RegistryResourceKind::ModelProvider,
             Self::ModelProfile(_) => RegistryResourceKind::ModelProfile,
             Self::Policy(_) => RegistryResourceKind::Policy,
             Self::SandboxProfile(_) => RegistryResourceKind::SandboxProfile,
@@ -201,6 +203,7 @@ impl CreateDeploymentClosureV1 {
             | Self::CapabilityInterface(_)
             | Self::ContextSourceInterface(_)
             | Self::McpServer(_)
+            | Self::ModelProvider(_)
             | Self::ModelProfile(_)
             | Self::Policy(_)
             | Self::SandboxProfile(_) => 0,
@@ -251,6 +254,7 @@ impl CreateDeploymentClosureV1 {
                 DeploymentClosure::ContextSourceInterface(closure)
             }
             Self::McpServer(closure) => DeploymentClosure::McpServer(closure),
+            Self::ModelProvider(closure) => DeploymentClosure::ModelProvider(closure),
             Self::ModelProfile(closure) => DeploymentClosure::ModelProfile(closure),
             Self::Policy(closure) => DeploymentClosure::Policy(closure),
             Self::SandboxProfile(closure) => DeploymentClosure::SandboxProfile(closure),
@@ -1095,6 +1099,9 @@ async fn control_deployment(
     let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
         return problem(ResourceApplicationError::NotFound);
     };
+    if resource_kind.deployment_kind().is_none() {
+        return problem(ResourceApplicationError::NotFound);
+    }
     let resource_id = match resource_id.parse::<ResourceId>() {
         Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
         _ => return problem(ResourceApplicationError::NotFound),
@@ -1172,6 +1179,9 @@ async fn create_deployment(
     let Some(resource_kind) = resource_kind_for_noun(&resource_noun) else {
         return problem(ResourceApplicationError::NotFound);
     };
+    if resource_kind.deployment_kind().is_none() {
+        return problem(ResourceApplicationError::NotFound);
+    }
     let resource_id = match resource_id.parse::<ResourceId>() {
         Ok(resource_id) if resource_id.kind() == resource_kind.id_kind() => resource_id,
         _ => return problem(ResourceApplicationError::NotFound),
@@ -1805,10 +1815,15 @@ pub fn resource_kind_for_noun(noun: &str) -> Option<RegistryResourceKind> {
         "agents" => Some(RegistryResourceKind::Agent),
         "skills" => Some(RegistryResourceKind::Skill),
         "capabilities" => Some(RegistryResourceKind::CapabilityInterface),
+        "capability-implementations" => Some(RegistryResourceKind::CapabilityImplementation),
         "contexts" => Some(RegistryResourceKind::ContextSourceInterface),
+        "context-implementations" => Some(RegistryResourceKind::ContextSourceImplementation),
         "models" => Some(RegistryResourceKind::ModelProfile),
+        "model-providers" => Some(RegistryResourceKind::ModelProvider),
         "mcp-servers" => Some(RegistryResourceKind::McpServer),
         "policies" => Some(RegistryResourceKind::Policy),
+        "sandbox-runtimes" => Some(RegistryResourceKind::SandboxRuntime),
+        "sandbox-packages" => Some(RegistryResourceKind::SandboxPackage),
         "sandboxes" => Some(RegistryResourceKind::SandboxProfile),
         _ => None,
     }
@@ -3169,25 +3184,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_public_deployment_nouns_reach_the_nominal_handler_matrix() {
+    async fn all_public_management_nouns_reach_the_nominal_handler_matrix() {
         let expected = [
             ("agents", RegistryResourceKind::Agent),
             ("skills", RegistryResourceKind::Skill),
             ("capabilities", RegistryResourceKind::CapabilityInterface),
+            (
+                "capability-implementations",
+                RegistryResourceKind::CapabilityImplementation,
+            ),
             ("contexts", RegistryResourceKind::ContextSourceInterface),
+            (
+                "context-implementations",
+                RegistryResourceKind::ContextSourceImplementation,
+            ),
+            ("model-providers", RegistryResourceKind::ModelProvider),
             ("mcp-servers", RegistryResourceKind::McpServer),
             ("models", RegistryResourceKind::ModelProfile),
             ("policies", RegistryResourceKind::Policy),
+            ("sandbox-runtimes", RegistryResourceKind::SandboxRuntime),
+            ("sandbox-packages", RegistryResourceKind::SandboxPackage),
             ("sandboxes", RegistryResourceKind::SandboxProfile),
         ];
-        assert_eq!(expected.len(), 8);
+        assert_eq!(expected.len(), 13);
         for (noun, kind) in expected {
             assert_eq!(resource_kind_for_noun(noun), Some(kind));
-            assert!(kind.deployment_kind().is_some());
         }
         assert_eq!(resource_kind_for_noun("context-datasets"), None);
-        assert_eq!(resource_kind_for_noun("sandbox-runtimes"), None);
         assert_eq!(resource_kind_for_noun("unknown"), None);
+
+        let deployable = expected
+            .into_iter()
+            .filter(|(_, kind)| kind.deployment_kind().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(deployable.len(), 9);
+        let definition_only = expected
+            .into_iter()
+            .filter(|(_, kind)| kind.deployment_kind().is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(definition_only.len(), 4);
 
         let now = Utc::now();
         let router = build_resource_router(ResourceHttpState::new(
@@ -3196,7 +3231,7 @@ mod tests {
             }),
             Arc::new(FixedClock(now)),
         ));
-        for (noun, kind) in expected {
+        for (noun, kind) in deployable {
             let wrong_resource_id = id(ResourceKind::Tenant, 90);
             let deployment_id = id(kind.deployment_kind().unwrap(), 91);
             let response = router
@@ -3206,6 +3241,38 @@ mod tests {
                         .method("POST")
                         .uri(format!(
                             "/v1/{noun}/{wrong_resource_id}/deployments/{deployment_id}:activate"
+                        ))
+                        .extension(principal(now))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{noun}");
+        }
+        for (noun, kind) in definition_only {
+            let resource_id = id(kind.id_kind(), 92);
+            let create_response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/{noun}/{resource_id}/deployments"))
+                        .header("content-type", "application/json")
+                        .extension(principal(now))
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(create_response.status(), StatusCode::NOT_FOUND, "{noun}");
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/v1/{noun}/{resource_id}/deployments/{resource_id}:activate"
                         ))
                         .extension(principal(now))
                         .body(axum::body::Body::empty())
