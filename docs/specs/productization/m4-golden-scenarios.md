@@ -48,16 +48,19 @@ terminal Run、durable SSE、exact binding、Orchestration Worker replacement、
 SignalWait exact key、Worker 缺席时两次相同 Receipt 的 204 replay、durable ready continuation、替代 Worker 恢复与 terminal
 result，生成第三份 `timer-signal-restart-recovery` report。受控 PostgreSQL 探针会领取 exact durable continuation，
 只替换 lease-token digest，证明 `RepositoryError::StaleFence` 且 Job version/token 不变，再由替代 Worker 在真实 lease
-到期后恢复。远端 fresh Linux journey 已为 Human Task、deterministic 和 Timer/Signal 三条场景补齐真实 Console，
-三份报告现均完整 Passed。其余七条场景尚未产生 Passed 报告。
+到期后恢复。Subagent 子旅程又覆盖 exact child Deployment、独立 durable child Run、root descendant reservation、
+cascade-and-wait 取消、取消后的迟到 Timer first-winner，以及请求完整 500 后代硬上限时无部分 child link/quota
+reservation 的 `budget_exhausted` 终态。远端 fresh Linux journey 已为四条 base 场景补齐真实 Console，四份报告现均
+完整 Passed。其余六条场景尚未产生 Passed 报告。
 
 这一区分防止把一个覆盖多项行为的集成测试误报为十条黄金场景，或用普通单元测试替代 fresh base/full
 profile evidence。
 
-Git revision `e03b6cc123f5f1ada2c96a47f167956adde7a095` 的 fresh Linux run `33284301192` 已使
-`approval-task-resume`、`deterministic-first-run` 和 `timer-signal-restart-recovery` 成为三份完整 Passed report：
-CLI、raw `/v1`、真实 Console、全部 assertion 与 failure probe 均 Passed。下载 artifact 后的 canonical report
-摘要与 SHA-256 见 [`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余七条没有全部
+Git revision `5a12a3deb8658e1dd496313b3f5bab9e352d5efe` 的 fresh Linux run `33289764921` 已使
+`approval-task-resume`、`deterministic-first-run`、`subagent-quota-and-cancel` 和
+`timer-signal-restart-recovery` 成为四份完整 Passed report：CLI、raw `/v1`、真实 Console、全部 assertion 与
+failure probe 均 Passed。下载 artifact 后的 canonical report 摘要与 SHA-256 见
+[`base-journey-evidence.md`](base-journey-evidence.md)。严格 M4 gate 仍因其余六条没有全部
 Passed 而失败。
 
 可从仓库根目录用下列单一入口复现当前 base journey；不带 `--report-directory` 时只运行测试，不写资格报告：

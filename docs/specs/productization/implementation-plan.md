@@ -337,6 +337,13 @@ digest 的方式证明 exact continuation 拒绝 stale Job fence，且没有改�
 无缓存机器证据，不据此宣称 G1 cold clone 门禁 Passed。精确报告摘要与 digest 见
 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
+2026-08-30 exact revision `5a12a3deb8658e1dd496313b3f5bab9e352d5efe` 的 fresh Linux run
+`33289764921` / job `99199229740` 又把 `subagent-quota-and-cancel` 纳入同一 base closure。场景证明 exact child
+Deployment 与独立 durable child Run、root descendant reservation、cascade-and-wait 取消，以及取消后的迟到 Timer
+不能覆盖 first-winner；请求完整 500 后代硬上限会立即提交 `budget_exhausted`，且不产生部分 child link 或 quota
+reservation。四份 base report 均完整 Passed，核心步骤约 10 分 15 秒。该结果仍不覆盖 full-only 场景或 G1 cold
+clone 门禁，精确报告摘要与 digest 见 [`base-journey-evidence.md`](base-journey-evidence.md)。
+
 ### 6.1 工作项
 
 1. 实现登录/tenant context 与平台 readiness 页面，不在浏览器持久化长期 Secret；
@@ -363,11 +370,12 @@ fresh-profile 报告全部 Passed，并逐项重验 entrypoint、assertion 与 f
 均失败。现有 deterministic P2 journey 可产出明确标注剩余 HTTP/Console/故障探针的 `incomplete` 报告，详见
 [`m4-golden-scenarios.md`](m4-golden-scenarios.md)；同一 fresh authority 的独立 Human Task fixture 也会产出第二份
 `approval-task-resume` report；启用真实浏览器时该报告已可完整 Passed。Timer/Signal restart fixture 会产出第三份
-`timer-signal-restart-recovery` report。这不是 M4 完成证据；其余七条 fixture/report 与 full profile 场景仍未交付。
+`timer-signal-restart-recovery` report，Subagent fixture 会产出第四份 `subagent-quota-and-cancel` report。这不是 M4
+完成证据；其余六条 fixture/report 与 full profile 场景仍未交付。
 
-远端 fresh base run `33284301192` 已使 `approval-task-resume`、`deterministic-first-run` 与
-`timer-signal-restart-recovery` 三份报告完整 Passed。严格 M4 checker 仍会因另外七条未全部 Passed 而失败。精确报告摘要见
-[`base-journey-evidence.md`](base-journey-evidence.md)。
+远端 fresh base run `33289764921` 已使 `approval-task-resume`、`deterministic-first-run`、
+`subagent-quota-and-cancel` 与 `timer-signal-restart-recovery` 四份报告完整 Passed。严格 M4 checker 仍会因另外六条
+未全部 Passed 而失败。精确报告摘要见 [`base-journey-evidence.md`](base-journey-evidence.md)。
 
 ### 7.1 工作项
 
