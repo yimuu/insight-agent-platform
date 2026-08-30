@@ -26,6 +26,7 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn("--report-directory", result.stdout)
         self.assertIn("--profile <base|full>", result.stdout)
         self.assertIn("--keep-dependencies", result.stdout)
+        self.assertIn("--north-star-report", result.stdout)
 
     def test_console_path_installs_exact_dependencies_before_build(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
@@ -78,7 +79,10 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
             '"PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY=$report_directory"', source
         )
         self.assertIn('"PLATFORM_PRODUCTIZATION_PROFILE=$profile"', source)
-        self.assertNotIn("inputs.profile == 'base'", workflow)
+        scenario_upload = workflow.split(
+            "- name: Preserve exact-revision scenario reports", 1
+        )[1].split("- name: Preserve fresh-checkout north-star report", 1)[0]
+        self.assertNotIn("inputs.profile == 'base'", scenario_upload)
         self.assertIn(
             '--report-directory "$RUNNER_TEMP/productization-reports"', workflow
         )
@@ -86,6 +90,23 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
             "productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}",
             workflow,
         )
+
+    def test_north_star_report_requires_fresh_checkout_clock(self) -> None:
+        result = self.run_runner("--north-star-report", "/tmp/north-star.json")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires --fresh-checkout", result.stderr)
+        self.assertNotIn("Compiling", result.stderr)
+
+    def test_workflow_starts_clock_before_checkout_and_preserves_report(self) -> None:
+        workflow = (ROOT / ".github/workflows/productization-base-journey.yml").read_text(
+            encoding="utf-8"
+        )
+        clock = "Record fresh-checkout journey start"
+        checkout = "actions/checkout@"
+        self.assertLess(workflow.index(clock), workflow.index(checkout))
+        self.assertIn("--journey-started-epoch", workflow)
+        self.assertIn("--fresh-checkout", workflow)
+        self.assertIn("productization-base-north-star-${{ github.sha }}", workflow)
 
 
 if __name__ == "__main__":

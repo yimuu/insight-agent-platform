@@ -2,6 +2,19 @@
 
 默认 Cargo 构建产物是 `insight`。它是 public `/v1` 客户端和本地多进程 supervisor，不拥有业务 authority。
 
+fresh checkout 到首个 deterministic Run 的低摩擦入口是：
+
+```bash
+scripts/run-productization-base-journey.sh --profile base
+```
+
+该单一入口构建 CLI、运行 `doctor/init/dev`、只经 public `/v1` 完成首次 Run 和 Task/restart 旅程，并在结束时
+停止精确 Platform 进程。连同 `git clone … && cd …`，文档路径共两条人工命令且不需要模型 key。资格 workflow
+在 checkout 前启动时钟，在首个 terminal Run 验证结果时写 marker，并以 closed north-star report 检查 600 秒上限；
+工作树运行不能伪装成 fresh-checkout 报告。
+
+需要保留平台做交互式开发时再使用下列显式命令：
+
 ```bash
 cargo build --locked
 target/debug/insight doctor

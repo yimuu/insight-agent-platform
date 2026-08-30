@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Record fresh-checkout journey start
+        run: echo "PLATFORM_PRODUCTIZATION_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
@@ -57,6 +59,13 @@ jobs:
             --browser-bin "$(command -v google-chrome)"
             --report-directory "$RUNNER_TEMP/productization-reports"
           )
+          if [[ "${{ inputs.profile }}" == "base" ]]; then
+            arguments+=(
+              --north-star-report "$RUNNER_TEMP/productization-north-star.json"
+              --journey-started-epoch "$PLATFORM_PRODUCTIZATION_STARTED_EPOCH"
+              --fresh-checkout
+            )
+          fi
           scripts/run-productization-base-journey.sh "${arguments[@]}"
       - name: Preserve bounded runtime diagnostics on failure
         if: ${{ failure() }}
@@ -76,4 +85,12 @@ jobs:
           name: productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}
           path: ${{ runner.temp }}/productization-reports/*.json
           if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve fresh-checkout north-star report
+        if: ${{ always() && inputs.profile == 'base' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: productization-base-north-star-${{ github.sha }}
+          path: ${{ runner.temp }}/productization-north-star.json
+          if-no-files-found: error
           retention-days: 14

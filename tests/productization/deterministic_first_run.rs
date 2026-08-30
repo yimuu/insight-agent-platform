@@ -38,6 +38,7 @@ const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
 const REPORT_DIRECTORY_ENV: &str = "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY";
 const FRESH_PROFILE_ENV: &str = "PLATFORM_PRODUCTIZATION_FRESH_PROFILE";
+const FIRST_RUN_MARKER_ENV: &str = "PLATFORM_PRODUCTIZATION_FIRST_RUN_MARKER";
 const CONTRACT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -824,6 +825,21 @@ fn public_cli_deterministic_first_run() {
         json!({"kind": "inline", "value": {"message": "hello"}})
     );
     assert_eq!(result["schema_digest"], schema_digest);
+    if let Ok(marker_path) = env::var(FIRST_RUN_MARKER_ENV) {
+        let marker = json!({
+            "schema_version": 1,
+            "report_kind": "insight.productization.first-run-marker/v1",
+            "run_id": run_id,
+            "state": "succeeded",
+            "result_verified": true,
+            "completed_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+        });
+        fs::write(
+            marker_path,
+            serde_jcs::to_vec(&marker).expect("first Run marker is canonicalizable"),
+        )
+        .expect("first Run marker is writable");
+    }
     prove_raw_http_read(project, run_id);
     prove_invalid_receipt_conflict(project, &run_request);
 

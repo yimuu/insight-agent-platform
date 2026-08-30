@@ -74,6 +74,7 @@ jobs:
             scripts/tests/test_classify_ci_paths.py \
             scripts/tests/test_productization_base_journey_runner.py \
             scripts/tests/test_productization_http_lifecycle.py \
+            scripts/tests/test_productization_north_star_report.py \
             scripts/tests/test_productization_scenario_reports.py
 
   lint:

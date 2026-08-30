@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight:productization:north-star-report:v1",
+  "title": "Insight Productization North-star Journey Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "contract_profile",
+    "source_revision",
+    "profile",
+    "environment",
+    "journey_started_at",
+    "first_run_completed_at",
+    "elapsed_to_first_run_ms",
+    "maximum_elapsed_ms",
+    "documented_manual_commands",
+    "maximum_manual_commands",
+    "external_model_key_required",
+    "run",
+    "checks",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_kind": { "const": "insight.productization.north-star-report/v1" },
+    "contract_profile": { "const": "insight.platform/v1" },
+    "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "profile": { "const": "base" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "fresh_checkout", "fresh_profile"],
+      "properties": {
+        "os": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "fresh_checkout": { "const": true },
+        "fresh_profile": { "const": true }
+      }
+    },
+    "journey_started_at": { "type": "string", "format": "date-time" },
+    "first_run_completed_at": { "type": "string", "format": "date-time" },
+    "elapsed_to_first_run_ms": { "type": "integer", "minimum": 0, "maximum": 600000 },
+    "maximum_elapsed_ms": { "const": 600000 },
+    "documented_manual_commands": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "maximum_manual_commands": { "const": 3 },
+    "external_model_key_required": { "const": false },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "state", "result_verified"],
+      "properties": {
+        "run_id": { "type": "string", "pattern": "^run_[0-9a-f-]+$" },
+        "state": { "const": "succeeded" },
+        "result_verified": { "const": true }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "status": { "const": "passed" },
+          "evidence": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      }
+    },
+    "status": { "const": "passed" }
+  }
+}

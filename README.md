@@ -6,27 +6,44 @@ Event、Receipt 和 Artifact 分别由 PostgreSQL 与独立 worker 持有，不�
 
 旧 `insight.agent/v1` DSL runtime 已退出默认构建、镜像和当前文档；历史源码与文档仅用于追溯，不构成兼容层。
 
-## 本地快速启动
+## 两条命令完成首次 Run
 
 前置条件：Rust 1.94.1、Docker Engine/Compose。Console 和 LangGraph.js 参考集成另外使用已有的 Node.js 24 与
 Corepack；Node 不是 Rust 平台服务运行时。
 
+在尚未 clone 的目录中执行以下两条人工命令；第二条会构建 `insight`，依次执行
+`doctor -> init -> dev --profile base`，通过 public `/v1` 发布 deterministic Agent、完成首个 Run 与 Task/restart
+负向旅程，然后停止精确 Platform 进程并保留 fresh project 和日志：
+
+```bash
+git clone https://github.com/yimuu/insight-agent-platform.git && cd insight-agent-platform
+scripts/run-productization-base-journey.sh --profile base
+```
+
+该入口不需要模型 API key，也不要求理解 workspace crate。fresh-checkout 的 10 分钟门禁由
+[`north-star-report.schema.json`](examples/productization/north-star-report.schema.json) 和独立 GitHub qualification
+生成机器可读报告；普通工作树不能自称 fresh checkout。
+
+## 交互式本地平台
+
+需要保留平台继续开发时，使用显式低层命令：
+
 ```bash
 cargo build --locked
-cargo run --locked -p insight-cli --bin insight -- doctor
-cargo run --locked -p insight-cli --bin insight -- init --path ./insight-local
-cargo run --locked -p insight-cli --bin insight -- dev --path ./insight-local --profile base
+target/debug/insight doctor
+target/debug/insight init --path ./insight-local
+target/debug/insight dev --path ./insight-local --profile base
 ```
 
 `init` 生成显式的非生产 OIDC、mTLS、配置摘要和本地 project；`dev` 预置 fresh PostgreSQL schema并监督独立
 Gateway、Orchestration、Artifact 和 worker 角色。服务进程不会隐式建表。运行后可用：
 
 ```bash
-cargo run --locked -p insight-cli --bin insight -- status --path ./insight-local
-cargo run --locked -p insight-cli --bin insight -- token --path ./insight-local
-cargo run --locked -p insight-cli --bin insight -- apply --path ./insight-local --file request.json
-cargo run --locked -p insight-cli --bin insight -- run create --path ./insight-local --file run.json
-cargo run --locked -p insight-cli --bin insight -- stop --path ./insight-local
+target/debug/insight status --path ./insight-local
+target/debug/insight token --path ./insight-local
+target/debug/insight apply --path ./insight-local --file request.json
+target/debug/insight run create --path ./insight-local --file run.json
+target/debug/insight stop --path ./insight-local
 ```
 
 完整、可复制的 Resource lifecycle curl 示例见

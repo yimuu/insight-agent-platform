@@ -11,6 +11,9 @@ console_browser=false
 node_bin="${PLATFORM_PRODUCTIZATION_NODE_BIN:-}"
 browser_bin="${INSIGHT_CONSOLE_BROWSER_BIN:-}"
 corepack_bin=""
+north_star_report=""
+journey_started_epoch=""
+fresh_checkout=false
 
 usage() {
   cat <<'EOF'
@@ -27,6 +30,9 @@ Options:
   --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
   --node-bin <path>           Node.js executable for full remote fixtures and --console-browser (default: current or login-shell PATH).
   --browser-bin <path>        Chromium/Chrome executable for --console-browser.
+  --north-star-report <path>  Write a closed checkout-to-first-Run qualification report.
+  --journey-started-epoch <s> Start clock captured before the fresh checkout.
+  --fresh-checkout            Assert the caller started the clock before a fresh checkout.
   -h, --help                   Show this help.
 EOF
 }
@@ -71,6 +77,20 @@ while (($# > 0)); do
       browser_bin=$2
       shift 2
       ;;
+    --north-star-report)
+      (($# >= 2)) || { echo "--north-star-report requires a value" >&2; exit 2; }
+      north_star_report=$2
+      shift 2
+      ;;
+    --journey-started-epoch)
+      (($# >= 2)) || { echo "--journey-started-epoch requires a value" >&2; exit 2; }
+      journey_started_epoch=$2
+      shift 2
+      ;;
+    --fresh-checkout)
+      fresh_checkout=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -86,6 +106,16 @@ done
 if [[ "$profile" != "base" && "$profile" != "full" ]]; then
   echo "--profile must be base or full" >&2
   exit 2
+fi
+if [[ -n "$north_star_report" ]]; then
+  if [[ "$profile" != "base" ]]; then
+    echo "--north-star-report only qualifies the base profile" >&2
+    exit 2
+  fi
+  if [[ "$fresh_checkout" != true || ! "$journey_started_epoch" =~ ^[0-9]{10}$ ]]; then
+    echo "--north-star-report requires --fresh-checkout and a ten-digit --journey-started-epoch captured before checkout" >&2
+    exit 2
+  fi
 fi
 if [[ -n "$project" && -e "$project" ]]; then
   echo "--project must name a path that does not already exist: $project" >&2
@@ -149,6 +179,13 @@ project="$(cd "$(dirname "$project")" && pwd)/$(basename "$project")"
 if [[ -n "$report_directory" ]]; then
   mkdir -p "$report_directory"
   report_directory="$(cd "$report_directory" && pwd)"
+fi
+first_run_marker=""
+if [[ -n "$north_star_report" ]]; then
+  mkdir -p "$(dirname "$north_star_report")"
+  north_star_report="$(cd "$(dirname "$north_star_report")" && pwd)/$(basename "$north_star_report")"
+  first_run_marker="${north_star_report}.first-run-marker"
+  rm -f "$first_run_marker"
 fi
 
 compose_project=""
@@ -244,9 +281,26 @@ if [[ -n "$report_directory" ]]; then
     "PLATFORM_PRODUCTIZATION_FRESH_PROFILE=true"
   )
 fi
+if [[ -n "$first_run_marker" ]]; then
+  test_environment+=("PLATFORM_PRODUCTIZATION_FIRST_RUN_MARKER=$first_run_marker")
+fi
 
 env "${test_environment[@]}" \
   cargo test --locked -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
+
+if [[ -n "$north_star_report" ]]; then
+  source_revision="$(git rev-parse HEAD)"
+  python3 scripts/write-productization-north-star-report.py \
+    --marker "$first_run_marker" \
+    --output "$north_star_report" \
+    --source-revision "$source_revision" \
+    --started-epoch "$journey_started_epoch" \
+    --fresh-checkout
+  python3 scripts/check-productization-north-star-report.py \
+    "$north_star_report" \
+    --source-revision "$source_revision"
+  rm -f "$first_run_marker"
+fi
 
 if [[ -n "$report_directory" ]]; then
   python3 scripts/check-productization-scenario-reports.py \

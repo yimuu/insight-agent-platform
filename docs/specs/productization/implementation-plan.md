@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Completed / M0～M5 repository scope（外部 L4～L6 Not run） |
+| 状态 | In Progress / final fresh-checkout G1 qualification pending（外部 L4～L6 Not run） |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
 | 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
@@ -45,6 +45,8 @@ M0 的已审查输入保存在：
 - [CI 与候选构建基线](m0-ci-baseline.md)；
 - [`examples/productization/scenarios.json`](../../../examples/productization/scenarios.json)；
 - ADR-0003～0006（CLI/profile、HTTP authoring、Console、local identity）。
+
+最终 G1 fresh-checkout 报告合同与当前状态见 [`north-star-evidence.md`](north-star-evidence.md)。
 
 ### 3.1 工作项
 
