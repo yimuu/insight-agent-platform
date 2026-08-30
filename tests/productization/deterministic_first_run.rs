@@ -19,6 +19,8 @@ use tempfile::TempDir;
 mod approval_task_resume;
 #[path = "artifact_lifecycle_and_rejection.rs"]
 mod artifact_lifecycle_and_rejection;
+#[path = "subagent_quota_and_cancel.rs"]
+mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
 mod timer_signal_restart_recovery;
 
@@ -891,13 +893,27 @@ fn public_cli_deterministic_first_run() {
         &agent_manifest,
         replacement,
     );
+    let mut subagent_evidence = subagent_quota_and_cancel::run(
+        insight,
+        project,
+        fixture.path(),
+        &schema_digest,
+        &agent_manifest,
+        &agent_report,
+        &qualification_ref,
+    );
     let approval_evidence = approval_task_resume::run(
         insight,
         project,
         fixture.path(),
         &schema_digest,
         &agent_manifest,
-        (run_id, &timer_signal_evidence.run_id, plan_artifact_id),
+        (
+            run_id,
+            &timer_signal_evidence.run_id,
+            &subagent_evidence.run_id,
+            plan_artifact_id,
+        ),
     );
     let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
         .then(|| {
@@ -912,6 +928,7 @@ fn public_cli_deterministic_first_run() {
         });
     if approval_evidence.console_passed {
         timer_signal_evidence.mark_console_passed();
+        subagent_evidence.mark_console_passed();
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
 
@@ -1106,6 +1123,12 @@ fn public_cli_deterministic_first_run() {
                 .expect("timer/signal scenario report is canonicalizable"),
         )
         .expect("timer/signal scenario report is writable");
+        fs::write(
+            report_directory.join("subagent-quota-and-cancel.json"),
+            serde_jcs::to_vec(&subagent_evidence.report(&revision))
+                .expect("Subagent scenario report is canonicalizable"),
+        )
+        .expect("Subagent scenario report is writable");
         if let Some(artifact_evidence) = artifact_evidence {
             fs::write(
                 report_directory.join("artifact-lifecycle-and-rejection.json"),
