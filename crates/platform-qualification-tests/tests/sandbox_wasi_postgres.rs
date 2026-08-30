@@ -1466,6 +1466,22 @@ async fn insert_derived_sandbox_invocation(
     payload.admission.origin_key = InvocationOrigin::PlanNode {
         node_execution_id: node_id.clone(),
     };
+    payload.admission.deployment = request.capability_deployment.clone();
+    payload.admission.input.value_id = request.input_value_id.clone();
+    payload.admission.input.classification = request.classification;
+    payload.admission.input.schema_digest = request.input_schema_digest.clone();
+    let ValueRef::Artifact { artifact } = &request.input_ref else {
+        panic!("derived Sandbox qualification input must remain an exact Artifact reference")
+    };
+    payload.admission.input.content_digest = artifact.content_digest().clone();
+    payload.admission.input.storage = InvocationValueStorage::Artifact {
+        artifact: artifact.clone(),
+    };
+    payload.admission.input_schema_digest = request.input_schema_digest.clone();
+    payload.admission.output_schema_digest = request.output_schema_digest.clone();
+    payload.admission.effect = request.effect;
+    payload.admission.retry_backoff_milliseconds = request.retry_backoff_milliseconds;
+    payload.admission.deadline = request.deadline;
     let input_artifact_link_id = id(
         ResourceKind::ArtifactLink,
         340 + u16::try_from(activation_ordinal).unwrap(),
