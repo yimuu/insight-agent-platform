@@ -184,6 +184,13 @@ production Helm 仍固定 `linux_procfs`、`allow_loopback_advertised_route=fals
 本证据只关闭 full 进程 composition 与空队列 claim/readiness；尚未提交一个真实 WASI Job，也未证明 WASI limit 负向场景、
 remote fixture dispatch 或 OAuth lifecycle，因此仍不得标记 M1/M4 或 spec 00–18 为 Verified。
 
+2026-08-30 exact revision `00310f9ff5162c2c2aa259dd8565b133a32568ca` 的 fresh GitHub Linux run
+`33283147235` / job `99181622944` 又从不存在的 project path 完成完整 `full` journey：24 个角色全部 ready，
+在 ready 后安全刷新短期本地 token，随后由真实 Runtime Gateway 与 headless Chrome 完成三条既有 base journey，
+最终清理 exact Platform/Compose closure。核心 step 约 19 分 32 秒。该结果把“整体 journey 尚未运行”关闭为
+Passed composition evidence，但没有产生七条 full-only report；精确事实与边界见
+[`full-journey-evidence.md`](full-journey-evidence.md)。
+
 2026-08-30 full 配置生成器的 dependency audit 进一步闭合了执行面边界：`insight` 不再为读取配置常量而链接
 Capability Worker、Egress RPC、Sandbox RPC 或 Wasmtime adapter。跨进程必须一致的 workload identity、内置 JSON
 codec 描述摘要和 WASI ABI runtime version 由无执行能力的 `platform-contracts` 统一拥有，各独立 Worker/RPC/Executor
