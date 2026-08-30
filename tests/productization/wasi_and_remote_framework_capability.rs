@@ -3,11 +3,11 @@ use async_trait::async_trait;
 use insight_platform_contracts::{
     ArtifactRef, AuthoringPackage, CapabilityBackendBinding, CapabilityDeploymentClosure,
     CodeTrustClass, DataClassification, Effect, ExactDeploymentRef, ExactSandboxProfileBinding,
-    ExactVersionRef, ResourceId, ResourceKind, SandboxAbiVersion, SandboxArtifactIoPolicyDocument,
-    SandboxCleanupPolicy, SandboxEntrypointKind, SandboxIsolationClass,
-    SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument, SandboxPackageResourceSpec,
-    SandboxProfileResourceSpec, SandboxResourcePolicyDocument, SandboxRuntimeFamily,
-    SandboxRuntimeResourceSpec, Sha256Digest, ValueRef,
+    ExactVersionRef, ResourceDocument, ResourceId, ResourceKind, SandboxAbiVersion,
+    SandboxArtifactIoPolicyDocument, SandboxCleanupPolicy, SandboxEntrypointKind,
+    SandboxIsolationClass, SandboxIsolationPolicyDocument, SandboxNetworkPolicyDocument,
+    SandboxPackageResourceSpec, SandboxProfileResourceSpec, SandboxResourcePolicyDocument,
+    SandboxRuntimeFamily, SandboxRuntimeResourceSpec, Sha256Digest, ValueRef,
 };
 use insight_platform_sandbox::{
     DestroySandbox, InstalledSandboxBackendDescriptor, ProveSandboxProcessGenerationAbsent,
@@ -609,6 +609,443 @@ fn qualify_restricted_wasi() {
     );
 }
 
+fn apply_sandbox_resource(
+    insight: &Path,
+    project: &Path,
+    fixture: &Path,
+    name: &str,
+    noun: &str,
+    document: ResourceDocument,
+    content_digest: &Sha256Digest,
+    deployment: Option<Value>,
+) -> Value {
+    let manifest = json!({
+        "schema_version": 1,
+        "kind": "insight.platform.apply/v1",
+        "resource_noun": noun,
+        "create": {
+            "display_name": name,
+            "document": serde_json::to_value(document).unwrap()
+        },
+        "publish": {
+            "kind": "single",
+            "revision_no": 1,
+            "content_digest": content_digest,
+            "artifact_id": null
+        },
+        "deployment": deployment
+    });
+    let path = write_canonical(fixture, &format!("{name}.apply.json"), &manifest);
+    run_json(
+        insight,
+        &[
+            "apply",
+            "--file",
+            path.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    )
+}
+
+fn upload_wasm(
+    insight: &Path,
+    project: &Path,
+    fixture: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> ArtifactRef {
+    let path = fixture.join(name);
+    fs::write(&path, bytes).unwrap();
+    let report = run_json(
+        insight,
+        &[
+            "artifact",
+            "upload",
+            "--file",
+            path.to_str().unwrap(),
+            "--purpose",
+            "package",
+            "--classification",
+            "internal",
+            "--media-type",
+            "application/wasm",
+            "--display-name",
+            name,
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    serde_json::from_value(json!({
+        "artifact_id": report["artifact_id"],
+        "content_digest": report["content_digest"],
+        "byte_length": report["byte_length"],
+        "media_type": report["media_type"],
+        "classification": "internal",
+        "display_name": name,
+    }))
+    .unwrap()
+}
+
+fn provision_sandbox_quotas() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect("postgres://insight:insight@127.0.0.1:5432/insight_platform")
+                .await
+                .unwrap();
+            let tenant_id: String = sqlx::query_scalar(
+                "SELECT tenant_id FROM insight_platform.tenants ORDER BY tenant_id LIMIT 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let payload = json!({"profile": "productization_full"});
+            let payload_digest = canonical_digest(&payload);
+            for (metric, limit) in [
+                ("sandbox.concurrent_executions", 8_i64),
+                ("sandbox.cpu_seconds", 10_000),
+                ("sandbox.memory_mebibytes", 65_536),
+                ("sandbox.output_bytes", 16_777_216),
+            ] {
+                sqlx::query(
+                    r#"INSERT INTO insight_platform.quota_accounts
+                       (tenant_id, quota_account_id, scope_kind, scope_id, work_class, metric,
+                        limit_value, payload_schema_version, payload, payload_digest)
+                       VALUES ($1, $2, 'tenant', $1, 'sandbox', $3, $4, 1, $5, $6)
+                       ON CONFLICT (tenant_id, scope_kind, scope_id, work_class, metric) DO NOTHING"#,
+                )
+                .bind(&tenant_id)
+                .bind(format!("qac_{}", uuid::Uuid::now_v7()))
+                .bind(metric)
+                .bind(limit)
+                .bind(&payload)
+                .bind(&payload_digest)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        });
+}
+
+fn publish_public_wasi_agent(
+    insight: &Path,
+    project: &Path,
+    fixture: &Path,
+    authoring_ref: &Value,
+    qualification_ref: &Value,
+) -> (String, String, String) {
+    let module = success_module();
+    let module_artifact = upload_wasm(insight, project, fixture, "public-success.wasm", &module);
+    let authoring_artifact: ArtifactRef = serde_json::from_value(authoring_ref.clone()).unwrap();
+    let qualification_artifact: ArtifactRef =
+        serde_json::from_value(qualification_ref.clone()).unwrap();
+    let authoring_package = AuthoringPackage {
+        artifact: authoring_artifact,
+        manifest_digest: authoring_ref["content_digest"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    };
+    let runtime_semantic = digest("public-wasi-runtime-semantic");
+    let runtime_report = apply_sandbox_resource(
+        insight,
+        project,
+        fixture,
+        "public-wasi-runtime",
+        "sandbox-runtimes",
+        ResourceDocument::SandboxRuntime(SandboxRuntimeResourceSpec {
+            authoring_package: authoring_package.clone(),
+            contract_digest: digest("public-wasi-runtime-contract"),
+            dependency_versions: vec![],
+            policy_versions: vec![],
+            runtime_family: SandboxRuntimeFamily::WasmWasi,
+            runtime_version: WASI_ABI_V1_RUNTIME_VERSION.to_owned(),
+            image_or_module_digest: digest("wasmtime-46.0.2-module"),
+            supported_isolation: vec![SandboxIsolationClass::Wasm],
+            abi: SandboxAbiVersion::V1,
+            builtin_modules_manifest_digest: digest("public-wasi-no-builtins"),
+            sbom_artifact: qualification_artifact.clone(),
+            provenance_evidence: qualification_artifact.clone(),
+            semantic_digest: runtime_semantic.clone(),
+        }),
+        &runtime_semantic,
+        None,
+    );
+    let runtime_revision: ExactVersionRef = serde_json::from_value(exact_version(
+        published_version(&runtime_report, "sandbox_runtime_revision"),
+    ))
+    .unwrap();
+
+    let policies_document = policy_closure();
+    let mut policies = BTreeMap::new();
+    for (key, role, kind, field, document) in [
+        (
+            "isolation",
+            "wasi-isolation",
+            "isolation",
+            "sandbox_isolation",
+            serde_json::to_value(&policies_document.isolation).unwrap(),
+        ),
+        (
+            "resource",
+            "wasi-resource",
+            "resource",
+            "sandbox_resource",
+            serde_json::to_value(&policies_document.resource).unwrap(),
+        ),
+        (
+            "network",
+            "wasi-network",
+            "network",
+            "sandbox_network",
+            serde_json::to_value(&policies_document.network).unwrap(),
+        ),
+        (
+            "artifact",
+            "wasi-artifact-io",
+            "artifact_io",
+            "sandbox_artifact_io",
+            serde_json::to_value(&policies_document.artifact_io).unwrap(),
+        ),
+    ] {
+        policies.insert(
+            key,
+            native_and_remote_capability::apply_policy(
+                insight,
+                project,
+                fixture,
+                role,
+                kind,
+                Some((field, document)),
+                authoring_ref,
+                qualification_ref,
+            ),
+        );
+    }
+    let selection_document = json!({
+        "schema_version": 1,
+        "mode": "only_candidate",
+        "route_schema_digest": null
+    });
+    let selection_policy = native_and_remote_capability::apply_policy(
+        insight,
+        project,
+        fixture,
+        "wasi-selection",
+        "selection",
+        Some(("selection", selection_document)),
+        authoring_ref,
+        qualification_ref,
+    );
+    let execution_policy = native_and_remote_capability::apply_policy(
+        insight,
+        project,
+        fixture,
+        "wasi-execution",
+        "execution",
+        None,
+        authoring_ref,
+        qualification_ref,
+    );
+
+    let package_contract_digest = digest("public-wasi-package-contract");
+    let dependency_lock_digest = digest("public-wasi-dependency-lock");
+    let package_digest = bytes_digest(&module);
+    let package_report = apply_sandbox_resource(
+        insight,
+        project,
+        fixture,
+        "public-wasi-package",
+        "sandbox-packages",
+        ResourceDocument::SandboxPackage(SandboxPackageResourceSpec {
+            authoring_package: authoring_package.clone(),
+            contract_digest: package_contract_digest.clone(),
+            dependency_versions: vec![runtime_revision.clone()],
+            policy_versions: vec![],
+            source_artifact: module_artifact.clone(),
+            source_digest: bytes_digest(&module),
+            runtime_revision: runtime_revision.clone(),
+            entrypoint_kind: SandboxEntrypointKind::WasmExport,
+            entrypoint: WASI_ABI_V1_ENTRYPOINT.to_owned(),
+            dependency_lock_digest: dependency_lock_digest.clone(),
+            runtime_bundle_artifact: module_artifact,
+            build_evidence: qualification_artifact.clone(),
+            trust_class: CodeTrustClass::BuiltIn,
+            package_digest: package_digest.clone(),
+        }),
+        &package_digest,
+        None,
+    );
+    let package_revision = exact_version(published_version(
+        &package_report,
+        "sandbox_package_revision",
+    ));
+
+    let profile_semantic = digest("public-wasi-profile-semantic");
+    let profile_policy_versions = policies
+        .values()
+        .map(|policy| serde_json::from_value(policy.revision.clone()).unwrap())
+        .collect::<Vec<ExactVersionRef>>();
+    let profile_report = apply_sandbox_resource(
+        insight,
+        project,
+        fixture,
+        "public-wasi-profile",
+        "sandboxes",
+        ResourceDocument::SandboxProfile(SandboxProfileResourceSpec {
+            authoring_package,
+            contract_digest: digest("public-wasi-profile-contract"),
+            dependency_versions: vec![runtime_revision.clone()],
+            policy_versions: profile_policy_versions,
+            allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
+            allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
+            minimum_isolation: SandboxIsolationClass::Wasm,
+            isolation_policy: serde_json::from_value(policies["isolation"].revision.clone())
+                .unwrap(),
+            resource_policy: serde_json::from_value(policies["resource"].revision.clone()).unwrap(),
+            network_policy: serde_json::from_value(policies["network"].revision.clone()).unwrap(),
+            artifact_io_policy: serde_json::from_value(policies["artifact"].revision.clone())
+                .unwrap(),
+            secret_policy: None,
+            cleanup: SandboxCleanupPolicy::SingleUseDestroy,
+            max_job_duration_milliseconds: 10_000,
+            semantic_digest: profile_semantic.clone(),
+        }),
+        &profile_semantic,
+        Some(json!({
+            "environment": "local",
+            "closure": {
+                "resource_kind": "sandbox_profile",
+                "bindings": {
+                    "runtime_revision": runtime_revision,
+                    "policy_bindings": policies.values().map(|policy| policy.binding.clone()).collect::<Vec<_>>(),
+                    "qualification_evidence": qualification_ref
+                }
+            }
+        })),
+    );
+    let profile_revision = exact_version(published_version(
+        &profile_report,
+        "sandbox_profile_revision",
+    ));
+    let profile_closure = json!({
+        "profile_revision": profile_revision,
+        "runtime_revision": serde_json::to_value(&runtime_revision).unwrap(),
+        "policy_bindings": policies.values().map(|policy| policy.binding.clone()).collect::<Vec<_>>(),
+        "qualification_evidence": qualification_ref,
+    });
+    let profile_binding = json!({
+        "deployment": {
+            "deployment_id": profile_report["deployment_id"],
+            "resource_kind": "sandbox_profile_deployment",
+            "deployment_digest": canonical_digest(&json!({
+                "schema_version": 1,
+                "resource_kind": "sandbox_profile",
+                "bindings": profile_closure,
+            })),
+        },
+        "revision": profile_revision,
+    });
+
+    let input_schema = native_and_remote_capability::value_schema("message");
+    let output_schema = json!({
+        "schema_version": 1,
+        "profile": "insight.closed-json-schema/1",
+        "canonical_digest": canonical_digest(&json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 0, "maximum": 100}},
+            "required": ["answer"],
+            "additionalProperties": false
+        })),
+        "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 0, "maximum": 100}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }
+    });
+    let backend_contract = json!({
+        "kind": "sandbox",
+        "contract": {
+            "package_contract_digest": package_contract_digest,
+            "entrypoint_kind": "wasm_export",
+            "entrypoint": WASI_ABI_V1_ENTRYPOINT,
+            "dependency_lock_digest": dependency_lock_digest,
+            "input_mapping_digest": digest("public-wasi-input-mapping"),
+            "output_mapping_digest": digest("public-wasi-output-mapping")
+        }
+    });
+    let backend_binding = json!({
+        "kind": "sandbox",
+        "binding": {
+            "runtime": serde_json::to_value(&runtime_revision).unwrap(),
+            "package": package_revision,
+            "profile": profile_binding,
+            "isolation": "wasm",
+            "network_policy": policies["network"].revision,
+            "resource_policy": policies["resource"].revision,
+            "artifact_io_policy": policies["artifact"].revision,
+            "secret_policy": null
+        }
+    });
+    let policy_versions = policies
+        .values()
+        .map(|policy| policy.revision.clone())
+        .collect();
+    let (capability_deployment, _) = native_and_remote_capability::publish_capability(
+        insight,
+        project,
+        fixture,
+        "public_wasi",
+        "pure",
+        "intrinsic",
+        "sandbox",
+        backend_contract,
+        backend_binding,
+        &input_schema,
+        &output_schema,
+        authoring_ref,
+        qualification_ref,
+        policy_versions,
+    );
+    provision_sandbox_quotas();
+    let agent_id = publish_wasi_agent(
+        insight,
+        project,
+        fixture,
+        authoring_ref,
+        qualification_ref,
+        &capability_deployment,
+        &selection_policy,
+        &execution_policy,
+        &input_schema,
+        &output_schema,
+    );
+    (
+        agent_id,
+        input_schema["canonical_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        output_schema["canonical_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
+}
+
 struct RemoteFrameworkEnvironment {
     broker: Child,
     fixture: Child,
@@ -788,6 +1225,119 @@ fn publish_framework_agent(
         .to_owned()
 }
 
+fn publish_wasi_agent(
+    insight: &Path,
+    project: &Path,
+    fixture: &Path,
+    authoring_ref: &Value,
+    qualification_ref: &Value,
+    deployment: &Value,
+    selection_policy: &native_and_remote_capability::PolicyAuthority,
+    execution_policy: &native_and_remote_capability::PolicyAuthority,
+    input_schema: &Value,
+    output_schema: &Value,
+) -> String {
+    let input_schema_digest = input_schema["canonical_digest"].as_str().unwrap();
+    let output_schema_digest = output_schema["canonical_digest"].as_str().unwrap();
+    let contract_digest = canonical_digest(&json!({"agent": "public-wasi-capability"}));
+    let requirement_digest = canonical_digest(&json!({"slot": "public-wasi"}));
+    let plan = json!({
+        "plan_version": 5,
+        "interface_contract_digest": contract_digest,
+        "entry_node_id": "start",
+        "dependency_slots": {"wasi": {"kind": "capability", "requirement_digest": requirement_digest}},
+        "nodes": {
+            "start": {"kind": "start", "next": "wasi"},
+            "wasi": {
+                "kind": "capability_call",
+                "capability_slot_id": "wasi",
+                "input": {"source": "run_input", "schema_digest": input_schema_digest},
+                "candidate_route": null,
+                "output": {"source": "node_output", "producer_node_id": "wasi", "port_id": "result", "schema_digest": output_schema_digest},
+                "attempt_limit": 1,
+                "retry_backoff_milliseconds": 100,
+                "resume": "finish"
+            },
+            "finish": {"kind": "return", "value": {"source": "node_output", "producer_node_id": "wasi", "port_id": "result", "schema_digest": output_schema_digest}}
+        }
+    });
+    let plan_path = write_canonical(fixture, "public-wasi-agent-plan.json", &plan);
+    let plan_upload = upload_artifact(
+        insight,
+        project,
+        &plan_path,
+        "typed_plan",
+        "public-wasi-agent-plan.json",
+    );
+    let manifest = json!({
+        "schema_version": 1,
+        "kind": "insight.platform.apply/v1",
+        "resource_noun": "agents",
+        "create": {
+            "display_name": "Public WASI Capability agent",
+            "document": {
+                "resource_kind": "agent",
+                "spec": {
+                    "authoring_package": {"artifact": authoring_ref, "manifest_digest": authoring_ref["content_digest"]},
+                    "contract_digest": contract_digest,
+                    "dependency_versions": [],
+                    "policy_versions": [selection_policy.revision, execution_policy.revision],
+                    "input_schema": input_schema,
+                    "output_schema": output_schema,
+                    "error_schema": native_and_remote_capability::value_schema("error"),
+                    "typed_plan_artifact_id": plan_upload["artifact_id"],
+                    "typed_plan_digest": plan_upload["content_digest"]
+                }
+            }
+        },
+        "publish": {
+            "kind": "agent",
+            "revision_no": 1,
+            "interface_content_digest": contract_digest,
+            "plan_content_digest": plan_upload["content_digest"],
+            "artifact_id": plan_upload["artifact_id"]
+        },
+        "deployment": {
+            "environment": "local",
+            "closure": {
+                "resource_kind": "agent",
+                "bindings": {
+                    "entry_node_id": "start",
+                    "entry_node_kind": "start",
+                    "slots": [{
+                        "slot_id": "wasi",
+                        "requirement_digest": requirement_digest,
+                        "target": {
+                            "kind": "capability",
+                            "candidates": [deployment],
+                            "selection_policy": selection_policy.binding
+                        }
+                    }],
+                    "policies": [],
+                    "execution_profile": execution_policy.binding
+                }
+            }
+        }
+    });
+    let path = write_canonical(fixture, "public-wasi-agent.apply.json", &manifest);
+    let _ = qualification_ref;
+    run_json(
+        insight,
+        &[
+            "apply",
+            "--file",
+            path.to_str().unwrap(),
+            "--timeout-seconds",
+            "120",
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    )["resource_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn trace_records(path: &Path) -> Vec<Value> {
     fs::read_to_string(path)
         .unwrap_or_default()
@@ -805,6 +1355,33 @@ pub(super) fn run(
 ) -> WasiFrameworkEvidence {
     let started_at = Utc::now();
     qualify_restricted_wasi();
+    let (wasi_agent_id, wasi_input_schema_digest, wasi_output_schema_digest) =
+        publish_public_wasi_agent(insight, project, fixture, authoring_ref, qualification_ref);
+    let wasi_run_id = native_and_remote_capability::create_run(
+        insight,
+        project,
+        fixture,
+        &wasi_agent_id,
+        &wasi_input_schema_digest,
+        "public-wasi-success",
+        "execute the exact WASI package",
+    );
+    assert_eq!(
+        native_and_remote_capability::terminal(insight, project, &wasi_run_id)["state"],
+        "succeeded"
+    );
+    let wasi_result = run_json(
+        insight,
+        &[
+            "run",
+            "result",
+            &wasi_run_id,
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(wasi_result["schema_digest"], wasi_output_schema_digest);
+    assert_eq!(wasi_result["value"]["value"]["answer"], 42);
 
     let selection =
         json!({"schema_version": 1, "mode": "only_candidate", "route_schema_digest": null});
