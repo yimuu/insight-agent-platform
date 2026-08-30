@@ -22,11 +22,12 @@ use insight_platform_artifacts::{
 };
 use insight_platform_contracts::{
     canonical_digest, ArtifactGrantOperation, ArtifactPurpose, ArtifactReferenceKind,
-    CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle, ExactPolicyBinding,
-    ExactSandboxProfileBinding, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
-    InvocationState, JobState, Permission, PlatformFailureCode, PolicyKind, PolicyResourceSpec,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Retryability,
-    SandboxJobState, Sha256Digest, ValueRef, WorkClass,
+    CapabilityBackendBinding, CommandOutcome, DataClassification, DeploymentClosure,
+    EntityLifecycle, ExactPolicyBinding, ExactSandboxProfileBinding, ExactVersionRef, Failure,
+    FailureClass, FailureCode, FailureSource, InvocationState, JobState, Permission,
+    PlatformFailureCode, PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind,
+    ResourceDocument, ResourceId, ResourceKind, Retryability, SandboxJobState, Sha256Digest,
+    ValueRef, WorkClass,
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, decide_detached_job_outcome, CapabilityControlKind,
@@ -44,23 +45,73 @@ use insight_platform_sandbox::{
     GvisorGuestBootstrapRequest, GvisorGuestExecutionPlan, HeartbeatSandboxExecution,
     MergeSandboxCapabilityOutcome, PendingSandboxCapabilityOutcome, RecoverExpiredSandboxLease,
     RecoverSandboxControlSignals, ResolveSandboxControlEvent, RevokeWasiSandboxGrants,
-    SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits, SandboxControlAuthority,
-    SandboxControlScanCursor, SandboxControlSignalPage, SandboxControlSignalSource,
-    SandboxExecutionAuthority, SandboxExecutionJobPayload, SandboxExecutionOutcome,
-    SandboxExecutionPolicyClosure, SandboxExecutionRequest, SandboxExecutionSource,
-    SandboxGatewayAuthority, SandboxJobPayload, SandboxLeaseRecoveryAction,
+    SafeSandboxTraceContext, SandboxClaimAuthority, SandboxClaimFailure, SandboxCommandLimits,
+    SandboxControlAuthority, SandboxControlScanCursor, SandboxControlSignalPage,
+    SandboxControlSignalSource, SandboxExecutionAuthority, SandboxExecutionJobPayload,
+    SandboxExecutionOutcome, SandboxExecutionPolicyClosure, SandboxExecutionRequest,
+    SandboxExecutionSource, SandboxGatewayAuthority, SandboxJobPayload, SandboxLeaseRecoveryAction,
     SandboxLeaseRecoveryAuthority, SandboxLeaseRecoveryDisposition, SandboxLeaseRecoveryResult,
-    SandboxPhaseDecision, SandboxPrestartControlOutcome, SandboxRecoveryAudit,
+    SandboxNetworkMode, SandboxPhaseDecision, SandboxPrestartControlOutcome, SandboxRecoveryAudit,
     SandboxResourceEnvelope, SandboxResourceUsage, SandboxStopReason, SandboxStopSignal,
-    SandboxWorkerAudit, ScopedArtifactGrant, ScopedSecretGrant, StopUnclaimedSandboxJob,
-    WasiArtifactReadPurpose, WasiArtifactReadRequest, WasiGrantRevocationError,
-    WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection, WasiValueValidationError,
-    WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
+    SandboxWorkerAudit, ScopedArtifactGrant, ScopedSandboxCallback, ScopedSecretGrant,
+    StopUnclaimedSandboxJob, WasiArtifactReadPurpose, WasiArtifactReadRequest,
+    WasiGrantRevocationError, WasiGrantRevocationEvidence, WasiGrantRevoker, WasiValueDirection,
+    WasiValueValidationError, WasiValueValidationRequest, WasiValueValidator, SANDBOX_QUOTA_LINES,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use std::collections::BTreeSet;
+
+#[derive(Debug, Clone)]
+pub struct SandboxCapabilitySubmission {
+    pub executor_worker_manifest_digest: Sha256Digest,
+    pub isolation_backend_contract_digest: Sha256Digest,
+    pub callback_audience_identity_digest: Sha256Digest,
+    pub output_value_id: ResourceId,
+    pub input_artifact_grant_id: ResourceId,
+    pub resources: SandboxResourceEnvelope,
+    pub receipt_id: ResourceId,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub usage_reservation_id: ResourceId,
+    pub quota_entry_ids: Vec<ResourceId>,
+}
+
+impl SandboxCapabilitySubmission {
+    pub fn validate(&self) -> Result<(), RepositoryError> {
+        let fixed = [
+            (&self.output_value_id, ResourceKind::RunValue),
+            (&self.input_artifact_grant_id, ResourceKind::ArtifactGrant),
+            (&self.receipt_id, ResourceKind::Receipt),
+            (&self.event_id, ResourceKind::Event),
+            (&self.outbox_id, ResourceKind::OutboxEvent),
+            (&self.usage_reservation_id, ResourceKind::UsageReservation),
+        ];
+        if fixed.iter().any(|(id, kind)| id.kind() != *kind)
+            || self.quota_entry_ids.len() != SANDBOX_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Sandbox Capability submission identities are invalid".to_owned(),
+            ));
+        }
+        let identities = fixed
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .chain(self.quota_entry_ids.iter().map(ResourceId::to_string))
+            .collect::<BTreeSet<_>>();
+        if identities.len() != fixed.len() + self.quota_entry_ids.len() {
+            return Err(RepositoryError::InvalidInput(
+                "Sandbox Capability submission identities must be unique".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 fn detached_sandbox_source_kind(source: &SandboxExecutionSource) -> DetachedSandboxSourceKind {
     match source {
@@ -70,6 +121,339 @@ fn detached_sandbox_source_kind(source: &SandboxExecutionSource) -> DetachedSand
         #[cfg(any())]
         SandboxExecutionSource::ManagedMcp { .. } => DetachedSandboxSourceKind::ManagedMcp,
     }
+}
+
+pub(crate) async fn build_sandbox_capability_execution(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &CapabilityInvocationRecord,
+    job_id: &ResourceId,
+    submission: &SandboxCapabilitySubmission,
+) -> Result<AcceptSandboxExecution, RepositoryError> {
+    submission.validate()?;
+    if job_id.kind() != ResourceKind::Job
+        || invocation.payload.admission.backend_kind
+            != insight_platform_contracts::CapabilityBackendKind::Sandbox
+        || invocation.payload.admission.mcp_runtime.is_some()
+        || !invocation
+            .payload
+            .admission
+            .artifact_contract
+            .ports
+            .is_empty()
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox Capability admission shape",
+        ));
+    }
+    let input = load_capability_execution_input(transaction, invocation).await?;
+    let input_ref = match (&input.exact.storage, &input.material) {
+        (InvocationValueStorage::Inline, CapabilityExecutionInputMaterial::Inline { value }) => {
+            ValueRef::Inline {
+                value: value.clone(),
+            }
+        }
+        (
+            InvocationValueStorage::Artifact { artifact },
+            CapabilityExecutionInputMaterial::LinkedArtifact { .. },
+        ) => ValueRef::Artifact {
+            artifact: artifact.clone(),
+        },
+        _ => {
+            return Err(RepositoryError::CorruptRow(
+                "Sandbox Capability input material differs from admission".to_owned(),
+            ));
+        }
+    };
+
+    let deployment = load_deployment(
+        transaction,
+        &invocation.tenant_id,
+        &invocation.payload.admission.deployment.deployment_id,
+    )
+    .await?;
+    if deployment.bindings.digest
+        != invocation
+            .payload
+            .admission
+            .deployment
+            .deployment_digest
+            .to_string()
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox exact Capability Deployment",
+        ));
+    }
+    let capability_closure = match decode_deployment_closure(&deployment.bindings)? {
+        DeploymentClosure::CapabilityInterface(closure) => closure,
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "Sandbox Capability Deployment closure",
+            ));
+        }
+    };
+    let CapabilityBackendBinding::Sandbox {
+        runtime: runtime_revision,
+        package: package_revision,
+        profile: profile_binding,
+        isolation,
+        network_policy,
+        resource_policy,
+        artifact_io_policy,
+        secret_policy,
+    } = &capability_closure.backend
+    else {
+        return Err(RepositoryError::Conflict("Sandbox Capability backend"));
+    };
+    if !capability_closure.secret_bindings.is_empty() || secret_policy.is_some() {
+        return Err(RepositoryError::Conflict(
+            "local Sandbox Capability Secret grants are not installed",
+        ));
+    }
+
+    let runtime = load_enabled_exact_published_version(
+        transaction,
+        &invocation.tenant_id,
+        runtime_revision,
+        RegistryResourceKind::SandboxRuntime,
+    )
+    .await?;
+    let ResourceDocument::SandboxRuntime(runtime) = runtime.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Sandbox Runtime Revision has the wrong document".to_owned(),
+        ));
+    };
+    let package = load_enabled_exact_published_version(
+        transaction,
+        &invocation.tenant_id,
+        package_revision,
+        RegistryResourceKind::SandboxPackage,
+    )
+    .await?;
+    let ResourceDocument::SandboxPackage(package) = package.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Sandbox Package Revision has the wrong document".to_owned(),
+        ));
+    };
+    let profile_deployment = load_deployment(
+        transaction,
+        &invocation.tenant_id,
+        &profile_binding.deployment.deployment_id,
+    )
+    .await?;
+    if profile_deployment.bindings.digest
+        != profile_binding.deployment.deployment_digest.to_string()
+        || profile_deployment.resource_version_id
+            != profile_binding.revision.revision_id.to_string()
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox Profile Deployment binding",
+        ));
+    }
+    let profile_closure = match decode_deployment_closure(&profile_deployment.bindings)? {
+        DeploymentClosure::SandboxProfile(closure) => closure,
+        _ => {
+            return Err(RepositoryError::Conflict(
+                "Sandbox Profile Deployment closure",
+            ));
+        }
+    };
+    let profile = load_enabled_exact_published_version(
+        transaction,
+        &invocation.tenant_id,
+        &profile_binding.revision,
+        RegistryResourceKind::SandboxProfile,
+    )
+    .await?;
+    let ResourceDocument::SandboxProfile(profile) = profile.document else {
+        return Err(RepositoryError::CorruptRow(
+            "Sandbox Profile Revision has the wrong document".to_owned(),
+        ));
+    };
+    let isolation_document = load_exact_sandbox_policy(
+        transaction,
+        &invocation.tenant_id,
+        exact_sandbox_policy_binding(&profile_closure, &profile.isolation_policy)?,
+        PolicyKind::Isolation,
+    )
+    .await?
+    .sandbox_isolation
+    .ok_or(RepositoryError::Conflict(
+        "Sandbox isolation Policy document",
+    ))?;
+    let resource_document = load_exact_sandbox_policy(
+        transaction,
+        &invocation.tenant_id,
+        exact_sandbox_policy_binding(&profile_closure, &profile.resource_policy)?,
+        PolicyKind::Resource,
+    )
+    .await?
+    .sandbox_resource
+    .ok_or(RepositoryError::Conflict(
+        "Sandbox resource Policy document",
+    ))?;
+    let network_document = load_exact_sandbox_policy(
+        transaction,
+        &invocation.tenant_id,
+        exact_sandbox_policy_binding(&profile_closure, &profile.network_policy)?,
+        PolicyKind::Network,
+    )
+    .await?
+    .sandbox_network
+    .ok_or(RepositoryError::Conflict("Sandbox network Policy document"))?;
+    let artifact_io_document = load_exact_sandbox_policy(
+        transaction,
+        &invocation.tenant_id,
+        exact_sandbox_policy_binding(&profile_closure, &profile.artifact_io_policy)?,
+        PolicyKind::ArtifactIo,
+    )
+    .await?
+    .sandbox_artifact_io
+    .ok_or(RepositoryError::Conflict(
+        "Sandbox Artifact I/O Policy document",
+    ))?;
+    if !network_document.destinations.is_empty() || profile.secret_policy.is_some() {
+        return Err(RepositoryError::Conflict(
+            "local WASI Sandbox requires no network and no Secret policy",
+        ));
+    }
+    let policies = SandboxExecutionPolicyClosure {
+        isolation: isolation_document,
+        resource: resource_document,
+        network: network_document,
+        artifact_io: artifact_io_document,
+        secret_resolution: None,
+    };
+    if isolation != &profile.minimum_isolation
+        || network_policy != &profile.network_policy
+        || resource_policy != &profile.resource_policy
+        || artifact_io_policy != &profile.artifact_io_policy
+        || submission.resources.result_bytes
+            > u64::from(
+                invocation
+                    .payload
+                    .admission
+                    .interface_limits
+                    .maximum_output_bytes,
+            )
+        || submission.resources.wall_milliseconds
+            > invocation
+                .payload
+                .admission
+                .interface_limits
+                .maximum_execution_milliseconds
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox Capability and Profile Policy bindings",
+        ));
+    }
+
+    let artifact_grants = match &input_ref {
+        ValueRef::Inline { .. } => Vec::new(),
+        ValueRef::Artifact { artifact } => vec![ScopedArtifactGrant {
+            schema_version: 1,
+            grant_id: submission.input_artifact_grant_id.clone(),
+            tenant_id: invocation.tenant_id.clone(),
+            sandbox_job_id: job_id.clone(),
+            operation: ArtifactGrantOperation::ReadWhole,
+            port: "input".to_owned(),
+            artifact: Some(artifact.clone()),
+            staging_artifact_id: None,
+            byte_range: None,
+            maximum_bytes: artifact.byte_length(),
+            generation: 1,
+            expires_at: invocation.payload.admission.deadline,
+            grant_digest: submission.callback_audience_identity_digest.clone(),
+        }
+        .seal()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?],
+    };
+    let callback = ScopedSandboxCallback {
+        schema_version: 1,
+        tenant_id: invocation.tenant_id.clone(),
+        sandbox_job_id: job_id.clone(),
+        invocation_id: invocation.invocation_id.clone(),
+        attempt_no: 1,
+        audience_identity_digest: submission.callback_audience_identity_digest.clone(),
+        expires_at: invocation.payload.admission.deadline,
+        binding_digest: submission.callback_audience_identity_digest.clone(),
+    }
+    .seal()
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let trace_id_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+        "trace_id": invocation.trace.trace_id,
+    }))
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+    .parse()
+    .map_err(|_| RepositoryError::InvalidInput("Sandbox trace digest".to_owned()))?;
+    let parent_span_id_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+        "node_execution_id": invocation.node_execution_id,
+    }))
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+    .parse()
+    .map_err(|_| RepositoryError::InvalidInput("Sandbox parent span digest".to_owned()))?;
+    SandboxExecutionRequest {
+        schema_version: 1,
+        protocol_version: runtime.abi,
+        tenant_id: invocation.tenant_id.clone(),
+        sandbox_job_id: job_id.clone(),
+        invocation_id: invocation.invocation_id.clone(),
+        job_id: job_id.clone(),
+        expected_invocation_version: invocation.version,
+        attempt_no: 1,
+        retry_backoff_milliseconds: invocation.payload.admission.retry_backoff_milliseconds,
+        lease_generation: 0,
+        capability_deployment: invocation.payload.admission.deployment.clone(),
+        execution_source: SandboxExecutionSource::SandboxCapability {
+            capability_deployment_closure: Box::new(capability_closure.clone()),
+        },
+        runtime_revision: runtime_revision.clone(),
+        runtime,
+        package_revision: package_revision.clone(),
+        package,
+        profile_binding: profile_binding.clone(),
+        profile,
+        policies: Box::new(policies),
+        isolation_class: *isolation,
+        executor_worker_manifest_digest: submission.executor_worker_manifest_digest.clone(),
+        isolation_backend_contract_digest: submission.isolation_backend_contract_digest.clone(),
+        effect: invocation.payload.admission.effect,
+        classification: input.exact.classification,
+        input_value_id: invocation.input_value_id.clone(),
+        input_schema_digest: invocation.payload.admission.input_schema_digest.clone(),
+        input_ref,
+        output_value_id: submission.output_value_id.clone(),
+        output_schema_digest: invocation.payload.admission.output_schema_digest.clone(),
+        artifact_grants,
+        secret_grants: Vec::new(),
+        network_mode: SandboxNetworkMode::None,
+        resources: submission.resources.clone(),
+        deadline: invocation.payload.admission.deadline,
+        callback,
+        trace_context: SafeSandboxTraceContext {
+            trace_id_digest,
+            parent_span_id_digest,
+        },
+        request_digest: submission.callback_audience_identity_digest.clone(),
+    }
+    .seal()
+    .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))
+    .map(|request| AcceptSandboxExecution {
+        audit: insight_platform_contracts::CommandAudit {
+            trace: invocation.trace,
+            tenant_id: invocation.tenant_id.clone(),
+            principal_id: invocation.payload.admission.principal.principal_id.clone(),
+            principal_kind: invocation.payload.admission.principal.principal_kind,
+            receipt_id: submission.receipt_id.clone(),
+            event_id: submission.event_id.clone(),
+            outbox_id: submission.outbox_id.clone(),
+            idempotency_key_digest: invocation.payload.admission.idempotency_key_digest.clone(),
+            request_digest: request.request_digest.clone(),
+            receipt_expires_at: invocation.payload.admission.deadline,
+        },
+        request,
+        usage_reservation_id: submission.usage_reservation_id.clone(),
+        quota_entry_ids: submission.quota_entry_ids.clone(),
+    })
 }
 
 #[cfg(any())]

@@ -3660,6 +3660,7 @@ impl PgRepository {
             invocation_limits: self.invocation_limits,
             context_query_limits: self.context_query_limits,
             model_turn_limits: self.model_turn_limits,
+            sandbox_limits: self.sandbox_limits,
             plan_limits: self.plan_limits,
             scope_environment_limits: self.scope_environment_limits,
             expression_inline_limits: self.expression_inline_limits,
@@ -7330,6 +7331,7 @@ pub struct PgSchedulerTransaction {
     invocation_limits: InvocationCommandLimits,
     context_query_limits: ContextQueryLimits,
     model_turn_limits: ModelTurnLimits,
+    sandbox_limits: SandboxCommandLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
     expression_inline_limits: JsonLimits,
@@ -9390,7 +9392,55 @@ impl PgSchedulerTransaction {
                     invocation
                 }
             };
-        let (invocation, capability_job) = if admitted.state == InvocationState::Ready {
+        let sandbox_backend = admitted.payload.admission.backend_kind
+            == insight_platform_contracts::CapabilityBackendKind::Sandbox;
+        if sandbox_backend != command.sandbox_submission.is_some() {
+            return Err(RepositoryError::Conflict(
+                "Sandbox Capability admission configuration",
+            ));
+        }
+        let (invocation, capability_job) = if admitted.state == InvocationState::Ready
+            && sandbox_backend
+        {
+            let submission =
+                command
+                    .sandbox_submission
+                    .as_ref()
+                    .ok_or(RepositoryError::Conflict(
+                        "Sandbox Capability admission configuration",
+                    ))?;
+            let sandbox_command = crate::sandbox_repository::build_sandbox_capability_execution(
+                &mut transaction,
+                &admitted,
+                &command.capability_job_id,
+                submission,
+            )
+            .await?;
+            match crate::sandbox_repository::accept_sandbox_execution_in_transaction(
+                &mut transaction,
+                sandbox_command,
+                database_now,
+                self.sandbox_limits,
+            )
+            .await?
+            {
+                CommandOutcome::Applied(_) | CommandOutcome::Replayed(_) => {}
+            }
+            let invocation = crate::invocation_repository::load_capability_invocation(
+                &mut transaction,
+                &tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = load_job_by_text(
+                &mut transaction,
+                &command.fence.tenant_id,
+                &command.capability_job_id.to_string(),
+            )
+            .await?;
+            (invocation, Some(job))
+        } else if admitted.state == InvocationState::Ready {
             let prepare_digest: Sha256Digest = canonical_digest(&serde_json::json!({
                 "capability_job_id": command.capability_job_id,
                 "expected_invocation_version": admitted.version,
@@ -32214,6 +32264,7 @@ pub struct DeferOrchestrationToCapabilityInvocation {
     pub approval_task_id: Option<ResourceId>,
     pub input_artifact_link_id: Option<ResourceId>,
     pub mcp_runtime: Option<McpCapabilityRuntimeRequest>,
+    pub sandbox_submission: Option<crate::sandbox_repository::SandboxCapabilitySubmission>,
     pub idempotency_key_digest: Sha256Digest,
     pub request_digest: Sha256Digest,
     pub receipt_expires_at: DateTime<Utc>,
@@ -32349,6 +32400,9 @@ impl DeferOrchestrationToCapabilityInvocation {
     fn validate(&self, inline_limits: JsonLimits) -> Result<(), RepositoryError> {
         self.fence.validate()?;
         self.mutations.validate()?;
+        if let Some(submission) = &self.sandbox_submission {
+            submission.validate()?;
+        }
         self.input
             .value
             .validate(inline_limits)
@@ -32376,6 +32430,8 @@ impl DeferOrchestrationToCapabilityInvocation {
                 .is_some_and(|id| id.kind() != ResourceKind::ArtifactLink)
             || self.input_artifact_link_id.is_some()
                 != matches!(self.input.value, ValueRef::Artifact { .. })
+            || (self.sandbox_submission.is_some()
+                && (self.mcp_runtime.is_some() || self.approval_task_id.is_some()))
             || self.receipt_expires_at <= Utc::now()
         {
             return Err(RepositoryError::InvalidInput(

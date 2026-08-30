@@ -2324,6 +2324,47 @@ fn prepare_runtime_profile_inner(
             artifact_data_worker_port: ports.artifact_data_controller,
         },
     ));
+    let sandbox_executor = &configs
+        .get("sandbox-executor")
+        .ok_or_else(|| CliError::InvalidLocalIdentity {
+            path: "local Sandbox executor configuration".to_owned(),
+        })?
+        .1;
+    let sandbox_worker_manifest_digest = canonical_digest(&sandbox_executor["worker_manifest"])
+        .map_err(|_| CliError::InvalidLocalIdentity {
+            path: "local Sandbox executor WorkerManifest".to_owned(),
+        })?;
+    let sandbox_backend_contract_digest = sandbox_executor["backend_contract_digest"].clone();
+    configs
+        .get_mut("orchestration")
+        .ok_or_else(|| CliError::InvalidLocalIdentity {
+            path: "local orchestration configuration".to_owned(),
+        })?
+        .1["sandbox"] = serde_json::json!({
+        "executor_worker_manifest_digest": sandbox_worker_manifest_digest,
+        "isolation_backend_contract_digest": sandbox_backend_contract_digest,
+        "callback_audience_identity_digest": local_digest("sandbox-callback-audience")?,
+        "resources": {
+            "cpu_millicores": 100,
+            "memory_mebibytes": 64,
+            "pids": 1,
+            "files": 1,
+            "io_bytes": 1048576,
+            "stdout_bytes": 1024,
+            "stderr_bytes": 1024,
+            "result_bytes": 4096,
+            "artifact_output_bytes": 0,
+            "network_connections": 0,
+            "network_request_bytes": 0,
+            "network_response_bytes": 0,
+            "startup_milliseconds": 10000,
+            "idle_milliseconds": 10000,
+            "wall_milliseconds": 10000,
+            "cleanup_milliseconds": 1000,
+            "wasm_fuel": 100000,
+            "wasm_memory_pages": 1024
+        }
+    });
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
         let digest = canonical_digest(&config).map_err(|_| CliError::InvalidLocalIdentity {
@@ -5691,6 +5732,22 @@ mod tests {
             artifact_data["scan_worker"]["ruleset_digest"]
                 .as_str()
                 .unwrap()
+        );
+        let orchestration: serde_json::Value = serde_json::from_slice(
+            &fs::read(configurations.join(RUNTIME_ORCHESTRATION_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        let sandbox_executor: serde_json::Value = serde_json::from_slice(
+            &fs::read(configurations.join(full_profile::SANDBOX_EXECUTOR_CONFIG_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            orchestration["sandbox"]["executor_worker_manifest_digest"],
+            canonical_digest(&sandbox_executor["worker_manifest"]).unwrap()
+        );
+        assert_eq!(
+            orchestration["sandbox"]["isolation_backend_contract_digest"],
+            sandbox_executor["backend_contract_digest"]
         );
         assert!(matches!(
             prepare_runtime_profile(

@@ -7,8 +7,9 @@
 use crate::{
     ControllerCapabilityAdmissionDecision, ControllerCapabilityAdmissionProvider,
     ControllerCapabilityAdmissionRequest, ControllerModelAdmissionDecision,
-    ControllerModelAdmissionProvider, ControllerModelAdmissionRequest, CoordinatorIdentityFactory,
-    DurablePlanDriverError, UuidCoordinatorIdentityFactory,
+    ControllerModelAdmissionProvider, ControllerModelAdmissionRequest,
+    ControllerSandboxCapabilityAdmission, CoordinatorIdentityFactory, DurablePlanDriverError,
+    UuidCoordinatorIdentityFactory,
 };
 use async_trait::async_trait;
 use insight_platform_artifacts::{
@@ -449,11 +450,18 @@ fn map_repository_error(
 #[derive(Clone)]
 pub struct PostgresControllerCapabilityAdmissionProvider {
     repository: PgRepository,
+    sandbox: Option<ControllerSandboxCapabilityAdmission>,
 }
 
 impl PostgresControllerCapabilityAdmissionProvider {
-    pub fn new(repository: PgRepository) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: PgRepository,
+        sandbox: Option<ControllerSandboxCapabilityAdmission>,
+    ) -> Self {
+        Self {
+            repository,
+            sandbox,
+        }
     }
 
     async fn load_facts(
@@ -618,6 +626,14 @@ impl ControllerCapabilityAdmissionProvider for PostgresControllerCapabilityAdmis
         let mcp_runtime = self
             .resolve_mcp_runtime(&request, &bindings, &deployment)
             .await?;
+        let sandbox = match deployment.backend {
+            CapabilityBackendBinding::Sandbox { .. } => Some(
+                self.sandbox
+                    .clone()
+                    .ok_or(DurablePlanDriverError::InvariantViolation)?,
+            ),
+            _ => None,
+        };
         let policies = build_allowed_policy_bundle(
             &request,
             bindings
@@ -629,6 +645,7 @@ impl ControllerCapabilityAdmissionProvider for PostgresControllerCapabilityAdmis
         Ok(ControllerCapabilityAdmissionDecision {
             policies,
             mcp_runtime,
+            sandbox,
         })
     }
 }
