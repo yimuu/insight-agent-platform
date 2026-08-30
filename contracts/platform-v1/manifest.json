@@ -1,12 +1,12 @@
 {
-  "contract_digest": "sha256:f0a1fa8fdcb913d16729732990b0d672a9c67c691e1c77469a951a48589c944b",
+  "contract_digest": "sha256:db31235582a2b53c1f577be5548a99022426b4cb2c2dfc7e88d8657730589734",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
-      "bytes": 86278,
+      "bytes": 86287,
       "media_type": "application/yaml",
       "path": "contracts/platform-v1/openapi.yaml",
-      "sha256": "28de8764aa4023749881bd340d29d781b629bde4c7b208a25a42d095deea27ff"
+      "sha256": "7ced080812091f49c483e983562cbe1b883324df0d1c6e0f5acc3a2c85d79bec"
     },
     {
       "bytes": 33564,
@@ -207,10 +207,10 @@
       "sha256": "7c45aabea2dbd1310188b674940c80ddedceccd402f45633aa0316d5f2f06a4d"
     },
     {
-      "bytes": 1964,
+      "bytes": 1947,
       "media_type": "application/json",
       "path": "contracts/platform-v1/examples/foundation-scalars.json",
-      "sha256": "12e5cefcbff84e47336a93b79fa92bcde0acc3dbaa5d685ce34095f594bc70c1"
+      "sha256": "0061d95f572a203d9d118d77c800c01a04ee8e3a6c34bb594d8deb9dfbdcdb7c"
     },
     {
       "bytes": 296,
@@ -226,5 +226,5 @@
     }
   ],
   "manifest_version": 1,
-  "status": "implementing_not_current"
+  "status": "current"
 }

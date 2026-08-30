@@ -38,11 +38,11 @@ pub const CONTRACT_ROOT: &str = "contracts/platform-v1";
 const PLATFORM_V1_OPENAPI: &str = r##"openapi: 3.1.0
 info:
   title: Insight Platform API
-  version: 1.0.0-implementing
+  version: 1.0.0
   description: >-
-    Target insight.platform/v1 contract. Operations remain implementing-not-current until
-    qualification and clean replacement are complete.
-x-insight-contract-status: implementing-not-current
+    Current insight.platform/v1 public contract. Production L4-L6 qualification remains a
+    separately reported deployment gate and does not change this repository contract status.
+x-insight-contract-status: current
 x-insight-trace-contract:
   request-header:
     name: traceparent
@@ -3681,7 +3681,7 @@ pub fn generated_root_manifest(repository_root: &Path) -> Result<Vec<u8>, std::i
         "contract_profile": "insight.platform/v1",
         "files": files,
         "manifest_version": 1,
-        "status": "implementing_not_current"
+        "status": "current"
     });
     Ok(pretty(&manifest))
 }

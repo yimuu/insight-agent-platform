@@ -265,8 +265,8 @@ def check_limits(errors):
 
 def check_foundation_surfaces(errors):
     openapi = (CONTRACT_ROOT / "openapi.yaml").read_text(encoding="utf-8")
-    if "x-insight-contract-status: implementing-not-current" not in openapi:
-        errors.append("OpenAPI must state that it is not current behavior")
+    if "x-insight-contract-status: current" not in openapi:
+        errors.append("OpenAPI must state that it is the current clean-cut behavior")
     if "  - url: /v1" not in openapi:
         errors.append("OpenAPI must use the clean-cut /v1 server base")
     if "/v2" in openapi:
@@ -813,8 +813,8 @@ def check_nominal_schemas(errors):
             errors.append(f"{path}: JSON Schema dialect is not 2020-12")
 
     examples = load(CONTRACT_ROOT / "examples" / "foundation-scalars.json")
-    if examples.get("status") != "implementing_not_current":
-        errors.append("foundation scalar examples must not claim current behavior")
+    if examples.get("status") != "current":
+        errors.append("foundation scalar examples must identify the current contract")
     if not RESOURCE_ID.fullmatch(examples.get("resource_id", "")):
         errors.append("foundation resource ID example is invalid")
     if not DIGEST.fullmatch(examples.get("digest", "")):
@@ -850,8 +850,8 @@ def check_contract_manifest(errors):
     manifest = load(CONTRACT_ROOT / "manifest.json")
     if manifest.get("contract_profile") != "insight.platform/v1":
         errors.append("contract manifest profile is invalid")
-    if manifest.get("status") != "implementing_not_current":
-        errors.append("contract manifest must not claim current behavior during implementation")
+    if manifest.get("status") != "current":
+        errors.append("contract manifest must claim current behavior after repository clean cut")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
         errors.append("contract manifest files must be a non-empty array")

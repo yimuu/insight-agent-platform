@@ -1,6 +1,6 @@
 {
   "profile": "insight.platform/v1",
-  "status": "implementing_not_current",
+  "status": "current",
   "resource_id": "agt_0198f1c3-8f49-7c3e-b1f3-773c28367b7e",
   "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "timestamp": "2026-08-07T12:34:56.123456Z",

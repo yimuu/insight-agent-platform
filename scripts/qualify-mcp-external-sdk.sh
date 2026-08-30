@@ -43,7 +43,7 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   INSIGHT_MCP_EXTERNAL_SDK_QUALIFY=1 \
   INSIGHT_MCP_NODE="${node_bin}" \
   INSIGHT_MCP_GO_FIXTURE_BIN="${go_fixture}" \
-    cargo test --test mcp_external_sdk_interop -- --nocapture
+    cargo test -p insight-agent-platform --test mcp_external_sdk_interop -- --nocapture
 )
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
