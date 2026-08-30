@@ -4,6 +4,8 @@
 //! read-only; exact-slot claim, heartbeat, quota settlement, and terminal commit use the shared
 //! durable contracts.
 
+pub mod dataset;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_context::{
     CitationLocator, ClaimContextJobs, CommitContextOutcome, ContextBackendOutcome,

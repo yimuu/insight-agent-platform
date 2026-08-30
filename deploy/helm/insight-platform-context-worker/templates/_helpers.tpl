@@ -2,6 +2,16 @@
 insight-platform-context-worker
 {{- end }}
 
+{{- define "insight-platform-context-worker.datasetName" -}}
+insight-platform-context-dataset-worker
+{{- end }}
+
+{{- define "insight-platform-context-worker.datasetLabels" -}}
+app.kubernetes.io/name: {{ include "insight-platform-context-worker.datasetName" . }}
+app.kubernetes.io/component: context-dataset-worker
+app.kubernetes.io/part-of: insight-platform
+{{- end }}
+
 {{- define "insight-platform-context-worker.labels" -}}
 app.kubernetes.io/name: {{ include "insight-platform-context-worker.name" . }}
 app.kubernetes.io/component: context-worker

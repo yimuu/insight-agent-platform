@@ -1627,6 +1627,15 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
     )?;
     write_local_leaf_certificate(
         &tls_directory,
+        full_profile::CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE,
+        full_profile::CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(full_profile::CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
+    write_local_leaf_certificate(
+        &tls_directory,
         full_profile::MCP_HOST_CERTIFICATE_FILE,
         full_profile::MCP_HOST_PRIVATE_KEY_FILE,
         &["localhost"],
@@ -2988,6 +2997,8 @@ fn ensure_runtime_binaries(
             "insight-platform-context-worker",
             "--bin",
             "platform-context-worker",
+            "--bin",
+            "platform-context-dataset-worker",
             "--bin",
             "platform-remote-context-worker",
             "--bin",
@@ -5342,6 +5353,7 @@ mod tests {
             full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
             full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
             full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
+            full_profile::CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE,
             full_profile::MCP_HOST_CERTIFICATE_FILE,
             full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
             full_profile::MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE,
@@ -5377,6 +5389,7 @@ mod tests {
                 full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
                 full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
+                full_profile::CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE,
                 full_profile::MCP_HOST_PRIVATE_KEY_FILE,
                 full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
                 full_profile::MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE,
@@ -5567,7 +5580,7 @@ mod tests {
             "sha256:test-profile-source",
         )
         .unwrap();
-        assert_eq!(digests.len(), 25);
+        assert_eq!(digests.len(), 26);
         let runtime = directory
             .path()
             .join(PROJECT_DIRECTORY)
@@ -5590,6 +5603,7 @@ mod tests {
                 RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
             ),
             ("context-native", full_profile::CONTEXT_NATIVE_CONFIG_FILE),
+            ("context-dataset", full_profile::CONTEXT_DATASET_CONFIG_FILE),
             (
                 "artifact-maintenance",
                 full_profile::ARTIFACT_MAINTENANCE_CONFIG_FILE,

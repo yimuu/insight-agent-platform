@@ -28,6 +28,7 @@ EXPECTED_COUNTS = {
   "capability_remote_worker" => 1,
   "registry_validation_worker" => 1,
   "context_worker" => 3,
+  "context_dataset_worker" => 1,
   "mcp_host" => 4,
   "sandbox_controller" => 1,
   "sandbox_wasi_executor" => 1,

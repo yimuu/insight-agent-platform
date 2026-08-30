@@ -61,7 +61,7 @@ if workflow.count("cosign sign-blob") < 2:
 
 production_bins = (
     "insight-agent-platform", "platform-callback-api", "platform-gateway",
-    "platform-model-worker", "platform-context-worker", "platform-remote-context-worker",
+    "platform-model-worker", "platform-context-worker", "platform-context-dataset-worker", "platform-remote-context-worker",
     "platform-subscription-context-worker", "platform-orchestration-worker",
     "platform-registry-validation-worker",
     "platform-capability-native-worker", "platform-capability-remote-worker",

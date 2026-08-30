@@ -2971,20 +2971,37 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     ));
     let worker_id = id(ResourceKind::WorkerProcessGeneration, 0x730);
     let lease_token_digest = named_digest("dataset-build-lease");
+    let wrong_source_claim = repository
+        .claim_context_dataset_build_jobs_for_sources(
+            ClaimJobs {
+                work_class: WorkClass::Context.to_string(),
+                worker_id: worker_id.clone(),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![named_digest("dataset-wrong-source-lease")],
+            },
+            &[named_digest("dataset-uninstalled-context-deployment")],
+        )
+        .await
+        .unwrap();
+    assert!(wrong_source_claim.is_empty());
     let claimed = repository
-        .claim_context_dataset_build_jobs(ClaimJobs {
-            work_class: WorkClass::Context.to_string(),
-            worker_id: worker_id.clone(),
-            limit: 1,
-            lease_milliseconds: 30_000,
-            lease_token_digests: vec![lease_token_digest.clone()],
-        })
+        .claim_context_dataset_build_jobs_for_sources(
+            ClaimJobs {
+                work_class: WorkClass::Context.to_string(),
+                worker_id: worker_id.clone(),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![lease_token_digest.clone()],
+            },
+            std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+        )
         .await
         .unwrap()
         .pop()
         .unwrap();
     assert_eq!(claimed.job_id, original_job.job_id);
-    let started = repository
+    let abandoned_started = repository
         .start_context_dataset_build_job(RepositoryJobFence {
             tenant_id: fixture.tenant_id.to_string(),
             job_id: claimed.job_id.clone(),
@@ -2995,13 +3012,70 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         })
         .await
         .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET heartbeat_at = clock_timestamp() - interval '2 seconds', lease_expires_at = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(&claimed.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repository
+            .recover_expired_context_dataset_build_jobs_for_sources(
+                1,
+                1,
+                std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET retry_at = clock_timestamp() - interval '1 millisecond' WHERE tenant_id = $1 AND job_id = $2 AND state = 'retry_scheduled'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(&claimed.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let replacement_worker = id(ResourceKind::WorkerProcessGeneration, 0x731);
+    let replacement_token = named_digest("dataset-build-replacement-lease");
+    let replacement_claim = repository
+        .claim_context_dataset_build_jobs_for_sources(
+            ClaimJobs {
+                work_class: WorkClass::Context.to_string(),
+                worker_id: replacement_worker.clone(),
+                limit: 1,
+                lease_milliseconds: 30_000,
+                lease_token_digests: vec![replacement_token.clone()],
+            },
+            std::slice::from_ref(&fixture.context_deployment.deployment_digest),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let started = repository
+        .start_context_dataset_build_job(RepositoryJobFence {
+            tenant_id: fixture.tenant_id.to_string(),
+            job_id: replacement_claim.job_id,
+            worker_id: replacement_worker.clone(),
+            lease_epoch: replacement_claim.lease_epoch,
+            expected_job_version: replacement_claim.version,
+            lease_token_digest: replacement_token.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(abandoned_started.attempt_no, 1);
+    assert_eq!(started.attempt_no, 2);
     let build_payload: ContextDatasetBuildJobPayload =
         serde_json::from_value(started.payload.value.clone()).unwrap();
     let producer_fence = JobFence {
         expected_version: u64::try_from(started.version).unwrap(),
-        worker_process_generation_id: worker_id,
+        worker_process_generation_id: replacement_worker,
         lease_generation: u64::try_from(started.lease_epoch).unwrap(),
-        token_digest: lease_token_digest,
+        token_digest: replacement_token,
     };
     let index_request = stage_context_dataset_artifact(
         &pool,

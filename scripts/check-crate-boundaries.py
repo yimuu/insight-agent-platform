@@ -93,10 +93,13 @@ ALLOWED_INTERNAL = {
     "capability_worker": {"capability_adapters", "contracts", "egress_rpc", "invocations_domain", "jobs_domain", "mcp_host", "mcp_rpc", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
     "callback_api": {"platform_api", "contracts", "egress_rpc", "mcp_host", "observability", "platform_postgres"},
     "contracts": set(),
-    "context_domain": {"contracts", "invocations_domain", "jobs_domain"},
-    # Native and Remote Context binaries share durable composition; only the Remote binary imports
-    # the typed Egress RPC client, while the Native binary remains separately deployment-checked.
-    "context_worker": {"context_domain", "contracts", "egress_rpc", "jobs_domain", "mcp_rpc", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
+    # Context generation/query contracts carry exact ArtifactRef and bounded staging snapshots;
+    # Artifact state and storage authority remain owned by the Artifact plane.
+    "context_domain": {"artifacts_domain", "contracts", "invocations_domain", "jobs_domain"},
+    # Native, Remote, Subscription and Dataset binaries share durable composition. Only Remote
+    # imports Egress RPC; only the independent Dataset binary imports Artifact Data Worker RPC.
+    # Their deployment checkers preserve the per-binary client boundaries.
+    "context_worker": {"artifact_rpc", "artifacts_domain", "context_domain", "contracts", "egress_rpc", "jobs_domain", "mcp_rpc", "observability", "platform_postgres", "platform_worker", "rpc_trace"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
     "public_gateway": {"context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "orchestrator_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},

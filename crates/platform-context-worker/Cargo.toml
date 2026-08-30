@@ -21,9 +21,16 @@ path = "src/remote_main.rs"
 name = "platform-subscription-context-worker"
 path = "src/subscription_main.rs"
 
+[[bin]]
+name = "platform-context-dataset-worker"
+path = "src/dataset_main.rs"
+
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+insight-platform-artifact-rpc.workspace = true
+insight-platform-artifacts.workspace = true
 insight-platform-context.workspace = true
 insight-platform-contracts.workspace = true
 insight-platform-egress-rpc.workspace = true

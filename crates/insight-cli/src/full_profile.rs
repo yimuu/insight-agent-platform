@@ -15,12 +15,12 @@ use insight_platform_contracts::{
     WASI_ABI_V1_RUNTIME_VERSION,
 };
 pub(crate) use insight_platform_contracts::{
-    CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
-    EGRESS_BROKER_WORKLOAD_IDENTITY, MCP_CALLBACK_WORKLOAD_IDENTITY,
-    MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY, MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
-    MCP_HOST_WORKLOAD_IDENTITY, MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
-    MODEL_WORKER_WORKLOAD_IDENTITY, SANDBOX_CONTROLLER_WORKLOAD_IDENTITY,
-    WASI_EXECUTOR_WORKLOAD_IDENTITY,
+    CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
+    CONTEXT_WORKER_WORKLOAD_IDENTITY, EGRESS_BROKER_WORKLOAD_IDENTITY,
+    MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
+    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
+    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
+    SANDBOX_CONTROLLER_WORKLOAD_IDENTITY, WASI_EXECUTOR_WORKLOAD_IDENTITY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,6 +30,7 @@ use std::{
 };
 
 pub(crate) const CONTEXT_NATIVE_CONFIG_FILE: &str = "context-native.json";
+pub(crate) const CONTEXT_DATASET_CONFIG_FILE: &str = "context-dataset-worker.json";
 pub(crate) const ARTIFACT_MAINTENANCE_CONFIG_FILE: &str = "artifact-maintenance.json";
 pub(crate) const SECURITY_AUTHORITY_CONFIG_FILE: &str = "security-authority.json";
 pub(crate) const EGRESS_BROKER_CONFIG_FILE: &str = "egress-broker.json";
@@ -60,6 +61,8 @@ pub(crate) const MODEL_WORKER_CLIENT_CERTIFICATE_FILE: &str = "model-worker-clie
 pub(crate) const MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "model-worker-client-key.pem";
 pub(crate) const CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE: &str = "context-worker-client.pem";
 pub(crate) const CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE: &str = "context-worker-client-key.pem";
+pub(crate) const CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE: &str = "context-dataset-client.pem";
+pub(crate) const CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE: &str = "context-dataset-client-key.pem";
 pub(crate) const MCP_HOST_CERTIFICATE_FILE: &str = "mcp-host.pem";
 pub(crate) const MCP_HOST_PRIVATE_KEY_FILE: &str = "mcp-host-key.pem";
 pub(crate) const MCP_RESOURCE_HOST_CERTIFICATE_FILE: &str = "mcp-resource-host.pem";
@@ -98,7 +101,7 @@ pub(crate) const SANDBOX_STATE_DIRECTORY: &str = "sandbox-attestor";
 pub(crate) const SANDBOX_REGISTRATION_SOCKET_FILE: &str = "registration.sock";
 pub(crate) const SANDBOX_REGISTRY_FILE: &str = "registrations.json";
 pub(crate) const SANDBOX_LOCAL_INSTANCE_UID_FILE: &str = "sandbox-local-instance-uid";
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 17] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 18] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
@@ -116,6 +119,7 @@ pub(crate) const INITIAL_BINARY_NAMES: [&str; 17] = [
     "platform-sandbox-attestor",
     "platform-sandbox-controller",
     "platform-sandbox-executor",
+    "platform-context-dataset-worker",
 ];
 
 pub(crate) struct ProcessLaunch {
@@ -205,6 +209,8 @@ pub(crate) struct PortBindings {
     pub(crate) sandbox_controller_observability: u16,
     #[serde(default = "default_sandbox_executor_observability_port")]
     pub(crate) sandbox_executor_observability: u16,
+    #[serde(default = "default_context_dataset_observability_port")]
+    pub(crate) context_dataset_observability: u16,
 }
 
 impl PortBindings {
@@ -233,6 +239,7 @@ impl PortBindings {
             sandbox_controller: next()?,
             sandbox_controller_observability: next()?,
             sandbox_executor_observability: next()?,
+            context_dataset_observability: next()?,
         })
     }
 
@@ -261,6 +268,7 @@ impl PortBindings {
             sandbox_controller: default_sandbox_controller_port(),
             sandbox_controller_observability: default_sandbox_controller_observability_port(),
             sandbox_executor_observability: default_sandbox_executor_observability_port(),
+            context_dataset_observability: default_context_dataset_observability_port(),
         }
     }
 }
@@ -341,6 +349,10 @@ const fn default_sandbox_executor_observability_port() -> u16 {
     19_117
 }
 
+const fn default_context_dataset_observability_port() -> u16 {
+    19_118
+}
+
 impl Default for PortBindings {
     fn default() -> Self {
         Self::legacy_defaults()
@@ -410,6 +422,13 @@ pub(crate) fn initial_configs(
     });
     let capability_adapter_digest = canonical_digest(&capability_closure)
         .expect("the closed local remote Capability codec closure is canonical JSON");
+    let dataset_content = json!("local deterministic context item");
+    let dataset_index = json!({
+        "items": [{"content": dataset_content.clone(), "ordinal": 0}],
+        "schema_version": 1,
+    });
+    let dataset_source_manifest_digest = canonical_digest(&dataset_index)
+        .expect("the closed local Context Dataset source is canonical JSON");
     BTreeMap::from([
         (
             "context-native".to_owned(),
@@ -1004,6 +1023,42 @@ pub(crate) fn initial_configs(
                     "control_request_timeout_milliseconds": 5000,
                     "connect_timeout_milliseconds": 5000,
                     "request_timeout_milliseconds": 30000,
+                }),
+            ),
+        ),
+        (
+            "context-dataset".to_owned(),
+            (
+                CONTEXT_DATASET_CONFIG_FILE,
+                json!({
+                    "schema_version": 1,
+                    "observability_listen_address": loopback_address(ports.context_dataset_observability),
+                    "database_max_connections": 4,
+                    "database_acquire_timeout_milliseconds": 5000,
+                    "claim_batch_size": 4,
+                    "recovery_batch_size": 4,
+                    "maximum_concurrency": 4,
+                    "lease_milliseconds": 30000,
+                    "scan_interval_milliseconds": 500,
+                    "failure_backoff_milliseconds": 250,
+                    "heartbeat_interval_milliseconds": 5000,
+                    "retry_backoff_milliseconds": 1000,
+                    "drain_grace_milliseconds": 30000,
+                    "sources": [{
+                        "schema_version": 1,
+                        "context_deployment_digest": digests.context_contract,
+                        "source_manifest_digest": dataset_source_manifest_digest,
+                        "items": [dataset_content],
+                    }],
+                    "artifact_data_worker": {
+                        "endpoint": format!("https://localhost:{}/", egress.artifact_data_worker_port),
+                        "tls_server_name": "localhost",
+                        "connect_timeout_milliseconds": 5000,
+                        "request_timeout_milliseconds": 30000,
+                        "maximum_read_request_bytes": 1048576,
+                        "maximum_chunk_bytes": 262144,
+                        "maximum_write_request_bytes": 67108864,
+                    },
                 }),
             ),
         ),
@@ -2024,6 +2079,54 @@ pub(crate) fn initial_process_launches(
             ],
             extra_environment: Vec::new(),
         },
+        ProcessLaunch {
+            role: "context-dataset",
+            binary: binary(INITIAL_BINARY_NAMES[17]),
+            ready_address: loopback_address(ports.context_dataset_observability),
+            environment: vec![
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_CONFIG",
+                    paths
+                        .configuration
+                        .join(CONTEXT_DATASET_CONFIG_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_CONFIG_DIGEST",
+                    config_digests["context-dataset"].clone(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_DATABASE_URL",
+                    database_url.to_owned(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_ARTIFACT_CA_PATH",
+                    paths
+                        .tls
+                        .join(paths.ca_certificate_file)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_CERT_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE)
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_KEY_PATH",
+                    paths
+                        .tls
+                        .join(CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE)
+                        .display()
+                        .to_string(),
+                ),
+            ],
+            extra_environment: Vec::new(),
+        },
     ]
 }
 
@@ -2065,6 +2168,7 @@ mod tests {
             sandbox_controller: 31_021,
             sandbox_controller_observability: 31_022,
             sandbox_executor_observability: 31_023,
+            context_dataset_observability: 31_024,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -2164,6 +2268,14 @@ mod tests {
             configs["sandbox-executor"].1["backend"]["runtime_version"],
             WASI_ABI_V1_RUNTIME_VERSION
         );
+        assert_eq!(
+            configs["context-dataset"].1["observability_listen_address"],
+            "127.0.0.1:31024"
+        );
+        assert_eq!(
+            configs["context-dataset"].1["sources"][0]["context_deployment_digest"],
+            contract
+        );
     }
 
     #[test]
@@ -2192,6 +2304,7 @@ mod tests {
             sandbox_controller: 31_021,
             sandbox_controller_observability: 31_022,
             sandbox_executor_observability: 31_023,
+            context_dataset_observability: 31_024,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -2211,6 +2324,7 @@ mod tests {
             ("sandbox-attestor".to_owned(), digest('9')),
             ("sandbox-controller".to_owned(), digest('a')),
             ("sandbox-executor".to_owned(), digest('b')),
+            ("context-dataset".to_owned(), digest('c')),
         ]);
         let launches = initial_process_launches(
             ProcessPaths {
@@ -2248,7 +2362,8 @@ mod tests {
                 "callback-api",
                 "sandbox-attestor",
                 "sandbox-controller",
-                "sandbox-executor"
+                "sandbox-executor",
+                "context-dataset"
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
@@ -2328,6 +2443,10 @@ mod tests {
             .iter()
             .any(|(name, value)| *name == "PLATFORM_SANDBOX_NATS_CERT_PATH"
                 && value == "/project/runtime/tls/sandbox-executor-client.pem"));
+        assert_eq!(launches[17].ready_address, "127.0.0.1:31024");
+        assert!(launches[17].environment.iter().any(|(name, value)| *name
+            == "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_CERT_PATH"
+            && value == "/project/runtime/tls/context-dataset-client.pem"));
     }
 
     #[test]
@@ -2358,5 +2477,6 @@ mod tests {
         assert_eq!(ports.sandbox_controller, 19_115);
         assert_eq!(ports.sandbox_controller_observability, 19_116);
         assert_eq!(ports.sandbox_executor_observability, 19_117);
+        assert_eq!(ports.context_dataset_observability, 19_118);
     }
 }

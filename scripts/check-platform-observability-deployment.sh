@@ -140,6 +140,7 @@ dependency_owner_contracts = {
   "crates/platform-capability-worker/src/remote_main.rs" => ["install_capability_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "WorkClass::CapabilityRemote"],
   "crates/platform-context-worker/src/main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "JobKind::ContextQueryNative"],
   "crates/platform-context-worker/src/remote_main.rs" => ["install_context_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "JobKind::ContextQueryRemote"],
+  "crates/platform-context-worker/src/dataset_main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "JobKind::ContextDatasetBuild"],
   "crates/platform-context-worker/src/subscription_main.rs" => ["install_context_dependency_metrics(false)", "run_postgres_health_sampler", "with_durable_job_queue", "JobKind::ContextSubscriptionRefresh"],
   "crates/platform-mcp-service/src/main.rs" => ["install_mcp_dependency_metrics(false)", "new_with_observer", "with_dependency_observations"],
   "crates/platform-mcp-service/src/resource_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler"],

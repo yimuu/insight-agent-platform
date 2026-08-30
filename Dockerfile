@@ -23,6 +23,7 @@ RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin platform-gateway \
     --bin platform-model-worker \
     --bin platform-context-worker \
+    --bin platform-context-dataset-worker \
     --bin platform-remote-context-worker \
     --bin platform-subscription-context-worker \
     --bin platform-orchestration-worker \
@@ -57,6 +58,7 @@ RUN cargo build --locked --release --workspace \
     --bin platform-gateway \
     --bin platform-model-worker \
     --bin platform-context-worker \
+    --bin platform-context-dataset-worker \
     --bin platform-remote-context-worker \
     --bin platform-subscription-context-worker \
     --bin platform-orchestration-worker \
@@ -95,6 +97,7 @@ COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/b
 COPY --from=builder /workspace/target/release/platform-gateway /usr/local/bin/platform-gateway
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker
 COPY --from=builder /workspace/target/release/platform-context-worker /usr/local/bin/platform-context-worker
+COPY --from=builder /workspace/target/release/platform-context-dataset-worker /usr/local/bin/platform-context-dataset-worker
 COPY --from=builder /workspace/target/release/platform-remote-context-worker /usr/local/bin/platform-remote-context-worker
 COPY --from=builder /workspace/target/release/platform-subscription-context-worker /usr/local/bin/platform-subscription-context-worker
 COPY --from=builder /workspace/target/release/platform-orchestration-worker /usr/local/bin/platform-orchestration-worker

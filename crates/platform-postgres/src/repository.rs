@@ -5144,7 +5144,7 @@ impl PgRepository {
 
     pub async fn claim_jobs(&self, command: ClaimJobs) -> Result<Vec<JobRecord>, RepositoryError> {
         command.validate()?;
-        self.claim_jobs_filtered(command, None, None).await
+        self.claim_jobs_filtered(command, None, None, None).await
     }
 
     /// Claims RegistryValidation work only for tenants where the configured validator is an
@@ -5169,7 +5169,7 @@ impl PgRepository {
             command.lease_milliseconds,
             &command.lease_token_digests,
         )?;
-        self.claim_jobs_filtered(command, None, Some(validator_principal_id))
+        self.claim_jobs_filtered(command, None, Some(validator_principal_id), None)
             .await
     }
 
@@ -5192,6 +5192,7 @@ impl PgRepository {
             },
             Some(job_kinds),
             None,
+            None,
         )
         .await
     }
@@ -5208,7 +5209,7 @@ impl PgRepository {
                 "MCP discovery claim requires the MCP work class".to_owned(),
             ));
         }
-        self.claim_jobs_filtered(command, Some(&["mcp_discovery"]), None)
+        self.claim_jobs_filtered(command, Some(&["mcp_discovery"]), None, None)
             .await
     }
 
@@ -5224,7 +5225,7 @@ impl PgRepository {
                 "MCP subscription claim requires the MCP work class".to_owned(),
             ));
         }
-        self.claim_jobs_filtered(command, Some(&["mcp_subscription"]), None)
+        self.claim_jobs_filtered(command, Some(&["mcp_subscription"]), None, None)
             .await
     }
 
@@ -5242,8 +5243,42 @@ impl PgRepository {
                 "Context Dataset build claim requires the Context work class".to_owned(),
             ));
         }
-        self.claim_jobs_filtered(command, Some(&["context_dataset_build"]), None)
+        self.claim_jobs_filtered(command, Some(&["context_dataset_build"]), None, None)
             .await
+    }
+
+    pub async fn claim_context_dataset_build_jobs_for_sources(
+        &self,
+        command: ClaimJobs,
+        context_deployment_digests: &[Sha256Digest],
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        command.validate()?;
+        if command.work_class != WorkClass::Context.as_str()
+            || context_deployment_digests.is_empty()
+            || context_deployment_digests.len() > 64
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Context Dataset source claim closure is invalid".to_owned(),
+            ));
+        }
+        let mut unique = context_deployment_digests
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        unique.sort();
+        unique.dedup();
+        if unique.len() != context_deployment_digests.len() {
+            return Err(RepositoryError::InvalidInput(
+                "Context Dataset source claim closure contains duplicates".to_owned(),
+            ));
+        }
+        self.claim_jobs_filtered(
+            command,
+            Some(&["context_dataset_build"]),
+            None,
+            Some(unique),
+        )
+        .await
     }
 
     async fn claim_jobs_filtered(
@@ -5251,6 +5286,7 @@ impl PgRepository {
         command: ClaimJobs,
         job_kinds: Option<&'static [&'static str]>,
         authorized_principal_id: Option<&ResourceId>,
+        context_deployment_digests: Option<Vec<String>>,
     ) -> Result<Vec<JobRecord>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -5278,6 +5314,10 @@ impl PgRepository {
               AND deadline > $3
               AND ($4::text[] IS NULL OR job_kind = ANY($4::text[]))
               AND (
+                $6::text[] IS NULL
+                OR payload #>> '{context_deployment,deployment_digest}' = ANY($6::text[])
+              )
+              AND (
                 $5::text IS NULL OR EXISTS (
                     SELECT 1
                     FROM insight_platform.tenant_principals AS binding
@@ -5302,6 +5342,7 @@ impl PgRepository {
         .bind(database_now)
         .bind(job_kinds.map(|kinds| kinds.to_vec()))
         .bind(authorized_principal_id.map(ToString::to_string))
+        .bind(context_deployment_digests)
         .fetch_all(&mut *transaction)
         .await?;
         let mut claimed = Vec::with_capacity(candidates.len());
@@ -5317,7 +5358,9 @@ impl PgRepository {
                 hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
                     .expect("positive Job lease hard maximum"),
             };
-            let next = if current.started_at.is_some() {
+            let is_continuation =
+                current.state == JobState::Ready.as_str() && current.started_at.is_some();
+            let next = if is_continuation {
                 decide_job_claim_continuation(
                     &current_projection,
                     database_now,
@@ -5343,6 +5386,10 @@ impl PgRepository {
                 SET state = $4, version = $5, attempt_no = $6, lease_epoch = $7,
                     worker_id = $8, lease_token_digest = $9,
                     lease_expires_at = $10, heartbeat_at = $11, retry_at = NULL,
+                    started_at = CASE
+                        WHEN state = 'retry_scheduled' THEN NULL
+                        ELSE started_at
+                    END,
                     updated_at = $11
                 WHERE tenant_id = $1 AND job_id = $2 AND version = $3
                   AND state IN ('ready', 'retry_scheduled') AND worker_id IS NULL

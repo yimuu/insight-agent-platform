@@ -40,6 +40,33 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 16
   targetCPUUtilizationPercentage: 70
+datasetPool:
+  enabled: true
+  replicas: 2
+  observability: {port: 9290}
+  config:
+    existingConfigMap: insight-platform-context-dataset-worker-candidate
+    fileKey: context-dataset-worker.json
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  database:
+    existingSecret: insight-platform-context-dataset-worker-database
+    urlKey: database-url
+  artifactDataWorker:
+    namespace: platform-artifact
+    podSelector: {app.kubernetes.io/component: artifact-data-worker}
+    port: 9443
+  artifactTls:
+    existingSecret: insight-platform-context-dataset-worker-artifact-client-tls
+    keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
+  resources:
+    requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
+  podDisruptionBudget: {enabled: true, minAvailable: 1}
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 16
+    targetCPUUtilizationPercentage: 70
 subscriptionPool:
   enabled: true
   replicas: 2

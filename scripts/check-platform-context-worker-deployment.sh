@@ -16,6 +16,7 @@ dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 source = (root / "crates/platform-context-worker/src/main.rs").read_text(encoding="utf-8")
 remote_source = (root / "crates/platform-context-worker/src/remote_main.rs").read_text(encoding="utf-8")
 subscription_source = (root / "crates/platform-context-worker/src/subscription_main.rs").read_text(encoding="utf-8")
+dataset_source = (root / "crates/platform-context-worker/src/dataset_main.rs").read_text(encoding="utf-8")
 failures = []
 
 required = [
@@ -55,10 +56,24 @@ for token in [
 for token in ["SubscriptionContextWorkerDriver", "McpResourceRefreshGrpcClient"]:
     if token not in subscription_source:
         failures.append(f"subscription Context Worker composition is missing {token}")
+for token in [
+    "/usr/local/bin/platform-context-dataset-worker",
+    "PLATFORM_CONTEXT_DATASET_WORKER_CONFIG_DIGEST",
+    "PLATFORM_CONTEXT_DATASET_WORKER_DATABASE_URL",
+    "PLATFORM_CONTEXT_DATASET_WORKER_ARTIFACT_CA_PATH",
+    "app.kubernetes.io/component: context-dataset-worker",
+    "app.kubernetes.io/component: artifact-data-worker",
+]:
+    if token not in rendered and token not in dockerfile:
+        failures.append(f"missing Dataset Builder deployment invariant: {token}")
+for token in ["ContextDatasetBuilderDriver", "ArtifactDataWorkerGrpcClient"]:
+    if token not in dataset_source:
+        failures.append(f"Dataset Builder composition is missing {token}")
 for role_source, kind in (
     (source, "JobKind::ContextQueryNative"),
     (remote_source, "JobKind::ContextQueryRemote"),
     (subscription_source, "JobKind::ContextSubscriptionRefresh"),
+    (dataset_source, "JobKind::ContextDatasetBuild"),
 ):
     for token in ("with_durable_job_queue", "run_context_queue_sampler", kind):
         if token not in role_source:
