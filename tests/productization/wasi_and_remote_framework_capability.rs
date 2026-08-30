@@ -197,7 +197,7 @@ fn policy_closure() -> SandboxExecutionPolicyClosure {
 }
 
 fn success_module() -> Vec<u8> {
-    let output = r#"{"schema_version":1,"value":{"answer":42}}"#;
+    let output = r#"{"schema_version":1,"value":{"answer":"42"}}"#;
     let packed = (128_u64 << 32) | u64::try_from(output.len()).unwrap();
     wat::parse_str(format!(
         r#"(module
@@ -450,7 +450,7 @@ impl WasiValueValidator for ExactValueValidator {
     ) -> Result<Sha256Digest, WasiValueValidationError> {
         let valid = match request.direction {
             WasiValueDirection::Input => request.value == json!({"question": "life"}),
-            WasiValueDirection::Output => request.value == json!({"answer": 42}),
+            WasiValueDirection::Output => request.value == json!({"answer": "42"}),
         };
         valid
             .then(|| digest("wasi-value-validation"))
@@ -566,7 +566,7 @@ fn qualify_restricted_wasi() {
     assert_eq!(
         output.value,
         ValueRef::Inline {
-            value: json!({"answer": 42})
+            value: json!({"answer": "42"})
         }
     );
     assert!(output.usage.wasm_fuel_consumed.is_some_and(|fuel| fuel > 0));
@@ -958,24 +958,7 @@ fn publish_public_wasi_agent(
     });
 
     let input_schema = native_and_remote_capability::value_schema("message");
-    let output_schema = json!({
-        "schema_version": 1,
-        "profile": "insight.closed-json-schema/1",
-        "canonical_digest": canonical_digest(&json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"answer": {"type": "integer", "minimum": 0, "maximum": 100}},
-            "required": ["answer"],
-            "additionalProperties": false
-        })),
-        "schema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"answer": {"type": "integer", "minimum": 0, "maximum": 100}},
-            "required": ["answer"],
-            "additionalProperties": false
-        }
-    });
+    let output_schema = native_and_remote_capability::value_schema("answer");
     let backend_contract = json!({
         "kind": "sandbox",
         "contract": {
@@ -1381,7 +1364,7 @@ pub(super) fn run(
         ],
     );
     assert_eq!(wasi_result["schema_digest"], wasi_output_schema_digest);
-    assert_eq!(wasi_result["value"]["value"]["answer"], 42);
+    assert_eq!(wasi_result["value"]["value"]["answer"], "42");
 
     let selection =
         json!({"schema_version": 1, "mode": "only_candidate", "route_schema_digest": null});
