@@ -266,7 +266,7 @@ jobs:
       - name: Test CLI and compile Productization journeys
         run: |
           cargo test --locked -p insight-cli
-          cargo test --locked --test productization --no-run
+          cargo test --locked -p insight-agent-platform --test productization --no-run
 
   console:
     name: Affected Console
