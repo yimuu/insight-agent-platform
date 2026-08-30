@@ -53,13 +53,13 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn("--profile must be base or full", result.stderr)
         self.assertNotIn("Compiling", result.stderr)
 
-    def test_full_profile_cannot_emit_base_scenario_reports(self) -> None:
-        result = self.run_runner(
-            "--profile", "full", "--report-directory", "/tmp/productization-reports"
+    def test_full_profile_can_emit_full_scenario_reports(self) -> None:
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertNotIn("describes base-profile scenarios only", source)
+        self.assertIn(
+            '"PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY=$report_directory"', source
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("describes base-profile scenarios only", result.stderr)
-        self.assertNotIn("Compiling", result.stderr)
+        self.assertIn('"PLATFORM_PRODUCTIZATION_PROFILE=$profile"', source)
 
 
 if __name__ == "__main__":

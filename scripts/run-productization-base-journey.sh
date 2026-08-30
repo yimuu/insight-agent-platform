@@ -87,10 +87,6 @@ if [[ "$profile" != "base" && "$profile" != "full" ]]; then
   echo "--profile must be base or full" >&2
   exit 2
 fi
-if [[ "$profile" != "base" && -n "$report_directory" ]]; then
-  echo "--report-directory currently describes base-profile scenarios only" >&2
-  exit 2
-fi
 if [[ -n "$project" && -e "$project" ]]; then
   echo "--project must name a path that does not already exist: $project" >&2
   exit 2

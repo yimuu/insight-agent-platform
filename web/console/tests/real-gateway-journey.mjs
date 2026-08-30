@@ -133,6 +133,7 @@ async function main() {
   const taskId = required('INSIGHT_CONSOLE_TASK_ID')
   const deterministicRunId = process.env.INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID
   const timerSignalRunId = process.env.INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID
+  const artifactId = process.env.INSIGHT_CONSOLE_ARTIFACT_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const browser = [
@@ -219,6 +220,16 @@ async function main() {
         'exact Timer/Signal Run authority and Inline result',
       )
     }
+    if (artifactId) {
+      await evaluate(client, clickText('Artifacts'))
+      await evaluate(client, setInput('input[placeholder="art_…"]', artifactId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await waitFor(
+        client,
+        `document.body.innerText.includes(${jsonLiteral(artifactId)}) && document.body.innerText.toLowerCase().includes('ready') && document.body.innerText.includes('Controlled download')`,
+        'exact Ready Artifact authority and controlled-download action',
+      )
+    }
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
@@ -268,10 +279,12 @@ async function main() {
       task_id: taskId,
       deterministic_run_id: deterministicRunId,
       timer_signal_run_id: timerSignalRunId,
+      artifact_id: artifactId,
       checks: [
         'gateway_ready',
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
         ...(timerSignalRunId ? ['timer_signal_run_read'] : []),
+        ...(artifactId ? ['artifact_ready_read'] : []),
         'sse_task_discovery',
         'task_mutation',
         'terminal_run',

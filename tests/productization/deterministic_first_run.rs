@@ -17,6 +17,8 @@ use tempfile::TempDir;
 
 #[path = "approval_task_resume.rs"]
 mod approval_task_resume;
+#[path = "artifact_lifecycle_and_rejection.rs"]
+mod artifact_lifecycle_and_rejection;
 #[path = "timer_signal_restart_recovery.rs"]
 mod timer_signal_restart_recovery;
 
@@ -895,9 +897,19 @@ fn public_cli_deterministic_first_run() {
         fixture.path(),
         &schema_digest,
         &agent_manifest,
-        run_id,
-        &timer_signal_evidence.run_id,
+        (run_id, &timer_signal_evidence.run_id, plan_artifact_id),
     );
+    let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
+        .then(|| {
+            artifact_lifecycle_and_rejection::run(
+                insight,
+                project,
+                fixture.path(),
+                &plan_upload,
+                &plan,
+                approval_evidence.console_passed,
+            )
+        });
     if approval_evidence.console_passed {
         timer_signal_evidence.mark_console_passed();
     }
@@ -1094,5 +1106,13 @@ fn public_cli_deterministic_first_run() {
                 .expect("timer/signal scenario report is canonicalizable"),
         )
         .expect("timer/signal scenario report is writable");
+        if let Some(artifact_evidence) = artifact_evidence {
+            fs::write(
+                report_directory.join("artifact-lifecycle-and-rejection.json"),
+                serde_jcs::to_vec(&artifact_evidence.report(&revision))
+                    .expect("Artifact scenario report is canonicalizable"),
+            )
+            .expect("Artifact scenario report is writable");
+        }
     }
 }
