@@ -614,8 +614,8 @@ impl ReqwestCapabilityHttpEgressTransport {
             || addresses.len() > self.limits.maximum_dns_answers
             || addresses.iter().any(|address| {
                 address.port() != endpoint.port
-                    || (!is_public_destination_ip(address.ip())
-                        && !(entry.development_loopback && address.ip().is_loopback()))
+                    || !(is_public_destination_ip(address.ip())
+                        || entry.development_loopback && address.ip().is_loopback())
             })
         {
             return Err(before_dispatch(
