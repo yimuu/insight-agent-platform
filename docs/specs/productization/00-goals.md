@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / final fresh-checkout G1 qualification pending（外部 L4～L6 Not run） |
+| 状态 | Completed（repository scope；外部 L4～L6 Not run） |
 | 日期 | 2026-08-29 |
 | 阶段代号 | Productization Convergence |
 | 合同输入 | Platform v2 spec00～18（Accepted / In Progress）、AGENTS.md |

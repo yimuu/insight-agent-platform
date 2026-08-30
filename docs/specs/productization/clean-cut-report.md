@@ -6,6 +6,8 @@
 
 最终 journey revision：`dd0109ee14cbcc043e056edadd744de33bbf1f94`
 
+最终 G1 qualification revision：`aac4b74d37712b3739b2cc34fc4555da645d8d95`
+
 外部资格：**Not run（L4～L6）**
 
 ## 1. 产品入口闭包
@@ -37,6 +39,10 @@ candidate image 不依赖它来提供新 `/v1` 行为。该保留不构成 publi
 - clean-cut 后 exact revision `dd0109ee14cbcc043e056edadd744de33bbf1f94` 的 full-profile fresh journey：
   25 个独立 role ready，10/10 report Passed，严格 checker `complete_gate=true`，测试主体 85.31 秒，详见
   [`full-journey-evidence.md`](full-journey-evidence.md)。
+- exact revision `aac4b74d37712b3739b2cc34fc4555da645d8d95` 的 fresh-checkout G1 journey：从 checkout 前计时至
+  deterministic first Run 与 Inline result 验证为 509569ms，两条人工命令、无外部模型 key；报告 SHA-256 为
+  `dce94a774b86ca90f6fd78227a15688b8c5ffb47e3df1e1d91893c0f7aa580fc`，详见
+  [`north-star-evidence.md`](north-star-evidence.md)。
 
 报告按自己的 exact `source_revision` 保存；后续纯证据文档提交不改写这些 machine-readable report 的 revision。
 

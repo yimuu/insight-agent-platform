@@ -47,7 +47,11 @@ fixture 请求日志做闭合断言。GitHub `console` job 固定在带 Chrome �
 `gateway_ready`、`sse_task_discovery`、`task_mutation`、`terminal_run`、`reload_authority_read` 与
 `memory_only_token`。workflow 后因更晚提交取代而取消，不改变已完成 job 的结果；该证据只适用于上述 exact revision
 且仅适用于 stateful fixture boundary。2026-08-31 的增强 fixture 本地闭合运行返回 `request_count=17`，并新增
-`empty_run_timeline` 与 `slow_dependency_busy_state`；远端 CI 结果在对应提交完成后按 exact revision 记录。
+`empty_run_timeline` 与 `slow_dependency_busy_state`；exact revision
+`6ae42490b34af00a0f67fe834d3982ca93a66536` 的 GitHub Actions run
+[`33332510665`](https://github.com/yimuu/insight-agent-platform/actions/runs/33332510665) / Console job
+[`99313569224`](https://github.com/yimuu/insight-agent-platform/actions/runs/33332510665/job/99313569224) 已在 32 秒内 Passed。
+该 workflow 后来因提交被替代而取消，但已完成的 Console job 结果保持成功。
 
 ## 证据边界
 
