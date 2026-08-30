@@ -9,10 +9,11 @@ use crate::{
         append_command_event, append_scheduler_event, begin_read_only_repeatable,
         claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
         job_projection, load_deployment, load_exact_active_policy_deployment,
-        load_job_for_update_by_text, load_resource, payload_from_row, require_tenant_permission,
-        safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt,
-        validate_safety_scan_request, JobRecord, PgRepository, RepositoryError, SafetyScanCursor,
-        SafetyScanPage, SafetyScanShard, TypedPayload, MAX_JOB_LEASE_MILLISECONDS,
+        load_job_for_update_by_text, load_resource, load_run_for_update, payload_from_row,
+        require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page,
+        terminalize_command_receipt, validate_safety_scan_request, JobRecord, PgRepository,
+        RepositoryError, SafetyScanCursor, SafetyScanPage, SafetyScanShard, TypedPayload,
+        MAX_JOB_LEASE_MILLISECONDS,
     },
 };
 use chrono::{DateTime, Duration, Utc};
@@ -26,8 +27,8 @@ use insight_platform_contracts::{
     EntityLifecycle, ExactPolicyBinding, ExactSandboxProfileBinding, ExactVersionRef, Failure,
     FailureClass, FailureCode, FailureSource, InvocationState, JobState, Permission,
     PlatformFailureCode, PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind,
-    ResourceDocument, ResourceId, ResourceKind, Retryability, SandboxJobState, Sha256Digest,
-    ValueRef, WorkClass,
+    ResourceDocument, ResourceId, ResourceKind, Retryability, RunState, SandboxJobState,
+    Sha256Digest, ValueRef, WorkClass,
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, decide_detached_job_outcome, CapabilityControlKind,
@@ -2984,6 +2985,12 @@ impl PgRepository {
         .await?
         .unwrap_or(false);
         if owner_node_waiting {
+            acquire_sandbox_capability_merge_permit(
+                &mut transaction,
+                &decision.invocation,
+                database_now,
+            )
+            .await?;
             let failure = match decision.invocation.state {
                 InvocationState::Failed => decision.invocation.payload.failure.clone(),
                 InvocationState::Cancelled => Some(Failure {
@@ -6509,6 +6516,60 @@ fn sandbox_output_bytes(usage: &SandboxResourceUsage) -> Result<u64, RepositoryE
 
 fn ceil_div(value: u64, divisor: u64) -> u64 {
     value.div_ceil(divisor)
+}
+
+async fn acquire_sandbox_capability_merge_permit(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &CapabilityInvocationRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let run = load_run_for_update(transaction, &invocation.tenant_id, &invocation.run_id).await?;
+    let run_state = run.state.parse::<RunState>().ok();
+    if !matches!(run_state, Some(RunState::Running | RunState::Waiting))
+        || run.terminal_at.is_some()
+        || run.current.control.pause_requested
+        || run.current.control.cancel_requested_at.is_some()
+        || run.current.control.timeout_requested_at.is_some()
+    {
+        return Err(RepositoryError::Conflict(
+            "Sandbox Capability merge Run permit",
+        ));
+    }
+    let mut current = run.current.clone();
+    if run_state == Some(RunState::Waiting) {
+        current.waiting_reason = None;
+    }
+    current
+        .validate(&invocation.run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = 'running', version = version + 1,
+            active_work_count = active_work_count + 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running', 'waiting') AND terminal_at IS NULL
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict(
+            "Sandbox Capability merge Run permit",
+        ));
+    }
+    Ok(())
 }
 
 async fn database_now(
