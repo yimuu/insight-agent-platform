@@ -30,8 +30,9 @@ use insight_platform_invocations::{
     PrepareCapabilityDispatch,
 };
 use insight_platform_jobs::{
-    decide_claim as decide_job_claim, decide_expired_lease as decide_expired_job_lease,
-    decide_heartbeat as decide_job_heartbeat, decide_owner_terminal as decide_job_owner_terminal,
+    decide_claim as decide_job_claim, decide_claim_continuation as decide_job_claim_continuation,
+    decide_expired_lease as decide_expired_job_lease, decide_heartbeat as decide_job_heartbeat,
+    decide_owner_terminal as decide_job_owner_terminal, decide_resume as decide_job_resume,
     decide_retry as decide_job_retry, decide_retry_due as decide_job_retry_due,
     decide_start as decide_job_start, decide_terminal as decide_job_terminal,
     decide_wait as decide_job_wait, decide_wake as decide_job_wake, JobError as DomainJobError,
@@ -7310,19 +7311,29 @@ impl PgSchedulerTransaction {
             {
                 return Err(RepositoryError::Conflict("selected orchestration Job"));
             }
-            let next = decide_job_claim(
-                &job_projection(locked)?,
-                database_now,
-                command.worker_id.clone(),
-                slot.lease_token_digest.clone(),
-                LeasePolicy {
-                    requested_milliseconds: u64::try_from(command.lease_milliseconds).map_err(
-                        |_| RepositoryError::InvalidInput("negative Job lease".to_owned()),
-                    )?,
-                    hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
-                        .expect("positive Job lease hard maximum"),
-                },
-            )?;
+            let policy = LeasePolicy {
+                requested_milliseconds: u64::try_from(command.lease_milliseconds)
+                    .map_err(|_| RepositoryError::InvalidInput("negative Job lease".to_owned()))?,
+                hard_maximum_milliseconds: u64::try_from(MAX_JOB_LEASE_MILLISECONDS)
+                    .expect("positive Job lease hard maximum"),
+            };
+            let next = if locked.started_at.is_some() {
+                decide_job_claim_continuation(
+                    &job_projection(locked)?,
+                    database_now,
+                    command.worker_id.clone(),
+                    slot.lease_token_digest.clone(),
+                    policy,
+                )?
+            } else {
+                decide_job_claim(
+                    &job_projection(locked)?,
+                    database_now,
+                    command.worker_id.clone(),
+                    slot.lease_token_digest.clone(),
+                    policy,
+                )?
+            };
             decisions.insert(candidate.job.job_id.clone(), next);
         }
 
@@ -7421,17 +7432,25 @@ impl PgSchedulerTransaction {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
-        let next = decide_job_start(
-            &job_projection(&current)?,
-            &domain_job_fence(&command.fence)?,
-            database_now,
-        )?;
+        let next = if current.started_at.is_some() {
+            decide_job_resume(
+                &job_projection(&current)?,
+                &domain_job_fence(&command.fence)?,
+                database_now,
+            )?
+        } else {
+            decide_job_start(
+                &job_projection(&current)?,
+                &domain_job_fence(&command.fence)?,
+                database_now,
+            )?
+        };
         let row =
             sqlx::query(
                 r#"
             UPDATE insight_platform.jobs
             SET state = 'running', version = $4, attempt_no = $5,
-                started_at = $6, updated_at = $6
+                started_at = COALESCE(started_at, $6), updated_at = $6
             WHERE tenant_id = $1 AND job_id = $2 AND version = $3
               AND state = 'leased'
             RETURNING *
@@ -21228,7 +21247,8 @@ async fn mutate_yielded_orchestration_job(
             scheduled_at = COALESCE($7, scheduled_at),
             wake_kind = $8, wake_state = $9, wake_generation = $10,
             payload_schema_version = $11, payload = $12, payload_digest = $13,
-            started_at = NULL, updated_at = $14
+            started_at = CASE WHEN $8::text IS NULL THEN NULL ELSE started_at END,
+            updated_at = $14
         WHERE tenant_id = $1 AND job_id = $2 AND version = $3 AND state = 'running'
         RETURNING *
         "#,
@@ -27785,7 +27805,19 @@ async fn enumerate_orchestration_candidates(
               AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
               AND job.state IN ('ready', 'retry_scheduled')
               AND job.terminal_at IS NULL AND job.worker_id IS NULL
-              AND job.attempt_no < job.attempt_limit
+              AND (
+                  job.attempt_no < job.attempt_limit
+                  OR (
+                      job.state = 'ready'
+                      AND job.attempt_no > 0
+                      AND job.attempt_no <= job.attempt_limit
+                      -- Durable wait preserves the current physical attempt's
+                      -- start time; ordinary retry clears it before becoming
+                      -- ready. The typed timestamp proves continuation without
+                      -- retaining a consumed wake contract.
+                      AND job.started_at IS NOT NULL
+                  )
+              )
               AND job.scheduled_at <= $1 AND (job.retry_at IS NULL OR job.retry_at <= $1)
               AND job.deadline > $1
               AND job.priority BETWEEN -1 AND 1

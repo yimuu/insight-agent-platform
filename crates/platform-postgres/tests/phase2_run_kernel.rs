@@ -1786,16 +1786,6 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap(),
         "waiting"
     );
-    // The surrounding fixture later exercises three distinct physical starts.
-    sqlx::query(
-        "UPDATE insight_platform.jobs SET attempt_limit = 3 WHERE tenant_id = $1 AND job_id = $2",
-    )
-    .bind(TENANT_ID)
-    .bind(&waited.job.job_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert!(matches!(
         scheduler
@@ -1865,6 +1855,21 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(woken.run.state, "running");
     assert_eq!(woken.run.current.waiting_reason, None);
     assert!(woken.job.wake_kind.is_none());
+    assert_eq!(woken.job.attempt_no, 1);
+    assert_eq!(woken.job.started_at, waited.job.started_at);
+    assert!(woken.job.started_at.is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT payload -> 'wake_contract' FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(TENANT_ID)
+        .bind(&woken.job.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        Value::Null,
+        "the winning wake must consume its closed wake contract"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, Value>(
             "SELECT payload FROM insight_platform.run_nodes WHERE tenant_id = $1 AND node_id = $2",
@@ -1938,7 +1943,18 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("retry Job start must apply"),
     };
     scheduler.commit().await.unwrap();
-    assert_eq!(retry_started.attempt_no, 2);
+    assert_eq!(retry_started.attempt_no, 1);
+    assert_eq!(retry_started.started_at, woken.job.started_at);
+    // The remainder of this fixture now exercises ordinary retry dispatches,
+    // which are distinct physical attempts and therefore require spare budget.
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET attempt_limit = 3 WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(TENANT_ID)
+    .bind(&retry_started.job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let retry_at = Utc::now() + Duration::milliseconds(500);
     let retry_yield = YieldOrchestrationJob {
         fence: JobFence {
@@ -3043,7 +3059,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("active cancellation start must apply"),
     };
     scheduler.commit().await.unwrap();
-    assert_eq!(active_cancel_started.attempt_no, 3);
+    assert_eq!(active_cancel_started.attempt_no, 2);
     let active_cancel_run_version: i64 = sqlx::query_scalar(
         "SELECT version FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $2",
     )
