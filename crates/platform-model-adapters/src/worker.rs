@@ -202,6 +202,10 @@ where
                 }
             }
             ModelAdapterExecutionOutcome::Failed(failure) => {
+                eprintln!(
+                    "Model adapter execution failed: class={:?} safe_code={} request_sent={}",
+                    failure.class, failure.safe_code, failure.request_sent
+                );
                 failure_outcome(&command.execution, failure, Utc::now())
                     .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
             }

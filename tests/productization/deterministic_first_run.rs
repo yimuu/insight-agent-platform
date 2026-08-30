@@ -21,6 +21,8 @@ mod approval_task_resume;
 mod artifact_lifecycle_and_rejection;
 #[path = "context_retrieval_and_citation.rs"]
 mod context_retrieval_and_citation;
+#[path = "exact_model_streaming_chat.rs"]
+mod exact_model_streaming_chat;
 #[path = "subagent_quota_and_cancel.rs"]
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
@@ -887,6 +889,16 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(result["schema_digest"], schema_digest);
 
+    let mut model_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
+        .then(|| {
+            exact_model_streaming_chat::run(
+                insight,
+                project,
+                fixture.path(),
+                &authoring_ref,
+                &qualification_ref,
+            )
+        });
     let (mut timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
         insight,
         project,
@@ -928,6 +940,9 @@ fn public_cli_deterministic_first_run() {
             context_evidence
                 .as_ref()
                 .map(|evidence| evidence.run_id.as_str()),
+            model_evidence
+                .as_ref()
+                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
     let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
@@ -946,6 +961,9 @@ fn public_cli_deterministic_first_run() {
         subagent_evidence.mark_console_passed();
         if let Some(context_evidence) = &mut context_evidence {
             context_evidence.mark_console_passed();
+        }
+        if let Some(model_evidence) = &mut model_evidence {
+            model_evidence.mark_console_passed();
         }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
@@ -1162,6 +1180,14 @@ fn public_cli_deterministic_first_run() {
                     .expect("Context scenario report is canonicalizable"),
             )
             .expect("Context scenario report is writable");
+        }
+        if let Some(model_evidence) = model_evidence {
+            fs::write(
+                report_directory.join("exact-model-streaming-chat.json"),
+                serde_jcs::to_vec(&model_evidence.report(&revision))
+                    .expect("Model scenario report is canonicalizable"),
+            )
+            .expect("Model scenario report is writable");
         }
     }
 }

@@ -653,7 +653,6 @@ async fn explicit_anonymous_development_endpoint_skips_secret_resolution() {
     fixture.entry.development_anonymous = true;
     fixture.entry.trusted_root_pem = Some(fixture_root_pem());
     fixture.request.endpoint_identity_digest = fixture.entry.endpoint_identity_digest.clone();
-    fixture.request.secret_bindings.clear();
     let secrets = successful_secrets();
     let transport = Arc::new(LoopbackFixtureTransport {
         expected_port: port,

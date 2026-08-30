@@ -25,7 +25,7 @@ Options:
   --insight-bin <path>         Use an existing insight binary (default: target/release/insight).
   --keep-dependencies          Leave the exact Docker Compose dependencies running.
   --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
-  --node-bin <path>           Node.js executable for --console-browser (default: command -v node).
+  --node-bin <path>           Node.js executable for full remote fixtures and --console-browser (default: current or login-shell PATH).
   --browser-bin <path>        Chromium/Chrome executable for --console-browser.
   -h, --help                   Show this help.
 EOF
@@ -99,14 +99,24 @@ if ! command -v pgrep >/dev/null 2>&1; then
   echo "pgrep is required to prove that no repository-local Platform process is already running" >&2
   exit 2
 fi
-if [[ "$console_browser" == true ]]; then
+if [[ "$profile" == "full" || "$console_browser" == true ]]; then
   if [[ -z "$node_bin" ]]; then
     node_bin="$(command -v node || true)"
   fi
+  if [[ -z "$node_bin" ]]; then
+    login_shell="${SHELL:-/bin/zsh}"
+    if [[ -x "$login_shell" ]]; then
+      # NVM's lazy-loading shell plugin exposes `node` as a function until first use, so ask the
+      # runtime for its physical executable instead of trusting `command -v` to return a path.
+      node_bin="$("$login_shell" -lic 'node -p process.execPath' 2>/dev/null | tail -n 1)"
+    fi
+  fi
   if [[ -z "$node_bin" || ! -x "$node_bin" ]]; then
-    echo "--console-browser requires an executable Node.js; pass --node-bin when Node is managed by NVM" >&2
+    echo "the full profile and --console-browser require an executable Node.js; pass --node-bin if it is not exposed by the current or login-shell PATH" >&2
     exit 2
   fi
+fi
+if [[ "$console_browser" == true ]]; then
   corepack_bin="$(dirname "$node_bin")/corepack"
   if [[ ! -x "$corepack_bin" ]]; then
     echo "--console-browser requires corepack next to the selected Node.js executable" >&2
@@ -209,10 +219,12 @@ test_environment=(
   "PLATFORM_PRODUCTIZATION_PROJECT=$project"
   "PLATFORM_PRODUCTIZATION_PROFILE=$profile"
 )
+if [[ -n "$node_bin" ]]; then
+  test_environment+=("PLATFORM_PRODUCTIZATION_NODE_BIN=$node_bin")
+fi
 if [[ "$console_browser" == true ]]; then
   test_environment+=(
     "PLATFORM_PRODUCTIZATION_CONSOLE_BROWSER=true"
-    "PLATFORM_PRODUCTIZATION_NODE_BIN=$node_bin"
     "INSIGHT_CONSOLE_BROWSER_BIN=$browser_bin"
   )
 fi

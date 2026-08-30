@@ -136,6 +136,7 @@ async function main() {
   const subagentRunId = process.env.INSIGHT_CONSOLE_SUBAGENT_RUN_ID
   const artifactId = process.env.INSIGHT_CONSOLE_ARTIFACT_ID
   const contextRunId = process.env.INSIGHT_CONSOLE_CONTEXT_RUN_ID
+  const modelRunId = process.env.INSIGHT_CONSOLE_MODEL_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const browser = [
@@ -252,6 +253,16 @@ async function main() {
         'exact Context Run and citation projection',
       )
     }
+    if (modelRunId) {
+      await evaluate(client, clickText('Runs'))
+      await evaluate(client, setInput('input[placeholder="run_…"]', modelRunId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await waitFor(
+        client,
+        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('deterministic streamed model response')`,
+        'exact Model Run and structured Inline result',
+      )
+    }
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
@@ -304,6 +315,7 @@ async function main() {
       subagent_run_id: subagentRunId,
       artifact_id: artifactId,
       context_run_id: contextRunId,
+      model_run_id: modelRunId,
       checks: [
         'gateway_ready',
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
@@ -311,6 +323,7 @@ async function main() {
         ...(subagentRunId ? ['subagent_run_read'] : []),
         ...(artifactId ? ['artifact_ready_read'] : []),
         ...(contextRunId ? ['context_run_read'] : []),
+        ...(modelRunId ? ['model_run_read'] : []),
         'sse_task_discovery',
         'task_mutation',
         'terminal_run',

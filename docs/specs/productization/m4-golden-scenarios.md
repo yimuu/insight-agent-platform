@@ -99,8 +99,9 @@ Passed report；严格 M4 仍因 Model、remote Capability、MCP、WASI/framewor
 
 下一批 remote fixture 的首个安装前置已经闭合：Model endpoint安装合同新增默认关闭的
 `development_loopback`、`development_anonymous` 与 bounded `trusted_root_pem`。只有 endpoint host 精确为
-`localhost` 且显式安装非空 CA bundle 时，DNS pinning才允许 loopback；匿名请求又必须同时显式启用该 loopback
-模式并携带零 Secret Binding。普通 endpoint仍执行 public-destination拒绝和精确凭据解析，所有开关默认关闭，生产默认
+`localhost` 且显式安装非空 CA bundle 时，DNS pinning才允许 loopback；匿名请求仍必须携带 Provider合同与Deployment
+冻结的 exact Secret Binding metadata，只在该显式 loopback 模式下跳过物理材料解析和认证 header。普通 endpoint仍执行
+public-destination拒绝和精确凭据解析，所有开关默认关闭，生产默认
 没有任何放宽。仓库内 Node builtin HTTPS fixture 不下载依赖，只模拟 closed streaming response 与受控失败。该实现只提供
 本地受控 HTTPS fixture 的最后一跳，不创建 Provider/Deployment、不绕过 Egress exact catalog，也尚未生成
 `exact-model-streaming-chat` report。

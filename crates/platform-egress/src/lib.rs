@@ -180,16 +180,12 @@ impl InstalledModelProviderEndpoint {
             && self.trust_policy == request.trust_policy
             && self.data_policy == request.data_policy
             && self.region == request.region
-            && if self.development_anonymous {
-                request.secret_bindings.is_empty()
-            } else {
-                request
-                    .secret_bindings
-                    .iter()
-                    .filter(|binding| binding.purpose == self.credential_purpose)
-                    .count()
-                    == 1
-            }
+            && request
+                .secret_bindings
+                .iter()
+                .filter(|binding| binding.purpose == self.credential_purpose)
+                .count()
+                == 1
     }
 }
 

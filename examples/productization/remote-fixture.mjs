@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:https'
 
 function required(name) {
@@ -30,9 +30,17 @@ function sse(response, event, value) {
   response.write(`data: ${JSON.stringify(value)}\n\n`)
 }
 
+function trace(record) {
+  const path = process.env.INSIGHT_REMOTE_FIXTURE_TRACE_PATH
+  if (path) appendFileSync(path, `${JSON.stringify({schema_version: 1, ...record})}\n`, {encoding: 'utf8', mode: 0o600})
+}
+
 async function handleModel(request, response) {
   const body = JSON.parse((await boundedBody(request)).toString('utf8'))
-  if (body.model !== 'fixture-model-2026-08' || body.stream !== true) {
+  const modelMatches = body.model === 'fixture-model-2026-08'
+  const streamEnabled = body.stream === true
+  trace({kind: 'model_request', method: request.method, path: request.url, model_matches: modelMatches, stream_enabled: streamEnabled})
+  if (!modelMatches || !streamEnabled) {
     response.writeHead(400, {'content-type': 'application/json'})
     response.end(JSON.stringify({error: {type: 'invalid_request_error'}}))
     return
@@ -41,7 +49,7 @@ async function handleModel(request, response) {
   if (serialized.includes('fixture-timeout')) return
   const text = serialized.includes('fixture-output-limit')
     ? 'x'.repeat(32_768)
-    : 'deterministic streamed model response'
+    : JSON.stringify({answer: 'deterministic streamed model response'})
   response.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-store',
@@ -87,9 +95,11 @@ const server = createServer(
         await handleModel(request, response)
         return
       }
+      trace({kind: 'route_rejected', method: request.method, path: request.url})
       response.writeHead(404, {'content-type': 'application/json'})
       response.end(JSON.stringify({error: 'not_found'}))
     } catch {
+      trace({kind: 'request_rejected', method: request.method, path: request.url})
       if (!response.headersSent) {
         response.writeHead(400, {'content-type': 'application/json'})
       }
