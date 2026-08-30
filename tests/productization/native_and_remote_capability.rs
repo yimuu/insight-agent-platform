@@ -5,9 +5,9 @@ use uuid::Uuid;
 const DATABASE_URL: &str = "postgres://insight:insight@127.0.0.1:5432/insight_platform";
 
 #[derive(Clone)]
-struct PolicyAuthority {
-    revision: Value,
-    binding: Value,
+pub(super) struct PolicyAuthority {
+    pub revision: Value,
+    pub binding: Value,
 }
 
 pub(super) struct CapabilityEvidence {
@@ -76,7 +76,7 @@ fn closed_schema(schema: Value) -> Value {
     })
 }
 
-fn value_schema(field: &str) -> Value {
+pub(super) fn value_schema(field: &str) -> Value {
     closed_schema(json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -95,7 +95,7 @@ fn value_schema(field: &str) -> Value {
     }))
 }
 
-fn apply_policy(
+pub(super) fn apply_policy(
     insight: &Path,
     project: &Path,
     fixture: &Path,
@@ -147,7 +147,7 @@ fn apply_policy(
         "kind": "insight.platform.apply/v1",
         "resource_noun": "policies",
         "create": {"display_name": format!("Capability {role} policy"), "document": {"resource_kind": "policy", "spec": spec}},
-        "publish": {"kind": "single", "revision_no": 1, "content_digest": contract_digest, "artifact_id": null},
+        "publish": {"kind": "single", "revision_no": 1, "content_digest": rules_digest, "artifact_id": null},
         "deployment": {"environment": "local", "closure": {"resource_kind": "policy", "bindings": {
             "applicability_digest": applicability_digest,
             "qualification_evidence": qualification_ref
@@ -189,7 +189,7 @@ fn apply_policy(
     }
 }
 
-fn raw_management_client(project: &Path) -> (Client, String, String) {
+pub(super) fn raw_management_client(project: &Path) -> (Client, String, String) {
     let profile: Value = serde_json::from_slice(
         &fs::read(project.join(".insight/runtime/profile.json")).expect("runtime profile"),
     )
@@ -319,7 +319,7 @@ fn publish_capability_interface(
     })
 }
 
-fn publish_capability(
+pub(super) fn publish_capability(
     insight: &Path,
     project: &Path,
     fixture: &Path,
@@ -479,7 +479,7 @@ fn publish_capability(
     (deployment, interface_revision)
 }
 
-fn provision_capability_quotas(deployments: &[(&Value, &str)]) {
+pub(super) fn provision_capability_quotas(deployments: &[(&Value, &str)]) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -551,7 +551,12 @@ impl Drop for RemoteCapabilityEnvironment {
     }
 }
 
-fn spawn_egress(workspace: &Path, project: &Path, config_path: &Path, config: &Value) -> Child {
+pub(super) fn spawn_egress(
+    workspace: &Path,
+    project: &Path,
+    config_path: &Path,
+    config: &Value,
+) -> Child {
     let runtime = project.join(".insight/runtime");
     let tls = runtime.join("tls");
     let config_digest = canonical_digest(config);
@@ -595,7 +600,7 @@ fn spawn_egress(workspace: &Path, project: &Path, config_path: &Path, config: &V
         .expect("replacement Egress starts")
 }
 
-fn wait_egress(child: &mut Child, address: &str) {
+pub(super) fn wait_egress(child: &mut Child, address: &str) {
     let deadline = Instant::now() + StdDuration::from_secs(30);
     while TcpStream::connect(address).is_err() {
         if let Some(status) = child.try_wait().expect("Egress status") {
@@ -643,14 +648,11 @@ fn start_remote_environment(
         "development_loopback": true,
         "trusted_root_pem": fs::read_to_string(tls.join("ca.pem")).expect("local CA")
     }]);
-    let process_state: Value = serde_json::from_slice(
-        &fs::read(runtime.join("processes.json")).expect("runtime process state"),
-    )
-    .expect("runtime process state JSON");
-    if process_state["processes"]["egress-broker"]["pid"]
-        .as_u64()
-        .is_some_and(process_is_running)
-    {
+    let address = config["observability_listen_address"]
+        .as_str()
+        .expect("Egress observability address")
+        .to_owned();
+    if TcpStream::connect(&address).is_ok() {
         stop_role(project, "egress-broker");
     }
     let port = endpoint["port"].as_u64().unwrap().to_string();
@@ -683,10 +685,6 @@ fn start_remote_environment(
         serde_json::from_str::<Value>(&ready).unwrap()["status"],
         "ready"
     );
-    let address = config["observability_listen_address"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let mut broker = spawn_egress(workspace, project, &config_path, &config);
     wait_egress(&mut broker, &address);
     RemoteCapabilityEnvironment {
@@ -697,7 +695,7 @@ fn start_remote_environment(
     }
 }
 
-fn create_run(
+pub(super) fn create_run(
     insight: &Path,
     project: &Path,
     fixture: &Path,
@@ -728,7 +726,7 @@ fn create_run(
         .to_owned()
 }
 
-fn terminal(insight: &Path, project: &Path, run_id: &str) -> Value {
+pub(super) fn terminal(insight: &Path, project: &Path, run_id: &str) -> Value {
     run_json_lines(
         insight,
         &[

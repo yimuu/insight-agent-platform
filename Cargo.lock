@@ -2301,6 +2301,7 @@ dependencies = [
  "insight-mcp",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-mcp-host",
  "insight-platform-postgres",
  "insight-resources",
  "insight-runtime",

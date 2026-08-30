@@ -25,6 +25,8 @@ mod context_retrieval_and_citation;
 mod exact_model_streaming_chat;
 #[path = "native_and_remote_capability.rs"]
 mod native_and_remote_capability;
+#[path = "remote_mcp_tool_and_resource.rs"]
+mod remote_mcp_tool_and_resource;
 #[path = "subagent_quota_and_cancel.rs"]
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
@@ -68,13 +70,14 @@ fn stop_role(project: &Path, role: &str) {
     let pid = process_state["processes"][role]["pid"]
         .as_u64()
         .unwrap_or_else(|| panic!("{role} PID"));
-    assert!(
-        Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .is_ok_and(|status| status.success()),
-        "{role} accepts TERM"
-    );
+    let terminated = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !terminated {
+        assert!(!process_is_running(pid), "{role} accepts TERM");
+        return;
+    }
     let deadline = Instant::now() + StdDuration::from_secs(15);
     while process_is_running(pid) && Instant::now() < deadline {
         thread::sleep(StdDuration::from_millis(50));
@@ -891,9 +894,9 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(result["schema_digest"], schema_digest);
 
-    let mut model_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
-        .then(|| {
-            exact_model_streaming_chat::run(
+    let mut capability_evidence =
+        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
+            native_and_remote_capability::run(
                 insight,
                 project,
                 fixture.path(),
@@ -901,9 +904,19 @@ fn public_cli_deterministic_first_run() {
                 &qualification_ref,
             )
         });
-    let mut capability_evidence =
+    let mut mcp_evidence =
         (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
-            native_and_remote_capability::run(
+            remote_mcp_tool_and_resource::run(
+                insight,
+                project,
+                fixture.path(),
+                &authoring_ref,
+                &qualification_ref,
+            )
+        });
+    let mut model_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
+        .then(|| {
+            exact_model_streaming_chat::run(
                 insight,
                 project,
                 fixture.path(),
@@ -958,6 +971,9 @@ fn public_cli_deterministic_first_run() {
             capability_evidence
                 .as_ref()
                 .map(|evidence| evidence.run_id.as_str()),
+            mcp_evidence
+                .as_ref()
+                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
     let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
@@ -982,6 +998,9 @@ fn public_cli_deterministic_first_run() {
         }
         if let Some(capability_evidence) = &mut capability_evidence {
             capability_evidence.mark_console_passed();
+        }
+        if let Some(mcp_evidence) = &mut mcp_evidence {
+            mcp_evidence.mark_console_passed();
         }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
@@ -1214,6 +1233,14 @@ fn public_cli_deterministic_first_run() {
                     .expect("Capability scenario report is canonicalizable"),
             )
             .expect("Capability scenario report is writable");
+        }
+        if let Some(mcp_evidence) = mcp_evidence {
+            fs::write(
+                report_directory.join("remote-mcp-tool-and-resource.json"),
+                serde_jcs::to_vec(&mcp_evidence.report(&revision))
+                    .expect("MCP scenario report is canonicalizable"),
+            )
+            .expect("MCP scenario report is writable");
         }
     }
 }

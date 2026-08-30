@@ -6500,6 +6500,10 @@ mod tests {
             panic!("expected completed MCP operation")
         };
         assert_eq!(result.value, serde_json::json!({"content": []}));
+        assert_eq!(
+            result.schema_digest,
+            fixture.request.protocol_policy.semantic_digest
+        );
 
         let observed = transport.observed.lock().unwrap();
         assert_eq!(observed.len(), 3);

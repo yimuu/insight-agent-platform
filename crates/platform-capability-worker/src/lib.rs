@@ -209,10 +209,10 @@ impl McpToolCapabilityCodec for BuiltinJsonMcpToolCapabilityCodec {
                 result,
                 evidence_digest,
             } => {
-                if result.schema_digest != request.output_schema_digest {
+                if result.schema_digest != self.descriptor.protocol_profile_digest {
                     return Err(permanent_adapter_failure(
-                        "builtin_json_output_schema",
-                        "MCP output schema does not match the admitted Capability interface",
+                        "builtin_json_mcp_protocol_profile",
+                        "MCP output does not match the exact protocol profile",
                     ));
                 }
                 let content_digest: Sha256Digest = canonical_digest(&result.value)

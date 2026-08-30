@@ -91,6 +91,59 @@ async function handleCapability(request, response) {
   response.end(JSON.stringify(body))
 }
 
+async function handleMcp(request, response) {
+  const body = JSON.parse((await boundedBody(request)).toString('utf8'))
+  const method = body.method
+  trace({kind: 'mcp_request', method: request.method, path: request.url, rpc_method: method})
+  if (method === 'notifications/initialized') {
+    response.writeHead(202, {'cache-control': 'no-store'})
+    response.end()
+    return
+  }
+  const id = body.id
+  let result
+  if (method === 'initialize') {
+    result = {
+      protocolVersion: '2025-11-25',
+      capabilities: {tools: {}, resources: {}},
+      serverInfo: {name: 'insight-productization-fixture', version: '1.0.0'},
+    }
+  } else if (method === 'tools/list') {
+    result = {tools: [{
+      name: 'fixture_lookup',
+      description: 'Return a bounded deterministic productization value.',
+      inputSchema: {
+        type: 'object',
+        properties: {message: {type: 'string'}},
+        required: ['message'],
+        additionalProperties: false,
+      },
+    }]}
+  } else if (method === 'resources/list') {
+    result = {resources: [{
+      name: 'productization-resource',
+      uri: 'mcp://insight.fixture/productization',
+      mimeType: 'text/plain',
+      description: 'Bounded MCP resource metadata.',
+    }]}
+  } else if (method === 'tools/call') {
+    if (JSON.stringify(body.params).includes('fixture-mcp-remote-error')) {
+      response.writeHead(200, {'content-type': 'application/json', 'cache-control': 'no-store'})
+      response.end(JSON.stringify({jsonrpc: '2.0', id, error: {code: -32001, message: 'fixture remote error'}}))
+      return
+    }
+    result = {message: body.params?.arguments?.message}
+  } else {
+    response.writeHead(200, {'content-type': 'application/json', 'cache-control': 'no-store'})
+    response.end(JSON.stringify({jsonrpc: '2.0', id, error: {code: -32601, message: 'method not found'}}))
+    return
+  }
+  const headers = {'content-type': 'application/json', 'cache-control': 'no-store', 'content-encoding': 'identity'}
+  if (method === 'initialize') headers['mcp-session-id'] = 'productization-mcp-session-v1'
+  response.writeHead(200, headers)
+  response.end(JSON.stringify({jsonrpc: '2.0', id, result}))
+}
+
 const port = Number.parseInt(required('INSIGHT_REMOTE_FIXTURE_PORT'), 10)
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error('INSIGHT_REMOTE_FIXTURE_PORT is invalid')
@@ -109,6 +162,10 @@ const server = createServer(
       }
       if (request.method === 'POST' && request.url === '/v1/capability') {
         await handleCapability(request, response)
+        return
+      }
+      if (request.method === 'POST' && request.url === '/mcp') {
+        await handleMcp(request, response)
         return
       }
       trace({kind: 'route_rejected', method: request.method, path: request.url})

@@ -138,6 +138,7 @@ async function main() {
   const contextRunId = process.env.INSIGHT_CONSOLE_CONTEXT_RUN_ID
   const modelRunId = process.env.INSIGHT_CONSOLE_MODEL_RUN_ID
   const capabilityRunId = process.env.INSIGHT_CONSOLE_CAPABILITY_RUN_ID
+  const mcpRunId = process.env.INSIGHT_CONSOLE_MCP_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const browser = [
@@ -274,6 +275,16 @@ async function main() {
         'exact native-to-remote Capability Run and typed Inline result',
       )
     }
+    if (mcpRunId) {
+      await evaluate(client, clickText('Runs'))
+      await evaluate(client, setInput('input[placeholder="run_…"]', mcpRunId))
+      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await waitFor(
+        client,
+        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('mcp round trip')`,
+        'exact MCP Capability Run and typed Inline result',
+      )
+    }
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
@@ -328,6 +339,7 @@ async function main() {
       context_run_id: contextRunId,
       model_run_id: modelRunId,
       capability_run_id: capabilityRunId,
+      mcp_run_id: mcpRunId,
       checks: [
         'gateway_ready',
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
@@ -337,6 +349,7 @@ async function main() {
         ...(contextRunId ? ['context_run_read'] : []),
         ...(modelRunId ? ['model_run_read'] : []),
         ...(capabilityRunId ? ['capability_run_read'] : []),
+        ...(mcpRunId ? ['mcp_run_read'] : []),
         'sse_task_discovery',
         'task_mutation',
         'terminal_run',

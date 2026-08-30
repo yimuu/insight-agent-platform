@@ -246,6 +246,7 @@ yaml_serde.workspace = true
 [dev-dependencies]
 insight-platform-artifacts.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-mcp-host.workspace = true
 insight-platform-postgres.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

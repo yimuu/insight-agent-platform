@@ -433,7 +433,13 @@ fn start_remote_model_environment(
         "trusted_root_pem": fs::read_to_string(tls.join("ca.pem")).expect("local CA is readable"),
     }]);
     let config_digest = canonical_digest(&config);
-    stop_role(project, "egress-broker");
+    let ready_address = config["observability_listen_address"]
+        .as_str()
+        .expect("Egress observability address")
+        .to_owned();
+    if TcpStream::connect(&ready_address).is_ok() {
+        stop_role(project, "egress-broker");
+    }
     fs::write(&config_path, canonical_bytes(&config)).expect("installed Egress config is writable");
 
     let fixture_port = endpoint["port"].as_u64().expect("fixture port").to_string();
@@ -467,10 +473,6 @@ fn start_remote_model_environment(
         "ready"
     );
 
-    let ready_address = config["observability_listen_address"]
-        .as_str()
-        .expect("Egress observability address")
-        .to_owned();
     let log = OpenOptions::new()
         .create(true)
         .append(true)

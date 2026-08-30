@@ -8,6 +8,7 @@ use crate::{
     ControllerCapabilityAdmissionDecision, ControllerCapabilityAdmissionProvider,
     ControllerCapabilityAdmissionRequest, ControllerModelAdmissionDecision,
     ControllerModelAdmissionProvider, ControllerModelAdmissionRequest, DurablePlanDriverError,
+    CoordinatorIdentityFactory, UuidCoordinatorIdentityFactory,
 };
 use async_trait::async_trait;
 use insight_platform_artifacts::{
@@ -18,10 +19,11 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, CapabilityBackendBinding,
     DataClassification, DeploymentClosure, ExactVersionRef, FrozenSlotTarget, RunBindingsSnapshot,
-    Sha256Digest, ValueRef,
+    ResourceId, ResourceKind, Sha256Digest, ValueRef,
 };
 use insight_platform_invocations::{
     InvocationPolicyDecision, InvocationPolicyDecisionBundle, InvocationPolicyDisposition,
+    McpCapabilityRuntimeRequest,
 };
 use insight_platform_models::{
     assemble_prompt_messages, CanonicalModelRequest, ModelRequestValue, ModelResponseContract,
@@ -537,6 +539,61 @@ impl PostgresControllerCapabilityAdmissionProvider {
         };
         Ok((bindings, capability))
     }
+
+    async fn resolve_mcp_runtime(
+        &self,
+        request: &ControllerCapabilityAdmissionRequest,
+        bindings: &RunBindingsSnapshot,
+        deployment: &insight_platform_contracts::CapabilityDeploymentClosure,
+    ) -> Result<Option<McpCapabilityRuntimeRequest>, DurablePlanDriverError> {
+        let CapabilityBackendBinding::Mcp { mcp_deployment, .. } = &deployment.backend else {
+            return Ok(None);
+        };
+        let authorization_binding_ids: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT resource_id
+            FROM insight_platform.resources
+            WHERE tenant_id = $1
+              AND resource_kind = 'mcp_authorization_binding'
+              AND lifecycle_state = 'active'
+              AND gate_state = 'enabled'
+              AND payload_schema_version = 1
+              AND payload->'mcp_deployment'->>'deployment_id' = $2
+              AND payload->'mcp_deployment'->>'deployment_digest' = $3
+              AND payload->>'principal_id' = $4
+              AND payload->>'principal_identity_kind' = $5
+              AND (payload->>'principal_binding_generation')::bigint = $6
+              AND payload->>'state' = 'active'
+              AND (payload->>'expires_at')::timestamptz > clock_timestamp()
+            ORDER BY resource_id
+            LIMIT 2
+            "#,
+        )
+        .bind(request.tenant_id.to_string())
+        .bind(mcp_deployment.deployment_id.to_string())
+        .bind(mcp_deployment.deployment_digest.to_string())
+        .bind(bindings.principal.principal_id.to_string())
+        .bind(bindings.principal.principal_kind.as_str())
+        .bind(i64::try_from(bindings.principal.binding_generation).map_err(|_| {
+            DurablePlanDriverError::InvariantViolation
+        })?)
+        .fetch_all(self.repository.pool())
+        .await
+        .map_err(|_| DurablePlanDriverError::Unavailable)?;
+        let [authorization_binding_id] = authorization_binding_ids.as_slice() else {
+            return Err(DurablePlanDriverError::FenceLost);
+        };
+        let authorization_binding_id = authorization_binding_id
+            .parse::<ResourceId>()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        let mcp_operation_id = UuidCoordinatorIdentityFactory
+            .new_resource_id(ResourceKind::McpOperation)
+            .map_err(|_| DurablePlanDriverError::Unavailable)?;
+        Ok(Some(McpCapabilityRuntimeRequest {
+            mcp_operation_id,
+            authorization_binding_id,
+        }))
+    }
 }
 
 #[async_trait]
@@ -554,11 +611,12 @@ impl ControllerCapabilityAdmissionProvider for PostgresControllerCapabilityAdmis
         let FrozenSlotTarget::Capability { candidates, .. } = &slot.target else {
             return Err(DurablePlanDriverError::FenceLost);
         };
-        if !candidates.contains(&request.selected_deployment)
-            || matches!(deployment.backend, CapabilityBackendBinding::Mcp { .. })
-        {
+        if !candidates.contains(&request.selected_deployment) {
             return Err(DurablePlanDriverError::FenceLost);
         }
+        let mcp_runtime = self
+            .resolve_mcp_runtime(&request, &bindings, &deployment)
+            .await?;
         let policies = build_allowed_policy_bundle(
             &request,
             bindings
@@ -569,7 +627,7 @@ impl ControllerCapabilityAdmissionProvider for PostgresControllerCapabilityAdmis
         )?;
         Ok(ControllerCapabilityAdmissionDecision {
             policies,
-            mcp_runtime: None,
+            mcp_runtime,
         })
     }
 }
