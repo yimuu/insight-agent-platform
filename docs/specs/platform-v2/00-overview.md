@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-214 |
+| 状态 | In Progress / CR-215 |
 | 日期 | 2026-08-31 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -48,6 +48,11 @@
 > `input.classification`与物化后的`limits.deadlineSeconds`，但两者此前只存在于client compiler intent；lock丢失或`agent adopt`后只能
 > 猜测隐藏默认。CR-214把两项冻结为`AgentResourceSpec.input_classification/default_deadline_seconds`，随Draft CAS与immutable Revision
 > digest处理；不新增表、route、aggregate、Job、Event projection或Deployment字段。
+
+> 2026-09-01 implementation feedback（CR-215）：Console不能读取CLI私有runtime配置，而现有`/v1`没有提供新Agent编译所需的
+> exact Policy revision/Deployment binding；把动态ID或synthetic默认写入browser bundle会形成第二authority。CR-215增加bounded、
+> tenant/principal-scoped `GET /v1/agent-authoring-profile`，只从现有Tenant配置和immutable Policy Version/Deployment直接投影；
+> 不新增表、cache、aggregate、Event projection、mutation、role或credential字段。
 
 > 2026-08-30 implementation feedback（CR-205）：剩余full-profile产品化场景确认，八类public noun只能发布
 > Capability/Context Interface、Model/Sandbox Profile，却没有合法management surface发布它们依赖的Capability/Context

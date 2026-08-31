@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -27,6 +27,12 @@
 > CR-214 impact：exact Agent Resource/Revision同时拥有normalized `input_classification`与`default_deadline_seconds`。这些authoring事实
 > 不进入list summary；CLI/Console在创建Run前通过既有exact Resource read取得并校验，随后提交现有absolute deadline与input classification。
 > API不增加默认值、route、header、projection table或server-side profile lookup。
+
+> CR-215 impact：Management增加`GET /v1/agent-authoring-profile`。authenticated tenant principal必须具有Policy read权限；响应只包含
+> closed compiler limits/environment、exact scheduling Policy revision/Deployment binding与bounded enabled model aliases。projection在一次
+> repeatable read中从Tenant配置及immutable ResourceVersion/Deployment authority组装，private/no-store；不得包含token、Secret binding、
+> provider endpoint、signed URL、raw model config或worker identity。缺失、suspended、digest drift、权限不足或feature disabled均fail closed，
+> Console不得使用bundle/browser fallback。
 
 > CR-209 impact：既有Agent Draft document增加nullable bounded `author_instructions`，属于closed `AgentResourceSpec`而非自由prompt
 > route。它随Draft CAS/publish/read和canonical request digest处理；Run create、list、summary、Event与Problem均不复制或回显正文。

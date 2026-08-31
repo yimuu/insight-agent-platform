@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -144,6 +144,9 @@ Agent document canonical digest。对同一Agent Resource的后续Draft update�
 但不能覆盖服务端name。name仍只要求project-local唯一，不增加tenant-wide唯一约束或查名route。
 
 ## 5. 发布执行
+
+CLI从私有project runtime state取得compiler profile并在线重验。Console只能通过
+`GET /v1/agent-authoring-profile`取得同一closed shape；两者都不得嵌入generated Policy identity或静默替换fallback binding。
 
 `publish` 按现有 authority 顺序执行：
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 默认入口 | `insight dev` |
 | 部署性质 | 单机开发；不是production或L4证据 |

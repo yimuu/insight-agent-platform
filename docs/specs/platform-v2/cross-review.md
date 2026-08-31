@@ -1,10 +1,24 @@
-# Platform v2 00～18 Cross-review（CR-214）
+# Platform v2 00～18 Cross-review（CR-215）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-215 browser authoring profile authority cross-review
+
+Phase 4 Console接线确认：browser不能读取CLI私有runtime config，而new-Agent compiler必须冻结exact Policy revision/Deployment binding。
+把generated ID写入bundle、localStorage或synthetic默认会与shared compiler分叉，并在fresh tenant产生无效Deployment closure。
+
+CR-215在Management surface增加一个read-only、bounded、tenant/principal-scoped authoring-profile projection。Tenant config仍选择当前
+default Policy Deployment；immutable ResourceVersion/Deployment仍拥有exact digest；Gateway只在repeatable read中组合safe DTO，Console不拥有
+任何business fact。缺失、suspended、digest mismatch、permission denied或feature disabled均fail closed。响应private/no-store且排除Secret、
+provider endpoint、signed URL、raw config与worker identity。
+
+复核覆盖DTO/schema、tenant/permission、transaction snapshot、digest、Problem、Console memory-only消费与negative fixture。该修订不新增表、
+aggregate、Event projection、cache、mutation、Job/Task/Receipt、role、migration或compatibility fallback；影响按17→18→00、Product
+01/03/04/06→00与implementation plan同步后授权Phase 4继续。
 
 ### CR-214 Agent Run input defaults authority cross-review
 

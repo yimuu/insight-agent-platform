@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -39,6 +39,10 @@
 > CR-214 impact：L1/L2/L3增加input classification与default deadline物化门禁：manifest/compiler intent、Agent Draft/Revision及
 > CLI/Console Run request逐字节一致；lock丢失、adopt、跨设备读取、classification降级、零/超限deadline及从profile/Deployment/Event
 > 猜测全部fail closed，不新增表、route、role或projection。
+
+> CR-215 impact：L1证明authoring-profile DTO closed/bounded/digest-valid且无credential；L2证明PostgreSQL read按tenant/principal隔离并拒绝
+> missing/suspended/digest-drift Policy authority且无cache/projection table；L3证明Management role/auth/permission绑定与Console仅消费exact
+> response，不写browser persistence或使用bundle默认。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production

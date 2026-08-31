@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-214 |
+| 状态 | Implementing / CR-215 |
 | 日期 | 2026-09-01 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
@@ -24,8 +24,9 @@
 - CR-212把normalized authoring name物化到现有Agent Resource authority并冻结创建后不可更名语义。
 - CR-213把compiler required feature set物化到现有Agent Resource authority，关闭草稿态summary来源缺口。
 - CR-214把normalized input classification与default deadline物化到现有Agent Resource authority，关闭adopt/lock丢失后的Run默认来源缺口。
+- CR-215增加只读、tenant-scoped Agent authoring-profile投影，关闭browser无法取得exact compiler binding的缺口。
 
-完成证据：文档链接与状态一致、`git diff --check`、CR-214无P0/P1。
+完成证据：文档链接与状态一致、`git diff --check`、CR-215无P0/P1。
 
 ## Phase 1：shared Agent authoring compiler
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Accepted / CR-215 |
 | 日期 | 2026-09-01 |
 | 前端 | 现有静态 React Console |
 | authority | public `/v1` only；无BFF、无Console数据库 |
@@ -29,6 +29,10 @@ Agent列表 -> 新建/导入 -> 校验 -> 发布 -> 输入 -> 运行 -> 时间�
 Artifact、Operation、Deployment、Receipt、Trace不再是默认一级导航，统一进入关联对象的“Advanced diagnostics”。
 
 ## 3. Agent 页面
+
+编译新manifest前，Console读取bounded tenant-scoped `GET /v1/agent-authoring-profile`并把其exact bindings与limits交给shared
+compiler adapter。missing、disabled、stale或unauthorized profile必须给出actionable error；browser storage与build-time默认都不是fallback
+authority。
 
 ### 3.1 列表
 
