@@ -49,6 +49,11 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/nominal/digest.schema.json",
     "contracts/platform-v1/schemas/nominal/failure.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
+    "contracts/platform-v1/schemas/agent-authoring-profile-v1.schema.json",
+    "contracts/platform-v1/schemas/agent-summary-v1.schema.json",
+    "contracts/platform-v1/schemas/run-summary-v1.schema.json",
+    "contracts/platform-v1/schemas/agent-list-page-v1.schema.json",
+    "contracts/platform-v1/schemas/run-list-page-v1.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-run-event-cursor.schema.json",
     "contracts/platform-v1/schemas/nominal/trace-id.schema.json",
     "contracts/platform-v1/schemas/nominal/trace-identity-v1.schema.json",
@@ -465,6 +470,8 @@ def check_foundation_surfaces(errors):
         if line.startswith("  /") and line.endswith(":")
     ]
     if path_lines != [
+        "  /agent-authoring-profile:",
+        "  /agents:",
         "  /{resource_noun}:",
         "  /{resource_noun}/{resource_id}:",
         "  /{resource_noun}/{resource_id}/draft:",

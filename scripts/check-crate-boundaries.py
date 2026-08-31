@@ -357,6 +357,12 @@ ALLOWED_FIXED_ASSET_LOCATORS = {
     # The contract owner embeds the versioned hard-limit profile once; all
     # consumers use its typed loader instead of reaching across the workspace.
     "crates/platform-contracts/src/limits.rs",
+    # The product CLI is the sole owner of the signed development feature registry and embeds its
+    # release schema so profile selection can fail before network or Docker I/O.
+    "crates/insight-cli/src/dev_profile.rs",
+    # The product CLI supervisor embeds the reviewed dependency Compose closure and copies those
+    # exact bytes to project-local runtime state; no member crate reads it independently.
+    "crates/insight-cli/src/lib.rs",
     # Test-only Schema provisioning reads the workspace-owned baseline at
     # runtime; production storage builds contain no embedded DDL.
     "crates/storage/src/repository/schema_contract.rs",
