@@ -2,13 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-204 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
 > CR-204 impact：Agent Deployment create body提交resolved slot intent，但不提交本次command才生成的`adep`、`xcb`或
 > binding digest。resolution transaction预留这些identity并物化完整`AgentDeploymentClosure`后再验证和持久化。
+
+> CR-209 impact：简化`model_chat`manifest的作者指令必须由immutable Agent Revision拥有，不能被提升为platform policy或在Run时
+> 从active head补取。`AgentResourceSpec.author_instructions`冻结其bounded UTF-8正文；Model assembly只把它投影为独立的
+> `AgentInstruction` user/untrusted block。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -111,6 +115,10 @@ Agent Interface Revision 与 Agent Plan Revision 分离；一个 Agent Revision 
 二者由同一个Agent Draft validation/publish command原子产生：Interface使用`aif_<uuidv7>`，Plan Revision使用
 `arev_<uuidv7>`。Interface没有独立Draft/Head/API；任何interface语义变化都随新Agent Revision发布，但多个
 Plan Revision可以在schema/digest完全相同时引用同一immutable Interface Revision。
+
+`AgentResourceSpec`包含nullable `author_instructions`：非空时为1～16384 UTF-8 bytes并拒绝NUL；它随完整Agent document参与
+canonical digest与Draft CAS，publish后不可变。该字段是作者内容而不是platform/system policy，不得改变Capability、Secret、Effect、
+approval、budget或exact binding authority。没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
 
 ## 4. 作者文档
 
@@ -575,7 +583,7 @@ Timer、Signal 和 HumanTask 都是 durable wait。等待态不占 execution per
 ModelLoop 是 durable controller，不是一个隐藏的同步函数：
 
 ModelLoop的唯一machine wire是10.3的Plan v5 `ModelLoopNode`；本节不另定义含自由`messages`或运行时模板的旧node shape。
-Agent contract、exact Plan node语义和Prompt Asset来源均由已发布Agent Revision、Typed Plan与Deployment closure冻结，运行时
+Agent contract、作者指令、exact Plan node语义和Prompt Asset来源均由已发布Agent Revision、Typed Plan与Deployment closure冻结，运行时
 只能将这些exact材料投影成11/16的canonical assembly block，不能从active head、自由模板或caller正文补猜。
 
 运行过程：
@@ -620,6 +628,8 @@ Ready且media/schema/size符合phase profile。MCP/导入内容初始只能是`E
 Revision publish才能标记为`AuthorReviewed`；任一trust tag都不能获得platform policy优先级。
 
 - Prompt Asset由其Agent/Skill owner Revision + Artifact/digest固定，不存在独立active head或运行时lookup；
+- Agent Revision的inline `author_instructions`不是Prompt Asset；它只投影为11/16定义的`AgentInstruction` canonical block，
+  source identity/digest来自exact Agent Revision，role固定为`user`且`trusted_instruction=false`；
 - 模板只能读取声明端口和安全 metadata；
 - instruction、retrieved content、tool output 和 user content 使用不同 trust tag；
 - 模型输入构造必须保留消息顺序和来源，不把不受信任内容提升为 platform policy；

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-208 |
+| 状态 | Implementing / CR-209 |
 | 日期 | 2026-08-31 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
@@ -18,6 +18,7 @@
 - 在Platform 17冻结Agent/Run bounded list、产品summary与cursor envelope；
 - 在Platform 18冻结compiler、API、CLI、Console、distribution与starter资格矩阵；
 - product-experience 00～06恢复Accepted。
+- CR-208关闭Artifact ID物化环；CR-209冻结`model_chat`作者指令在Agent Revision中的落点与untrusted assembly角色。
 
 完成证据：文档链接与状态一致、`git diff --check`、CR-207无P0/P1。
 
@@ -29,6 +30,7 @@
 - strict YAML 1.2 JSON-compatible parser、project-root/symlink-safe reference loader与closed nominal manifest；
 - `deterministic`和`model_chat`生成canonical Agent resource intent、Typed Plan v5、schema/manifest digest、binding intent、
   required features和ordered lifecycle plan；
+- `model_chat.instructions`物化到Agent Revision，并以`AgentInstruction`/`user`/untrusted block进入canonical model assembly；
 - 上传后以exact Artifact authority materialize并重验真正的`ResourceDocument::Agent`，compiler不预留或猜测ID；
 - repository-level跨语言fixture corpus与TypeScript conformance adapter。
 

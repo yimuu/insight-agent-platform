@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-208 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -69,7 +69,7 @@ spec:
 | `metadata.name` | project-local稳定 key，`[a-z][a-z0-9-]{0,62}` |
 | `metadata.displayName` | 1～255字符；缺省为 name 的展示形式 |
 | `spec.execution.kind` | `deterministic` 或 `model_chat` |
-| `spec.instructions` | model_chat必填；UTF-8、bounded；不是 platform/system role |
+| `spec.instructions` | model_chat必填；UTF-8、1～16384 bytes、拒绝NUL；不是 platform/system role |
 | `spec.model.ref` | model_chat必填；project alias 或 advanced exact Deployment ID |
 | `spec.input/output.schema` | project-relative JSON Schema 文件 |
 | `spec.input.classification` | `public/internal/confidential/restricted` |
@@ -102,6 +102,11 @@ ordered lifecycle plan使用closed logical output reference（例如`authoring_a
 
 相同输入必须字节级产生相同输出；文件遍历顺序、YAML map 顺序、操作系统和 CPU 架构不得影响 digest。
 CLI 与 Console 实现若使用不同语言，必须共享同一 conformance fixture corpus并逐字节比较编译产物。
+
+`model_chat.spec.instructions`确定性映射到`AgentResourceIntent.author_instructions`，materialize后成为immutable
+`AgentResourceSpec.author_instructions`。运行时只从Run冻结的exact Agent Revision读取它，并在Plan node instruction之后、required
+Skill之前生成`AgentInstruction` assembly block；该block固定为`user` role且`trusted_instruction=false`。`deterministic`的该字段固定为
+`null`。compiler、publisher或runtime不得把作者正文拼入platform safety、Agent contract或Plan node instruction。
 
 ## 5. 发布执行
 

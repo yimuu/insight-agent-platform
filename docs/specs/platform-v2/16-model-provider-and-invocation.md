@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-205 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-30 |
 | 依赖 | 02、03、04、06、07、09、10、15 |
 | 直接下游 | 17、18 |
@@ -15,6 +15,9 @@
 
 > CR-181/203 impact：ModelLoop由05 Plan v5冻结model/skill/capability slots、input/output、route和全部budget；Model Worker不能从
 > prompt/tool intent扩大bindings、budget或选择另一个output port。
+
+> CR-209 impact：exact Agent Revision可冻结bounded `author_instructions`；canonical request在Plan node instruction后投影独立
+> `AgentInstruction`，固定为`user` role且`trusted_instruction=false`，不得合并或提升为三个platform block。
 
 ## 1. 决策摘要
 
@@ -103,7 +106,8 @@ content part、tool、schema、string和bytes有平台hard limit。prompt inject
 
 CR-186 canonical `ModelContentSource`固定包含`source_kind/source_id/source_digest/content_digest/assembly_phase/ordinal/
 byte_budget/token_budget/trusted_instruction`。初始request必须完整包含11的四个必选phase（platform safety、Agent contract、Plan node
-instruction、current user input），Skill与Context phase按exact activation/query事实可选；同phase ordinal唯一。canonical message顺序
+instruction、current user input）；exact Agent Revision携带非空作者指令时`AgentInstruction`也为必选，Skill与Context phase按exact
+activation/query事实可选；同phase ordinal唯一。canonical message顺序
 就是phase/ordinal顺序，source-map digest来自同序closed entries。任何overflow整批返回稳定admission failure，不允许Provider adapter、
 Model Worker或恢复路径自行截断或重排。
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-31 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -20,6 +20,9 @@
 > CR-207 impact：产品体验L1～L3增加shared Agent manifest compiler、产品DTO/错误映射、Agent/Run list cursor与CLI/Console
 > 北极星旅程。release侧增加四target CLI archive、immutable Console/runtime/guest image、ReleaseBundle/SBOM/provenance/signature和
 > single-node starter/feature profile门禁。starter证据始终是development/non-production；真实L4～L6状态不变。
+
+> CR-209 impact：`model_chat.instructions`必须随exact Agent Revision冻结并生成独立`AgentInstruction` user/untrusted block；L1/L3
+> 增加缺失/空/NUL/超限、digest漂移、role提升、active-head漂移与prompt/log/Event/Problem泄漏负向。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production
@@ -272,6 +275,8 @@ CR-207产品体验矩阵：
   path/symlink escape、Secret/URL/shell字段；`deterministic | model_chat` positive/negative corpus在Rust CLI与Console compiler逐字节得到
   相同manifest digest、Typed Plan v5、schema digest、required feature与ordered lifecycle plan；产品text/json/DOM投影的closed字段和
   Problem→UserProblem映射覆盖unknown fallback且零authority/credential泄漏。
+- L1 model assembly：`model_chat.instructions`在Agent Revision与request source map中保持exact digest，顺序固定在Plan node instruction
+  后、required Skill前，role=`user`且`trusted_instruction=false`；deterministic为null，空/NUL/超限、来源漂移或合并进platform block失败。
 - L2：fresh PostgreSQL覆盖Agent/Run list上限、filter、stable keyset、snapshot、cursor replay/tamper/expiry/wrong purpose/principal/tenant，
   并发publish/activate/update/archive与Run/Task terminal下不重复、不越权、不从Event重建；Agent publication所有HTTP边界前后kill/retry通过
   Receipt/ETag/journal恢复且不重复Version/Deployment/Run effect。

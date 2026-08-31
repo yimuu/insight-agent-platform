@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-208 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -67,6 +67,10 @@ projection table。CR-207已按 17 -> 18 -> 00/cross-review 顺序修订 Platfor
 ADR-0003/0004/0005与Platform 17→18→00已由CR-207完成修订；cross-review确认没有新增business authority、表、
 Job/Task/Event/Receipt种类或常驻role。本目录00～06进入Accepted并授权clean-cut实现。只有实现与适用仓库门禁通过后才能更新
 `docs/current`或把状态推进为Implemented/Verified。
+
+CR-209关闭实现前最后一个prompt authority缺口：`model_chat.spec.instructions`进入immutable Agent Revision的bounded
+`author_instructions`，并在11/16的固定assembly序列中以`user` role、`trusted_instruction=false`投影。它不得进入platform safety、
+Agent contract或Plan node instruction，也不能在Run时由active head、caller metadata或浏览器本地状态补取。
 
 ## 5. 完成定义
 

@@ -1,10 +1,33 @@
-# Platform v2 00～18 Cross-review（CR-208）
+# Platform v2 00～18 Cross-review（CR-209）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-208 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-209 Agent author instruction trust cross-review
+
+Phase 1实现审计确认`model_chat.spec.instructions`没有合法的persisted/runtime落点：现有`AgentResourceSpec`不携带作者正文，
+而初始model assembly只有platform safety、Agent contract、Plan node instruction三个trusted platform block和Skill/Context/user输入。
+忽略正文会使manifest行为失效；把正文拼入前三者会把tenant作者内容提升为platform policy，并破坏CR-186信任合同。
+
+CR-209选择由既有immutable Agent Revision拥有nullable bounded `author_instructions`，并在canonical assembly中增加独立
+`AgentInstruction`位置。正文随Agent document canonical digest、Draft CAS、publish与Run exact binding冻结；block固定为`user` role、
+`trusted_instruction=false`，位于Plan node instruction之后、required Skill之前。Run/Event/Problem/list summary不复制正文，runtime不从
+active head、caller metadata、local lock或browser state补取。
+
+| Spec | CR-209 结论 |
+|---|---|
+| 00～04、06～10、12～15 | identity、Resource lifecycle、Run/Job/Task/Event/Receipt与执行边界不变 |
+| 05 | `AgentResourceSpec`增加nullable bounded作者正文；Revision/digest/CAS继续由既有Resource authority拥有 |
+| 11/16 | 增加独立AgentInstruction assembly位置；作者正文为user/untrusted且不能扩大任何binding/policy |
+| 17 | 复用既有Agent Draft document route；list/Run/Event/Problem不公开正文，不增加自由prompt endpoint |
+| 18/Product 00～01 | 增加compiler、role、顺序、digest、漂移与泄漏门禁；`model_chat`行为闭合 |
+
+复核覆盖state ownership、ID/closed schema、canonical digest、CAS、permission、prompt role、budget、recovery与泄漏。CR-209不新增表、
+aggregate、ResourceKind、route、Job/Task/Event/Receipt kind、ComponentRole、Secret路径或compatibility fallback；05→11/16→17→18→00与
+product-experience 00/01/plan已同步并恢复Accepted/Implementing，授权实现。
 
 ### CR-208 Agent compiler Artifact identity cross-review
 
@@ -1065,7 +1088,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-208 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+CR-209 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

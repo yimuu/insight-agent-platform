@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-209 |
 | 日期 | 2026-08-31 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -15,6 +15,9 @@
 > `GET /v1/runs`直接查询Run并关联其frozen Agent Deployment/Resource identity。两者使用purpose/filter/principal/tenant-bound
 > opaque cursor与stable keyset，不新增projection table、cache或Event current state。产品summary不包含authority字段；分页cursor只在
 > page envelope中作为客户端代管的protocol metadata出现，默认text/DOM不得显示。
+
+> CR-209 impact：既有Agent Draft document增加nullable bounded `author_instructions`，属于closed `AgentResourceSpec`而非自由prompt
+> route。它随Draft CAS/publish/read和canonical request digest处理；Run create、list、summary、Event与Problem均不复制或回显正文。
 
 > CR-205 impact：Management `ResourceNoun`从八类可调用owner扩为十三类closed authoring kind，新增
 > `capability-implementations | context-implementations | model-providers | sandbox-runtimes | sandbox-packages`。前两类及
