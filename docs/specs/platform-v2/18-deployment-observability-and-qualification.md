@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-211 |
+| 状态 | Accepted / CR-212 |
 | 日期 | 2026-08-31 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -29,6 +29,9 @@
 
 > CR-211 impact：L1 conformance corpus逐字节锁定Interface contract与`primary_model` requirement的closed v1 preimage及digest，
 > 防止CLI/Console、publish恢复或server ID物化产生不同算法。
+
+> CR-212 impact：L1/L2/L3增加authoring name物化与稳定性门禁：manifest/Agent Revision/AgentSummary/RunSummary逐字节一致；
+> Draft重命名、display-name替代、Artifact/lock猜测、wrong owner/tenant与Revision漂移全部fail closed，不新增表或tenant-wide name index。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-211 |
+| 状态 | Accepted / CR-212 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -66,7 +66,7 @@ spec:
 |---|---|
 | `apiVersion` | exact `insight.platform/v1` |
 | `kind` | exact `Agent` |
-| `metadata.name` | project-local稳定 key，`[a-z][a-z0-9-]{0,62}` |
+| `metadata.name` | project-local稳定 key，`[a-z][a-z0-9-]{0,62}`；物化为不可更名的`AgentResourceSpec.authoring_name` |
 | `metadata.displayName` | 1～255字符；缺省为 name 的展示形式 |
 | `spec.execution.kind` | `deterministic` 或 `model_chat` |
 | `spec.instructions` | model_chat必填；UTF-8、1～16384 bytes、拒绝NUL；不是 platform/system role |
@@ -86,7 +86,7 @@ value/schema的Compute或Capability节点；Return直接消费exact RunInput por
 project profile和已解析 exact binding；输出为：
 
 1. canonical manifest digest；
-2. closed `AgentResourceIntent`，包含Resource业务字段、authoring/plan artifact purpose与digest，但不含Artifact ID；
+2. closed `AgentResourceIntent`，包含normalized `authoring_name`、Resource业务字段、authoring/plan artifact purpose与digest，但不含Artifact ID；
 3. canonical Typed Plan v5 bytes与digest；
 4. input/output/error schema digest；
 5. Deployment binding intent；
@@ -129,6 +129,10 @@ Skill之前生成`AgentInstruction` assembly block；该block固定为`user` rol
 
 `deterministic`的Typed Plan为`start -> return`，Return的`RunInput.schema_digest`同时等于input/output schema digest；compiler不得
 伪造output digest、插入隐式coercion或生成一个只能在terminal materialization失败的Plan。
+
+`metadata.name`逐字节映射到`AgentResourceIntent.authoring_name`，materialize后成为`AgentResourceSpec.authoring_name`并参与
+Agent document canonical digest。对同一Agent Resource的后续Draft update必须保持该值；本地lock可以采用显式`agent adopt`恢复映射，
+但不能覆盖服务端name。name仍只要求project-local唯一，不增加tenant-wide唯一约束或查名route。
 
 ## 5. 发布执行
 

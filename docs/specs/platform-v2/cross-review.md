@@ -1,10 +1,25 @@
-# Platform v2 00～18 Cross-review（CR-211）
+# Platform v2 00～18 Cross-review（CR-212）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-211 |
+| 状态 | Accepted / CR-212 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-212 Agent authoring name authority cross-review
+
+Phase 2 direct-authority list审计确认：`AgentSummaryV1.name`与`RunSummaryV1.agent_name`要求来自Agent Resource authority，但
+normalized `metadata.name`此前只存在于本地manifest与project lock；既有`AgentResourceSpec`只有display name外层字段和语义内容。
+服务端若继续实现只能把display name当稳定key、读取Artifact正文或信任client lock，都会产生猜测或第二authority。
+
+CR-212选择把bounded normalized name加入既有`AgentResourceSpec.authoring_name`。compiler逐字节物化manifest name；Resource创建后
+Draft update必须保持同一值，publish后随immutable Agent Revision冻结并参与canonical digest。name只需project-local唯一，不增加
+tenant-wide unique index、查名route或新的identity。Agent list从current Resource document投影，Run list通过frozen Agent Deployment
+精确关联同一owner Resource后投影该字段；历史Run不使用current active Deployment改写绑定。
+
+复核覆盖closed schema、digest/CAS、Resource update、Revision publication、Run frozen binding、tenant/permission、cursor filter与CLI lock恢复。
+CR-212不新增表、aggregate、ResourceKind、route、Job/Task/Event/Receipt、role、migration或compatibility fallback；05→17→18→00、
+Product 00/01/plan与cross-review已同步并恢复Accepted/Implementing，授权Phase 2继续。
 
 ### CR-211 Product compiler digest preimage cross-review
 
@@ -1110,7 +1125,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-211 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+CR-212 cross-review没有未关闭P0/P1合同冲突；product-experience实现已进入Phase 2，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

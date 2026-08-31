@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-211 |
+| 状态 | Accepted / CR-212 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -17,6 +17,10 @@
 > CR-211 impact：产品compiler生成的Agent Interface contract digest使用closed v1 preimage，只包含input/output/error
 > `ClosedJsonSchema.canonical_digest`；`primary_model` requirement digest使用kind、normalized manifest ref与schema_version。两者均按02
 > canonical JSON/SHA-256计算，不包含Artifact或server ID。
+
+> CR-212 impact：简化manifest的normalized `metadata.name`冻结到`AgentResourceSpec.authoring_name`，成为Agent Resource的
+> bounded authoring identity；创建后不可更名。Agent/Run产品summary只从该Resource authority投影，不从本地lock、Artifact文件名或
+> display name猜测。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -120,9 +124,12 @@ Agent Interface Revision 与 Agent Plan Revision 分离；一个 Agent Revision 
 `arev_<uuidv7>`。Interface没有独立Draft/Head/API；任何interface语义变化都随新Agent Revision发布，但多个
 Plan Revision可以在schema/digest完全相同时引用同一immutable Interface Revision。
 
-`AgentResourceSpec`包含nullable `author_instructions`：非空时为1～16384 UTF-8 bytes并拒绝NUL；它随完整Agent document参与
-canonical digest与Draft CAS，publish后不可变。该字段是作者内容而不是platform/system policy，不得改变Capability、Secret、Effect、
-approval、budget或exact binding authority。没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
+`AgentResourceSpec`包含`authoring_name`与nullable `author_instructions`。`authoring_name`必须匹配
+`[a-z][a-z0-9-]{0,62}`，由简化manifest的normalized `metadata.name`逐字节物化；Agent Resource创建后，Draft update必须保持同一值，
+不能用display name、Artifact文件名、project lock或当前Deployment重命名。name只需在project-local lock内唯一，不引入tenant-wide
+唯一约束。`author_instructions`非空时为1～16384 UTF-8 bytes并拒绝NUL；两者随完整Agent document参与canonical digest与Draft CAS，
+publish后不可变。作者正文不是platform/system policy，不得改变Capability、Secret、Effect、approval、budget或exact binding authority。
+没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
 
 简化产品compiler的`contract_digest` preimage固定为closed
 `{schema_version,input_schema_digest,output_schema_digest,error_schema_digest}`；三个digest来自对应完整ClosedJsonSchema snapshot。

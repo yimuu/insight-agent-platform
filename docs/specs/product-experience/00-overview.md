@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-211 |
+| 状态 | Accepted / CR-212 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -76,6 +76,9 @@ CR-210关闭`deterministic`模板的数据端口缺口：因为该模板没有�
 并让Return消费该exact RunInput port。需要不同输出shape的Agent必须使用`model_chat`或高级Typed Plan。
 
 CR-211冻结简化compiler的Interface contract与model requirement digest preimage，避免CLI/Console或恢复路径对opaque digest各自猜算法。
+
+CR-212关闭产品summary的authoring name authority缺口：normalized `metadata.name`物化到现有Agent Resource document，创建后不可更名；
+CLI lock只保存映射而不拥有name，Console/API不得用display name或Artifact内容猜测。
 
 ## 5. 完成定义
 

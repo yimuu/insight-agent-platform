@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-211 |
+| 状态 | In Progress / CR-212 |
 | 日期 | 2026-08-31 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -34,6 +34,11 @@
 > 2026-08-31 implementation feedback（CR-211）：产品compiler要求CLI/Console逐字节相同，却没有冻结Interface contract与model
 > requirement digest preimage。CR-211在05/Product 01定义两个closed v1 canonical文档；算法复用02，不改变public DTO、runtime、
 > route、table或server-generated identity。
+
+> 2026-08-31 implementation feedback（CR-212）：Agent/Run产品summary要求authoring name来自Resource authority，但
+> `metadata.name`此前只存在于本地manifest/lock，服务端无法安全投影且不能用display name猜测。CR-212把normalized name冻结为
+> `AgentResourceSpec.authoring_name`；它在Resource创建后不可更名，随Draft CAS与immutable Revision digest处理，不新增表、route、
+> aggregate、ID或tenant-wide uniqueness。
 
 > 2026-08-30 implementation feedback（CR-205）：剩余full-profile产品化场景确认，八类public noun只能发布
 > Capability/Context Interface、Model/Sandbox Profile，却没有合法management surface发布它们依赖的Capability/Context
