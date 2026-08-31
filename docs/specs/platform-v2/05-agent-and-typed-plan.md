@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-209 |
+| 状态 | Accepted / CR-211 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -13,6 +13,10 @@
 > CR-209 impact：简化`model_chat`manifest的作者指令必须由immutable Agent Revision拥有，不能被提升为platform policy或在Run时
 > 从active head补取。`AgentResourceSpec.author_instructions`冻结其bounded UTF-8正文；Model assembly只把它投影为独立的
 > `AgentInstruction` user/untrusted block。
+
+> CR-211 impact：产品compiler生成的Agent Interface contract digest使用closed v1 preimage，只包含input/output/error
+> `ClosedJsonSchema.canonical_digest`；`primary_model` requirement digest使用kind、normalized manifest ref与schema_version。两者均按02
+> canonical JSON/SHA-256计算，不包含Artifact或server ID。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -120,6 +124,10 @@ Plan Revision可以在schema/digest完全相同时引用同一immutable Interfac
 canonical digest与Draft CAS，publish后不可变。该字段是作者内容而不是platform/system policy，不得改变Capability、Secret、Effect、
 approval、budget或exact binding authority。没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
 
+简化产品compiler的`contract_digest` preimage固定为closed
+`{schema_version,input_schema_digest,output_schema_digest,error_schema_digest}`；三个digest来自对应完整ClosedJsonSchema snapshot。
+该规则只规范简化authoring source，不改变高级作者显式提交已验证Agent document的能力。Typed Plan与Agent document必须携带同一结果。
+
 ## 4. 作者文档
 
 每个 Draft 只能选择一种 authoring mode：
@@ -210,6 +218,9 @@ enum DependencySlot {
 每个 slot 有稳定 `slot_id`、精确 Interface Revision 或受限 compatibility requirement、用途和数据策略。
 Agent Deployment将每个slot解析为exact resource Deployment并同时冻结其owner Revision；RunBindings固定该结果。
 运行时只能在已经绑定的candidate集合中选择，不能discovery、绕过Deployment或追随active binding。
+
+简化`model_chat`的slot ID固定为`primary_model`，requirement digest preimage固定为closed
+`{schema_version:1,kind:"model",manifest_ref}`。exact Model Deployment与selection Policy属于Deployment binding，不得混入requirement。
 
 ## 8. Canonical Typed Plan
 

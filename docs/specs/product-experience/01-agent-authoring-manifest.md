@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-210 |
+| 状态 | Accepted / CR-211 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -104,6 +104,24 @@ ordered lifecycle plan使用closed logical output reference（例如`authoring_a
 相同输入必须字节级产生相同输出；文件遍历顺序、YAML map 顺序、操作系统和 CPU 架构不得影响 digest。
 CLI 与 Console 实现若使用不同语言，必须共享同一 conformance fixture corpus并逐字节比较编译产物。
 
+所有digest使用02的RFC 8785 canonical JSON bytes与SHA-256 lowercase前缀格式。Interface contract的唯一preimage为：
+
+```json
+{
+  "error_schema_digest": "sha256:...",
+  "input_schema_digest": "sha256:...",
+  "output_schema_digest": "sha256:...",
+  "schema_version": 1
+}
+```
+
+字段值分别来自完整`ClosedJsonSchema` snapshot的`canonical_digest`；其digest同时写入`AgentResourceIntent.contract_digest`与
+Typed Plan v5 `interface_contract_digest`。不得digest整个Resource document、文件路径、Artifact ID或server-generated revision ID。
+
+`model_chat`的`primary_model` requirement唯一preimage为
+`{"kind":"model","manifest_ref":"<normalized ref>","schema_version":1}`；manifest ref不允许Unicode/大小写别名化，resolver返回的exact
+Model Deployment与selection Policy不进入requirement digest，而进入Deployment binding intent。slot与binding恢复必须重算并比较该digest。
+
 `model_chat.spec.instructions`确定性映射到`AgentResourceIntent.author_instructions`，materialize后成为immutable
 `AgentResourceSpec.author_instructions`。运行时只从Run冻结的exact Agent Revision读取它，并在Plan node instruction之后、required
 Skill之前生成`AgentInstruction` assembly block；该block固定为`user` role且`trusted_instruction=false`。`deterministic`的该字段固定为
@@ -166,6 +184,7 @@ token、Secret value、signed URL、Artifact body或数据库连接。丢失 loc
 - deterministic input/output schema不同的fixture在任何副作用前失败；
 - negative fixtures覆盖所有 YAML危险特性、路径逃逸、unknown field、超限和条件字段；
 - CLI/Console compiler corpus产生相同 digest、Typed Plan和请求序列；
+- contract/requirement preimage字段增加、缺失、重排或混入Artifact/server ID时fixture必须检测digest漂移；
 - 第一次发布、无变化重放、内容更新、并发发布和每个 crash window 都不产生重复 effect；
 - manifest中不存在 ResourceVersion、Deployment、Job、Receipt或ETag字段；
 - 发布后的 Run仍冻结与高级 lifecycle完全相同的 exact closure。

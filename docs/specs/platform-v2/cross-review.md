@@ -1,10 +1,22 @@
-# Platform v2 00～18 Cross-review（CR-210）
+# Platform v2 00～18 Cross-review（CR-211）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-210 |
+| 状态 | Accepted / CR-211 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-211 Product compiler digest preimage cross-review
+
+Phase 1输出审计确认Interface `contract_digest`与model slot `requirement_digest`此前没有唯一preimage；Rust/TypeScript、首次publish与
+crash recovery若各自digest不同对象，会让相同manifest产生不同Plan/Receipt/binding，或在Artifact ID物化后发生漂移。
+
+CR-211冻结两个最小closed v1 document：Interface preimage只含三个ClosedJsonSchema canonical digest与schema_version；model requirement
+只含schema_version、kind=`model`与normalized manifest ref。两者复用02 RFC 8785/SHA-256，均不含Artifact、Version、Deployment、Receipt、
+ETag或其他server identity。exact Model Deployment与selection Policy只属于Deployment binding intent。
+
+复核确认Resource/Version/Deployment、Run、Artifact、Receipt与runtime authority不变；不新增field/table/route/Job/role/fallback。05、18、00、
+Product 00/01/plan与cross-review已同步并恢复Accepted/Implementing，授权Phase 1继续。
 
 ### CR-210 Deterministic template terminal schema cross-review
 
@@ -1098,7 +1110,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-210 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+CR-211 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

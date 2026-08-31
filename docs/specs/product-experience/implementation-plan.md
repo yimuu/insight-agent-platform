@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-210 |
+| 状态 | Implementing / CR-211 |
 | 日期 | 2026-08-31 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
@@ -20,6 +20,7 @@
 - product-experience 00～06恢复Accepted。
 - CR-208关闭Artifact ID物化环；CR-209冻结`model_chat`作者指令在Agent Revision中的落点与untrusted assembly角色。
 - CR-210冻结`deterministic`的identity input/output schema与exact RunInput terminal port。
+- CR-211冻结Interface contract与`primary_model` requirement的canonical v1 preimage。
 
 完成证据：文档链接与状态一致、`git diff --check`、CR-207无P0/P1。
 
