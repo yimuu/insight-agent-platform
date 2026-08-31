@@ -5169,6 +5169,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     plan.validate(plan_limits).unwrap();
     let plan_digest = plan.canonical_digest(plan_limits).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_name: "invocation-agent".to_owned(),
         authoring_package: package.clone(),
         contract_digest: digest('b'),
         dependency_versions: vec![],

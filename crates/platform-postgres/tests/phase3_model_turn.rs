@@ -1330,6 +1330,7 @@ async fn seed_production_artifact_run(
     )
     .unwrap();
     let document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_name: "model-agent".to_owned(),
         authoring_package: authoring(0xc20, '4'),
         contract_digest: digest('5'),
         dependency_versions: vec![],
@@ -2381,6 +2382,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     .unwrap();
     let runtime_plan_bytes = canonical_json(&serde_json::to_value(&runtime_plan).unwrap()).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_name: "instruction-agent".to_owned(),
         authoring_package: authoring(0xa6, 'a'),
         contract_digest: digest('b'),
         dependency_versions: vec![],

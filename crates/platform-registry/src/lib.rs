@@ -8,8 +8,8 @@
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, ActiveTarget, AdministrativeGate, DeploymentClosure, EntityLifecycle,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDraftPayload, ResourceId, ResourceKind,
-    Sha256Digest, ValidationSummary,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
+    ResourceId, ResourceKind, Sha256Digest, ValidationSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
@@ -60,6 +60,23 @@ impl UpdateResourceDraft {
         }
         Ok(())
     }
+}
+
+pub fn validate_resource_draft_replacement(
+    current: &ResourceDraftPayload,
+    replacement: &ResourceDraftPayload,
+) -> Result<(), RegistryCommandError> {
+    if current.document.kind() != replacement.document.kind() {
+        return Err(RegistryCommandError::InvalidResourceDraft);
+    }
+    if let (ResourceDocument::Agent(current_agent), ResourceDocument::Agent(replacement_agent)) =
+        (&current.document, &replacement.document)
+    {
+        if current_agent.authoring_name != replacement_agent.authoring_name {
+            return Err(RegistryCommandError::InvalidResourceDraft);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +546,7 @@ mod tests {
             display_name: "example".to_owned(),
             document: insight_platform_contracts::ResourceDocument::Agent(
                 insight_platform_contracts::AgentResourceSpec {
+                    authoring_name: "registry-agent".to_owned(),
                     authoring_package: insight_platform_contracts::AuthoringPackage {
                         artifact: insight_platform_contracts::ArtifactRef::new(
                             id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),
@@ -564,5 +582,15 @@ mod tests {
             build_registry_validation_summary(&payload, &draft, &digest('0'), &digest('c'))
                 .is_err()
         );
+        let mut renamed = draft.clone();
+        let ResourceDocument::Agent(agent) = &mut renamed.document else {
+            unreachable!()
+        };
+        agent.authoring_name = "different-agent".to_owned();
+        assert_eq!(
+            validate_resource_draft_replacement(&draft, &renamed),
+            Err(RegistryCommandError::InvalidResourceDraft)
+        );
+        assert_eq!(validate_resource_draft_replacement(&draft, &draft), Ok(()));
     }
 }

@@ -226,6 +226,7 @@ pub struct LoadedAgentProject {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceIntent {
+    pub authoring_name: String,
     pub display_name: String,
     pub authoring_artifact: ArtifactIntent,
     pub contract_digest: Sha256Digest,
@@ -361,6 +362,7 @@ impl AgentResourceIntent {
             ));
         }
         let document = ResourceDocument::Agent(AgentResourceSpec {
+            authoring_name: self.authoring_name.clone(),
             authoring_package: AuthoringPackage {
                 artifact: authoring.artifact.clone(),
                 manifest_digest: self.authoring_artifact.content_digest.clone(),
@@ -554,6 +556,7 @@ pub fn compile_agent(input: AgentCompilerInput) -> Result<CompiledAgent, AgentCo
     let typed_plan_length = u64::try_from(typed_plan_bytes.len())
         .map_err(|_| AgentCompilerError::compile("Typed Plan length overflow"))?;
     let resource_intent = AgentResourceIntent {
+        authoring_name: manifest.metadata.name.clone(),
         display_name,
         authoring_artifact: ArtifactIntent {
             purpose: ArtifactPurpose::AuthoringDocument,

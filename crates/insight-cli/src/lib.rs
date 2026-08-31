@@ -6,9 +6,6 @@
 
 pub mod agent_compiler;
 
-#[cfg(test)]
-#[path = "../../../tests/support/workspace_assets.rs"]
-mod workspace_assets;
 mod apply;
 mod apply_journal;
 mod artifact;
@@ -19,6 +16,9 @@ mod run;
 mod run_journal;
 mod task;
 mod task_journal;
+#[cfg(test)]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use insight_platform_contracts::{

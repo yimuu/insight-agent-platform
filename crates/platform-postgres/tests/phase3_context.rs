@@ -1761,6 +1761,7 @@ async fn seed_fixture_with_backend(
     .unwrap();
     let runtime_plan_bytes = canonical_json(&serde_json::to_value(&runtime_plan).unwrap()).unwrap();
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
+        authoring_name: "context-agent".to_owned(),
         authoring_package: authoring(0xa5),
         contract_digest: named_digest("agent-contract"),
         dependency_versions: vec![],

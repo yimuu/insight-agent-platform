@@ -60,10 +60,11 @@ use insight_platform_orchestrator::{
     ScopeDataEnvironmentSnapshot, ScopeEnvironmentLimits, SetRunPause,
 };
 use insight_platform_registry::{
-    build_registry_validation_summary, ActivateResource, CreateDeployment, CreateResourceDraft,
-    NewPublishedVersion, PublishResourceVersions, RecordResourceValidation, RegistryCommandError,
-    RegistryStore, RegistryTransaction, RegistryValidationJobPayload, RequestResourceValidation,
-    SetResourceGate, SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
+    build_registry_validation_summary, validate_resource_draft_replacement, ActivateResource,
+    CreateDeployment, CreateResourceDraft, NewPublishedVersion, PublishResourceVersions,
+    RecordResourceValidation, RegistryCommandError, RegistryStore, RegistryTransaction,
+    RegistryValidationJobPayload, RequestResourceValidation, SetResourceGate,
+    SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
 };
 use insight_platform_sandbox::{
     SandboxCommandLimits, SandboxContractError as DomainSandboxContractError,
@@ -4179,6 +4180,22 @@ impl PgRegistryTransaction {
             command.draft.document.authoring_package(),
         )
         .await?;
+        let current = load_resource_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.resource_id,
+        )
+        .await?;
+        if current.version != command.expected_resource_version
+            || current.lifecycle_state == "retired"
+            || current.resource_kind != command.draft.document.kind().as_str()
+        {
+            return Err(RepositoryError::Conflict("resource"));
+        }
+        validate_resource_draft_replacement(
+            &decode_resource_draft(&current.payload)?,
+            &command.draft,
+        )?;
         let payload = TypedPayload::new(1, &command.draft)?;
         let row = sqlx::query(
             r#"

@@ -347,6 +347,7 @@ macro_rules! authoring_spec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceSpec {
+    pub authoring_name: String,
     pub authoring_package: AuthoringPackage,
     pub contract_digest: Sha256Digest,
     pub dependency_versions: Vec<ExactVersionRef>,
@@ -361,6 +362,9 @@ pub struct AgentResourceSpec {
 
 impl AgentResourceSpec {
     fn validate(&self) -> Result<(), ResourceContractError> {
+        if !is_agent_authoring_name(&self.authoring_name) {
+            return Err(ResourceContractError::InvalidAgentContract);
+        }
         self.authoring_package.validate()?;
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
@@ -3183,6 +3187,13 @@ fn is_name(value: &str, maximum: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn is_agent_authoring_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && value.len() <= 63
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 fn is_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_CODE_BYTES
@@ -3872,6 +3883,7 @@ mod tests {
         }))
         .unwrap();
         let invalid_agent = ResourceDocument::Agent(AgentResourceSpec {
+            authoring_name: "contract-agent".to_owned(),
             authoring_package: AuthoringPackage {
                 artifact: ArtifactRef::new(
                     id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
@@ -3917,6 +3929,13 @@ mod tests {
         }
         invalid_instructions.author_instructions = Some("Use the supplied input.".to_owned());
         assert_eq!(invalid_instructions.validate(), Ok(()));
+        for name in ["", "Uppercase", "starts_with_underscore", &"x".repeat(64)] {
+            invalid_instructions.authoring_name = name.to_owned();
+            assert_eq!(
+                invalid_instructions.validate(),
+                Err(ResourceContractError::InvalidAgentContract)
+            );
+        }
     }
 
     #[test]
