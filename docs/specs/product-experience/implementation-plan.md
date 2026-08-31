@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-215 |
+| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
@@ -30,6 +30,8 @@
 
 ## Phase 1：shared Agent authoring compiler
 
+状态：**Complete（implementation + L1～L3）**。
+
 交付：
 
 - 无网络/数据库/执行依赖的Rust owner compiler；
@@ -46,6 +48,8 @@ workspace fmt/strict Clippy与crate-boundary checker。
 
 ## Phase 2：Agent/Run safe list projection
 
+状态：**Complete（implementation + L1～L3）**。
+
 交付：
 
 - owner DTO、OpenAPI/JSON Schema/generated registry；
@@ -58,6 +62,8 @@ workspace fmt/strict Clippy与crate-boundary checker。
 
 ## Phase 3：`insight agent` CLI
 
+状态：**Complete（implementation + L1～L3）**。
+
 交付：
 
 - `validate/publish/list/get/adopt/run/logs/result`与`text|json`、`--verbose`、`--debug-authority`分层；
@@ -68,6 +74,8 @@ workspace fmt/strict Clippy与crate-boundary checker。
 门禁：每个HTTP crash window、并发publish、journal丢失/损坏/权限、terminal success/failure、字段泄漏矩阵与public-only dependency检查。
 
 ## Phase 4：Console authoring与Run
+
+状态：**Complete（implementation + L1～L3）**。
 
 交付：
 
@@ -81,6 +89,8 @@ high-contrast/ARIA，以及既有Task/Artifact安全回归。
 
 ## Phase 5：预构建发行物
 
+状态：**Complete（implementation）**；tag push、registry signature与四target实体runner资格仍为**Not run**。
+
 交付：
 
 - 四target CLI archive、runtime/guest/Console immutable image与manifest list；
@@ -92,6 +102,8 @@ high-contrast/ARIA，以及既有Task/Artifact安全回归。
 `version/doctor`；未实际push/sign/跨架构运行的项必须报告Not run。
 
 ## Phase 6：starter与feature profile
+
+状态：**Complete（implementation + L1～L3）**；真实预构建Docker的cold/warm/idle资源实测仍为**Not run**。
 
 交付：
 
@@ -105,6 +117,8 @@ recovery、deterministic Agent在starter/all结果与authority一致。资源预
 
 ## Phase 7：总回归与clean cut
 
+状态：**Complete（repository L1～L3）**；fresh预构建发行环境与L4～L6资格仍为**Not run**。
+
 交付：
 
 - L1～L3适用workspace门禁、Console与release/profile checks；
@@ -113,3 +127,16 @@ recovery、deterministic Agent在starter/all结果与authority一致。资源预
 - product-experience状态按真实证据推进，保留L4～L6 Not run。
 
 禁止用route/object count、mock-only旅程、checked-in dist、静态Compose或本机Docker结果替代所声明层级证据。
+
+## 实施证据（2026-09-01）
+
+- Rust：workspace `fmt`、all-target/all-feature `check`、strict Clippy、全量unit/integration tests、doc tests与root public API
+  baseline通过；PostgreSQL合同测试在其既有available/conditional语义下通过。
+- 平台静态/合同门禁：cutover residual、`/v1` generated contract、PostgreSQL schema、crate boundary、workload closure、
+  Sandbox、安全/egress、Model、Context、orchestration、Artifact、observability/redaction、callback、MCP cleanup与production
+  profile检查通过。
+- Console：16项unit/contract tests、production build、lint，以及11项headless browser北极星检查通过。
+- 产品化脚本：M0 manifest、path-aware CI、release contract、partial scenario fail-closed检查通过；相关Python合同测试
+  37项通过、1项按环境合同跳过。
+- 明确保留Not run：真实tag/push与registry签名、四target实体runner、fresh预构建Docker的cold/warm/idle资源实测、
+  production security/chaos/capacity/soak/restore（L4～L6）。这些项不得由本地fixture或静态manifest替代。

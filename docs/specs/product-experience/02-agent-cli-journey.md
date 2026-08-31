@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-214 |
+| 状态 | Implemented / CR-214；L1～L3 passed，L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 命令入口 | `insight agent ...` |
 | authority | public `/v1` only |

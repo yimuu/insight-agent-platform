@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-215 |
+| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 适用面 | CLI、Console、Quickstart、产品DTO与错误信息 |
 

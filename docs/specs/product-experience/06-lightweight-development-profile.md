@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-215 |
+| 状态 | Implemented / CR-215；L1～L3 passed，资源实测与 L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 默认入口 | `insight dev` |
 | 部署性质 | 单机开发；不是production或L4证据 |

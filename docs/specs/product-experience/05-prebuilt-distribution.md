@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Implemented / CR-207；L1～L3 passed，发行环境资格 Not run |
 | 日期 | 2026-08-31 |
 | 发行authority | GitHub Release + OCI registry + signed release bundle |
 

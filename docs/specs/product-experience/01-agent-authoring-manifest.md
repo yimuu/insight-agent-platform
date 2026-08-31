@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-215 |
+| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |

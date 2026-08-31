@@ -2,10 +2,10 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-215 |
+| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
-| 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+| 当前行为 | 已 clean-cut 实现；现行使用说明以 [`docs/current`](../../current/README.md) 为准 |
 | 前置阶段 | [`productization`](../productization/00-goals.md) repository scope 已完成 |
 
 本阶段把已经通过资格场景的平台内核收敛为普通开发者可使用的 Agent 产品。成功标准不是再增加
@@ -65,8 +65,8 @@ projection table。CR-207已按 17 -> 18 -> 00/cross-review 顺序修订 Platfor
 复用当前路由，不新增公共 noun。
 
 ADR-0003/0004/0005与Platform 17→18→00已由CR-207完成修订；cross-review确认没有新增business authority、表、
-Job/Task/Event/Receipt种类或常驻role。本目录00～06进入Accepted并授权clean-cut实现。只有实现与适用仓库门禁通过后才能更新
-`docs/current`或把状态推进为Implemented/Verified。
+Job/Task/Event/Receipt种类或常驻role。本目录00～06随后进入Accepted并授权clean-cut实现；实现与适用L1～L3仓库门禁
+现已完成，`docs/current`已同步，状态推进为Implemented。尚未运行的发行环境与L4～L6资格不据此推进为Verified。
 
 CR-215补充browser authoring-profile authority：Console只通过bounded Management projection取得exact compiler Policy binding；
 bundle、URL与browser persistence均不得保存generated Policy ID或充当fallback默认。
