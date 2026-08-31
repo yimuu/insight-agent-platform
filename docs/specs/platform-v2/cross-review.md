@@ -1,10 +1,38 @@
-# Platform v2 00～18 Cross-review（CR-206）
+# Platform v2 00～18 Cross-review（CR-207）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-206 |
-| 日期 | 2026-08-30 |
-| 输入 | 00～18 live tree、implementation-plan、CR-206 Context Dataset result discovery review、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | Accepted / CR-207 |
+| 日期 | 2026-08-31 |
+| 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-207 Agent product experience cross-review
+
+产品体验spec要求普通用户只理解Agent、Publish、Run与Result，同时Console需要tenant Agent/Run历史。现有exact-ID read无法支持远端列表，
+而以browser storage或Event重建会产生第二current-state authority。CR-207选择在现有Agent noun和Run collection上增加两个只读projection：
+直接查询Resource/Deployment/Run/Task authority，使用signed/AEAD opaque keyset cursor，不增加list表、cache或current head。
+
+分页与“默认DTO不显示cursor”的表面冲突收敛为两层合同：`AgentSummaryV1/RunSummaryV1`不含cursor；closed page envelope可以携带
+`next_cursor`作为客户端代管的protocol metadata，默认CLI text/Console DOM不得渲染。cursor绑定route purpose、tenant、principal scope、
+canonical filter、page size、snapshot/boundary与expiry；错误绑定在repository读取前拒绝。
+
+| Spec | CR-207 结论 |
+|---|---|
+| 00～02 | Resource/Version/Deployment、ID与active binding authority不变；Agent list只投影既有Agent Resource及active Deployment |
+| 03～04 | list是只读操作，不创建Receipt/Event/Outbox；tenant/principal permission与cursor key是唯一安全边界，不把cursor当业务state |
+| 05～16 | Typed Plan v5、Run frozen binding、Job/Task/Artifact/Capability/Context/MCP/Sandbox/Model合同不变；manifest只编译两个评审模板 |
+| 17 | 增加Agent/Run list DTO、closed filters、stable keyset与cursor binding；不新增generic CRUD或内部字段 |
+| 18 | 增加compiler/API/CLI/Console/release/profile L1～L3与distribution门禁；starter保持non-production，L4～L6状态不变 |
+| Product 00～06 | ADR前置与17→18→00复核关闭，状态恢复Accepted；实现顺序固定为01→02/03→04及05→06 |
+
+ADR-0003 clean-cut `base/full`为`starter + closed features`并要求prebuilt exact release；ADR-0004把`apply`保留为advanced authority入口，
+默认增加确定性Agent manifest/CLI；ADR-0005保持static `/v1`/无BFF边界并把Console扩展为authoring与Run产品入口。三项都不改变
+PostgreSQL durable authority、Run exact binding、Receipt/CAS、public route version或production GitOps ownership。
+
+复核覆盖state ownership、ID/closed schema、errors、transaction/Event/Receipt、permissions、cursor confidentiality/integrity、capacity、
+crash/reload recovery、browser/CLI leakage、distribution supply chain和test fixture。CR-207不新增table、aggregate、ResourceKind、JobKind、
+WorkClass、Task/Event/Receipt kind、ComponentRole、Secret路径、BFF、数据库或兼容fallback；受影响合同按ADR-0003～0005、17→18→00及
+product-experience 00～06完成复核并授权clean-cut实现。
 
 ### CR-206 Context Dataset generation discovery cross-review
 
@@ -1022,8 +1050,10 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-201范围没有未关闭P0/P1或仓库实现任务。Acceptance 37与既有13～36形成单一闭包，00～18状态为Verified，implementation plan为Complete。
+CR-207 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
+[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 
 production-equivalent Kubernetes与真实`RuntimeClass=runsc`、L4拓扑安全矩阵、L5容量/持续soak与首个CapacityProfile、L6
 backup-restore/rollout-rollback以及人工GitOps clean cut均未执行。它们保留为environment production-ready声明的门禁，不回退已关闭的
-spec/implementation状态；实际通过前禁止声称production capacity、SLO、HA、真实runsc/restore或该environment已完成clean cut。
+既有spec证据；实际通过前禁止声称production capacity、SLO、HA、真实runsc/restore或该environment已完成clean cut。

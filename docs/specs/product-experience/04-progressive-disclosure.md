@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / revises ADR-0004 default UX |
+| 状态 | Accepted / CR-207 |
 | 日期 | 2026-08-31 |
 | 适用面 | CLI、Console、Quickstart、产品DTO与错误信息 |
 
@@ -57,7 +57,8 @@ CLI和Console共享下列逻辑摘要；具体序列化类型必须closed并带`
 - `suggested_action`
 - `request_id`或`trace_id`（可选）
 
-默认DTO不得包含Version/Deployment/Job/Receipt/ETag/cursor、worker、lease、fence、数据库或endpoint。`agent_id/run_id`
+summary DTO不得包含Version/Deployment/Job/Receipt/ETag/cursor、worker、lease、fence、数据库或endpoint。list page的
+`next_cursor`是有界分页protocol metadata，由客户端代管且默认text/DOM不渲染，不属于summary字段。`agent_id/run_id`
 保留是因为它们是用户可引用的产品身份，不属于需要隐藏的物理实现。
 
 ## 4. 客户端代管

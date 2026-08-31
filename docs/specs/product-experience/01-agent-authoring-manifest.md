@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft |
+| 状态 | Accepted / CR-207 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / requires Platform 17 cross-review |
+| 状态 | Accepted / CR-207 |
 | 日期 | 2026-08-31 |
 | 前端 | 现有静态 React Console |
 | authority | public `/v1` only；无BFF、无Console数据库 |
@@ -70,8 +70,8 @@ Validating -> Publishing -> Activating -> Ready
 - pause/resume/cancel由Console生成Receipt并携带ETag，用户不输入；
 - Artifact结果只在显式下载动作后读取，不把未授权正文渲染到DOM。
 
-为支持历史页面，可增加`GET /v1/runs`的bounded safe projection，至少按Agent ID、state和created time过滤。它直接查询
-Run authority，不能新建projection表或把Event当current state。若该route未通过17/18 cross-review，首版只能展示当前浏览器会话创建的Run，
+历史页面使用CR-207已评审的`GET /v1/runs` bounded safe projection，至少按Agent ID、state和created time过滤。它直接查询
+Run authority，不能新建projection表或把Event当current state。opaque cursor只在分页envelope中由客户端代管，不进入默认DOM、标题或消息；
 不得用localStorage伪造远端历史。
 
 ## 5. 浏览器安全

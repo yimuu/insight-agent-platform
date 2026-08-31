@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft |
+| 状态 | Accepted / CR-207 |
 | 日期 | 2026-08-31 |
 | 命令入口 | `insight agent ...` |
 | authority | public `/v1` only |

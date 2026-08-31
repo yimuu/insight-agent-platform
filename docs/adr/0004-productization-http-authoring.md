@@ -2,16 +2,22 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
-| 日期 | 2026-08-29 |
-| 影响阶段 | Productization M2、M4 |
+| 状态 | Accepted / CR-207 |
+| 日期 | 2026-08-31 |
+| 影响阶段 | Productization、Agent Product Experience |
 
 ## 决策
 
-`contracts/platform-v1/openapi.yaml` 和 owner JSON Schema 是唯一 authoring wire contract。`insight apply`
+`contracts/platform-v1/openapi.yaml` 和 owner JSON Schema 是唯一 authoring wire contract。`insight apply --advanced`
 读取一个版本化、closed 的 project request manifest，并将其逐项映射到公开 `/v1` 请求：create/update Draft、
-validate、publish、create Deployment、activate、create Run。它必须显示每一步的 Resource、Version、Deployment、
-Binding、Operation 和 Run ID。
+validate、publish、create Deployment、activate、create Run。它保留完整Resource、Version、Deployment、Binding、
+Operation与Run ID输出，作为automation/authority入口。
+
+默认作者入口是`insight agent validate|publish|run|list|get|logs|result`。closed `agent.yaml`只支持评审过的
+`deterministic`与`model_chat`模板，由无网络shared compiler确定性生成同一public lifecycle请求；它不是第二runtime、
+第二DSL或服务端authority。默认输出只显示Agent、发布状态、Run与结果；`--verbose`显示运营摘要，只有
+`--debug-authority`显示底层ID、ETag、Receipt与cursor。隐藏仅发生在客户端展示层，不允许跳过任何CAS、Receipt、
+validation、deployment或Run frozen binding。
 
 manifest 是请求编排文件，不是另一套 Agent DSL：
 
@@ -25,5 +31,5 @@ manifest 是请求编排文件，不是另一套 Agent DSL：
 
 ## 后果
 
-初次使用会保留 Resource lifecycle 的可见性与审计性，但减少用户手写 header、cursor 与 polling 的负担。
-CLI 不能以“方便”为由隐藏 active-head 切换或吞掉 CAS/Receipt 冲突。
+初次使用以Agent产品词汇完成旅程；完整Resource lifecycle仍可审计并通过advanced入口取得。CLI可以代管active-head
+切换所需的Receipt/ETag/Operation/cursor，但不能吞掉CAS/Receipt冲突、伪造恢复状态或用新随机值重做不确定effect。

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-206 |
-| 日期 | 2026-08-30 |
+| 状态 | In Progress / CR-207 |
+| 日期 | 2026-08-31 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -12,6 +12,11 @@
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
 > generation read route或证明active generation。CR-206把Operation result收敛为closed typed union：普通Job只返回Digest，
 > ContextDatasetBuild成功返回`context_dataset_generation` result并携带exact `generation_id + result_digest`；不新增Dataset list/head API。
+
+> 2026-08-31 architecture revision（CR-207）：Agent产品体验需要安全Agent/Run历史页，而现有API只有exact-ID read。CR-207在17增加
+> 两个direct-authority bounded list projection，以tenant/principal/filter/purpose-bound opaque cursor执行stable keyset；不新增表、cache、
+> Event current projection、route noun或服务role。ADR-0003/0004/0005同步clean-cut为starter feature profile、默认Agent CLI与authoring Console。
+> product-experience 00～06完成cross-review后进入Accepted；实现仍须按manifest compiler→API/CLI/Console→distribution/profile顺序取证。
 
 > 2026-08-30 implementation feedback（CR-205）：剩余full-profile产品化场景确认，八类public noun只能发布
 > Capability/Context Interface、Model/Sandbox Profile，却没有合法management surface发布它们依赖的Capability/Context
@@ -212,7 +217,7 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | In Progress / CR-206 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | In Progress / CR-207 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-201（CR-204 reviewed） | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-205 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-206 | PostgreSQL、事务、Outbox、Lease、恢复 |
@@ -229,8 +234,8 @@ Platform v2 采用以下不可逆的架构决定：
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-205 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-203（CR-204 reviewed） | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-205 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-206 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-203（CR-206 reviewed） | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-207 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-207 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得

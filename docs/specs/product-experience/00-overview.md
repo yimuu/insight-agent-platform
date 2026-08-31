@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Draft / Architecture Revision |
+| 状态 | Accepted / CR-207 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -52,7 +52,7 @@ Agent 编译语义。
 
 ## 4. 架构修订边界
 
-本规范与现有 ADR 有三处需要在实现前修订：
+本规范识别并由CR-207完成了三处ADR修订：
 
 1. ADR-0004要求 `apply` 默认显示每个 Version、Deployment、Binding、Operation 和 Run ID；04改为默认隐藏、
    高级模式完整显示，但不改变 wire authority。
@@ -61,10 +61,12 @@ Agent 编译语义。
 3. ADR-0003只定义 `base/full`；06将开发体验 clean-cut 为默认 `starter` 加显式 feature closure。
 
 03要求 Agent 和 Run 的安全分页列表读模型。它们必须由现有 Resource/Run authority直接查询并投影，不能新建
-projection table。实施前须按 17 -> 18 -> 00/cross-review 顺序修订 Platform v2 API 与资格矩阵。其余规范优先
+projection table。CR-207已按 17 -> 18 -> 00/cross-review 顺序修订 Platform v2 API 与资格矩阵。其余规范优先
 复用当前路由，不新增公共 noun。
 
-在上述 ADR 与 Platform cross-review完成前，本目录保持 Draft，不授权实现或将目标写入 `docs/current`。
+ADR-0003/0004/0005与Platform 17→18→00已由CR-207完成修订；cross-review确认没有新增business authority、表、
+Job/Task/Event/Receipt种类或常驻role。本目录00～06进入Accepted并授权clean-cut实现。只有实现与适用仓库门禁通过后才能更新
+`docs/current`或把状态推进为Implemented/Verified。
 
 ## 5. 完成定义
 

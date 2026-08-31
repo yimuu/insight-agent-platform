@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-29 |
+| 状态 | Accepted / CR-207 |
+| 日期 | 2026-08-31 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -16,6 +16,10 @@
 > CR-203 impact：增加public Agent authoring P1 fixture：调用方只持有Draft内容和Artifact，不能预知Version ID；publish后
 > Interface/Plan exact IDs不同且同属一个Agent publish batch，fresh Run materialization以Plan v5 contract digest与exact owner
 > 双重校验成功。wrong digest、cross-Agent Interface/Plan拼接、旧Plan v4均须在Node/Job写入前fail closed。
+
+> CR-207 impact：产品体验L1～L3增加shared Agent manifest compiler、产品DTO/错误映射、Agent/Run list cursor与CLI/Console
+> 北极星旅程。release侧增加四target CLI archive、immutable Console/runtime/guest image、ReleaseBundle/SBOM/provenance/signature和
+> single-node starter/feature profile门禁。starter证据始终是development/non-production；真实L4～L6状态不变。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production
@@ -261,6 +265,28 @@ CR-201将“spec qualification”和“environment qualification”分开：L1�
 未运行门禁，并由部署方决定是否在自己的目标环境执行。
 
 ## 13. 必须资格矩阵
+
+CR-207产品体验矩阵：
+
+- L1：YAML 1.2 JSON-compatible closed subset拒绝duplicate/merge/anchor/alias/tag、implicit timestamp、NaN/Infinity、非UTF-8、
+  path/symlink escape、Secret/URL/shell字段；`deterministic | model_chat` positive/negative corpus在Rust CLI与Console compiler逐字节得到
+  相同manifest digest、Typed Plan v5、schema digest、required feature与ordered lifecycle plan；产品text/json/DOM投影的closed字段和
+  Problem→UserProblem映射覆盖unknown fallback且零authority/credential泄漏。
+- L2：fresh PostgreSQL覆盖Agent/Run list上限、filter、stable keyset、snapshot、cursor replay/tamper/expiry/wrong purpose/principal/tenant，
+  并发publish/activate/update/archive与Run/Task terminal下不重复、不越权、不从Event重建；Agent publication所有HTTP边界前后kill/retry通过
+  Receipt/ETag/journal恢复且不重复Version/Deployment/Run effect。
+- L3：预构建CLI和静态Console只经public Gateway完成空tenant `create/import -> validate -> publish -> activate -> Run -> SSE/result`；
+  Gateway/CLI/browser在四个publish阶段、SSE断线与terminal result前后kill/reload仍从server authority恢复。Console覆盖两个会话CAS冲突、
+  keyboard/mobile/high-contrast/accessible status与浏览器storage/DOM canary；CLI覆盖Ctrl-C resume、0600 journal损坏/权限过宽fail closed。
+- Distribution：四个CLI target运行`version/doctor`；archive、runtime/guest/Console OCI、checksum、SBOM、provenance与canonical ReleaseBundle
+  绑定同一commit/schema/profile/image digest并可离线重验。签名超时、partial push、wrong architecture、mutable tag与cache poisoning保持
+  未发布。PR复用一次candidate，不为每个journey重复release build/sign。
+- Development profile：`starter`、每个single feature与`all`有closed排序closure、identity/config/readiness/disable负向fixture；unknown、
+  duplicate、dependency conflict在任何pull/provision/start前失败。fresh/warm/idle报告记录source compilation=0、download/build/start阶段、
+  process/image/volume资源，并明确single-node、non-production、L4～L6 Not run。stop/start和Gateway/Worker/dependency重启不丢Run或重复effect。
+
+上述L1～L3与distribution producer属于仓库spec证据；4 vCPU/8 GiB机器上的cold/warm/idle预算只有实际运行才可标passed。
+真实registry publish、跨架构runner、production cluster/runsc、capacity/soak/restore与人工promotion仍分别属于适用L4～L6 environment gate。
 
 CR-181新增：L1验证Plan v1/v2/v3、wrong slot/port/schema/budget/route；L2 fresh PostgreSQL验证伪造selection evidence、集合外candidate、
 caller-supplied child entry/Task/Wake/result/resume、并发terminal first-winner；L3以独立Scheduler和Capability/Context/Model/Artifact Data/

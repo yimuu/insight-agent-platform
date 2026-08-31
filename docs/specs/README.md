@@ -13,7 +13,7 @@
 
 - [Agent 产品体验收敛规范](product-experience/00-overview.md)：在不新增 `/v2`、业务authority、表或服务角色的
   前提下，交付简化 `agent.yaml`、Agent CLI、Console authoring、渐进披露、预构建发行物和轻量单节点开发模式。
-  当前为 Draft / Architecture Revision，尚未授权实现或改变 `docs/current`；
+  ADR与Platform 17→18→00 cross-review已由CR-207关闭，当前为Accepted并授权clean-cut实现；
 - [产品化收敛阶段目标](productization/00-goals.md)及其
   [实施计划](productization/implementation-plan.md)：repository scope 已完成，CLI/HTTP、base/full profile、Console和
   十条黄金场景已有证据；真实多节点Kubernetes、runsc、容量、混沌、restore、soak与production GitOps promotion仍是

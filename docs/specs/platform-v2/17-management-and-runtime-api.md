@@ -2,14 +2,19 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-206 |
-| 日期 | 2026-08-30 |
+| 状态 | Accepted / CR-207 |
+| 日期 | 2026-08-31 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
 > CR-206 impact：`SafeJobResult`升级为closed tagged union。`digest`保持普通成功Operation的安全摘要；
 > `context_dataset_generation`只允许`ContextDatasetBuild + ContextDataset target + succeeded`，并携带exact `generation_id`
 > 与`result_digest`。该ID来自同一Job frozen payload，不能从mutable active head补查。
+
+> CR-207 impact：Agent产品入口增加两个bounded只读projection：`GET /v1/agents`直接查询Resource/Deployment authority，
+> `GET /v1/runs`直接查询Run并关联其frozen Agent Deployment/Resource identity。两者使用purpose/filter/principal/tenant-bound
+> opaque cursor与stable keyset，不新增projection table、cache或Event current state。产品summary不包含authority字段；分页cursor只在
+> page envelope中作为客户端代管的protocol metadata出现，默认text/DOM不得显示。
 
 > CR-205 impact：Management `ResourceNoun`从八类可调用owner扩为十三类closed authoring kind，新增
 > `capability-implementations | context-implementations | model-providers | sandbox-runtimes | sandbox-packages`。前两类及
@@ -355,6 +360,59 @@ Maintenance admin route。
 filter/sort是route-specific closed registry，unknown field/operator被拒绝。cursor绑定tenant、principal-scope digest、filter/sort digest、
 snapshot position、page size和expiry，并签名或AEAD保护。page size只能在hard max内缩小。
 
+Agent产品面固定增加：
+
+```text
+GET /v1/agents?page_size=<1..50>&cursor=<opaque>&state=<closed>&environment=<closed>
+GET /v1/runs?page_size=<1..50>&cursor=<opaque>&agent_id=<agt>&state=<closed>
+             &created_after=<timestamp>&created_before=<timestamp>
+```
+
+`GET /v1/agents`只返回`ResourceKind::Agent`。稳定排序为`updated_at DESC, resource_id DESC`；第一页冻结数据库
+`snapshot_at`，后续页只读取`updated_at <= snapshot_at`并使用cursor中的exact keyset boundary。`state`是closed
+`draft | validating | publishing | ready | blocked`安全投影；它由Resource current Draft/gate、active Agent Deployment与其
+exact validation/publication Job authority确定，不能写回Resource或由Event重建。`environment`只来自active immutable Deployment。
+
+```rust
+struct AgentSummaryV1 {
+    schema_version: ConstU16<1>,
+    name: BoundedAuthoringName,
+    display_name: BoundedSafeText,
+    agent_id: AgentId,
+    state: AgentProductState,
+    environment: Option<BoundedEnvironmentName>,
+    updated_at: Timestamp,
+    published_at: Option<Timestamp>,
+    required_features: BoundedSortedSet<AgentRequiredFeature>,
+    latest_run_state: Option<PublicRunState>,
+}
+```
+
+`GET /v1/runs`稳定排序为`created_at DESC, run_id DESC`；第一页同样冻结`snapshot_at`。`agent_id`通过Run冻结的
+Agent Deployment精确关联owner Agent Resource；不能用current active Deployment改写历史。`state`只允许一个public Run state，时间窗口
+必须有界且`created_after < created_before <= snapshot_at`。summary中的`agent_name`是当前同一Resource authority的authoring name，
+`waiting_task_count`只统计该Run owner下current waiting Task，`result_available`只由terminal Run/current output authority导出。
+
+```rust
+struct RunSummaryV1 {
+    schema_version: ConstU16<1>,
+    run_id: RunId,
+    agent_name: BoundedAuthoringName,
+    agent_id: AgentId,
+    state: PublicRunState,
+    started_at: Option<Timestamp>,
+    terminal_at: Option<Timestamp>,
+    waiting_task_count: BoundedU32,
+    result_available: bool,
+}
+```
+
+两个route都返回closed `ListPageV1<T> { schema_version, items, next_cursor }`，`items <= 50`。`next_cursor`是分页
+protocol metadata，不属于`AgentSummaryV1/RunSummaryV1`，客户端必须代管且默认不渲染。cursor绑定route purpose、tenant、
+principal permission-scope digest、canonical filters、page size、snapshot/boundary与短期expiry；wrong route/tenant/principal/filter、
+tamper或expiry返回`cursor_invalid|cursor_expired`且repository读取为零。并发插入不会进入已冻结snapshot；更新、归档或删除可能使后续页
+变短但不得造成跨边界重复、越租户或回退到Event/local cache。不存在跨页一致快照数据库事务。
+
 ## 12. SSE 与Event
 
 ```text
@@ -432,6 +490,8 @@ Service/ServiceMonitor，并由Ingress按closed `/v1` noun分流。该本地unit
 - remote Capability publish对缺失/错kind/错module/错descriptor/错Worker manifest的installed codec closure全部fail closed，且public request
   不能注入运行时codec或Worker override；
 - Run admission只有完整binding snapshot事务成功才返回201；
+- Agent/Run list的page/filter/cursor closed schema、stable keyset、wrong tenant/principal/purpose、tamper/expiry及并发更新/归档矩阵通过，
+  且查询只读取现有Resource/Deployment/Run/Task authority；
 - SSE在NATS丢失/断线后从Event cursor恢复，慢client不使服务内存无界；
 - public/internal route无Secret、object locator、DB payload、lease token或敏感正文泄漏；
 - Run/control route对unknown observation/selected-target/item-count/loop-condition/compute-result/terminal-value/failure字段一律以`invalid_request`拒绝，
