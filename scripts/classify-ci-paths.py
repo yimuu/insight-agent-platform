@@ -50,9 +50,15 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
             "tests/fixtures/productization-reports",
             "examples/productization",
             "docs/specs/productization",
+            "release",
         )
     ) or any(
         path.name.startswith("check-productization")
+        or path.name.startswith("build-product-release")
+        or path.name.startswith("build-release-")
+        or path.name == "sign-product-release.py"
+        or path.name == "check-product-release.py"
+        or path.name == "test_product_release.py"
         or path.name == "run-productization-base-journey.sh"
         or path.name == "qualify-productization-first-run.py"
         or path.name == "test_productization_base_journey_runner.py"
@@ -71,6 +77,7 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
         "examples/productization",
         "tests/productization",
         "tests/fixtures/productization-reports",
+        "release",
     )
     non_runtime_root_files = {
         ".gitignore",
@@ -86,6 +93,11 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
                 is_under(path, "scripts")
                 and (
                     path.name.startswith("check-productization")
+                    or path.name.startswith("build-product-release")
+                    or path.name.startswith("build-release-")
+                    or path.name == "sign-product-release.py"
+                    or path.name == "check-product-release.py"
+                    or path.name == "test_product_release.py"
                     or path.name == "classify-ci-paths.py"
                     or path.name == "run-productization-base-journey.sh"
                     or path.name == "qualify-productization-first-run.py"

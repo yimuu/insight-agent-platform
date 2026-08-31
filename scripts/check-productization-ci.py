@@ -27,6 +27,8 @@ for marker in (
     "Workspace full tests",
     "Required CI summary",
     "scripts/classify-ci-paths.py",
+    "scripts/check-product-release.py",
+    "scripts/tests/test_product_release.py",
     "needs.changes.outputs.runtime == 'true'",
     "needs.changes.outputs.cli == 'true'",
     "needs.changes.outputs.console == 'true'",

@@ -13,6 +13,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/build-product-release.py"
 SIGNER = ROOT / "scripts/sign-product-release.py"
+IMAGE_METADATA = ROOT / "scripts/build-release-image-metadata.py"
+PERFORMANCE = ROOT / "scripts/build-release-performance.py"
 TARGETS = (
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
@@ -126,6 +128,47 @@ class ProductReleaseTests(unittest.TestCase):
                 "--public-key-base64", "A" * 43, "--output", str(signature),
             ], cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(wrong.returncode, 0)
+
+    def test_image_index_requires_both_exact_release_children(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            arguments = []
+            for name in ("runtime", "sandbox-guest", "console"):
+                index = root / f"{name}.json"
+                index.write_text(json.dumps({"manifests": [
+                    {"digest": digest(f"{name}-amd64"), "platform": {"os": "linux", "architecture": "amd64"}},
+                    {"digest": digest(f"{name}-arm64"), "platform": {"os": "linux", "architecture": "arm64"}},
+                    {"digest": digest(f"{name}-attestation"), "platform": {"os": "unknown", "architecture": "unknown"}},
+                ]}))
+                arguments += [f"--{name}-subject", f"ghcr.io/example/{name}:v1.2.3",
+                              f"--{name}-digest", digest(f"index-{name}"), f"--{name}-index", str(index)]
+            output = root / "images.json"
+            result = subprocess.run(["python3", str(IMAGE_METADATA), *arguments, "--output", str(output)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual({"linux/amd64", "linux/arm64"}, set(json.loads(output.read_bytes())["runtime"]["platforms"]))
+            value = json.loads((root / "runtime.json").read_bytes())
+            value["manifests"].pop(1)
+            (root / "runtime.json").write_text(json.dumps(value))
+            self.assertNotEqual(subprocess.run(["python3", str(IMAGE_METADATA), *arguments, "--output", str(output)], capture_output=True).returncode, 0)
+
+    def test_performance_report_is_closed_and_budget_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            phases = [
+                "console_build", "runtime_build_push", "sandbox_guest_build_push",
+                "console_image_build_push", "sbom", "provenance", "cosign", "cold_pull", "warm_reuse",
+            ] + [f"cli_build:{target}" for target in TARGETS]
+            evidence = [{"name": name, "duration_seconds": 1} for name in phases]
+            (root / "all.performance.json").write_text(json.dumps(evidence))
+            output = root / "release-performance.json"
+            command = ["python3", str(PERFORMANCE), "--version", "1.2.3", "--git-commit", "a" * 40,
+                       "--evidence-directory", str(root), "--output", str(output)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("passed", json.loads(output.read_bytes())["status"])
+            evidence[0]["duration_seconds"] = 10000
+            (root / "all.performance.json").write_text(json.dumps(evidence))
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
 
 
 if __name__ == "__main__":

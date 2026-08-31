@@ -150,7 +150,9 @@ def main() -> None:
     args.output.write_bytes(encoded)
     checksum_paths = sorted(
         path for path in root.iterdir()
-        if path.is_file() and path.name not in {"checksums.txt", "release-bundle.signature.json"}
+        if path.is_file() and path.name not in {
+            "checksums.txt", "release-bundle.signature.json", args.output.name
+        }
     ) + [args.output]
     checksums = "".join(
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in checksum_paths

@@ -66,6 +66,7 @@ jobs:
           bash scripts/check-cutover-residuals.sh
           python3 scripts/check-productization-m0.py
           python3 scripts/check-productization-ci.py
+          python3 scripts/check-product-release.py
           python3 scripts/check-productization-scenario-reports.py \
             tests/fixtures/productization-reports/incomplete \
             --allow-incomplete \
@@ -75,7 +76,8 @@ jobs:
             scripts/tests/test_productization_base_journey_runner.py \
             scripts/tests/test_productization_http_lifecycle.py \
             scripts/tests/test_productization_north_star_report.py \
-            scripts/tests/test_productization_scenario_reports.py
+            scripts/tests/test_productization_scenario_reports.py \
+            scripts/tests/test_product_release.py
 
   lint:
     name: Workspace lint and checks
