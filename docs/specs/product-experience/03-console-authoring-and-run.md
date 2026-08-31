@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 前端 | 现有静态 React Console |
 | authority | public `/v1` only；无BFF、无Console数据库 |
 
@@ -65,6 +65,8 @@ Validating -> Publishing -> Activating -> Ready
 - 从Agent详情点击`Run`进入，自动携带Agent ID和input schema；
 - 表单依据closed input schema生成，另提供严格JSON模式；
 - 创建后自动进入Run详情，使用durable SSE cursor更新；
+- Run input classification与default deadline只从exact Agent Resource/Revision读取；reload、跨设备或adopt后不得用浏览器缓存或
+  profile隐藏默认补值；
 - terminal时在同页展示typed result或安全failure；
 - waiting Task以内联卡片跳转，完成后回到原Run；
 - pause/resume/cancel由Console生成Receipt并携带ETag，用户不输入；

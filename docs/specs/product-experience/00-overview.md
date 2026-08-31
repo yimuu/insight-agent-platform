@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 | 前置阶段 | [`productization`](../productization/00-goals.md) repository scope 已完成 |
@@ -82,6 +82,9 @@ CLI lock只保存映射而不拥有name，Console/API不得用display name或Art
 
 CR-213关闭产品summary的required feature authority缺口：compiler结果物化到现有Agent Resource document的closed sorted set，
 草稿与发布态使用同一来源；CLI/Console/API不得从Plan Artifact、Deployment、lock或Event反推。
+
+CR-214关闭Run输入默认的authority缺口：normalized input classification与default deadline seconds物化到同一Agent Resource/Revision，
+CLI/Console在lock丢失、adopt或跨设备读取后仍可从exact服务端事实构造Run，不依赖隐藏默认或client-only profile。
 
 ## 5. 完成定义
 

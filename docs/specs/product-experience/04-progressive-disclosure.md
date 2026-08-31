@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 适用面 | CLI、Console、Quickstart、产品DTO与错误信息 |
 
 ## 1. 目标
@@ -60,6 +60,9 @@ CLI和Console共享下列逻辑摘要；具体序列化类型必须closed并带`
 summary DTO不得包含Version/Deployment/Job/Receipt/ETag/cursor、worker、lease、fence、数据库或endpoint。list page的
 `next_cursor`是有界分页protocol metadata，由客户端代管且默认text/DOM不渲染，不属于summary字段。`agent_id/run_id`
 保留是因为它们是用户可引用的产品身份，不属于需要隐藏的物理实现。
+
+input classification与default deadline不进入列表summary；创建Run前客户端通过exact Agent Resource读取这两个immutable authoring事实。
+本地lock可缓存但不能覆盖authority，缺失或漂移时必须fail closed并重新读取。
 
 ## 4. 客户端代管
 

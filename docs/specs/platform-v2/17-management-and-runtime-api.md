@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
@@ -23,6 +23,10 @@
 > CR-213 impact：`AgentSummaryV1.required_features`只投影current Agent Resource document中随Revision冻结的closed
 > `AgentResourceSpec.required_features`。草稿和未激活Deployment的Agent因此仍有同一权威来源；handler不得检查client manifest、Plan
 > Artifact、active Deployment slots或Event来补值。
+
+> CR-214 impact：exact Agent Resource/Revision同时拥有normalized `input_classification`与`default_deadline_seconds`。这些authoring事实
+> 不进入list summary；CLI/Console在创建Run前通过既有exact Resource read取得并校验，随后提交现有absolute deadline与input classification。
+> API不增加默认值、route、header、projection table或server-side profile lookup。
 
 > CR-209 impact：既有Agent Draft document增加nullable bounded `author_instructions`，属于closed `AgentResourceSpec`而非自由prompt
 > route。它随Draft CAS/publish/read和canonical request digest处理；Run create、list、summary、Event与Problem均不复制或回显正文。

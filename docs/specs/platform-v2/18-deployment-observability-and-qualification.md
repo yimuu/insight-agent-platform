@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -35,6 +35,10 @@
 
 > CR-213 impact：L1/L2/L3增加required feature物化与投影门禁：compiler intent、Agent Draft/Revision与AgentSummary逐字节一致；
 > 空/重复/乱序/unknown/超限集合以及从Plan Artifact、Deployment、client lock或Event猜测均fail closed，不新增表、route或projection。
+
+> CR-214 impact：L1/L2/L3增加input classification与default deadline物化门禁：manifest/compiler intent、Agent Draft/Revision及
+> CLI/Console Run request逐字节一致；lock丢失、adopt、跨设备读取、classification降级、零/超限deadline及从profile/Deployment/Event
+> 猜测全部fail closed，不新增表、route、role或projection。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production

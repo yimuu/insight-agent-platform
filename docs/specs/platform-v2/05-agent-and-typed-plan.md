@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-30 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
 
@@ -25,6 +25,10 @@
 > CR-213 impact：简化compiler的closed `required_features`同时冻结到`AgentResourceSpec.required_features`。该bounded sorted set
 > 随Draft CAS与immutable Revision digest处理，是草稿态和发布态`AgentSummaryV1`的唯一来源；API不得从active Deployment、Plan Artifact、
 > client lock或Event反推。
+
+> CR-214 impact：简化manifest的`spec.input.classification`和显式物化后的`spec.limits.deadlineSeconds`同时冻结到
+> `AgentResourceSpec.input_classification/default_deadline_seconds`。CLI/Console在lock丢失、跨设备或显式adopt后只从exact Agent
+> Resource/Revision恢复Run输入等级与deadline，不从本地profile、Deployment、Plan、Event或隐藏默认猜测。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -128,7 +132,8 @@ Agent Interface Revision 与 Agent Plan Revision 分离；一个 Agent Revision 
 `arev_<uuidv7>`。Interface没有独立Draft/Head/API；任何interface语义变化都随新Agent Revision发布，但多个
 Plan Revision可以在schema/digest完全相同时引用同一immutable Interface Revision。
 
-`AgentResourceSpec`包含`authoring_name`、closed `required_features`与nullable `author_instructions`。`authoring_name`必须匹配
+`AgentResourceSpec`包含`authoring_name`、closed `required_features`、`input_classification`、`default_deadline_seconds`与nullable
+`author_instructions`。`authoring_name`必须匹配
 `[a-z][a-z0-9-]{0,62}`，由简化manifest的normalized `metadata.name`逐字节物化；Agent Resource创建后，Draft update必须保持同一值，
 不能用display name、Artifact文件名、project lock或当前Deployment重命名。name只需在project-local lock内唯一，不引入tenant-wide
 唯一约束。`required_features`是最多16项、按wire value严格排序且不重复的closed `AgentRequiredFeature`集合；简化compiler当前只允许
@@ -136,6 +141,10 @@ Plan Revision可以在schema/digest完全相同时引用同一immutable Interfac
 `author_instructions`非空时为1～16384 UTF-8 bytes并拒绝NUL；这些字段随完整Agent document参与canonical digest与Draft CAS，
 publish后不可变。作者正文不是platform/system policy，不得改变Capability、Secret、Effect、approval、budget或exact binding authority。
 没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
+
+`input_classification`使用04的closed `DataClassification`，是构造Run input与本地schema validation的唯一默认等级；
+`default_deadline_seconds`为1～3600的正整数，是manifest省略显式Run timeout时的唯一deadline duration。两者随同一Draft validation、
+publication与exact Agent Revision冻结；Run create仍提交absolute UTC deadline，服务端不读取客户端lock或重新套用profile默认。
 
 简化产品compiler的`contract_digest` preimage固定为closed
 `{schema_version,input_schema_digest,output_schema_digest,error_schema_digest}`；三个digest来自对应完整ClosedJsonSchema snapshot。

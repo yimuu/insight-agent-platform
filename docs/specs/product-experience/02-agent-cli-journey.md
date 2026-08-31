@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 命令入口 | `insight agent ...` |
 | authority | public `/v1` only |
 
@@ -59,7 +59,8 @@ insight agent result <run-id> [--output text|json]
 
 - name首先解析为 Agent ID，并在线重验 active Deployment；
 - 根据 manifest input schema本地校验输入，再调用现有 `POST /v1/runs`；
-- deadline由命令参数或已物化 manifest limit确定，不能依赖客户端当前时间之外的隐藏默认；
+- input classification与deadline由exact Agent Resource/Revision中已物化的manifest值确定；命令参数只可缩短deadline，不能降级
+  classification，也不能依赖客户端当前时间之外的隐藏默认；
 - 默认订阅 durable SSE直到terminal并输出结果；终端中断后打印一个可复制的resume命令；
 - `--detach` 返回高层 Run summary，不显示 Job或Receipt；
 - terminal failure返回非零，结构化输出保留稳定 failure code和retryability。

@@ -1,10 +1,24 @@
-# Platform v2 00～18 Cross-review（CR-213）
+# Platform v2 00～18 Cross-review（CR-214）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-213 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-214 |
+| 日期 | 2026-09-01 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-214 Agent Run input defaults authority cross-review
+
+Phase 3 CLI接线确认：manifest的`spec.input.classification`与物化后的`spec.limits.deadlineSeconds`必须在`insight.lock`丢失、跨设备读取或
+显式`agent adopt`后仍可从服务端恢复；两项此前只存在于compiler `AgentResourceIntent/DeploymentBindingIntent`，未进入Resource、Revision
+或Deployment closure。让CLI/Console使用本地profile、lock或隐藏默认会造成第二authority，并使adopt无法安全构造`POST /v1/runs`。
+
+CR-214选择把closed `DataClassification`与1～3600秒的bounded duration加入既有
+`AgentResourceSpec.input_classification/default_deadline_seconds`。compiler materializer逐字节复制normalized manifest值；Resource Draft CAS、
+validation、publish与immutable Revision digest继续复用既有authority。Run create仍使用absolute `UtcTimestamp`，客户端只在命令执行时从
+exact Resource值计算；服务端不新增clock/default逻辑。
+
+影响按05→17→18→00、Product 01/02/03/04→00与implementation plan复核。该修订不新增表、aggregate、ResourceKind、route、
+Job/Task/Event/Receipt、role、migration、Deployment字段或compatibility fallback；permission、tenant、Run冻结与执行状态机不变。
 
 ### CR-213 Agent required feature authority cross-review
 
@@ -1138,7 +1152,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-213 cross-review没有未关闭P0/P1合同冲突；product-experience实现已进入Phase 2，因此00保持In Progress、17/18与
+CR-214 cross-review没有未关闭P0/P1合同冲突；product-experience实现已进入Phase 3，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 
