@@ -1591,6 +1591,8 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "coordinator-agent".to_owned(),
                 required_features: vec![],
+                input_classification: insight_platform_contracts::DataClassification::Internal,
+                default_deadline_seconds: 120,
                 authoring_package: AuthoringPackage {
                     artifact: typed_plan_artifact.clone(),
                     manifest_digest: digest('4'),
@@ -1633,6 +1635,8 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "coordinator-child-agent".to_owned(),
                 required_features: vec![],
+                input_classification: insight_platform_contracts::DataClassification::Internal,
+                default_deadline_seconds: 120,
                 authoring_package: AuthoringPackage {
                     artifact: child_plan_artifact.clone(),
                     manifest_digest: digest('4'),

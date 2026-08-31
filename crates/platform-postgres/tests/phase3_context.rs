@@ -1763,6 +1763,8 @@ async fn seed_fixture_with_backend(
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_name: "context-agent".to_owned(),
         required_features: vec![],
+        input_classification: insight_platform_contracts::DataClassification::Internal,
+        default_deadline_seconds: 120,
         authoring_package: authoring(0xa5),
         contract_digest: named_digest("agent-contract"),
         dependency_versions: vec![],

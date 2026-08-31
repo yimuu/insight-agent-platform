@@ -10,12 +10,12 @@ use crate::{
     CodeTrustClass, ContextBackendBinding, ContextBackendKind, ContextBindingSnapshot,
     ContextCitationContract, ContextConsistencyMode, ContextDataPolicyContract,
     ContextDatasetGenerationSpec, ContextImplementationContract, ContextInterfaceLimits,
-    ContextPaginationContract, ContextRankingContract, ContextWindowContract, DataRegion, Effect,
-    InstalledModelAdapter, McpAuthPolicyDocument, McpProtocolPolicyDocument, McpServerLimits,
-    McpTransportBinding, McpTransportKind, ModelCatalogEvidence, ModelLimits, ModelModalities,
-    ModelToolContract, ModelUsageContract, PlanNodeKind, PolicyKind, PrincipalSnapshot,
-    ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits, ResourceId,
-    ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
+    ContextPaginationContract, ContextRankingContract, ContextWindowContract, DataClassification,
+    DataRegion, Effect, InstalledModelAdapter, McpAuthPolicyDocument, McpProtocolPolicyDocument,
+    McpServerLimits, McpTransportBinding, McpTransportKind, ModelCatalogEvidence, ModelLimits,
+    ModelModalities, ModelToolContract, ModelUsageContract, PlanNodeKind, PolicyKind,
+    PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
+    ResourceId, ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
     SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
     SkillInstructionAudience, SkillInstructionPhase, SkillPackageEntryKind,
     StructuredOutputContract,
@@ -350,6 +350,8 @@ macro_rules! authoring_spec {
 pub struct AgentResourceSpec {
     pub authoring_name: String,
     pub required_features: Vec<AgentRequiredFeature>,
+    pub input_classification: DataClassification,
+    pub default_deadline_seconds: u32,
     pub authoring_package: AuthoringPackage,
     pub contract_digest: Sha256Digest,
     pub dependency_versions: Vec<ExactVersionRef>,
@@ -372,6 +374,7 @@ impl AgentResourceSpec {
                 .required_features
                 .windows(2)
                 .all(|pair| pair[0] < pair[1])
+            || !(1..=3_600).contains(&self.default_deadline_seconds)
         {
             return Err(ResourceContractError::InvalidAgentContract);
         }
@@ -3895,6 +3898,8 @@ mod tests {
         let invalid_agent = ResourceDocument::Agent(AgentResourceSpec {
             authoring_name: "contract-agent".to_owned(),
             required_features: vec![],
+            input_classification: DataClassification::Internal,
+            default_deadline_seconds: 120,
             authoring_package: AuthoringPackage {
                 artifact: ArtifactRef::new(
                     id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
@@ -3931,7 +3936,13 @@ mod tests {
             ResourceDocument::Agent(invalid_features.clone()).validate(),
             Err(ResourceContractError::InvalidAgentContract)
         );
-        invalid_features.required_features = vec![];
+        invalid_features.required_features.clear();
+        invalid_features.default_deadline_seconds = 0;
+        assert_eq!(
+            ResourceDocument::Agent(invalid_features.clone()).validate(),
+            Err(ResourceContractError::InvalidAgentContract)
+        );
+        invalid_features.default_deadline_seconds = 120;
 
         let mut invalid_instructions = invalid_features;
         for instructions in [

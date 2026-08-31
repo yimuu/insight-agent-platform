@@ -5171,6 +5171,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_name: "invocation-agent".to_owned(),
         required_features: vec![],
+        input_classification: insight_platform_contracts::DataClassification::Internal,
+        default_deadline_seconds: 120,
         authoring_package: package.clone(),
         contract_digest: digest('b'),
         dependency_versions: vec![],

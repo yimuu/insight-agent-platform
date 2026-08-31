@@ -228,6 +228,8 @@ pub struct LoadedAgentProject {
 pub struct AgentResourceIntent {
     pub authoring_name: String,
     pub required_features: Vec<RequiredAgentFeature>,
+    pub input_classification: DataClassification,
+    pub default_deadline_seconds: u32,
     pub display_name: String,
     pub authoring_artifact: ArtifactIntent,
     pub contract_digest: Sha256Digest,
@@ -361,6 +363,8 @@ impl AgentResourceIntent {
         let document = ResourceDocument::Agent(AgentResourceSpec {
             authoring_name: self.authoring_name.clone(),
             required_features: self.required_features.clone(),
+            input_classification: self.input_classification,
+            default_deadline_seconds: self.default_deadline_seconds,
             authoring_package: AuthoringPackage {
                 artifact: authoring.artifact.clone(),
                 manifest_digest: self.authoring_artifact.content_digest.clone(),
@@ -556,6 +560,8 @@ pub fn compile_agent(input: AgentCompilerInput) -> Result<CompiledAgent, AgentCo
     let resource_intent = AgentResourceIntent {
         authoring_name: manifest.metadata.name.clone(),
         required_features: required_features.clone(),
+        input_classification: manifest.spec.input.classification,
+        default_deadline_seconds: deadline_seconds,
         display_name,
         authoring_artifact: ArtifactIntent {
             purpose: ArtifactPurpose::AuthoringDocument,
@@ -1458,6 +1464,11 @@ spec:
         assert_eq!(first.name, "echo-agent");
         assert_eq!(first.resource_intent.display_name, "Echo Agent");
         assert!(first.required_features.is_empty());
+        assert_eq!(
+            first.resource_intent.input_classification,
+            DataClassification::Internal
+        );
+        assert_eq!(first.resource_intent.default_deadline_seconds, 120);
         let plan: Value = serde_json::from_slice(&first.typed_plan_bytes).unwrap();
         assert_eq!(plan["plan_version"], 5);
         assert_eq!(plan["nodes"]["finish"]["value"]["source"], "run_input");
@@ -1482,6 +1493,11 @@ spec:
             compiled.resource_intent.author_instructions.as_deref(),
             Some("Answer using only the current user input.\n")
         );
+        assert_eq!(
+            compiled.resource_intent.input_classification,
+            DataClassification::Internal
+        );
+        assert_eq!(compiled.resource_intent.default_deadline_seconds, 120);
         assert_eq!(compiled.deployment_intent.slots.len(), 1);
         let plan: Value = serde_json::from_slice(&compiled.typed_plan_bytes).unwrap();
         assert_eq!(plan["nodes"]["model"]["kind"], "model_loop");

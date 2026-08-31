@@ -548,6 +548,8 @@ mod tests {
                 insight_platform_contracts::AgentResourceSpec {
                     authoring_name: "registry-agent".to_owned(),
                     required_features: vec![],
+                    input_classification: insight_platform_contracts::DataClassification::Internal,
+                    default_deadline_seconds: 120,
                     authoring_package: insight_platform_contracts::AuthoringPackage {
                         artifact: insight_platform_contracts::ArtifactRef::new(
                             id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),

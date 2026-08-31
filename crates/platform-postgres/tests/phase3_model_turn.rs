@@ -1332,6 +1332,8 @@ async fn seed_production_artifact_run(
     let document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_name: "model-agent".to_owned(),
         required_features: vec![insight_platform_contracts::AgentRequiredFeature::Model],
+        input_classification: insight_platform_contracts::DataClassification::Internal,
+        default_deadline_seconds: 120,
         authoring_package: authoring(0xc20, '4'),
         contract_digest: digest('5'),
         dependency_versions: vec![],
@@ -2385,6 +2387,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_name: "instruction-agent".to_owned(),
         required_features: vec![insight_platform_contracts::AgentRequiredFeature::Model],
+        input_classification: insight_platform_contracts::DataClassification::Internal,
+        default_deadline_seconds: 120,
         authoring_package: authoring(0xa6, 'a'),
         contract_digest: digest('b'),
         dependency_versions: vec![],
