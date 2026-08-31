@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "kind": "insight.dev.feature-registry/v1",
+  "environment_class": "development",
+  "deployment": "single_node",
+  "production_qualification": false,
+  "release_images": ["runtime", "sandbox_guest", "console"],
+  "dependencies": [
+    {"name": "postgresql", "image": "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"},
+    {"name": "nats", "image": "nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927"},
+    {"name": "object_storage", "image": "localstack/localstack@sha256:b279c01f4cfb8f985a482e4014cabc1e2697b9d7a6c8c8db2e40f4d9f93687c7"}
+  ],
+  "starter": {
+    "roles": ["artifact_data", "artifact_gateway", "capability_native", "management_gateway", "orchestration", "registry_validation", "runtime_gateway"],
+    "configs": ["artifact-bootstrap", "artifact-data", "artifact-gateway", "capability-native", "gateway-management", "gateway-runtime", "orchestration", "registry-validation"],
+    "identities": ["artifact_data", "artifact_gateway", "capability_native", "management_gateway", "orchestration", "registry_validation", "runtime_gateway"],
+    "readiness": ["postgresql", "nats", "object_storage", "artifact_data", "artifact_gateway", "capability_native", "management_gateway", "orchestration", "registry_validation", "runtime_gateway"],
+    "memory_mib": 3072,
+    "cpu_millicores": 1000
+  },
+  "features": {
+    "context": {
+      "roles": ["context_dataset", "context_subscription", "context_worker", "remote_context"],
+      "configs": ["context-dataset", "context-subscription", "context-worker", "remote-context"],
+      "identities": ["context_dataset", "context_subscription", "context_worker", "remote_context"],
+      "readiness": ["context_dataset", "context_subscription", "context_worker", "remote_context"],
+      "provides": ["context"],
+      "memory_mib": 512,
+      "cpu_millicores": 250
+    },
+    "mcp": {
+      "roles": ["callback_api", "egress_broker", "mcp_cleanup", "mcp_discovery", "mcp_host", "mcp_resource", "mcp_subscription"],
+      "configs": ["callback", "egress-broker", "mcp-cleanup", "mcp-discovery", "mcp-host", "mcp-resource", "mcp-subscription"],
+      "identities": ["callback_api", "egress_broker", "mcp_cleanup", "mcp_discovery", "mcp_host", "mcp_resource", "mcp_subscription"],
+      "readiness": ["callback_api", "egress_broker", "mcp_cleanup", "mcp_discovery", "mcp_host", "mcp_resource", "mcp_subscription"],
+      "provides": ["mcp"],
+      "memory_mib": 768,
+      "cpu_millicores": 300
+    },
+    "model": {
+      "roles": ["egress_broker", "model_worker"],
+      "configs": ["egress-broker", "model-worker"],
+      "identities": ["egress_broker", "model_worker"],
+      "readiness": ["egress_broker", "model_worker"],
+      "provides": ["model"],
+      "memory_mib": 512,
+      "cpu_millicores": 250
+    },
+    "remote-capability": {
+      "roles": ["capability_remote", "egress_broker"],
+      "configs": ["capability-remote", "egress-broker"],
+      "identities": ["capability_remote", "egress_broker"],
+      "readiness": ["capability_remote", "egress_broker"],
+      "provides": ["remote-capability"],
+      "memory_mib": 384,
+      "cpu_millicores": 200
+    },
+    "wasi": {
+      "roles": ["sandbox_attestor", "sandbox_controller", "sandbox_executor"],
+      "configs": ["sandbox-attestor", "sandbox-controller", "sandbox-executor"],
+      "identities": ["sandbox_attestor", "sandbox_controller", "sandbox_executor"],
+      "readiness": ["sandbox_attestor", "sandbox_controller", "sandbox_executor"],
+      "provides": ["wasi"],
+      "memory_mib": 768,
+      "cpu_millicores": 300
+    }
+  },
+  "aliases": {"all": ["context", "mcp", "model", "remote-capability", "wasi"]},
+  "qualification": {"dev_feature": false, "levels": {"L4": "not_run", "L5": "not_run", "L6": "not_run"}}
+}

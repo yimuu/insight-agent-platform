@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import pathlib
+import subprocess
+import tarfile
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/build-product-release.py"
+SIGNER = ROOT / "scripts/sign-product-release.py"
+TARGETS = (
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+)
+METADATA = (
+    "build-provenance.intoto.jsonl", "cli.spdx.json", "console.spdx.json",
+    "release-performance.json", "runtime.spdx.json", "sandbox-guest.spdx.json",
+)
+
+
+def digest(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
+
+
+class ProductReleaseTests(unittest.TestCase):
+    def fixture(self, root: pathlib.Path) -> pathlib.Path:
+        version = "1.2.3"
+        profile = json.loads((ROOT / "release/development-profile-v1.json").read_bytes())
+        (root / "development-profile-v1.json").write_text(
+            json.dumps(profile, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+        )
+        for name in METADATA:
+            (root / name).write_text("{}\n", encoding="utf-8")
+        (root / f"console-{version}.tar.gz").write_bytes(b"console")
+        for target in TARGETS:
+            binary = f"binary-{target}".encode()
+            (root / f"insight-{version}-{target}").write_bytes(binary)
+            with tarfile.open(root / f"insight-{version}-{target}.tar.gz", "w:gz") as archive:
+                for name, contents, mode in (
+                    ("insight", binary, 0o755), ("LICENSE", b"license\n", 0o644),
+                    ("VERSION", f"{version}\n".encode(), 0o644),
+                ):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(contents)
+                    info.mode = mode
+                    info.mtime = 0
+                    archive.addfile(info, io.BytesIO(contents))
+        images = {
+            name: {
+                "subject": f"ghcr.io/example/{name}:v{version}",
+                "index_digest": digest(f"index-{name}"),
+                "platforms": {platform: digest(f"{name}-{platform}") for platform in ("linux/amd64", "linux/arm64")},
+            }
+            for name in ("console", "runtime", "sandbox_guest")
+        }
+        image_path = root / "images.json"
+        image_path.write_text(json.dumps(images), encoding="utf-8")
+        return image_path
+
+    def run_generator(self, root: pathlib.Path, images: pathlib.Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([
+            "python3", str(SCRIPT), "--version", "1.2.3", "--git-commit", "a" * 40,
+            "--created-at", "2026-09-01T00:00:00.000000Z", "--artifacts", str(root),
+            "--images", str(images), "--output", str(root / "release-bundle.json"),
+        ], cwd=ROOT, capture_output=True, text=True)
+
+    def test_builds_canonical_closed_bundle_and_checksums(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            result = self.run_generator(root, self.fixture(root))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw = (root / "release-bundle.json").read_bytes()
+            self.assertEqual(raw, json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":")).encode())
+            bundle = json.loads(raw)
+            self.assertEqual(list(TARGETS), [item["target"] for item in bundle["cli"]])
+            self.assertEqual(["console", "runtime", "sandbox_guest"], [item["name"] for item in bundle["images"]])
+            self.assertIn("release-bundle.json", (root / "checksums.txt").read_text())
+
+    def test_missing_arch_partial_image_and_archive_extra_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            images = self.fixture(root)
+            (root / f"insight-1.2.3-{TARGETS[-1]}").unlink()
+            self.assertNotEqual(self.run_generator(root, images).returncode, 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            images = self.fixture(root)
+            value = json.loads(images.read_bytes())
+            del value["runtime"]["platforms"]["linux/arm64"]
+            images.write_text(json.dumps(value))
+            self.assertNotEqual(self.run_generator(root, images).returncode, 0)
+
+    def test_signer_binds_the_configured_public_trust_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            private = root / "private.pem"
+            public_der = root / "public.der"
+            bundle = root / "release-bundle.json"
+            signature = root / "release-bundle.signature.json"
+            bundle.write_bytes(b"{}")
+            generated = subprocess.run([
+                "openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private)
+            ], check=False, capture_output=True)
+            if generated.returncode != 0:
+                self.skipTest("local OpenSSL does not provide Ed25519; Rust verifier tests still run")
+            subprocess.run([
+                "openssl", "pkey", "-in", str(private), "-pubout", "-outform", "DER",
+                "-out", str(public_der),
+            ], check=True, capture_output=True)
+            public = __import__("base64").urlsafe_b64encode(public_der.read_bytes()[-32:]).decode().rstrip("=")
+            result = subprocess.run([
+                "python3", str(SIGNER), "--bundle", str(bundle), "--private-key", str(private),
+                "--public-key-base64", public, "--output", str(signature),
+            ], cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("ed25519", json.loads(signature.read_bytes())["algorithm"])
+            wrong = subprocess.run([
+                "python3", str(SIGNER), "--bundle", str(bundle), "--private-key", str(private),
+                "--public-key-base64", "A" * 43, "--output", str(signature),
+            ], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(wrong.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

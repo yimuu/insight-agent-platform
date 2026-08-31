@@ -13,6 +13,7 @@ mod artifact;
 mod artifact_journal;
 mod full_profile;
 mod public_client;
+mod release;
 mod run;
 mod run_journal;
 mod task;
@@ -108,6 +109,13 @@ const DOCTOR_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub enum CliCommand {
     Doctor {
         json: bool,
+    },
+    Version {
+        json: bool,
+    },
+    UpdateCheck,
+    UpdateApply {
+        version: String,
     },
     Init {
         root: PathBuf,
@@ -314,6 +322,7 @@ pub enum CliError {
     Task(task::TaskClientError),
     Artifact(artifact::ArtifactClientError),
     Agent(agent::AgentCommandError),
+    Release(release::ReleaseError),
     OperationTerminal {
         operation_id: String,
         state: String,
@@ -402,6 +411,7 @@ impl std::fmt::Display for CliError {
             Self::Task(error) => write!(formatter, "{error}"),
             Self::Artifact(error) => write!(formatter, "{error}"),
             Self::Agent(error) => write!(formatter, "{error}"),
+            Self::Release(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
                 state,
@@ -434,6 +444,7 @@ impl std::error::Error for CliError {
             Self::Run(source) => Some(source),
             Self::Task(source) => Some(source),
             Self::Artifact(source) => Some(source),
+            Self::Release(source) => Some(source),
             _ => None,
         }
     }
@@ -469,6 +480,7 @@ impl CliError {
             | Self::Task(_)
             | Self::Artifact(_)
             | Self::Agent(_)
+            | Self::Release(_)
             | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
@@ -489,6 +501,8 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
     match command {
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         "doctor" => parse_doctor(&arguments[1..]),
+        "version" => parse_version(&arguments[1..]),
+        "update" => parse_update(&arguments[1..]),
         "init" => parse_init(&arguments[1..]),
         "token" => parse_token(&arguments[1..]),
         "dev" => parse_dev(&arguments[1..]),
@@ -511,6 +525,37 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
             }
         }
         value => Err(CliError::UnknownCommand(value.to_owned())),
+    }
+}
+
+fn parse_version(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    match arguments {
+        [] => Ok(CliCommand::Version { json: false }),
+        [flag] if flag == "--json" => Ok(CliCommand::Version { json: true }),
+        [flag] => Err(CliError::UnsupportedOption(lossy(flag))),
+        _ => Err(CliError::Usage),
+    }
+}
+
+fn parse_update(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    match arguments {
+        [action] if action == "check" => Ok(CliCommand::UpdateCheck),
+        [action, version_flag, version] if action == "apply" && version_flag == "--version" => {
+            let version = version
+                .to_str()
+                .ok_or_else(|| CliError::InvalidOptionValue {
+                    option: "--version",
+                    value: version.to_string_lossy().into_owned(),
+                })?
+                .to_owned();
+            release::validate_exact_version(&version).map_err(CliError::Release)?;
+            Ok(CliCommand::UpdateApply { version })
+        }
+        [action] if action == "apply" => Err(CliError::MissingValue("--version")),
+        [action, ..] if action != "check" && action != "apply" => Err(CliError::UnknownCommand(
+            format!("update {}", lossy(action)),
+        )),
+        _ => Err(CliError::Usage),
     }
 }
 
@@ -4964,6 +5009,11 @@ pub fn execute(
     match command {
         CliCommand::Help => Ok(usage().to_owned()),
         CliCommand::AdvancedHelp => Ok(advanced_usage().to_owned()),
+        CliCommand::Version { json } => Ok(release::version_output(json)),
+        CliCommand::UpdateCheck => release::check_for_update().map_err(CliError::Release),
+        CliCommand::UpdateApply { version } => {
+            release::apply_update(&version).map_err(CliError::Release)
+        }
         CliCommand::Doctor { json } => {
             let report = doctor_report_at(probe, current_directory, SystemTime::now());
             let output = if json {
@@ -5221,7 +5271,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--profile base|full]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
+    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--profile base|full]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n\nInstall and update:\n  insight version [--json]\n  insight update check\n  insight update apply --version <exact-version>\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
 }
 
 fn advanced_usage() -> &'static str {
@@ -7166,6 +7216,36 @@ mod tests {
     }
 
     #[test]
+    fn command_parser_accepts_version_and_exact_updates() {
+        assert!(matches!(
+            parse_command(&[OsString::from("version"), OsString::from("--json")]),
+            Ok(CliCommand::Version { json: true })
+        ));
+        assert!(matches!(
+            parse_command(&[OsString::from("update"), OsString::from("check")]),
+            Ok(CliCommand::UpdateCheck)
+        ));
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("update"),
+                OsString::from("apply"),
+                OsString::from("--version"),
+                OsString::from("1.2.3"),
+            ]),
+            Ok(CliCommand::UpdateApply { version }) if version == "1.2.3"
+        ));
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("update"),
+                OsString::from("apply"),
+                OsString::from("--version"),
+                OsString::from("latest"),
+            ]),
+            Err(CliError::Release(_))
+        ));
+    }
+
+    #[test]
     fn default_help_keeps_platform_automation_behind_advanced_help() {
         let default = usage();
         assert!(default.contains("insight agent publish"));
@@ -7173,5 +7253,6 @@ mod tests {
         let advanced = advanced_usage();
         assert!(advanced.contains("insight apply --file"));
         assert!(advanced.contains("insight artifact upload"));
+        assert!(default.contains("insight update apply --version <exact-version>"));
     }
 }
