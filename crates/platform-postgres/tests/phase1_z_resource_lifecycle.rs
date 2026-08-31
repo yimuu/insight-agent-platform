@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{
-    ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
-    ArtifactRetentionPolicy, AuthoringPackage, ClosedJsonSchema, CodeTrustClass,
+    ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentProductState, AgentResourceSpec,
+    ArtifactRef, ArtifactRetentionPolicy, AuthoringPackage, ClosedJsonSchema, CodeTrustClass,
     DataClassification, DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExactPolicyBinding,
     ExactVersionRef, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
     PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
@@ -15,6 +15,7 @@ use insight_platform_contracts::{
     ValidationSummary,
 };
 use insight_platform_postgres::{
+    product_repository::AgentProductListQuery,
     repository::{
         ClaimJobs, CommitRegistryValidation, JobFence, NewPrincipal, NewTenant, NewTenantPrincipal,
         PgRepository, RegistryValidationCommitOutcome, RepositoryError, TypedPayload,
@@ -65,6 +66,7 @@ const AGENT_DEPLOYMENT_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd3";
 const AGENT_DEPLOYMENT_REPLAY_CANDIDATE_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd4";
 const AGENT_DEPLOYMENT_BAD_BATCH_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd5";
 const AGENT_DEPLOYMENT_BAD_OWNER_ID: &str = "adep_0198f1c3-8f49-7c3e-b1f3-773c28367cd6";
+const LATE_AGENT_ID: &str = "agt_0198f1c3-8f49-7c3e-b1f3-773c28367cd7";
 const POLICY_VERSION_2_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce1";
 const POLICY_VERSION_3_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce2";
 const POLICY_VERSION_4_ID: &str = "prev_0198f1c3-8f49-7c3e-b1f3-773c28367ce3";
@@ -1806,6 +1808,130 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         late_suspension_replay,
         CommandOutcome::Replayed(ref replayed) if replayed == &suspended_agent
     ));
+
+    let first_agent_page = repository
+        .list_agent_products(AgentProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            state: None,
+            environment: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_agent_page.records.len(), 1);
+    assert_eq!(
+        first_agent_page.records[0].product_state,
+        AgentProductState::Ready
+    );
+    assert_eq!(
+        first_agent_page.records[0]
+            .active_deployment
+            .as_ref()
+            .map(|deployment| deployment.environment.as_str()),
+        Some("test")
+    );
+    let first_boundary = (
+        first_agent_page.records[0].resource.updated_at,
+        id(AGENT_ID),
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.resources (
+            tenant_id, resource_id, resource_kind, lifecycle_state, gate_state,
+            draft_generation, active_version_id, active_deployment_id, version,
+            payload_schema_version, payload, payload_digest, created_at, updated_at
+        )
+        SELECT tenant_id, $3, resource_kind, lifecycle_state, gate_state,
+               draft_generation, NULL, NULL, version,
+               payload_schema_version, payload, payload_digest,
+               clock_timestamp(), clock_timestamp()
+        FROM insight_platform.resources
+        WHERE tenant_id = $1 AND resource_id = $2
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(AGENT_ID)
+    .bind(LATE_AGENT_ID)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let frozen_next_page = repository
+        .list_agent_products(AgentProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            state: None,
+            environment: None,
+            snapshot_at: Some(first_agent_page.snapshot_at),
+            boundary: Some(first_boundary),
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert!(frozen_next_page.records.is_empty());
+
+    let current_agents = repository
+        .list_agent_products(AgentProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            state: None,
+            environment: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert_eq!(current_agents.records.len(), 2);
+
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: id(TENANT_B_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            payload: TenantPrincipalPayload {
+                permissions: PermissionSet::new(vec![Permission::AgentRead]).unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let other_tenant = repository
+        .list_agent_products(AgentProductListQuery {
+            tenant_id: id(TENANT_B_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            state: None,
+            environment: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert!(other_tenant.records.is_empty());
+
+    let ready_only = repository
+        .list_agent_products(AgentProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(PRINCIPAL_ID),
+            principal_kind: PrincipalKind::TenantAdmin,
+            state: Some(AgentProductState::Ready),
+            environment: Some("test".to_owned()),
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ready_only.records.len(), 1);
+    assert_eq!(ready_only.records[0].resource.resource_id, AGENT_ID);
 
     let first_update_audit = audit(TENANT_ID, PRINCIPAL_ID, "7ce0", '1', '2');
     let mut first_updated_draft = draft.clone();

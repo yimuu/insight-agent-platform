@@ -58,9 +58,9 @@ spec:
             - {name: PLATFORM_GATEWAY_CONFIG_DIGEST, value: {{ $component.config.digest | quote }}}
             - name: PLATFORM_GATEWAY_DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ $component.database.existingSecret }}, key: {{ $component.database.urlKey }}}}
-            {{- if eq $role "runtime-api" }}
             - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH, value: /etc/insight/run-event-cursor/key}
             - {name: PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST, value: {{ $root.Values.runEventCursorKey.digest | quote }}}
+            {{- if eq $role "runtime-api" }}
             - {name: PLATFORM_GATEWAY_ARTIFACT_CA_PATH, value: /etc/insight/artifact-tls/ca.pem}
             - {name: PLATFORM_GATEWAY_ARTIFACT_CERT_PATH, value: /etc/insight/artifact-tls/client.pem}
             - {name: PLATFORM_GATEWAY_ARTIFACT_KEY_PATH, value: /etc/insight/artifact-tls/client-key.pem}
@@ -72,17 +72,17 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
-            {{- if eq $role "runtime-api" }}
             - {name: run-event-cursor-key, mountPath: /etc/insight/run-event-cursor, readOnly: true}
+            {{- if eq $role "runtime-api" }}
             - {name: artifact-tls, mountPath: /etc/insight/artifact-tls, readOnly: true}
             {{- end }}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: config
           configMap: {name: {{ $component.config.existingConfigMap }}, items: [{key: {{ $component.config.fileKey }}, path: gateway.json}]}
-        {{- if eq $role "runtime-api" }}
         - name: run-event-cursor-key
           secret: {secretName: {{ $root.Values.runEventCursorKey.existingSecret }}, items: [{key: {{ $root.Values.runEventCursorKey.key }}, path: key}]}
+        {{- if eq $role "runtime-api" }}
         - name: artifact-tls
           secret:
             secretName: {{ $root.Values.artifactGateway.tls.existingSecret }}

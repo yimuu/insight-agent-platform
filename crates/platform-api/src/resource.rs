@@ -2,7 +2,10 @@ use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Extension, Path, State},
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        DefaultBodyLimit, Extension, Path, Query, State,
+    },
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -21,6 +24,12 @@ use insight_platform_contracts::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::product::{
+    list_filter_digest, AgentListFiltersV1, AgentSummaryV1, AuthorityListPage, ListCursorCodec,
+    ListCursorContext, ListError, ListKeysetBoundary, ListPageV1, ListRoutePurpose,
+    PRODUCT_LIST_CURSOR_TTL_SECONDS, PRODUCT_LIST_DEFAULT_PAGE_SIZE, PRODUCT_LIST_MAX_PAGE_SIZE,
+};
 
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const IF_MATCH: &str = "if-match";
@@ -671,6 +680,16 @@ pub struct BuildContextDatasetIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListAgentsIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub filters: AgentListFiltersV1,
+    pub page_size: u16,
+    pub snapshot_at: Option<DateTime<Utc>>,
+    pub boundary: Option<ListKeysetBoundary>,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -680,12 +699,21 @@ pub enum ResourceApplicationError {
     Conflict,
     PreconditionRequired,
     IdempotencyConflict,
+    CursorInvalid,
+    CursorExpired,
     Unavailable,
     Internal,
 }
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    async fn list_agents(
+        &self,
+        _intent: ListAgentsIntent,
+    ) -> Result<AuthorityListPage<AgentSummaryV1>, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+
     async fn create_resource(
         &self,
         intent: CreateResourceIntent,
@@ -768,16 +796,27 @@ impl ResourceClock for SystemResourceClock {
 pub struct ResourceHttpState {
     application: Arc<dyn ResourceApplication>,
     clock: Arc<dyn ResourceClock>,
+    list_cursor_codec: Option<Arc<dyn ListCursorCodec>>,
 }
 
 impl ResourceHttpState {
     pub fn new(application: Arc<dyn ResourceApplication>, clock: Arc<dyn ResourceClock>) -> Self {
-        Self { application, clock }
+        Self {
+            application,
+            clock,
+            list_cursor_codec: None,
+        }
+    }
+
+    pub fn with_list_cursor_codec(mut self, codec: Arc<dyn ListCursorCodec>) -> Self {
+        self.list_cursor_codec = Some(codec);
+        self
     }
 }
 
 pub fn build_resource_router(state: ResourceHttpState) -> Router {
     Router::new()
+        .route("/v1/agents", get(list_agents).post(create_agent))
         .route(
             "/v1/context-datasets/{dataset_id}/versions/{generation_id}",
             get(read_context_dataset_generation),
@@ -810,6 +849,109 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentListQuery {
+    page_size: Option<u16>,
+    cursor: Option<String>,
+    state: Option<insight_platform_contracts::AgentProductState>,
+    environment: Option<String>,
+}
+
+async fn list_agents(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    query: Result<Query<AgentListQuery>, QueryRejection>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return problem(ResourceApplicationError::Invalid),
+    };
+    let page_size = query.page_size.unwrap_or(PRODUCT_LIST_DEFAULT_PAGE_SIZE);
+    if page_size == 0 || page_size > PRODUCT_LIST_MAX_PAGE_SIZE {
+        return problem(ResourceApplicationError::Invalid);
+    }
+    let filters = AgentListFiltersV1 {
+        state: query.state,
+        environment: query.environment,
+    };
+    if filters.validate().is_err() {
+        return problem(ResourceApplicationError::Invalid);
+    }
+    let filter_digest = match list_filter_digest(&filters) {
+        Ok(digest) => digest,
+        Err(_) => return problem(ResourceApplicationError::Invalid),
+    };
+    let context = ListCursorContext {
+        purpose: ListRoutePurpose::Agents,
+        filter_digest,
+        page_size,
+    };
+    let Some(codec) = state.list_cursor_codec.as_ref() else {
+        return problem(ResourceApplicationError::Unavailable);
+    };
+    let now = state.clock.now();
+    let (requested_snapshot_at, boundary, expires_at) = match query.cursor {
+        Some(cursor) => match codec.decode(&cursor, &principal, &context, now) {
+            Ok(decoded) => (
+                Some(decoded.snapshot_at),
+                Some(decoded.boundary),
+                decoded.expires_at,
+            ),
+            Err(ListError::Invalid) => return problem(ResourceApplicationError::CursorInvalid),
+            Err(ListError::Expired) => return problem(ResourceApplicationError::CursorExpired),
+        },
+        None => (
+            None,
+            None,
+            now + Duration::seconds(PRODUCT_LIST_CURSOR_TTL_SECONDS),
+        ),
+    };
+    let page = match state
+        .application
+        .list_agents(ListAgentsIntent {
+            principal: principal.clone(),
+            filters,
+            page_size,
+            snapshot_at: requested_snapshot_at,
+            boundary,
+            deadline: now + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(page) => page,
+        Err(error) => return problem(error),
+    };
+    if page.items.iter().any(|item| item.validate().is_err()) {
+        return problem(ResourceApplicationError::Internal);
+    }
+    let response_now = state.clock.now();
+    if requested_snapshot_at.is_some_and(|snapshot_at| snapshot_at != page.snapshot_at)
+        || page.snapshot_at > response_now
+    {
+        return problem(ResourceApplicationError::Internal);
+    }
+    let next_cursor = match page.next_boundary {
+        Some(boundary) => {
+            match codec.encode(&principal, &context, page.snapshot_at, boundary, expires_at) {
+                Ok(cursor) => Some(cursor),
+                Err(_) => return problem(ResourceApplicationError::Internal),
+            }
+        }
+        None => None,
+    };
+    match ListPageV1::new(page.items, next_cursor) {
+        Ok(page) => no_store((StatusCode::OK, Json(page)).into_response()),
+        Err(_) => problem(ResourceApplicationError::Internal),
+    }
 }
 
 async fn read_context_dataset_generation(
@@ -1580,6 +1722,25 @@ async fn create_resource(
     headers: HeaderMap,
     body: Result<Json<CreateResourceRequestV1>, JsonRejection>,
 ) -> Response {
+    create_resource_for_noun(state, principal, resource_noun, headers, body).await
+}
+
+async fn create_agent(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    headers: HeaderMap,
+    body: Result<Json<CreateResourceRequestV1>, JsonRejection>,
+) -> Response {
+    create_resource_for_noun(state, principal, "agents".to_owned(), headers, body).await
+}
+
+async fn create_resource_for_noun(
+    state: ResourceHttpState,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    resource_noun: String,
+    headers: HeaderMap,
+    body: Result<Json<CreateResourceRequestV1>, JsonRejection>,
+) -> Response {
     let Some(Extension(principal)) = principal else {
         return problem(ResourceApplicationError::Unauthenticated);
     };
@@ -1911,6 +2072,18 @@ fn problem(error: ResourceApplicationError) -> Response {
             "The idempotency key was used for a different request.",
             false,
         ),
+        ResourceApplicationError::CursorInvalid => (
+            StatusCode::BAD_REQUEST,
+            ApiProblemCode::CursorInvalid,
+            "The list cursor is invalid for this request.",
+            false,
+        ),
+        ResourceApplicationError::CursorExpired => (
+            StatusCode::BAD_REQUEST,
+            ApiProblemCode::CursorExpired,
+            "The list cursor has expired.",
+            false,
+        ),
         ResourceApplicationError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             ApiProblemCode::TemporarilyUnavailable,
@@ -1967,7 +2140,10 @@ mod tests {
         PolicyKind, PolicyResourceSpec, PrincipalKind, PublicJobKind, PublicJobState,
         PublicJobTarget, UtcTimestamp, ValidationSummary,
     };
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
     use tower::ServiceExt;
 
     fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
@@ -2005,7 +2181,8 @@ mod tests {
             tenant_id: id(ResourceKind::Tenant, 1),
             principal_id: id(ResourceKind::Principal, 2),
             principal_kind: PrincipalKind::TenantAdmin,
-            permissions: PermissionSet::new(vec![Permission::PolicyWrite]).unwrap(),
+            permissions: PermissionSet::new(vec![Permission::AgentRead, Permission::PolicyWrite])
+                .unwrap(),
             authn_strength: AuthnStrength::MultiFactor,
             principal_version: 1,
             binding_generation: 1,
@@ -3282,5 +3459,164 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{noun}");
         }
+    }
+
+    struct AgentListFixture {
+        calls: AtomicUsize,
+        snapshot_at: DateTime<Utc>,
+    }
+
+    #[async_trait]
+    impl ResourceApplication for AgentListFixture {
+        async fn list_agents(
+            &self,
+            _intent: ListAgentsIntent,
+        ) -> Result<AuthorityListPage<AgentSummaryV1>, ResourceApplicationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let agent_id = id(ResourceKind::Agent, 70);
+            Ok(AuthorityListPage {
+                snapshot_at: self.snapshot_at,
+                items: vec![AgentSummaryV1 {
+                    schema_version: 1,
+                    name: "support-agent".to_owned(),
+                    display_name: "Support Agent".to_owned(),
+                    agent_id: agent_id.clone(),
+                    state: insight_platform_contracts::AgentProductState::Draft,
+                    environment: None,
+                    updated_at: UtcTimestamp::from_datetime(self.snapshot_at),
+                    published_at: None,
+                    required_features: vec![],
+                    latest_run_state: None,
+                }],
+                next_boundary: Some(ListKeysetBoundary::Agent {
+                    updated_at: UtcTimestamp::from_datetime(self.snapshot_at),
+                    agent_id,
+                }),
+            })
+        }
+
+        async fn create_resource(
+            &self,
+            _intent: CreateResourceIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn read_resource(
+            &self,
+            _intent: ReadResourceIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn update_resource_draft(
+            &self,
+            _intent: UpdateResourceDraftIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn validate_resource_draft(
+            &self,
+            _intent: ValidateResourceDraftIntent,
+        ) -> Result<OperationViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn read_resource_version(
+            &self,
+            _intent: ReadResourceVersionIntent,
+        ) -> Result<ResourceVersionViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn read_deployment(
+            &self,
+            _intent: ReadDeploymentIntent,
+        ) -> Result<DeploymentViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn create_deployment(
+            &self,
+            _intent: CreateDeploymentIntent,
+        ) -> Result<DeploymentViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn activate_deployment(
+            &self,
+            _intent: ControlDeploymentIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn suspend_deployment(
+            &self,
+            _intent: ControlDeploymentIntent,
+        ) -> Result<ResourceViewV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+
+        async fn publish_resource_draft(
+            &self,
+            _intent: PublishResourceDraftIntent,
+        ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError> {
+            Err(ResourceApplicationError::Internal)
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_list_cursor_is_opaque_filter_bound_and_rejected_before_authority() {
+        let now = Utc::now();
+        let application = Arc::new(AgentListFixture {
+            calls: AtomicUsize::new(0),
+            snapshot_at: now - Duration::seconds(1),
+        });
+        let router = build_resource_router(
+            ResourceHttpState::new(application.clone(), Arc::new(FixedClock(now)))
+                .with_list_cursor_codec(Arc::new(
+                    crate::product::HmacListCursorCodec::install(&[7_u8; 32]).unwrap(),
+                )),
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agents?page_size=1")
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let page: ListPageV1<AgentSummaryV1> = serde_json::from_slice(&body).unwrap();
+        let cursor = page.next_cursor.unwrap();
+        assert!(!cursor.as_str().contains("support-agent"));
+        assert_eq!(application.calls.load(Ordering::SeqCst), 1);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/agents?page_size=1&state=blocked&cursor={}",
+                        cursor.as_str()
+                    ))
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("cursor_invalid"));
+        assert_eq!(application.calls.load(Ordering::SeqCst), 1);
     }
 }

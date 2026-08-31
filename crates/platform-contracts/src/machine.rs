@@ -20,7 +20,7 @@ use crate::{
         SkillRequirementKind, SkillSelectionMode, WakeContractKind, WorkClass,
     },
     schema::{ALLOWED_SCHEMA_KEYWORDS, CLOSED_SCHEMA_PROFILE_ID},
-    state::{all_state_machines, AttemptCommitDisposition},
+    state::{all_state_machines, AttemptCommitDisposition, RunState},
     types::MAX_PUBLIC_EVENT_SAFE_SUMMARY_BYTES,
     MAX_CANDIDATE_COMPONENT_IMAGES, MAX_CANDIDATE_WORKER_MANIFESTS,
 };
@@ -57,6 +57,31 @@ x-insight-trace-contract:
 servers:
   - url: /v1
 paths:
+  /agents:
+    get:
+      operationId: listAgents
+      summary: List the current Agent product projection from Resource authority
+      tags: [Agents]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: agent.read
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+        - {name: state, in: query, schema: {$ref: "#/components/schemas/AgentProductState"}}
+        - {name: environment, in: query, schema: {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_-]{0,127}$"}}
+      responses:
+        "200":
+          description: One stable keyset page of current tenant-visible Agents.
+          headers:
+            trace-id: {$ref: "#/components/headers/TraceId"}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentListPageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /{resource_noun}:
     post:
       operationId: createManagedResource
@@ -274,6 +299,32 @@ paths:
         "412": {$ref: "#/components/responses/ApiProblem"}
         "428": {$ref: "#/components/responses/ApiProblem"}
   /runs:
+    get:
+      operationId: listRuns
+      summary: List the current Run product projection from durable Run authority
+      tags: [Runs]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: runtime.read
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+        - {name: agent_id, in: query, schema: {$ref: "#/components/schemas/AgentId"}}
+        - {name: state, in: query, schema: {$ref: "#/components/schemas/PublicRunState"}}
+        - {name: created_after, in: query, schema: {$ref: "#/components/schemas/UtcTimestamp"}}
+        - {name: created_before, in: query, schema: {$ref: "#/components/schemas/UtcTimestamp"}}
+      responses:
+        "200":
+          description: One stable keyset page of current tenant-visible Runs.
+          headers:
+            trace-id: {$ref: "#/components/headers/TraceId"}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunListPageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
     post:
       operationId: createRun
       summary: Admit a root Run from one enabled Agent binding
@@ -1466,6 +1517,81 @@ components:
     AgentId:
       type: string
       pattern: "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    AgentProductState:
+      type: string
+      enum: [draft, validating, publishing, ready, blocked]
+    AgentRequiredFeature:
+      type: string
+      enum: [model]
+    PublicRunState:
+      type: string
+      enum: [queued, running, waiting, cancelling, succeeded, failed, cancelled, timed_out]
+    AgentSummaryV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, name, display_name, agent_id, state, environment, updated_at, published_at, required_features, latest_run_state]
+      properties:
+        schema_version: {const: 1}
+        name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z][a-z0-9-]{0,62}$"}
+        display_name: {type: string, minLength: 1, maxLength: 255}
+        agent_id: {$ref: "#/components/schemas/AgentId"}
+        state: {$ref: "#/components/schemas/AgentProductState"}
+        environment:
+          oneOf:
+            - {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_-]{0,127}$"}
+            - {type: "null"}
+        updated_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        published_at:
+          oneOf:
+            - {$ref: "#/components/schemas/UtcTimestamp"}
+            - {type: "null"}
+        required_features: {type: array, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentRequiredFeature"}}
+        latest_run_state:
+          oneOf:
+            - {$ref: "#/components/schemas/PublicRunState"}
+            - {type: "null"}
+    RunSummaryV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, agent_name, agent_id, state, started_at, terminal_at, waiting_task_count, result_available]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        agent_name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z][a-z0-9-]{0,62}$"}
+        agent_id: {$ref: "#/components/schemas/AgentId"}
+        state: {$ref: "#/components/schemas/PublicRunState"}
+        started_at:
+          oneOf:
+            - {$ref: "#/components/schemas/UtcTimestamp"}
+            - {type: "null"}
+        terminal_at:
+          oneOf:
+            - {$ref: "#/components/schemas/UtcTimestamp"}
+            - {type: "null"}
+        waiting_task_count: {type: integer, minimum: 0, maximum: 4294967295}
+        result_available: {type: boolean}
+    AgentListPageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/AgentSummaryV1"}}
+        next_cursor:
+          oneOf:
+            - {$ref: "#/components/schemas/OpaqueListCursor"}
+            - {type: "null"}
+    RunListPageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/RunSummaryV1"}}
+        next_cursor:
+          oneOf:
+            - {$ref: "#/components/schemas/OpaqueListCursor"}
+            - {type: "null"}
     AgentDeploymentId:
       type: string
       pattern: "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -2165,6 +2291,10 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/nominal/digest.schema.json",
     "contracts/platform-v1/schemas/nominal/failure.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
+    "contracts/platform-v1/schemas/agent-summary-v1.schema.json",
+    "contracts/platform-v1/schemas/run-summary-v1.schema.json",
+    "contracts/platform-v1/schemas/agent-list-page-v1.schema.json",
+    "contracts/platform-v1/schemas/run-list-page-v1.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-run-event-cursor.schema.json",
     "contracts/platform-v1/schemas/nominal/trace-id.schema.json",
     "contracts/platform-v1/schemas/nominal/trace-identity-v1.schema.json",
@@ -2380,6 +2510,18 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     let artifact_retention_policy_schema = artifact_retention_policy_schema();
     let scheduling_policy_schema = scheduling_policy_schema();
     let public_run_payload_schema = durable_public_run_payload_schema();
+    let agent_summary_schema = agent_summary_schema();
+    let run_summary_schema = run_summary_schema();
+    let agent_list_page_schema = product_list_page_schema(
+        "urn:insight:platform:v1:agent-list-page-v1",
+        "AgentListPageV1",
+        "agent-summary-v1.schema.json",
+    );
+    let run_list_page_schema = product_list_page_schema(
+        "urn:insight:platform:v1:run-list-page-v1",
+        "RunListPageV1",
+        "run-summary-v1.schema.json",
+    );
     let states = json!({
         "attempt_commit_dispositions": AttemptCommitDisposition::ALL
             .iter()
@@ -2414,6 +2556,22 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         (
             "events/public-run-payloads.schema.json",
             pretty(&public_run_payload_schema),
+        ),
+        (
+            "schemas/agent-summary-v1.schema.json",
+            pretty(&agent_summary_schema),
+        ),
+        (
+            "schemas/run-summary-v1.schema.json",
+            pretty(&run_summary_schema),
+        ),
+        (
+            "schemas/agent-list-page-v1.schema.json",
+            pretty(&agent_list_page_schema),
+        ),
+        (
+            "schemas/run-list-page-v1.schema.json",
+            pretty(&run_list_page_schema),
         ),
         ("schemas/nominal-types.json", pretty(&nominal_types)),
         (
@@ -2470,6 +2628,80 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         contracts.insert(path, pretty(&schema));
     }
     contracts
+}
+
+fn nullable_ref(reference: &str) -> Value {
+    json!({"oneOf": [{"$ref": reference}, {"type": "null"}]})
+}
+
+fn agent_summary_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:agent-summary-v1",
+        "title": "AgentSummaryV1",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "name", "display_name", "agent_id", "state", "environment", "updated_at", "published_at", "required_features", "latest_run_state"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+            "display_name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "agent_id": {"type": "string", "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "state": {"type": "string", "enum": AgentProductState::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()},
+            "environment": {"oneOf": [
+                {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_-]{0,127}$"},
+                {"type": "null"}
+            ]},
+            "updated_at": {"$ref": "nominal/utc-timestamp.schema.json"},
+            "published_at": nullable_ref("nominal/utc-timestamp.schema.json"),
+            "required_features": {
+                "type": "array", "maxItems": 16, "uniqueItems": true,
+                "items": {"type": "string", "enum": AgentRequiredFeature::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()}
+            },
+            "latest_run_state": {"oneOf": [
+                {"type": "string", "enum": RunState::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()},
+                {"type": "null"}
+            ]}
+        }
+    })
+}
+
+fn run_summary_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:run-summary-v1",
+        "title": "RunSummaryV1",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "run_id", "agent_name", "agent_id", "state", "started_at", "terminal_at", "waiting_task_count", "result_available"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "run_id": {"type": "string", "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "agent_name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+            "agent_id": {"type": "string", "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "state": {"type": "string", "enum": RunState::ALL.iter().map(|value| value.as_str()).collect::<Vec<_>>()},
+            "started_at": nullable_ref("nominal/utc-timestamp.schema.json"),
+            "terminal_at": nullable_ref("nominal/utc-timestamp.schema.json"),
+            "waiting_task_count": {"type": "integer", "minimum": 0, "maximum": 4294967295_u64},
+            "result_available": {"type": "boolean"}
+        }
+    })
+}
+
+fn product_list_page_schema(id: &str, title: &str, item_ref: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": id,
+        "title": title,
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "items", "next_cursor"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "items": {"type": "array", "maxItems": 50, "items": {"$ref": item_ref}},
+            "next_cursor": nullable_ref("nominal/opaque-list-cursor.schema.json")
+        }
+    })
 }
 
 fn deployment_variant_schema(resource_kind: &str, properties: Value) -> Value {

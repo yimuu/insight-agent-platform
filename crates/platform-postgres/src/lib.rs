@@ -17,6 +17,7 @@ pub mod model_turn_repository;
 pub mod operation_repository;
 pub mod operational_metrics;
 pub mod principal_authentication;
+pub mod product_repository;
 pub mod repository;
 pub mod sandbox_repository;
 

@@ -30,6 +30,7 @@ use insight_platform_orchestrator::{
     RuntimePlan, SetRunPause, TypedExpressionProgram, TypedInstruction,
 };
 use insight_platform_postgres::{
+    product_repository::RunProductListQuery,
     repository::{
         ApplyDerivedExpressionControllerStep, ApplyOrchestrationControllerStep,
         ChildRunCancellationSlot, ClaimOrchestrationJobs, ClaimedOrchestrationJob,
@@ -9804,6 +9805,95 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap(),
         0
     );
+
+    let first_run_page = repository
+        .list_run_products(RunProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(DENIED_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::AgentRunner,
+            agent_id: None,
+            state: None,
+            created_after: None,
+            created_before: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_run_page.records.len(), 1);
+    let first_run = &first_run_page.records[0];
+    let first_run_id = first_run.run_id.clone();
+    let next_run_page = repository
+        .list_run_products(RunProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(DENIED_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::AgentRunner,
+            agent_id: None,
+            state: None,
+            created_after: None,
+            created_before: None,
+            snapshot_at: Some(first_run_page.snapshot_at),
+            boundary: Some((first_run.created_at, first_run.run_id.clone())),
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert!(next_run_page
+        .records
+        .iter()
+        .all(|record| record.run_id != first_run_id
+            && record.created_at <= first_run_page.snapshot_at));
+
+    let agent_runs = repository
+        .list_run_products(RunProductListQuery {
+            tenant_id: id(TENANT_ID),
+            principal_id: id(DENIED_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::AgentRunner,
+            agent_id: Some(id(AGENT_ID)),
+            state: None,
+            created_after: None,
+            created_before: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert!(!agent_runs.records.is_empty());
+    assert!(agent_runs
+        .records
+        .iter()
+        .all(|record| record.agent_id == id(AGENT_ID)));
+
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: id(TENANT_B_ID),
+            principal_id: id(DENIED_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::AgentRunner,
+            payload: TenantPrincipalPayload {
+                permissions: PermissionSet::new(vec![Permission::RuntimeRead]).unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let other_tenant_runs = repository
+        .list_run_products(RunProductListQuery {
+            tenant_id: id(TENANT_B_ID),
+            principal_id: id(DENIED_PRINCIPAL_ID),
+            principal_kind: PrincipalKind::AgentRunner,
+            agent_id: None,
+            state: None,
+            created_after: None,
+            created_before: None,
+            snapshot_at: None,
+            boundary: None,
+            fetch_limit: 51,
+        })
+        .await
+        .unwrap();
+    assert!(other_tenant_runs.records.is_empty());
+
             }};
         }
         async fn run_task_first_winner_fixture(

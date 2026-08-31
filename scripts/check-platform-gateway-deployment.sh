@@ -110,8 +110,15 @@ management = next((item for item in deployments if "app.kubernetes.io/component:
 runtime = next((item for item in deployments if "app.kubernetes.io/component: runtime-api" in item), "")
 if not management or not runtime:
     failures.append("Management and Runtime API Deployment identities are incomplete")
-for runtime_only in (
+for shared_cursor_authority in (
     "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
+    "run-event-cursor-key",
+):
+    if shared_cursor_authority not in management:
+        failures.append(f"Management API is missing list cursor authority {shared_cursor_authority}")
+    if shared_cursor_authority not in runtime:
+        failures.append(f"Runtime API is missing cursor authority {shared_cursor_authority}")
+for runtime_only in (
     "artifact-tls",
 ):
     if runtime_only in management:

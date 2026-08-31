@@ -2,7 +2,10 @@ use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Extension, Path, State},
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        DefaultBodyLimit, Extension, Path, Query, State,
+    },
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     routing::{get, post},
@@ -20,6 +23,12 @@ use insight_platform_contracts::{
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc};
+
+use crate::product::{
+    list_filter_digest, AuthorityListPage, ListCursorCodec, ListCursorContext, ListError,
+    ListKeysetBoundary, ListPageV1, ListRoutePurpose, RunListFiltersV1, RunSummaryV1,
+    PRODUCT_LIST_CURSOR_TTL_SECONDS, PRODUCT_LIST_DEFAULT_PAGE_SIZE, PRODUCT_LIST_MAX_PAGE_SIZE,
+};
 
 const RUN_READ_DEADLINE_MILLISECONDS: i64 = 5_000;
 const RUN_COMMAND_DEADLINE_MILLISECONDS: i64 = 10_000;
@@ -127,6 +136,16 @@ impl RunResultViewV1 {
 pub struct ReadRunIntent {
     pub principal: AuthenticatedPrincipal,
     pub run_id: ResourceId,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListRunsIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub filters: RunListFiltersV1,
+    pub page_size: u16,
+    pub snapshot_at: Option<DateTime<Utc>>,
+    pub boundary: Option<ListKeysetBoundary>,
     pub deadline: DateTime<Utc>,
 }
 
@@ -325,6 +344,13 @@ pub enum RunApplicationError {
 
 #[async_trait]
 pub trait RunApplication: Send + Sync {
+    async fn list_runs(
+        &self,
+        _intent: ListRunsIntent,
+    ) -> Result<AuthorityListPage<RunSummaryV1>, RunApplicationError> {
+        Err(RunApplicationError::Internal)
+    }
+
     async fn create_run(&self, _intent: CreateRunIntent) -> Result<RunViewV1, RunApplicationError> {
         Err(RunApplicationError::Internal)
     }
@@ -379,6 +405,7 @@ pub struct RunHttpState {
     application: Arc<dyn RunApplication>,
     clock: Arc<dyn RunClock>,
     event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
+    list_cursor_codec: Option<Arc<dyn ListCursorCodec>>,
 }
 
 impl RunHttpState {
@@ -387,6 +414,7 @@ impl RunHttpState {
             application,
             clock,
             event_cursor_codec: None,
+            list_cursor_codec: None,
         }
     }
 
@@ -394,11 +422,16 @@ impl RunHttpState {
         self.event_cursor_codec = Some(codec);
         self
     }
+
+    pub fn with_list_cursor_codec(mut self, codec: Arc<dyn ListCursorCodec>) -> Self {
+        self.list_cursor_codec = Some(codec);
+        self
+    }
 }
 
 pub fn build_run_router(state: RunHttpState) -> Router {
     Router::new()
-        .route("/v1/runs", post(create_run))
+        .route("/v1/runs", get(list_runs).post(create_run))
         .route(
             "/v1/runs/{run_action}",
             get(read_run).post(control_run_action),
@@ -408,6 +441,123 @@ pub fn build_run_router(state: RunHttpState) -> Router {
         .route("/v1/runs/{run_id}/signals/{signal_key}", post(signal_run))
         .layer(DefaultBodyLimit::max(MAX_RUN_REQUEST_BYTES))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunListQuery {
+    page_size: Option<u16>,
+    cursor: Option<String>,
+    agent_id: Option<ResourceId>,
+    state: Option<RunState>,
+    created_after: Option<UtcTimestamp>,
+    created_before: Option<UtcTimestamp>,
+}
+
+async fn list_runs(
+    State(state): State<RunHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+    query: Result<Query<RunListQuery>, QueryRejection>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(RunApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(RunApplicationError::Unauthenticated);
+    }
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return problem(RunApplicationError::Invalid),
+    };
+    let page_size = query.page_size.unwrap_or(PRODUCT_LIST_DEFAULT_PAGE_SIZE);
+    if page_size == 0 || page_size > PRODUCT_LIST_MAX_PAGE_SIZE {
+        return problem(RunApplicationError::Invalid);
+    }
+    let filters = RunListFiltersV1 {
+        agent_id: query.agent_id,
+        state: query.state,
+        created_after: query.created_after,
+        created_before: query.created_before,
+    };
+    let filter_digest = match list_filter_digest(&filters) {
+        Ok(digest) => digest,
+        Err(_) => return problem(RunApplicationError::Invalid),
+    };
+    let context = ListCursorContext {
+        purpose: ListRoutePurpose::Runs,
+        filter_digest,
+        page_size,
+    };
+    let Some(codec) = state.list_cursor_codec.as_ref() else {
+        return problem(RunApplicationError::Unavailable);
+    };
+    let now = state.clock.now();
+    let (requested_snapshot_at, boundary, expires_at) = match query.cursor {
+        Some(cursor) => match codec.decode(&cursor, &principal, &context, now) {
+            Ok(decoded) => (
+                Some(decoded.snapshot_at),
+                Some(decoded.boundary),
+                decoded.expires_at,
+            ),
+            Err(ListError::Invalid) => return problem(RunApplicationError::CursorInvalid),
+            Err(ListError::Expired) => return problem(RunApplicationError::CursorExpired),
+        },
+        None => (
+            None,
+            None,
+            now + Duration::seconds(PRODUCT_LIST_CURSOR_TTL_SECONDS),
+        ),
+    };
+    if filters
+        .validate_at(requested_snapshot_at.unwrap_or(now))
+        .is_err()
+    {
+        return problem(RunApplicationError::Invalid);
+    }
+    let page = match state
+        .application
+        .list_runs(ListRunsIntent {
+            principal: principal.clone(),
+            filters,
+            page_size,
+            snapshot_at: requested_snapshot_at,
+            boundary,
+            deadline: now + Duration::milliseconds(RUN_READ_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(page) => page,
+        Err(error) => return problem(error),
+    };
+    if page.items.iter().any(|item| item.validate().is_err()) {
+        return problem(RunApplicationError::Internal);
+    }
+    let response_now = state.clock.now();
+    if requested_snapshot_at.is_some_and(|snapshot_at| snapshot_at != page.snapshot_at)
+        || page.snapshot_at > response_now
+    {
+        return problem(RunApplicationError::Internal);
+    }
+    let next_cursor = match page.next_boundary {
+        Some(boundary) => {
+            match codec.encode(&principal, &context, page.snapshot_at, boundary, expires_at) {
+                Ok(cursor) => Some(cursor),
+                Err(_) => return problem(RunApplicationError::Internal),
+            }
+        }
+        None => None,
+    };
+    match ListPageV1::new(page.items, next_cursor) {
+        Ok(page) => {
+            let mut response = (StatusCode::OK, Json(page)).into_response();
+            response.headers_mut().insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private, max-age=0"),
+            );
+            response
+        }
+        Err(_) => problem(RunApplicationError::Internal),
+    }
 }
 
 async fn read_run_events(
@@ -1026,6 +1176,7 @@ mod tests {
     use insight_platform_contracts::{
         AuthnStrength, Permission, PermissionSet, PrincipalKind, Sha256Digest,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     fn id(kind: ResourceKind, suffix: u16) -> ResourceId {
@@ -1461,5 +1612,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_kind.status(), StatusCode::NOT_FOUND);
+    }
+
+    struct RunListFixture {
+        calls: AtomicUsize,
+        snapshot_at: DateTime<Utc>,
+    }
+
+    #[async_trait]
+    impl RunApplication for RunListFixture {
+        async fn list_runs(
+            &self,
+            _intent: ListRunsIntent,
+        ) -> Result<AuthorityListPage<RunSummaryV1>, RunApplicationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let run_id = id(ResourceKind::Run, 70);
+            Ok(AuthorityListPage {
+                snapshot_at: self.snapshot_at,
+                items: vec![RunSummaryV1 {
+                    schema_version: 1,
+                    run_id: run_id.clone(),
+                    agent_name: "support-agent".to_owned(),
+                    agent_id: id(ResourceKind::Agent, 71),
+                    state: RunState::Running,
+                    started_at: Some(UtcTimestamp::from_datetime(self.snapshot_at)),
+                    terminal_at: None,
+                    waiting_task_count: 0,
+                    result_available: false,
+                }],
+                next_boundary: Some(ListKeysetBoundary::Run {
+                    created_at: UtcTimestamp::from_datetime(self.snapshot_at),
+                    run_id,
+                }),
+            })
+        }
+
+        async fn read_run(&self, _intent: ReadRunIntent) -> Result<RunViewV1, RunApplicationError> {
+            Err(RunApplicationError::Internal)
+        }
+    }
+
+    #[tokio::test]
+    async fn run_list_cursor_is_filter_bound_and_rejected_before_authority() {
+        let now = Utc::now();
+        let application = Arc::new(RunListFixture {
+            calls: AtomicUsize::new(0),
+            snapshot_at: now - Duration::seconds(1),
+        });
+        let router = build_run_router(
+            RunHttpState::new(application.clone(), Arc::new(FixedClock(now)))
+                .with_list_cursor_codec(Arc::new(
+                    crate::product::HmacListCursorCodec::install(&[7_u8; 32]).unwrap(),
+                )),
+        );
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/runs?page_size=1")
+                    .extension(principal(now))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let page: ListPageV1<RunSummaryV1> = serde_json::from_slice(&body).unwrap();
+        let cursor = page.next_cursor.unwrap();
+        assert_eq!(application.calls.load(Ordering::SeqCst), 1);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/runs?page_size=1&state=failed&cursor={}",
+                        cursor.as_str()
+                    ))
+                    .extension(principal(now))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("cursor_invalid"));
+        assert_eq!(application.calls.load(Ordering::SeqCst), 1);
     }
 }

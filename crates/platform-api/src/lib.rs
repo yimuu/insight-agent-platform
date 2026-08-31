@@ -29,6 +29,7 @@ pub mod artifact;
 pub mod authentication;
 pub mod oidc;
 pub mod operation;
+pub mod product;
 pub mod resource;
 pub mod run;
 pub mod task;

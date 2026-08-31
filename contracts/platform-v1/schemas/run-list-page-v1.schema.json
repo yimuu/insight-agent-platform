@@ -1,0 +1,34 @@
+{
+  "$id": "urn:insight:platform:v1:run-list-page-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "run-summary-v1.schema.json"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "next_cursor": {
+      "oneOf": [
+        {
+          "$ref": "nominal/opaque-list-cursor.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "items",
+    "next_cursor"
+  ],
+  "title": "RunListPageV1",
+  "type": "object"
+}

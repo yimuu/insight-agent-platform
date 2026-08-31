@@ -29,10 +29,14 @@ use insight_platform_api::{
         build_operation_router, OperationApplication, OperationApplicationError,
         OperationHttpState, SystemOperationClock,
     },
+    product::{
+        AgentSummaryV1, AuthorityListPage, HmacListCursorCodec, ListCursorCodec,
+        ListKeysetBoundary, RunSummaryV1,
+    },
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
         BuildContextDatasetIntent, ControlDeploymentIntent, CreateDeploymentIntent,
-        CreateResourceIntent, DeploymentViewV1, DiscoverMcpDeploymentIntent,
+        CreateResourceIntent, DeploymentViewV1, DiscoverMcpDeploymentIntent, ListAgentsIntent,
         PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
         PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
         ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
@@ -41,7 +45,7 @@ use insight_platform_api::{
     },
     run::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
-        ReadRunEventsIntent, ReadRunIntent, RunApplication, RunApplicationError,
+        ListRunsIntent, ReadRunEventsIntent, ReadRunIntent, RunApplication, RunApplicationError,
         RunEventCursorCodec, RunEventProjectionV1, RunHttpState, RunResultViewV1, RunViewV1,
         SignalRunIntent, SystemRunClock,
     },
@@ -59,8 +63,9 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, ActiveTarget, AdministrativeGate, CommandAudit,
     DeploymentClosure, EntityLifecycle, ExactDeploymentRef, ExternalLeafFailureMutationIds,
-    JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceId,
-    ResourceKind, RunBindingsSnapshot, Sha256Digest, ValueRef, MAX_ARTIFACT_BYTES,
+    JsonLimits, OperationViewV1, PrincipalKind, PrincipalSnapshot, ReadOperation, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, RunBindingsSnapshot, Sha256Digest,
+    UtcTimestamp, ValueRef, MAX_ARTIFACT_BYTES,
 };
 use insight_platform_invocations::{
     CapabilityApprovalDecision, CapabilityApprovalDispatchMutationIds, InvocationTransaction,
@@ -82,6 +87,7 @@ use insight_platform_postgres::{
         project_context_dataset_build_operation, project_registry_validation_operation,
         OperationReadError,
     },
+    product_repository::{AgentProductListQuery, RunProductListQuery},
     repository::{
         OrchestrationSignalAuthority, OrchestrationWakeMutationIds, PgRepository, RepositoryError,
         ResolveOrchestrationSignalTarget, ResolveOrchestrationTask,
@@ -1189,6 +1195,90 @@ fn decode_task_payload(
 
 #[async_trait]
 impl RunApplication for PgRuns {
+    async fn list_runs(
+        &self,
+        intent: ListRunsIntent,
+    ) -> Result<AuthorityListPage<RunSummaryV1>, RunApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(RunApplicationError::Unavailable);
+        }
+        let boundary = match intent.boundary {
+            Some(ListKeysetBoundary::Run { created_at, run_id }) => Some((
+                parse_utc_timestamp(&created_at).map_err(|_| RunApplicationError::Invalid)?,
+                run_id,
+            )),
+            Some(ListKeysetBoundary::Agent { .. }) => return Err(RunApplicationError::Invalid),
+            None => None,
+        };
+        let page = self
+            .0
+            .list_run_products(RunProductListQuery {
+                tenant_id: intent.principal.tenant_id,
+                principal_id: intent.principal.principal_id,
+                principal_kind: intent.principal.principal_kind,
+                agent_id: intent.filters.agent_id,
+                state: intent.filters.state,
+                created_after: intent
+                    .filters
+                    .created_after
+                    .as_ref()
+                    .map(parse_utc_timestamp)
+                    .transpose()
+                    .map_err(|_| RunApplicationError::Invalid)?,
+                created_before: intent
+                    .filters
+                    .created_before
+                    .as_ref()
+                    .map(parse_utc_timestamp)
+                    .transpose()
+                    .map_err(|_| RunApplicationError::Invalid)?,
+                snapshot_at: intent.snapshot_at,
+                boundary,
+                fetch_limit: intent.page_size + 1,
+            })
+            .await
+            .map_err(map_run_repository_error)?;
+        let has_more = page.records.len() > usize::from(intent.page_size);
+        let mut records = page.records;
+        if has_more {
+            records.truncate(usize::from(intent.page_size));
+        }
+        let next_boundary = if has_more {
+            records.last().map(|record| ListKeysetBoundary::Run {
+                created_at: UtcTimestamp::from_datetime(record.created_at),
+                run_id: record.run_id.clone(),
+            })
+        } else {
+            None
+        };
+        let mut items = Vec::with_capacity(records.len());
+        for record in records {
+            let draft = decode_agent_resource_draft(record.agent_resource_payload)
+                .map_err(|_| RunApplicationError::Internal)?;
+            let ResourceDocument::Agent(agent) = draft.document else {
+                return Err(RunApplicationError::Internal);
+            };
+            let item = RunSummaryV1 {
+                schema_version: 1,
+                run_id: record.run_id,
+                agent_name: agent.authoring_name,
+                agent_id: record.agent_id,
+                state: record.state,
+                started_at: record.started_at.map(UtcTimestamp::from_datetime),
+                terminal_at: record.terminal_at.map(UtcTimestamp::from_datetime),
+                waiting_task_count: record.waiting_task_count,
+                result_available: record.result_available,
+            };
+            item.validate().map_err(|_| RunApplicationError::Internal)?;
+            items.push(item);
+        }
+        Ok(AuthorityListPage {
+            snapshot_at: page.snapshot_at,
+            items,
+            next_boundary,
+        })
+    }
+
     async fn create_run(&self, intent: CreateRunIntent) -> Result<RunViewV1, RunApplicationError> {
         let now = chrono::Utc::now();
         if intent.deadline <= now {
@@ -1659,6 +1749,100 @@ struct PgResources {
 
 #[async_trait]
 impl ResourceApplication for PgResources {
+    async fn list_agents(
+        &self,
+        intent: ListAgentsIntent,
+    ) -> Result<AuthorityListPage<AgentSummaryV1>, ResourceApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let boundary = match intent.boundary {
+            Some(ListKeysetBoundary::Agent {
+                updated_at,
+                agent_id,
+            }) => Some((
+                parse_utc_timestamp(&updated_at).map_err(|_| ResourceApplicationError::Invalid)?,
+                agent_id,
+            )),
+            Some(ListKeysetBoundary::Run { .. }) => return Err(ResourceApplicationError::Invalid),
+            None => None,
+        };
+        let page = self
+            .repository
+            .list_agent_products(AgentProductListQuery {
+                tenant_id: intent.principal.tenant_id,
+                principal_id: intent.principal.principal_id,
+                principal_kind: intent.principal.principal_kind,
+                state: intent.filters.state,
+                environment: intent.filters.environment,
+                snapshot_at: intent.snapshot_at,
+                boundary,
+                fetch_limit: intent.page_size + 1,
+            })
+            .await
+            .map_err(map_resource_repository_error)?;
+        let has_more = page.records.len() > usize::from(intent.page_size);
+        let mut records = page.records;
+        if has_more {
+            records.truncate(usize::from(intent.page_size));
+        }
+        let next_boundary = if has_more {
+            records
+                .last()
+                .map(|record| -> Result<_, ResourceApplicationError> {
+                    Ok(ListKeysetBoundary::Agent {
+                        updated_at: UtcTimestamp::from_datetime(record.resource.updated_at),
+                        agent_id: record
+                            .resource
+                            .resource_id
+                            .parse()
+                            .map_err(|_| ResourceApplicationError::Internal)?,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let mut items = Vec::with_capacity(records.len());
+        for record in records {
+            let draft = decode_agent_resource_draft(record.resource.payload)
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let ResourceDocument::Agent(agent) = draft.document else {
+                return Err(ResourceApplicationError::Internal);
+            };
+            let agent_id: ResourceId = record
+                .resource
+                .resource_id
+                .parse()
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            let item = AgentSummaryV1 {
+                schema_version: 1,
+                name: agent.authoring_name,
+                display_name: draft.display_name,
+                agent_id,
+                state: record.product_state,
+                environment: record
+                    .active_deployment
+                    .as_ref()
+                    .map(|deployment| deployment.environment.clone()),
+                updated_at: UtcTimestamp::from_datetime(record.resource.updated_at),
+                published_at: record
+                    .active_deployment
+                    .map(|deployment| UtcTimestamp::from_datetime(deployment.created_at)),
+                required_features: agent.required_features,
+                latest_run_state: record.latest_run_state,
+            };
+            item.validate()
+                .map_err(|_| ResourceApplicationError::Internal)?;
+            items.push(item);
+        }
+        Ok(AuthorityListPage {
+            snapshot_at: page.snapshot_at,
+            items,
+            next_boundary,
+        })
+    }
+
     async fn create_resource(
         &self,
         intent: CreateResourceIntent,
@@ -2536,6 +2720,31 @@ fn resource_view_from_record(
     })
 }
 
+fn decode_agent_resource_draft(
+    mut payload: insight_platform_postgres::repository::TypedPayload,
+) -> Result<ResourceDraftPayload, ()> {
+    if payload.schema_version != 1 {
+        return Err(());
+    }
+    payload
+        .value
+        .as_object_mut()
+        .ok_or(())?
+        .remove("schema_version");
+    let draft: ResourceDraftPayload = serde_json::from_value(payload.value).map_err(|_| ())?;
+    draft.validate().map_err(|_| ())?;
+    if !matches!(draft.document, ResourceDocument::Agent(_)) {
+        return Err(());
+    }
+    Ok(draft)
+}
+
+fn parse_utc_timestamp(value: &UtcTimestamp) -> Result<chrono::DateTime<chrono::Utc>, ()> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .map_err(|_| ())
+}
+
 fn new_id(kind: ResourceKind) -> Result<ResourceId, ResourceApplicationError> {
     ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
         .map_err(|_| ResourceApplicationError::Internal)
@@ -2635,6 +2844,7 @@ struct RouterDependencies {
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
     run_event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
+    list_cursor_codec: Arc<dyn ListCursorCodec>,
     metrics: Arc<ProcessHttpMetrics>,
 }
 
@@ -2649,6 +2859,7 @@ fn build_router(
         validator_digest,
         validation_profile_digest,
         run_event_cursor_codec,
+        list_cursor_codec,
         metrics,
     } = dependencies;
     let authentication = PublicAuthenticationState::new(
@@ -2661,16 +2872,17 @@ fn build_router(
         Arc::new(SystemOperationClock),
     ));
     let protected = match role {
-        ProcessRole::ManagementApi => {
-            operation.merge(build_resource_router(ResourceHttpState::new(
+        ProcessRole::ManagementApi => operation.merge(build_resource_router(
+            ResourceHttpState::new(
                 Arc::new(PgResources {
                     repository,
                     validator_digest,
                     validation_profile_digest,
                 }),
                 Arc::new(SystemResourceClock),
-            )))
-        }
+            )
+            .with_list_cursor_codec(list_cursor_codec),
+        )),
         ProcessRole::RuntimeApi => {
             let run_event_cursor_codec =
                 run_event_cursor_codec.ok_or(ProcessError::InvalidConfiguration)?;
@@ -2682,7 +2894,8 @@ fn build_router(
                         Arc::new(PgRuns(repository.clone())),
                         Arc::new(SystemRunClock),
                     )
-                    .with_event_cursor_codec(run_event_cursor_codec),
+                    .with_event_cursor_codec(run_event_cursor_codec)
+                    .with_list_cursor_codec(list_cursor_codec),
                 ))
                 .merge(build_task_router(TaskHttpState::new(
                     Arc::new(PgTasks(repository)),
@@ -2874,6 +3087,35 @@ fn install_run_event_cursor_codec(
         .map_err(|_| ProcessError::InvalidConfiguration)
 }
 
+fn load_list_cursor_codec() -> Result<Arc<dyn ListCursorCodec>, ProcessError> {
+    let path = required_absolute_path(RUN_EVENT_CURSOR_KEY_PATH_ENV)?;
+    let key = read_bounded_file(&path, MAX_RUN_EVENT_CURSOR_KEY_BYTES)?;
+    let expected: Sha256Digest = required(RUN_EVENT_CURSOR_KEY_DIGEST_ENV)?
+        .parse()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    install_list_cursor_codec(&key, &expected)
+}
+
+fn install_list_cursor_codec(
+    key: &[u8],
+    expected: &Sha256Digest,
+) -> Result<Arc<dyn ListCursorCodec>, ProcessError> {
+    let actual = Sha256::digest(key);
+    let hexadecimal = actual
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let actual: Sha256Digest = format!("sha256:{hexadecimal}")
+        .parse()
+        .map_err(|_| ProcessError::InvalidConfiguration)?;
+    if &actual != expected {
+        return Err(ProcessError::InvalidConfiguration);
+    }
+    HmacListCursorCodec::install(key)
+        .map(|codec| Arc::new(codec) as Arc<dyn ListCursorCodec>)
+        .map_err(|_| ProcessError::InvalidConfiguration)
+}
+
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
@@ -2889,6 +3131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .install()
         .map_err(|_| ProcessError::InvalidConfiguration)?;
+    let list_cursor_codec = load_list_cursor_codec()?;
     let (run_event_cursor_codec, artifact_mutation_forwarder) = match config.role {
         ProcessRole::ManagementApi => (None, None),
         ProcessRole::RuntimeApi => (
@@ -2935,6 +3178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 validator_digest: config.registry_validator_digest,
                 validation_profile_digest: config.registry_validation_profile_digest,
                 run_event_cursor_codec,
+                list_cursor_codec,
                 metrics,
             },
         )?,
@@ -3107,6 +3351,10 @@ mod tests {
         Arc::new(HmacRunEventCursorCodec::install(&[7_u8; 32]).unwrap())
     }
 
+    fn test_list_cursor_codec() -> Arc<dyn ListCursorCodec> {
+        Arc::new(HmacListCursorCodec::install(&[7_u8; 32]).unwrap())
+    }
+
     #[test]
     fn process_config_rejects_unbounded_or_ambiguous_values() {
         let mut config = ProcessConfig {
@@ -3211,6 +3459,7 @@ mod tests {
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
                 run_event_cursor_codec: Some(test_run_event_cursor_codec()),
+                list_cursor_codec: test_list_cursor_codec(),
                 metrics: Arc::clone(&metrics),
             },
         )
@@ -3281,6 +3530,7 @@ mod tests {
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
                 run_event_cursor_codec: None,
+                list_cursor_codec: test_list_cursor_codec(),
                 metrics: management_metrics,
             },
         )
@@ -3298,12 +3548,14 @@ mod tests {
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
                 run_event_cursor_codec: Some(test_run_event_cursor_codec()),
+                list_cursor_codec: test_list_cursor_codec(),
                 metrics: runtime_metrics,
             },
         )
         .unwrap();
 
         for (uri, management_status, runtime_status) in [
+            ("/v1/agents", 401, 404),
             (
                 "/v1/agents/res_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
                 401,
@@ -3334,6 +3586,7 @@ mod tests {
                 401,
                 404,
             ),
+            ("/v1/runs", 404, 401),
             (
                 "/v1/runs/run_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
                 404,

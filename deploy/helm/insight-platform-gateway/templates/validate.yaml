@@ -32,7 +32,7 @@
 {{- end }}
 {{- end }}
 {{- if or (empty .Values.runEventCursorKey.existingSecret) (empty .Values.runEventCursorKey.key) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.runEventCursorKey.digest)) }}
-{{- fail "Runtime API Run event cursor key closure is invalid" }}
+{{- fail "Gateway list and Run event cursor key closure is invalid" }}
 {{- end }}
 {{- if or (empty .Values.artifactGateway.tls.existingSecret) (empty .Values.artifactGateway.tls.keys.ca) (empty .Values.artifactGateway.tls.keys.certificate) (empty .Values.artifactGateway.tls.keys.privateKey) }}
 {{- fail "Runtime API to Artifact Gateway requires exact mTLS Secret keys" }}
