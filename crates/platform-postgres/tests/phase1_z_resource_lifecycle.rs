@@ -1356,6 +1356,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     };
     let agent_document = ResourceDocument::Agent(AgentResourceSpec {
         authoring_name: "deployment-agent".to_owned(),
+        required_features: vec![],
         authoring_package: draft.document.authoring_package().clone(),
         contract_digest: digest('a'),
         dependency_versions: vec![policy_ref.clone()],

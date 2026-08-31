@@ -10274,6 +10274,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         &PublishedVersionPayload {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "run-kernel-agent".to_owned(),
+                required_features: vec![],
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
                         id(AGENT_AUTHORING_ARTIFACT_ID),
@@ -10311,6 +10312,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         &PublishedVersionPayload {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "run-kernel-child-agent".to_owned(),
+                required_features: vec![],
                 authoring_package: AuthoringPackage {
                     artifact: ArtifactRef::new(
                         id("art_0198f1c3-9a00-7c3e-b1f3-773c2836701c"),

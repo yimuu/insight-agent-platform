@@ -7,9 +7,9 @@
 
 use insight_platform_contracts::{
     canonical_digest, canonical_json, parse_strict_json, pinned_nominal_reference,
-    AgentResourceSpec, ArtifactPurpose, ArtifactRef, ArtifactState, AuthoringPackage,
-    ClosedJsonSchema, DataClassification, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef,
-    JsonLimits, PlanNodeKind, ResourceDocument, ResourceKind, Sha256Digest,
+    AgentRequiredFeature, AgentResourceSpec, ArtifactPurpose, ArtifactRef, ArtifactState,
+    AuthoringPackage, ClosedJsonSchema, DataClassification, ExactDeploymentRef, ExactPolicyBinding,
+    ExactVersionRef, JsonLimits, PlanNodeKind, ResourceDocument, ResourceKind, Sha256Digest,
     MAX_AGENT_AUTHOR_INSTRUCTION_BYTES, MAX_CLOSED_SCHEMA_BYTES,
 };
 use serde::{Deserialize, Serialize};
@@ -227,6 +227,7 @@ pub struct LoadedAgentProject {
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceIntent {
     pub authoring_name: String,
+    pub required_features: Vec<RequiredAgentFeature>,
     pub display_name: String,
     pub authoring_artifact: ArtifactIntent,
     pub contract_digest: Sha256Digest,
@@ -286,11 +287,7 @@ pub enum SlotTargetIntent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequiredAgentFeature {
-    Model,
-}
+pub type RequiredAgentFeature = AgentRequiredFeature;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -363,6 +360,7 @@ impl AgentResourceIntent {
         }
         let document = ResourceDocument::Agent(AgentResourceSpec {
             authoring_name: self.authoring_name.clone(),
+            required_features: self.required_features.clone(),
             authoring_package: AuthoringPackage {
                 artifact: authoring.artifact.clone(),
                 manifest_digest: self.authoring_artifact.content_digest.clone(),
@@ -557,6 +555,7 @@ pub fn compile_agent(input: AgentCompilerInput) -> Result<CompiledAgent, AgentCo
         .map_err(|_| AgentCompilerError::compile("Typed Plan length overflow"))?;
     let resource_intent = AgentResourceIntent {
         authoring_name: manifest.metadata.name.clone(),
+        required_features: required_features.clone(),
         display_name,
         authoring_artifact: ArtifactIntent {
             purpose: ArtifactPurpose::AuthoringDocument,

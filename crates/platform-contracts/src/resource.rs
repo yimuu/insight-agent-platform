@@ -2,10 +2,10 @@ use crate::{
     canonical_digest, validate_capability_conformance_evidence,
     validate_capability_credential_requirements, validate_capability_interface_schema,
     validate_mcp_server_contract, validate_model_profile_contract,
-    validate_model_provider_contract, ArtifactRef, CapabilityArtifactContract,
-    CapabilityBackendBinding, CapabilityBackendContract, CapabilityBackendKind,
-    CapabilityBackendLimits, CapabilityCancellationKind, CapabilityDataFlowPolicy,
-    CapabilityIdempotencyKind, CapabilityInterfaceLimits, CapabilityName,
+    validate_model_provider_contract, AgentRequiredFeature, ArtifactRef,
+    CapabilityArtifactContract, CapabilityBackendBinding, CapabilityBackendContract,
+    CapabilityBackendKind, CapabilityBackendLimits, CapabilityCancellationKind,
+    CapabilityDataFlowPolicy, CapabilityIdempotencyKind, CapabilityInterfaceLimits, CapabilityName,
     CapabilityProgressDurability, CapabilityProgressMode, ClosedJsonSchema, ClosedJsonValue,
     CodeTrustClass, ContextBackendBinding, ContextBackendKind, ContextBindingSnapshot,
     ContextCitationContract, ContextConsistencyMode, ContextDataPolicyContract,
@@ -29,6 +29,7 @@ pub const MAX_RESOURCE_POLICIES: usize = 64;
 pub const MAX_FROZEN_SLOTS: usize = 512;
 pub const MAX_CODE_BYTES: usize = 128;
 pub const MAX_AGENT_AUTHOR_INSTRUCTION_BYTES: usize = 16_384;
+pub const MAX_AGENT_REQUIRED_FEATURES: usize = 16;
 pub const MAX_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 67_108_864;
 pub const MAX_SKILL_PACKAGE_ENTRIES: usize = 512;
 pub const MAX_SKILL_INSTRUCTION_SECTIONS: usize = 128;
@@ -348,6 +349,7 @@ macro_rules! authoring_spec {
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceSpec {
     pub authoring_name: String,
+    pub required_features: Vec<AgentRequiredFeature>,
     pub authoring_package: AuthoringPackage,
     pub contract_digest: Sha256Digest,
     pub dependency_versions: Vec<ExactVersionRef>,
@@ -363,6 +365,14 @@ pub struct AgentResourceSpec {
 impl AgentResourceSpec {
     fn validate(&self) -> Result<(), ResourceContractError> {
         if !is_agent_authoring_name(&self.authoring_name) {
+            return Err(ResourceContractError::InvalidAgentContract);
+        }
+        if self.required_features.len() > MAX_AGENT_REQUIRED_FEATURES
+            || !self
+                .required_features
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        {
             return Err(ResourceContractError::InvalidAgentContract);
         }
         self.authoring_package.validate()?;
@@ -3884,6 +3894,7 @@ mod tests {
         .unwrap();
         let invalid_agent = ResourceDocument::Agent(AgentResourceSpec {
             authoring_name: "contract-agent".to_owned(),
+            required_features: vec![],
             authoring_package: AuthoringPackage {
                 artifact: ArtifactRef::new(
                     id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b91"),
@@ -3911,11 +3922,18 @@ mod tests {
             Err(ResourceContractError::WrongResourceIdKind)
         );
 
-        let ResourceDocument::Agent(mut invalid_instructions) = invalid_agent.clone() else {
+        let ResourceDocument::Agent(mut invalid_features) = invalid_agent.clone() else {
             unreachable!()
         };
-        invalid_instructions.typed_plan_artifact_id =
-            id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92");
+        invalid_features.typed_plan_artifact_id = id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92");
+        invalid_features.required_features = vec![AgentRequiredFeature::Model; 2];
+        assert_eq!(
+            ResourceDocument::Agent(invalid_features.clone()).validate(),
+            Err(ResourceContractError::InvalidAgentContract)
+        );
+        invalid_features.required_features = vec![];
+
+        let mut invalid_instructions = invalid_features;
         for instructions in [
             String::new(),
             "contains\0nul".to_owned(),

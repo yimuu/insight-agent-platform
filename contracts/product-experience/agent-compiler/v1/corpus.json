@@ -59,7 +59,7 @@
         "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
         "name": "echo-agent",
         "required_features": [],
-        "resource_intent_digest": "sha256:9767a53128e921b2eb9080d98ad99a4ecd86f323e4a4931a3e27a7e8d11a662d",
+        "resource_intent_digest": "sha256:76abdffddb4c0c9e9d23008b87ffc5708345ad3bc2dd1a234b59e6087739af0d",
         "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":5}",
         "typed_plan_digest": "sha256:6cc2084f31ff81c9bf38361a8d6f03f19e07e68de7ab63005bdfa6d9a7e0fd0b"
       }
@@ -79,7 +79,7 @@
         "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
         "name": "echo-agent",
         "required_features": [],
-        "resource_intent_digest": "sha256:9767a53128e921b2eb9080d98ad99a4ecd86f323e4a4931a3e27a7e8d11a662d",
+        "resource_intent_digest": "sha256:76abdffddb4c0c9e9d23008b87ffc5708345ad3bc2dd1a234b59e6087739af0d",
         "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":5}",
         "typed_plan_digest": "sha256:6cc2084f31ff81c9bf38361a8d6f03f19e07e68de7ab63005bdfa6d9a7e0fd0b"
       }
@@ -120,7 +120,7 @@
         "manifest_digest": "sha256:15703291bd66a99070d0114573e8bd7dc3dd48c40905adaea926e490e581045d",
         "name": "support-agent",
         "required_features": ["model"],
-        "resource_intent_digest": "sha256:e0195a9dac8c2fffc83355e74b566c5000b2398a3d2cc64d4ed8ddb12cc9574b",
+        "resource_intent_digest": "sha256:3ccd3430833cbf775a0ab1b4c7b56f947ef51896df1d8b9e077f015288d210b4",
         "typed_plan": "{\"dependency_slots\":{\"primary_model\":{\"kind\":\"model\",\"requirement_digest\":\"sha256:18c8cb8c7d3db6a005f4b0fa8069024a30512813b2804b98fb059875a718bdb5\"}},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:2c27aba019e30eecdea7309c0fe9fc073d32f0d9999492f53427472683aa5b3f\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"}},\"model\":{\"capability_slot_ids\":[],\"input\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"},\"kind\":\"model_loop\",\"maximum_capability_calls\":1,\"maximum_parallel_calls_per_round\":1,\"maximum_rounds\":1,\"model_route\":null,\"model_slot_id\":\"primary_model\",\"output\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"},\"resume\":\"finish\",\"skill_slot_ids\":[],\"token_budget\":2304},\"start\":{\"kind\":\"start\",\"next\":\"model\"}},\"plan_version\":5}",
         "typed_plan_digest": "sha256:55a370f3d53ea8991d4886918bdfb71fa349003015c4034f28f42113376cf6a0"
       }

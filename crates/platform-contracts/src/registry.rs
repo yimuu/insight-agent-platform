@@ -336,6 +336,22 @@ string_enum! {
 }
 
 string_enum! {
+    pub enum AgentProductState, "agent product state" {
+        Draft => "draft",
+        Validating => "validating",
+        Publishing => "publishing",
+        Ready => "ready",
+        Blocked => "blocked"
+    }
+}
+
+string_enum! {
+    pub enum AgentRequiredFeature, "agent required feature" {
+        Model => "model"
+    }
+}
+
+string_enum! {
     pub enum DependencySlotKind, "dependency slot kind" {
         Model => "model",
         Capability => "capability",

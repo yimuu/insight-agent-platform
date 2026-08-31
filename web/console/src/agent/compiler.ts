@@ -219,6 +219,7 @@ export async function compileAgentManifest(input: AgentCompilerInput): Promise<C
   )
   const resourceIntent: Json = {
     authoring_name: manifest.metadata.name,
+    required_features: requiredFeatures,
     author_instructions: manifest.spec.instructions,
     authoring_artifact: {
       byte_length: utf8.encode(canonicalManifest).byteLength,

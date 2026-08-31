@@ -547,6 +547,7 @@ mod tests {
             document: insight_platform_contracts::ResourceDocument::Agent(
                 insight_platform_contracts::AgentResourceSpec {
                     authoring_name: "registry-agent".to_owned(),
+                    required_features: vec![],
                     authoring_package: insight_platform_contracts::AuthoringPackage {
                         artifact: insight_platform_contracts::ArtifactRef::new(
                             id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92"),

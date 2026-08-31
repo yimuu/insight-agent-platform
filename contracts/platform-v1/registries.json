@@ -53,6 +53,16 @@
     "structured",
     "graph"
   ],
+  "agent_product_states": [
+    "draft",
+    "validating",
+    "publishing",
+    "ready",
+    "blocked"
+  ],
+  "agent_required_features": [
+    "model"
+  ],
   "artifact_grant_operations": [
     "read_whole",
     "read_range",

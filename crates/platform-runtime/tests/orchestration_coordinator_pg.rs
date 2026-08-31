@@ -1590,6 +1590,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         &PublishedVersionPayload {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "coordinator-agent".to_owned(),
+                required_features: vec![],
                 authoring_package: AuthoringPackage {
                     artifact: typed_plan_artifact.clone(),
                     manifest_digest: digest('4'),
@@ -1631,6 +1632,7 @@ async fn seed_authorities(repository: &PgRepository) -> RunBindingsSnapshot {
         &PublishedVersionPayload {
             document: ResourceDocument::Agent(AgentResourceSpec {
                 authoring_name: "coordinator-child-agent".to_owned(),
+                required_features: vec![],
                 authoring_package: AuthoringPackage {
                     artifact: child_plan_artifact.clone(),
                     manifest_digest: digest('4'),
