@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-209 |
+| 状态 | Accepted / CR-210 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -71,6 +71,9 @@ Job/Task/Event/Receipt种类或常驻role。本目录00～06进入Accepted并授
 CR-209关闭实现前最后一个prompt authority缺口：`model_chat.spec.instructions`进入immutable Agent Revision的bounded
 `author_instructions`，并在11/16的固定assembly序列中以`user` role、`trusted_instruction=false`投影。它不得进入platform safety、
 Agent contract或Plan node instruction，也不能在Run时由active head、caller metadata或浏览器本地状态补取。
+
+CR-210关闭`deterministic`模板的数据端口缺口：因为该模板没有转换节点，它只接受canonical digest相同的input/output schema，
+并让Return消费该exact RunInput port。需要不同输出shape的Agent必须使用`model_chat`或高级Typed Plan。
 
 ## 5. 完成定义
 

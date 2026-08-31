@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-209 |
+| 状态 | Accepted / CR-210 |
 | 日期 | 2026-08-31 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
@@ -23,6 +23,9 @@
 
 > CR-209 impact：`model_chat.instructions`必须随exact Agent Revision冻结并生成独立`AgentInstruction` user/untrusted block；L1/L3
 > 增加缺失/空/NUL/超限、digest漂移、role提升、active-head漂移与prompt/log/Event/Problem泄漏负向。
+
+> CR-210 impact：`deterministic`模板只允许input/output schema canonical digest相同；L1证明不同schema在I/O前失败，生成Plan的
+> Return exact RunInput port同时满足Interface input/output与05 terminal invariant。
 
 > CR-201 completion scope：本规范的仓库交付包括Kubernetes/GitOps manifests、closed QualificationProfile、candidate/evidence validator、
 > topology/workload preflight、CI producer和runbook，以及L1～L3与静态部署负向门禁。项目未执行真实多节点Kubernetes、`runsc`、production
@@ -277,6 +280,8 @@ CR-207产品体验矩阵：
   Problem→UserProblem映射覆盖unknown fallback且零authority/credential泄漏。
 - L1 model assembly：`model_chat.instructions`在Agent Revision与request source map中保持exact digest，顺序固定在Plan node instruction
   后、required Skill前，role=`user`且`trusted_instruction=false`；deterministic为null，空/NUL/超限、来源漂移或合并进platform block失败。
+- L1 deterministic：相同schema生成`start -> return`且Return消费相同digest的RunInput；不同input/output schema在网络、Artifact与lock
+  I/O前返回`agent_compile_failed`，不得插入coercion或生成运行时必失败的Plan。
 - L2：fresh PostgreSQL覆盖Agent/Run list上限、filter、stable keyset、snapshot、cursor replay/tamper/expiry/wrong purpose/principal/tenant，
   并发publish/activate/update/archive与Run/Task terminal下不重复、不越权、不从Event重建；Agent publication所有HTTP边界前后kill/retry通过
   Receipt/ETag/journal恢复且不重复Version/Deployment/Run effect。

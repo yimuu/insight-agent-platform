@@ -1,10 +1,20 @@
-# Platform v2 00～18 Cross-review（CR-209）
+# Platform v2 00～18 Cross-review（CR-210）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-209 |
+| 状态 | Accepted / CR-210 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-210 Deterministic template terminal schema cross-review
+
+Phase 1 Typed Plan生成审计确认：产品`deterministic`模板只有`start -> return`，而05/06要求RunInput exact schema与terminal output schema
+同时匹配。若manifest允许不同input/output schema，compiler只能伪造一个port digest、加入未声明转换或生成首次Run必失败的Plan。
+
+CR-210把约束放在最窄的product authoring surface：`deterministic`要求两个ClosedJsonSchema canonical digest相同，Return消费该exact
+RunInput；需要转换的Agent使用`model_chat`或高级Typed Plan。05/06现有wire与runtime invariant不变，错误在任何HTTP、Artifact或lock I/O前
+返回。复核确认不新增node、route、表、Job/Task/Event/Receipt、role、authority或fallback；Product 00/01/plan、18、00与cross-review已同步，
+恢复Accepted/Implementing并授权Phase 1继续。
 
 ### CR-209 Agent author instruction trust cross-review
 
@@ -1088,7 +1098,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-209 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+CR-210 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

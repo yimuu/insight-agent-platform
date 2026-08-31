@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-209 |
+| 状态 | Accepted / CR-210 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -76,7 +76,8 @@ spec:
 | `spec.limits.deadlineSeconds` | 1～3600；省略时从 project profile 显式物化 |
 | `spec.publish.environment` | closed environment name；省略时从 project config 显式物化 |
 
-`deterministic` 不允许 `instructions` 或 `model`；`model_chat` 不允许缺失 model binding。条件字段组合错误必须在
+`deterministic` 不允许 `instructions` 或 `model`，并要求input/output schema的canonical digest完全相同，因为首版模板没有可改变
+value/schema的Compute或Capability节点；Return直接消费exact RunInput port。`model_chat` 不允许缺失 model binding。条件字段组合错误必须在
 任何 HTTP、Artifact upload 或本地 lock 写入前失败。
 
 ## 4. 确定性编译
@@ -107,6 +108,9 @@ CLI 与 Console 实现若使用不同语言，必须共享同一 conformance fix
 `AgentResourceSpec.author_instructions`。运行时只从Run冻结的exact Agent Revision读取它，并在Plan node instruction之后、required
 Skill之前生成`AgentInstruction` assembly block；该block固定为`user` role且`trusted_instruction=false`。`deterministic`的该字段固定为
 `null`。compiler、publisher或runtime不得把作者正文拼入platform safety、Agent contract或Plan node instruction。
+
+`deterministic`的Typed Plan为`start -> return`，Return的`RunInput.schema_digest`同时等于input/output schema digest；compiler不得
+伪造output digest、插入隐式coercion或生成一个只能在terminal materialization失败的Plan。
 
 ## 5. 发布执行
 
@@ -159,6 +163,7 @@ token、Secret value、signed URL、Artifact body或数据库连接。丢失 loc
 ## 8. 验收
 
 - positive fixtures覆盖两个 execution kind及 YAML/JSON 等价 canonicalization；
+- deterministic input/output schema不同的fixture在任何副作用前失败；
 - negative fixtures覆盖所有 YAML危险特性、路径逃逸、unknown field、超限和条件字段；
 - CLI/Console compiler corpus产生相同 digest、Typed Plan和请求序列；
 - 第一次发布、无变化重放、内容更新、并发发布和每个 crash window 都不产生重复 effect；
