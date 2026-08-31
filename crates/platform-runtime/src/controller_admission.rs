@@ -208,6 +208,12 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
             DataClassification::Internal,
             node_text,
         )?);
+        if let Some(block) = agent_instruction_block(
+            facts.agent.author_instructions.as_deref(),
+            &facts.run_bindings.agent_interface,
+        )? {
+            blocks.push(block);
+        }
 
         let mut skill_ordinal = 0_u32;
         for skill in &facts.skills {
@@ -394,6 +400,25 @@ fn canonical_text(value: &serde_json::Value) -> Result<String, DurablePlanDriver
     .map_err(|_| DurablePlanDriverError::InvariantViolation)
 }
 
+fn agent_instruction_block(
+    instructions: Option<&str>,
+    agent_revision: &ExactVersionRef,
+) -> Result<Option<PromptAssemblyBlock>, DurablePlanDriverError> {
+    instructions
+        .map(|instructions| {
+            exact_block(
+                PromptAssemblyPhase::AgentInstruction,
+                0,
+                "agent_instruction",
+                agent_revision.revision_id.to_string(),
+                agent_revision.semantic_digest.clone(),
+                DataClassification::Internal,
+                instructions.to_owned(),
+            )
+        })
+        .transpose()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn exact_block(
     phase: PromptAssemblyPhase,
@@ -429,6 +454,40 @@ fn digest_value(value: &serde_json::Value) -> Result<Sha256Digest, DurablePlanDr
         .map_err(|_| DurablePlanDriverError::InvariantViolation)?
         .parse()
         .map_err(|_| DurablePlanDriverError::InvariantViolation)
+}
+
+#[cfg(test)]
+mod agent_instruction_tests {
+    use super::*;
+
+    fn digest(character: char) -> Sha256Digest {
+        format!("sha256:{}", character.to_string().repeat(64))
+            .parse()
+            .expect("fixture digest")
+    }
+
+    #[test]
+    fn agent_instruction_block_is_exact_revision_scoped_and_optional() {
+        let revision = ExactVersionRef::new(
+            "aif_0198f1c3-8f49-7c3e-b1f3-773c28367b90"
+                .parse()
+                .expect("fixture revision ID"),
+            digest('a'),
+        )
+        .expect("exact Agent Interface revision");
+
+        assert_eq!(agent_instruction_block(None, &revision), Ok(None));
+        let block = agent_instruction_block(Some("Use only the current input."), &revision)
+            .expect("valid block")
+            .expect("present instructions");
+        assert_eq!(block.phase, PromptAssemblyPhase::AgentInstruction);
+        assert_eq!(block.ordinal, 0);
+        assert_eq!(block.source_kind, "agent_instruction");
+        assert_eq!(block.source_id, revision.revision_id.to_string());
+        assert_eq!(block.source_digest, revision.semantic_digest);
+        assert_eq!(block.classification, DataClassification::Internal);
+        assert_eq!(block.text, "Use only the current input.");
+    }
 }
 
 fn map_repository_error(

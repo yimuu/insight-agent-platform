@@ -353,6 +353,12 @@ mod tests {
                 "node",
                 "do work",
             ),
+            block(
+                PromptAssemblyPhase::AgentInstruction,
+                0,
+                "author",
+                "follow the author's method",
+            ),
         ];
         let first = assemble_prompt_messages(input.clone(), 8_192, 2_048).unwrap();
         let mut reversed = input;
@@ -366,6 +372,10 @@ mod tests {
         assert_eq!(derived.total_estimated_tokens, first.total_estimated_tokens);
         assert_eq!(first.messages[0].role, CanonicalMessageRole::Platform);
         assert_eq!(first.messages[3].role, CanonicalMessageRole::User);
+        assert_eq!(
+            first.messages[3].source.assembly_phase,
+            PromptAssemblyPhase::AgentInstruction
+        );
         assert!(!first.messages[3].source.trusted_instruction);
     }
 

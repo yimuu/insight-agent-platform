@@ -5173,6 +5173,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         contract_digest: digest('b'),
         dependency_versions: vec![],
         policy_versions: vec![policy_exact.clone()],
+        author_instructions: None,
         input_schema: input_schema.clone(),
         output_schema: output_schema.clone(),
         error_schema,

@@ -30,6 +30,7 @@ pub enum PromptAssemblyPhase {
     PlatformSafety,
     AgentContract,
     PlanNodeInstruction,
+    AgentInstruction,
     RequiredSkill,
     SelectedSkill,
     ContextObservation,
@@ -69,7 +70,8 @@ impl ModelContentSource {
             ) != self.trusted_instruction
             || (matches!(
                 self.assembly_phase,
-                PromptAssemblyPhase::RequiredSkill
+                PromptAssemblyPhase::AgentInstruction
+                    | PromptAssemblyPhase::RequiredSkill
                     | PromptAssemblyPhase::SelectedSkill
                     | PromptAssemblyPhase::ContextObservation
                     | PromptAssemblyPhase::UserInput

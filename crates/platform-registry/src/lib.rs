@@ -544,6 +544,7 @@ mod tests {
                     contract_digest: digest('f'),
                     dependency_versions: Vec::new(),
                     policy_versions: Vec::new(),
+                    author_instructions: None,
                     input_schema: schema.clone(),
                     output_schema: schema.clone(),
                     error_schema: schema,

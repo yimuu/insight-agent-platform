@@ -1359,6 +1359,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         contract_digest: digest('a'),
         dependency_versions: vec![policy_ref.clone()],
         policy_versions: vec![policy_ref.clone()],
+        author_instructions: None,
         input_schema: agent_schema(),
         output_schema: agent_schema(),
         error_schema: agent_schema(),

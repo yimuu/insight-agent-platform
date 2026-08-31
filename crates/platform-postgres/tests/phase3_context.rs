@@ -1765,6 +1765,7 @@ async fn seed_fixture_with_backend(
         contract_digest: named_digest("agent-contract"),
         dependency_versions: vec![],
         policy_versions: vec![authorization_policy.clone()],
+        author_instructions: None,
         input_schema: agent_schema(),
         output_schema: agent_schema(),
         error_schema: agent_schema(),

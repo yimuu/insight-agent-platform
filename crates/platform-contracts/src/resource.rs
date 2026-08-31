@@ -28,6 +28,7 @@ pub const MAX_RESOURCE_DEPENDENCIES: usize = 512;
 pub const MAX_RESOURCE_POLICIES: usize = 64;
 pub const MAX_FROZEN_SLOTS: usize = 512;
 pub const MAX_CODE_BYTES: usize = 128;
+pub const MAX_AGENT_AUTHOR_INSTRUCTION_BYTES: usize = 16_384;
 pub const MAX_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 67_108_864;
 pub const MAX_SKILL_PACKAGE_ENTRIES: usize = 512;
 pub const MAX_SKILL_INSTRUCTION_SECTIONS: usize = 128;
@@ -350,6 +351,7 @@ pub struct AgentResourceSpec {
     pub contract_digest: Sha256Digest,
     pub dependency_versions: Vec<ExactVersionRef>,
     pub policy_versions: Vec<ExactVersionRef>,
+    pub author_instructions: Option<String>,
     pub input_schema: ClosedJsonSchema,
     pub output_schema: ClosedJsonSchema,
     pub error_schema: ClosedJsonSchema,
@@ -362,6 +364,17 @@ impl AgentResourceSpec {
         self.authoring_package.validate()?;
         validate_exact_versions(&self.dependency_versions, MAX_RESOURCE_DEPENDENCIES)?;
         validate_policy_versions(&self.policy_versions)?;
+        if self
+            .author_instructions
+            .as_ref()
+            .is_some_and(|instructions| {
+                instructions.is_empty()
+                    || instructions.len() > MAX_AGENT_AUTHOR_INSTRUCTION_BYTES
+                    || instructions.contains('\0')
+            })
+        {
+            return Err(ResourceContractError::InvalidAgentContract);
+        }
         validate_agent_interface_schema(&self.input_schema, false)?;
         validate_agent_interface_schema(&self.output_schema, false)?;
         validate_agent_interface_schema(&self.error_schema, true)?;
@@ -3874,6 +3887,7 @@ mod tests {
             contract_digest: digest('c'),
             dependency_versions: vec![],
             policy_versions: vec![],
+            author_instructions: None,
             input_schema: agent_schema.clone(),
             output_schema: agent_schema.clone(),
             error_schema: agent_schema,
@@ -3884,6 +3898,25 @@ mod tests {
             invalid_agent.validate(),
             Err(ResourceContractError::WrongResourceIdKind)
         );
+
+        let ResourceDocument::Agent(mut invalid_instructions) = invalid_agent.clone() else {
+            unreachable!()
+        };
+        invalid_instructions.typed_plan_artifact_id =
+            id("art_0198f1c3-8f49-7c3e-b1f3-773c28367b92");
+        for instructions in [
+            String::new(),
+            "contains\0nul".to_owned(),
+            "x".repeat(MAX_AGENT_AUTHOR_INSTRUCTION_BYTES + 1),
+        ] {
+            invalid_instructions.author_instructions = Some(instructions);
+            assert_eq!(
+                invalid_instructions.validate(),
+                Err(ResourceContractError::InvalidAgentContract)
+            );
+        }
+        invalid_instructions.author_instructions = Some("Use the supplied input.".to_owned());
+        assert_eq!(invalid_instructions.validate(), Ok(()));
     }
 
     #[test]
