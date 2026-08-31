@@ -25,7 +25,17 @@
     "report_kind": { "const": "insight.productization.scenario-report/v1" },
     "scenario_id": { "type": "string", "minLength": 1, "maxLength": 96 },
     "contract_profile": { "const": "insight.platform/v1" },
-    "profile": { "enum": ["base", "full"] },
+    "profile": {
+      "enum": [
+        "starter",
+        "starter+context",
+        "starter+mcp,remote-capability",
+        "starter+model",
+        "starter+remote-capability",
+        "starter+remote-capability,wasi",
+        "starter+wasi"
+      ]
+    },
     "automation_layer": { "enum": ["P2", "P3"] },
     "source_revision": {
       "type": "string",

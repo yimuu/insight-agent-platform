@@ -27,7 +27,7 @@
     "report_kind": { "const": "insight.productization.north-star-report/v1" },
     "contract_profile": { "const": "insight.platform/v1" },
     "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "profile": { "const": "base" },
+    "profile": { "const": "starter" },
     "environment": {
       "type": "object",
       "additionalProperties": false,

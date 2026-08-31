@@ -49,8 +49,8 @@ def validate(path: Path, expected_revision: str) -> None:
         fail(f"report must use exactly {sorted(REPORT_FIELDS)}")
     if report["schema_version"] != 1 or report["report_kind"] != "insight.productization.north-star-report/v1":
         fail("schema/report kind is not v1")
-    if report["contract_profile"] != "insight.platform/v1" or report["profile"] != "base":
-        fail("report must qualify the base insight.platform/v1 profile")
+    if report["contract_profile"] != "insight.platform/v1" or report["profile"] != "starter":
+        fail("report must qualify the starter insight.platform/v1 profile")
     if report["source_revision"] != expected_revision or not REVISION.fullmatch(expected_revision):
         fail("source_revision differs from the exact requested revision")
 

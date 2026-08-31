@@ -72,7 +72,7 @@ def main() -> None:
         "checks": [
             check("doctor", "the supported-environment doctor completed before any local mutation"),
             check("init", "a new project path received an explicit non-production identity and profile"),
-            check("dev", "the base public /v1 closure reached ready on a fresh durable authority"),
+            check("dev", "the starter public /v1 closure reached ready on a fresh durable authority"),
             check("first_run", "public authoring and Run commands returned a succeeded deterministic Inline result"),
         ],
         "status": "passed" if elapsed <= 600_000 else "failed",
