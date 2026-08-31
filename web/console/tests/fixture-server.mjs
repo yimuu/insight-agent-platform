@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,9 +13,20 @@ const emptyRunId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b95'
 const taskId = 'int_0198f1c3-8f49-7c3e-b1f3-773c28367b91'
 const deploymentId = 'adep_0198f1c3-8f49-7c3e-b1f3-773c28367b92'
 const outputId = 'val_0198f1c3-8f49-7c3e-b1f3-773c28367b93'
+const agentId = 'agt_0198f1c3-8f49-7c3e-b1f3-773c28367ba0'
+const authoredRunId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367ba1'
+const agentDeploymentId = 'adep_0198f1c3-8f49-7c3e-b1f3-773c28367ba2'
+const policyRevisionId = 'prev_0198f1c3-8f49-7c3e-b1f3-773c28367ba3'
+const policyDeploymentId = 'pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ba4'
 let taskState = 'pending'
 let runState = 'waiting'
 let taskVersion = 1
+let authoredAgentReady = false
+let authoredDocument = null
+let authoredDisplayName = 'Hello Agent'
+let authoredValidation = null
+let authoredResourceEtag = '"agent-v1"'
+const preparedArtifacts = new Map()
 let requestCount = 0
 const slowResponseMilliseconds = Number(process.env.INSIGHT_CONSOLE_FIXTURE_SLOW_RESPONSE_MS ?? 0)
 
@@ -91,6 +103,65 @@ function taskView() {
   }
 }
 
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+const digest = (value) => `sha256:${createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex')}`
+const policyBinding = {
+  deployment: { deployment_id: policyDeploymentId, resource_kind: 'policy_deployment', deployment_digest: `sha256:${'b'.repeat(64)}` },
+  revision: { revision_id: policyRevisionId, resource_kind: 'policy_revision', semantic_digest: `sha256:${'c'.repeat(64)}` },
+}
+const authoringProfile = {
+  schema_version: 1,
+  default_deadline_seconds: 120,
+  default_environment: 'development',
+  policy_versions: [policyBinding.revision],
+  deployment_policies: [policyBinding],
+  execution_profile: policyBinding,
+  model_loop: { maximum_rounds: 1, maximum_capability_calls: 1, maximum_parallel_calls_per_round: 1, token_budget: 2304 },
+  models: [],
+}
+authoringProfile.profile_digest = digest(authoringProfile)
+
+function authoredResource() {
+  return {
+    schema_version: 1,
+    resource_id: agentId,
+    resource_kind: 'agent',
+    lifecycle_state: 'active',
+    gate_state: 'enabled',
+    draft_generation: 1,
+    version: Number(authoredResourceEtag.match(/\d+/)?.[0] ?? 1),
+    draft: { display_name: authoredDisplayName, document: authoredDocument, validation: authoredValidation },
+    etag: authoredResourceEtag,
+  }
+}
+
+function authoredRunView() {
+  return {
+    schema_version: 1,
+    run_id: authoredRunId,
+    agent_deployment_id: agentDeploymentId,
+    state: 'succeeded',
+    version: 2,
+    input_value_id: 'val_0198f1c3-8f49-7c3e-b1f3-773c28367ba5',
+    output_value_id: 'val_0198f1c3-8f49-7c3e-b1f3-773c28367ba6',
+    pause_generation: 0,
+    cancel_generation: 0,
+    deadline: '2030-01-01T00:00:00Z',
+    started_at: '2026-09-01T00:00:00Z',
+    terminal_at: '2026-09-01T00:00:01Z',
+    created_at: '2026-09-01T00:00:00Z',
+    updated_at: '2026-09-01T00:00:01Z',
+    etag: '"authored-run-v2"',
+  }
+}
+
 async function readBody(request, maximum = 64 * 1024) {
   const chunks = []
   let size = 0
@@ -138,6 +209,151 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname.startsWith('/v1/') && !authorizationPresent) {
     problem(response, 401, 'authentication_required', 'A bearer token is required.')
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/agent-authoring-profile') {
+    sendJson(response, 200, authoringProfile)
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/agents') {
+    sendJson(response, 200, {
+      schema_version: 1,
+      items: authoredAgentReady ? [{
+        schema_version: 1,
+        name: 'hello-agent',
+        display_name: authoredDisplayName,
+        agent_id: agentId,
+        state: 'ready',
+        environment: 'development',
+        updated_at: '2026-09-01T00:00:02Z',
+        published_at: '2026-09-01T00:00:02Z',
+        required_features: [],
+        latest_run_state: null,
+      }] : [],
+      next_cursor: null,
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/artifacts:prepare-upload') {
+    const body = JSON.parse(await readBody(request))
+    const index = body.purpose === 'authoring_document' ? 1 : 2
+    const artifactId = `art_0198f1c3-8f49-7c3e-b1f3-773c28367ba${index + 6}`
+    const operationId = `job_0198f1c3-8f49-7c3e-b1f3-773c28367ba${index + 8}`
+    preparedArtifacts.set(artifactId, { ...body, operationId })
+    sendJson(response, 201, {
+      schema_version: 1,
+      artifact_id: artifactId,
+      operation_id: operationId,
+      upload_grant_id: `grt_0198f1c3-8f49-7c3e-b1f3-773c28367bb${index}`,
+      artifact_etag: '"artifact-v1"',
+      upload_target: { url: `https://objects.example/${artifactId}`, completion_proof: `proof-${index}` },
+      upload_expires_at: '2030-01-01T00:00:00Z',
+    }, { etag: '"artifact-v1"' })
+    return
+  }
+  const completeArtifact = url.pathname.match(/^\/v1\/artifacts\/(art_[^/]+):complete-upload$/)
+  if (request.method === 'POST' && completeArtifact) {
+    await readBody(request)
+    const prepared = preparedArtifacts.get(completeArtifact[1])
+    sendJson(response, 202, { schema_version: 1, artifact_id: completeArtifact[1], artifact_etag: '"artifact-v2"', operation_id: prepared.operationId })
+    return
+  }
+  const readArtifact = url.pathname.match(/^\/v1\/artifacts\/(art_[^/]+)$/)
+  if (request.method === 'GET' && readArtifact && preparedArtifacts.has(readArtifact[1])) {
+    const prepared = preparedArtifacts.get(readArtifact[1])
+    sendJson(response, 200, {
+      schema_version: 1,
+      artifact_id: readArtifact[1],
+      purpose: prepared.purpose,
+      classification: prepared.classification,
+      state: 'ready',
+      version: 2,
+      expected_size_bytes: prepared.expected_size_bytes,
+      declared_media_type: prepared.declared_media_type,
+      verified_media_type: prepared.declared_media_type,
+      content: {
+        artifact_id: readArtifact[1],
+        content_digest: prepared.expected_digest,
+        byte_length: prepared.expected_size_bytes,
+        media_type: prepared.declared_media_type,
+        classification: prepared.classification,
+        display_name: prepared.display_name,
+      },
+      retain_until: '2030-01-01T00:00:00Z',
+      created_at: '2026-09-01T00:00:00Z',
+      updated_at: '2026-09-01T00:00:01Z',
+      etag: '"artifact-v2"',
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/agents') {
+    const body = JSON.parse(await readBody(request))
+    authoredDisplayName = body.display_name
+    authoredDocument = body.document
+    authoredResourceEtag = '"agent-v1"'
+    sendJson(response, 201, authoredResource(), { etag: authoredResourceEtag })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === `/v1/agents/${agentId}/draft:validate`) {
+    authoredValidation = { validator_digest: `sha256:${'d'.repeat(64)}` }
+    authoredResourceEtag = '"agent-v2"'
+    sendJson(response, 202, { operation_id: 'job_0198f1c3-8f49-7c3e-b1f3-773c28367bb3', state: 'ready' })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === `/v1/agents/${agentId}`) {
+    sendJson(response, 200, authoredResource(), { etag: authoredResourceEtag })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === `/v1/agents/${agentId}/draft:publish`) {
+    const body = JSON.parse(await readBody(request))
+    authoredResourceEtag = '"agent-v3"'
+    sendJson(response, 200, {
+      schema_version: 1,
+      resource_id: agentId,
+      resource_kind: 'agent',
+      draft_generation: 1,
+      version: 3,
+      published_versions: [
+        { resource_version_id: 'aif_0198f1c3-8f49-7c3e-b1f3-773c28367bb4', revision_no: 1, content_digest: body.interface_content_digest, artifact_id: body.artifact_id, etag: '"interface"' },
+        { resource_version_id: 'arev_0198f1c3-8f49-7c3e-b1f3-773c28367bb5', revision_no: 1, content_digest: body.plan_content_digest, artifact_id: body.artifact_id, etag: '"plan"' },
+      ],
+      etag: authoredResourceEtag,
+    }, { etag: authoredResourceEtag })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === `/v1/agents/${agentId}/deployments`) {
+    const body = JSON.parse(await readBody(request))
+    authoredResourceEtag = '"agent-v4"'
+    sendJson(response, 201, { schema_version: 1, deployment_id: agentDeploymentId, resource_id: agentId, resource_kind: 'agent', resource_version_id: body.resource_version_id, environment: body.environment, closure_digest: `sha256:${'e'.repeat(64)}`, closure: body.closure, created_at: '2026-09-01T00:00:02Z', etag: '"deployment"' })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === `/v1/agents/${agentId}/deployments/${agentDeploymentId}:activate`) {
+    authoredAgentReady = true
+    authoredResourceEtag = '"agent-v5"'
+    sendJson(response, 200, authoredResource(), { etag: authoredResourceEtag })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/runs') {
+    await readBody(request)
+    sendJson(response, 201, authoredRunView(), { etag: authoredRunView().etag })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === `/v1/runs/${authoredRunId}`) {
+    sendJson(response, 200, authoredRunView(), { etag: authoredRunView().etag })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === `/v1/runs/${authoredRunId}/events`) {
+    response.writeHead(200, headers({ 'content-type': 'text/event-stream', 'content-length': 0 }))
+    response.end()
+    return
+  }
+  if (request.method === 'GET' && url.pathname === `/v1/runs/${authoredRunId}/result`) {
+    sendJson(response, 200, { schema_version: 1, run_id: authoredRunId, value: { kind: 'inline', value: { message: 'north-star-complete' } } })
+    return
+  }
+  const operationRead = url.pathname.match(/^\/v1\/operations\/(job_[^/]+)$/)
+  if (request.method === 'GET' && operationRead && operationRead[1] !== 'job_capacity') {
+    sendJson(response, 200, { operation_id: operationRead[1], tenant_id: 'ten_0198f1c3-8f49-7c3e-b1f3-773c28367bbc', kind: 'resource_validation', target: { kind: 'agent', agent_id: agentId }, state: 'succeeded', progress: null, result: { result_digest: `sha256:${'f'.repeat(64)}` }, error: null, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:01Z', etag: '"operation-v2"' })
     return
   }
   if (request.method === 'GET' && [runId, emptyRunId].some((id) => url.pathname === `/v1/runs/${id}`)) {

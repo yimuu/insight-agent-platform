@@ -47,3 +47,30 @@ test('task mutations send exact If-Match and Receipt headers', async (context) =
   assert.equal(init.headers.get('if-match'), '"task-v3"')
   assert.equal(init.headers.get('idempotency-key'), 'console-receipt')
 })
+
+test('product lists keep opaque cursors in protocol metadata', async (context) => {
+  let calledUrl
+  context.mock.method(globalThis, 'fetch', async (url) => {
+    calledUrl = url
+    return new Response(JSON.stringify({ schema_version: 1, items: [], next_cursor: null }), { status: 200 })
+  })
+  const client = new PlatformClient('https://platform.example', 'token')
+  await client.listAgents('opaque+/cursor==')
+  assert.equal(calledUrl, 'https://platform.example/v1/agents?page_size=25&cursor=opaque%2B%2Fcursor%3D%3D')
+})
+
+test('signed Artifact upload omits bearer authority and rejects insecure targets', async (context) => {
+  let init
+  context.mock.method(globalThis, 'fetch', async (_url, requestInit) => {
+    init = requestInit
+    return new Response('', { status: 200 })
+  })
+  const client = new PlatformClient('https://platform.example', 'memory-only-token')
+  await client.putArtifactObject('https://objects.example/upload?signature=secret', new Uint8Array([1, 2]), 'application/json')
+  assert.equal(new Headers(init.headers).has('authorization'), false)
+  assert.equal(init.credentials, 'omit')
+  await assert.rejects(
+    client.putArtifactObject('http://objects.example/upload', new Uint8Array([1]), 'application/json'),
+    /unsafe target/,
+  )
+})

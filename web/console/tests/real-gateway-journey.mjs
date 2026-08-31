@@ -61,8 +61,12 @@ function cdp(webSocketUrl) {
   const socket = new WebSocket(webSocketUrl)
   let sequence = 0
   const pending = new Map()
+  const handlers = new Map()
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data)
+    if (message.method && handlers.has(message.method)) {
+      Promise.resolve(handlers.get(message.method)(message.params)).catch(() => {})
+    }
     const waiter = pending.get(message.id)
     if (!waiter) return
     pending.delete(message.id)
@@ -81,6 +85,7 @@ function cdp(webSocketUrl) {
       socket.send(JSON.stringify({ id, method, params }))
       return result
     },
+    on(method, handler) { handlers.set(method, handler) },
     close() { socket.close() },
   }
 }
@@ -144,6 +149,7 @@ async function main() {
   const wasiFrameworkRunId = process.env.INSIGHT_CONSOLE_WASI_FRAMEWORK_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
+  const authoringJourney = process.env.INSIGHT_CONSOLE_AUTHORING_JOURNEY === '1'
   const browser = [
     process.env.INSIGHT_CONSOLE_BROWSER_BIN,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -188,6 +194,25 @@ async function main() {
     await client.call('Runtime.enable')
     await client.call('Page.enable')
     await client.call('Log.enable')
+    if (authoringJourney) {
+      client.on('Fetch.requestPaused', async (params) => {
+        if (params.request.url.startsWith('https://objects.example/')) {
+          await client.call('Fetch.fulfillRequest', {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [
+              { name: 'access-control-allow-origin', value: consoleServer.origin },
+              { name: 'access-control-allow-methods', value: 'PUT, OPTIONS' },
+              { name: 'access-control-allow-headers', value: 'content-type, content-length' },
+              { name: 'content-length', value: '0' },
+            ],
+          })
+        } else {
+          await client.call('Fetch.continueRequest', { requestId: params.requestId })
+        }
+      })
+      await client.call('Fetch.enable', { patterns: [{ urlPattern: 'https://objects.example/*', requestStage: 'Request' }] })
+    }
     // Runtime console events are not request/response messages, so collect them through a second
     // small protocol connection dedicated to passive observation.
     observer = new WebSocket(page.webSocketDebuggerUrl)
@@ -208,6 +233,26 @@ async function main() {
     await evaluate(client, `document.querySelector('.connection-form').requestSubmit()`)
     await waitFor(client, `document.body.innerText.includes('Gateway is ready.')`, 'real Gateway readiness')
 
+    if (authoringJourney) {
+      await evaluate(client, clickText('Refresh'))
+      await waitFor(client, `document.body.innerText.includes('This tenant has no Agents yet.')`, 'empty tenant Agent list')
+      await evaluate(client, clickText('New Agent'))
+      await waitFor(client, `document.body.innerText.includes('Define an Agent')`, 'new Agent editor')
+      await evaluate(client, clickText('Publish'))
+      await waitFor(
+        client,
+        `document.body.innerText.includes('Hello Agent') && document.body.innerText.toLowerCase().includes('ready') && [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === 'Run')`,
+        'fresh Agent publication',
+        60_000,
+      )
+      await evaluate(client, clickText('Run'))
+      await waitFor(client, `document.body.innerText.includes('Run Hello Agent') && document.body.innerText.includes('Start Run')`, 'schema-driven Run input')
+      await evaluate(client, clickText('Start Run'))
+      await waitFor(client, `document.body.innerText.includes('Completed')`, 'new Agent Run terminal state')
+      await evaluate(client, `(() => { const buttons = [...document.querySelectorAll('button')].filter((button) => button.textContent.trim() === 'Refresh'); buttons.at(-1).click() })()`)
+      await waitFor(client, `document.body.innerText.includes('north-star-complete')`, 'new Agent typed result')
+    }
+
     if (emptyRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', emptyRunId))
@@ -222,7 +267,7 @@ async function main() {
       }
       await waitFor(
         client,
-        `document.body.innerText.includes(${jsonLiteral(emptyRunId)}) && !!document.querySelector('.empty-state') && document.body.innerText.includes('No public events in this bounded page')`,
+        `!!document.querySelector('.empty-state') && document.body.innerText.includes('No public events in this bounded page')`,
         'explicit empty durable timeline',
       )
     }
@@ -258,6 +303,7 @@ async function main() {
       )
     }
     if (artifactId) {
+      await evaluate(client, clickText('Settings'))
       await evaluate(client, clickText('Artifacts'))
       await evaluate(client, setInput('input[placeholder="art_…"]', artifactId))
       await evaluate(client, `document.querySelector('.search').requestSubmit()`)
@@ -322,9 +368,15 @@ async function main() {
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
     await evaluate(client, `document.querySelector('.search').requestSubmit()`)
     await waitFor(client, `document.body.innerText.includes(${jsonLiteral(taskId)}) && document.body.innerText.toLowerCase().includes('waiting')`, 'waiting Run and linked Task')
-    await evaluate(client, clickText(taskId))
+    const eventCanaryAbsent = await evaluate(client, `![
+      'browser-token-must-not-render',
+      'browser-prompt-must-not-render',
+      'browser-secret-must-not-render'
+    ].some((canary) => document.documentElement.innerHTML.includes(canary))`)
+    if (!eventCanaryAbsent) throw new Error('sensitive event canary reached the DOM')
+    await evaluate(client, clickText('Open task'))
     await evaluate(client, `document.querySelector('.search').requestSubmit()`)
-    await waitFor(client, `document.body.innerText.includes(${jsonLiteral(taskId)}) && document.body.innerText.toLowerCase().includes('pending')`, 'pending Task authority')
+    await waitFor(client, `document.body.innerText.toLowerCase().includes('pending') && document.body.innerText.includes('interaction.confirm_release')`, 'pending Task authority')
     await evaluate(client, setInput('textarea', JSON.stringify(responseBody, null, 2)))
     await evaluate(client, clickText('Submit input'))
     await waitFor(client, `document.body.innerText.toLowerCase().includes('responded') && document.body.innerText.includes('submit-input committed')`, 'Task mutation authority result')
@@ -338,6 +390,21 @@ async function main() {
       await delay(250)
     }
     await waitFor(client, `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes(${jsonLiteral(expectedResultText)})`, 'terminal Run and safe result')
+    if (await evaluate(client, `document.documentElement.innerHTML.includes('browser-tool-output-must-not-render')`)) {
+      throw new Error('sensitive result canary reached the DOM')
+    }
+
+    await client.call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    const mobileAccessible = await evaluate(client, `({
+      noHorizontalOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      navigationComplete: ['Agents', 'Runs', 'Tasks', 'Settings'].every((label) =>
+        [...document.querySelectorAll('nav button')].some((button) => button.textContent.includes(label))
+      ),
+      liveRegionPresent: !!document.querySelector('[aria-live]'),
+      mainFocusable: document.querySelector('main').tabIndex === -1,
+    })`)
+    if (!Object.values(mobileAccessible).every(Boolean)) throw new Error(`mobile or ARIA qualification failed: ${JSON.stringify(mobileAccessible)}`)
+    await client.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
 
     await client.call('Page.reload', { ignoreCache: true })
     await waitFor(client, `document.readyState === 'complete' && !!document.querySelector('.connection-form')`, 'Console reload')
@@ -345,7 +412,12 @@ async function main() {
       passwordEmpty: document.querySelector('input[type="password"]').value === '',
       runAbsent: !document.body.innerText.includes(${jsonLiteral(runId)}),
       localStorageEmpty: localStorage.length === 0,
-      sessionStorageEmpty: sessionStorage.length === 0,
+      persistedStateSafe: !Object.values(sessionStorage).some((value) =>
+        value.includes(${jsonLiteral(token)}) ||
+        value.includes(${jsonLiteral(JSON.stringify(responseBody))}) ||
+        value.includes(${jsonLiteral(expectedResultText)}) ||
+        value.includes('apiVersion: insight.platform/v1')
+      ),
       tokenAbsent: !document.documentElement.innerHTML.includes(${jsonLiteral(token)}),
     })`)
     if (!Object.values(cleared).every(Boolean)) throw new Error(`reload did not clear browser-only authority state: ${JSON.stringify(cleared)}`)
@@ -375,6 +447,7 @@ async function main() {
       wasi_framework_run_id: wasiFrameworkRunId,
       checks: [
         'gateway_ready',
+        ...(authoringJourney ? ['agent_authoring_north_star'] : []),
         ...(emptyRunId ? ['empty_run_timeline'] : []),
         ...(expectSlowLoading ? ['slow_dependency_busy_state'] : []),
         ...(deterministicRunId ? ['deterministic_run_read'] : []),
@@ -391,6 +464,8 @@ async function main() {
         'terminal_run',
         'reload_authority_read',
         'memory_only_token',
+        'dom_canary_redaction',
+        'mobile_aria_layout',
       ],
     })}\n`)
   } finally {

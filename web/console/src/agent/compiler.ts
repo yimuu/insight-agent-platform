@@ -45,6 +45,12 @@ export interface AgentCompilerProfile {
   }
 }
 
+export interface AgentAuthoringProfileEnvelope extends AgentCompilerProfile {
+  schema_version: 1
+  models: unknown[]
+  profile_digest: string
+}
+
 export interface ResolvedAgentBindings {
   model: null | {
     manifest_ref: string
@@ -100,6 +106,39 @@ export class AgentCompilerError extends Error {
     super(detail)
     this.name = 'AgentCompilerError'
     this.code = code
+  }
+}
+
+export function inspectAgentManifest(source: string): {
+  executionKind: AgentExecutionKind
+  modelRef: string | null
+} {
+  const manifest = parseManifest(source)
+  return {
+    executionKind: manifest.spec.execution.kind,
+    modelRef: manifest.spec.model?.ref ?? null,
+  }
+}
+
+export async function verifyAgentAuthoringProfile(
+  profile: AgentAuthoringProfileEnvelope,
+): Promise<void> {
+  validateProfile(profile)
+  if (profile.schema_version !== 1 || profile.models.length > 16) {
+    fail('agent_binding_not_ready', 'authoring profile version or model bound is invalid')
+  }
+  const expected = await digestJson({
+    default_deadline_seconds: profile.default_deadline_seconds,
+    default_environment: profile.default_environment,
+    deployment_policies: profile.deployment_policies,
+    execution_profile: profile.execution_profile,
+    model_loop: profile.model_loop,
+    models: profile.models,
+    policy_versions: profile.policy_versions,
+    schema_version: profile.schema_version,
+  } as unknown as Json)
+  if (expected !== profile.profile_digest) {
+    fail('agent_binding_not_ready', 'authoring profile digest does not match its exact bindings')
   }
 }
 

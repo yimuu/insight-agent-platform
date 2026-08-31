@@ -1,13 +1,19 @@
 import { parseEventStream } from './sse.ts'
 import type {
   ApiProblemShape,
+  AgentAuthoringProfile,
+  AgentSummary,
   ArtifactView,
   AuthorityResponse,
   DeploymentView,
   JsonObject,
+  ListPage,
   OperationView,
+  PrepareArtifactUploadResponse,
+  PublishResourceResponse,
   ResourceView,
   RunEvent,
+  RunSummary,
   RunView,
   TaskView,
 } from './types.ts'
@@ -129,6 +135,20 @@ export class PlatformClient {
     return response.ok
   }
 
+  getAgentAuthoringProfile() { return this.request<AgentAuthoringProfile>('/agent-authoring-profile') }
+  listAgents(cursor?: string) {
+    const query = new URLSearchParams({ page_size: '25' })
+    if (cursor) query.set('cursor', cursor)
+    return this.request<ListPage<AgentSummary>>(`/agents?${query}`)
+  }
+  listRuns(filters: { agentId?: string; state?: string; cursor?: string } = {}) {
+    const query = new URLSearchParams({ page_size: '25' })
+    if (filters.agentId) query.set('agent_id', filters.agentId)
+    if (filters.state) query.set('state', filters.state)
+    if (filters.cursor) query.set('cursor', filters.cursor)
+    return this.request<ListPage<RunSummary>>(`/runs?${query}`)
+  }
+
   getRun(id: string) { return this.request<RunView>(`/runs/${encodeURIComponent(id)}`) }
   getRunResult(id: string) { return this.request<JsonObject>(`/runs/${encodeURIComponent(id)}/result`) }
   getTask(id: string) { return this.request<TaskView>(`/tasks/${encodeURIComponent(id)}`) }
@@ -137,6 +157,86 @@ export class PlatformClient {
   getResource(noun: string, id: string) { return this.request<ResourceView>(`/${encodeURIComponent(noun)}/${encodeURIComponent(id)}`) }
   getDeployment(noun: string, resourceId: string, deploymentId: string) {
     return this.request<DeploymentView>(`/${encodeURIComponent(noun)}/${encodeURIComponent(resourceId)}/deployments/${encodeURIComponent(deploymentId)}`)
+  }
+
+  createAgent(body: JsonObject, receipt: string) {
+    return this.request<ResourceView>('/agents', {
+      method: 'POST', headers: { 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  updateAgent(id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<ResourceView>(`/agents/${encodeURIComponent(id)}/draft`, {
+      method: 'PUT', headers: { 'If-Match': etag, 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  validateAgent(id: string, etag: string, receipt: string) {
+    return this.request<OperationView>(`/agents/${encodeURIComponent(id)}/draft:validate`, {
+      method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt },
+    })
+  }
+
+  publishAgent(id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<PublishResourceResponse>(`/agents/${encodeURIComponent(id)}/draft:publish`, {
+      method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  createAgentDeployment(id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<DeploymentView>(`/agents/${encodeURIComponent(id)}/deployments`, {
+      method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  activateAgentDeployment(id: string, deploymentId: string, etag: string, receipt: string) {
+    return this.request<ResourceView>(`/agents/${encodeURIComponent(id)}/deployments/${encodeURIComponent(deploymentId)}:activate`, {
+      method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt },
+    })
+  }
+
+  createRun(body: JsonObject, receipt: string) {
+    return this.request<RunView>('/runs', {
+      method: 'POST', headers: { 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  prepareArtifactUpload(body: JsonObject, receipt: string) {
+    return this.request<PrepareArtifactUploadResponse>('/artifacts:prepare-upload', {
+      method: 'POST', headers: { 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  completeArtifactUpload(id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<JsonObject>(`/artifacts/${encodeURIComponent(id)}:complete-upload`, {
+      method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt }, body: JSON.stringify(body),
+    })
+  }
+
+  async putArtifactObject(target: string, bytes: Uint8Array, mediaType: string): Promise<void> {
+    const url = new URL(target)
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+      throw new Error('invalid_upload_target: Artifact upload authority returned an unsafe target')
+    }
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': mediaType, 'Content-Length': String(bytes.byteLength) },
+      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+      credentials: 'omit',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    })
+    if (!response.ok) throw new Error('artifact_upload_failed: Signed object upload was not accepted')
+  }
+
+  async waitOperation(id: string, timeoutMilliseconds = 120_000): Promise<AuthorityResponse<OperationView>> {
+    const deadline = Date.now() + timeoutMilliseconds
+    while (Date.now() < deadline) {
+      const operation = await this.getOperation(id)
+      if (['succeeded', 'failed', 'cancelled', 'timed_out'].includes(operation.data.state)) return operation
+      await new Promise((resolve) => window.setTimeout(resolve, 250))
+    }
+    throw new Error('operation_pending: Background work is still running; resume from server authority')
   }
 
   async getRunEvents(id: string, cursor?: string): Promise<RunEvent[]> {

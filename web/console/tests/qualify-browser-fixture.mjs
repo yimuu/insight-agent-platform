@@ -55,6 +55,7 @@ async function runJourney(origin) {
     env: {
       ...process.env,
       INSIGHT_CONSOLE_ACCESS_TOKEN: token,
+      INSIGHT_CONSOLE_AUTHORING_JOURNEY: '1',
       INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT: 'completed',
       INSIGHT_CONSOLE_GATEWAY_ORIGIN: origin,
       INSIGHT_CONSOLE_RUN_ID: runId,
