@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Embeds a workspace-root asset from an integration test owned by a package
 /// under `crates/*`. `include_str!` is the compile-time existence gate.
+#[allow(unused_macros)]
 macro_rules! workspace_asset_str {
     ($workspace_relative:literal) => {
         include_str!(concat!(

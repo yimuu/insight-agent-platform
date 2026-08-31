@@ -1,0 +1,12 @@
+apiVersion: insight.platform/v1
+kind: Agent
+metadata:
+  name: echo-agent
+spec:
+  execution:
+    kind: deterministic
+  input:
+    schema: schema-message.json
+    classification: internal
+  output:
+    schema: schema-message.json

@@ -22,6 +22,8 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 x509-parser.workspace = true
+yaml-rust2.workspace = true
+yaml_serde.workspace = true
 
 [dev-dependencies]
 insight-platform-api.workspace = true

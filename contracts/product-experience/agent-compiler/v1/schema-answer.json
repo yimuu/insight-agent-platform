@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "answer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-platform-max-bytes": 1024
+    }
+  },
+  "required": ["answer"],
+  "additionalProperties": false
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "Agent",
+  "apiVersion": "insight.platform/v1",
+  "spec": {
+    "output": { "schema": "schema-message.json" },
+    "input": {
+      "classification": "internal",
+      "schema": "schema-message.json"
+    },
+    "execution": { "kind": "deterministic" }
+  },
+  "metadata": { "name": "echo-agent" }
+}

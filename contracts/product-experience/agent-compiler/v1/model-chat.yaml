@@ -1,0 +1,21 @@
+apiVersion: insight.platform/v1
+kind: Agent
+metadata:
+  name: support-agent
+  displayName: Support Agent
+spec:
+  execution:
+    kind: model_chat
+  instructions: |
+    Answer using only the current user input.
+  model:
+    ref: project/default-model
+  input:
+    schema: schema-message.json
+    classification: internal
+  output:
+    schema: schema-answer.json
+  limits:
+    deadlineSeconds: 120
+  publish:
+    environment: development

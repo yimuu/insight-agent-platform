@@ -12,12 +12,13 @@
     "browser:gateway": "node tests/gateway-server.mjs",
     "browser:gateway:journey": "node tests/real-gateway-journey.mjs",
     "lint": "oxlint",
-    "test": "node --check tests/fixture-server.mjs && node --check tests/gateway-server.mjs && node --check tests/qualify-browser-fixture.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs",
+    "test": "node --check tests/fixture-server.mjs && node --check tests/gateway-server.mjs && node --check tests/qualify-browser-fixture.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs src/agent/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "yaml": "2.8.1"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

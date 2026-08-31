@@ -4,6 +4,11 @@
 //! host prerequisites and create project-local development state, but all future business
 //! mutations must use the public Gateway `/v1` contract.
 
+pub mod agent_compiler;
+
+#[cfg(test)]
+#[path = "../../../tests/support/workspace_assets.rs"]
+mod workspace_assets;
 mod apply;
 mod apply_journal;
 mod artifact;

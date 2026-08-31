@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "profile": {
+    "default_deadline_seconds": 120,
+    "default_environment": "development",
+    "policy_versions": [
+      {
+        "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f3000b",
+        "resource_kind": "policy_revision",
+        "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "deployment_policies": [
+      {
+        "deployment": {
+          "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f30014",
+          "resource_kind": "policy_deployment",
+          "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "revision": {
+          "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f30015",
+          "resource_kind": "policy_revision",
+          "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "execution_profile": {
+      "deployment": {
+        "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f3001e",
+        "resource_kind": "policy_deployment",
+        "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "revision": {
+        "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f3001f",
+        "resource_kind": "policy_revision",
+        "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "model_loop": {
+      "maximum_rounds": 1,
+      "maximum_capability_calls": 1,
+      "maximum_parallel_calls_per_round": 1,
+      "token_budget": 2304
+    }
+  },
+  "cases": [
+    {
+      "case_id": "deterministic-yaml",
+      "manifest": "deterministic.yaml",
+      "input_schema": "schema-message.json",
+      "output_schema": "schema-message.json",
+      "bindings": { "model": null },
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Echo Agent\",\"name\":\"echo-agent\"},\"spec\":{\"execution\":{\"kind\":\"deterministic\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":null,\"limits\":{\"deadlineSeconds\":120},\"model\":null,\"output\":{\"schema\":\"schema-message.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689",
+        "deployment_intent_digest": "sha256:b9576e3e8feaedd7418d89b8f4d6f6078644ccda25df2b9fa314aee53228d57c",
+        "execution_kind": "deterministic",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
+        "name": "echo-agent",
+        "required_features": [],
+        "resource_intent_digest": "sha256:4b92b397aa27d0931f8c405a13fe0a56167e82391ae7419f803ab194ebb0a2b7",
+        "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":5}",
+        "typed_plan_digest": "sha256:6cc2084f31ff81c9bf38361a8d6f03f19e07e68de7ab63005bdfa6d9a7e0fd0b"
+      }
+    },
+    {
+      "case_id": "deterministic-json-equivalent",
+      "manifest": "deterministic.json",
+      "input_schema": "schema-message.json",
+      "output_schema": "schema-message.json",
+      "bindings": { "model": null },
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Echo Agent\",\"name\":\"echo-agent\"},\"spec\":{\"execution\":{\"kind\":\"deterministic\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":null,\"limits\":{\"deadlineSeconds\":120},\"model\":null,\"output\":{\"schema\":\"schema-message.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689",
+        "deployment_intent_digest": "sha256:b9576e3e8feaedd7418d89b8f4d6f6078644ccda25df2b9fa314aee53228d57c",
+        "execution_kind": "deterministic",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
+        "name": "echo-agent",
+        "required_features": [],
+        "resource_intent_digest": "sha256:4b92b397aa27d0931f8c405a13fe0a56167e82391ae7419f803ab194ebb0a2b7",
+        "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":5}",
+        "typed_plan_digest": "sha256:6cc2084f31ff81c9bf38361a8d6f03f19e07e68de7ab63005bdfa6d9a7e0fd0b"
+      }
+    },
+    {
+      "case_id": "model-chat-yaml",
+      "manifest": "model-chat.yaml",
+      "input_schema": "schema-message.json",
+      "output_schema": "schema-answer.json",
+      "bindings": {
+        "model": {
+          "manifest_ref": "project/default-model",
+          "deployment": {
+            "deployment_id": "mdep_0198f1c5-0787-75e1-a9e8-d95ca0f30028",
+            "resource_kind": "model_deployment",
+            "deployment_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "selection_policy": {
+            "deployment": {
+              "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f30032",
+              "resource_kind": "policy_deployment",
+              "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "revision": {
+              "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f30033",
+              "resource_kind": "policy_revision",
+              "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        }
+      },
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Support Agent\",\"name\":\"support-agent\"},\"spec\":{\"execution\":{\"kind\":\"model_chat\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":\"Answer using only the current user input.\\n\",\"limits\":{\"deadlineSeconds\":120},\"model\":{\"ref\":\"project/default-model\"},\"output\":{\"schema\":\"schema-answer.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:2c27aba019e30eecdea7309c0fe9fc073d32f0d9999492f53427472683aa5b3f",
+        "deployment_intent_digest": "sha256:008f18bb18e2a0b1277d5a362d9bd0566bf716ce7907dc9d9450f2f1a1c32d70",
+        "execution_kind": "model_chat",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:15703291bd66a99070d0114573e8bd7dc3dd48c40905adaea926e490e581045d",
+        "name": "support-agent",
+        "required_features": ["model"],
+        "resource_intent_digest": "sha256:ebb71b164c5b1b76926bad296d6c04122c17f14a570014f6f9db96c913f867c6",
+        "typed_plan": "{\"dependency_slots\":{\"primary_model\":{\"kind\":\"model\",\"requirement_digest\":\"sha256:18c8cb8c7d3db6a005f4b0fa8069024a30512813b2804b98fb059875a718bdb5\"}},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:2c27aba019e30eecdea7309c0fe9fc073d32f0d9999492f53427472683aa5b3f\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"}},\"model\":{\"capability_slot_ids\":[],\"input\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"},\"kind\":\"model_loop\",\"maximum_capability_calls\":1,\"maximum_parallel_calls_per_round\":1,\"maximum_rounds\":1,\"model_route\":null,\"model_slot_id\":\"primary_model\",\"output\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"},\"resume\":\"finish\",\"skill_slot_ids\":[],\"token_budget\":2304},\"start\":{\"kind\":\"start\",\"next\":\"model\"}},\"plan_version\":5}",
+        "typed_plan_digest": "sha256:55a370f3d53ea8991d4886918bdfb71fa349003015c4034f28f42113376cf6a0"
+      }
+    }
+  ]
+}

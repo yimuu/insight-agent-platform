@@ -2383,6 +2383,8 @@ dependencies = [
  "tempfile",
  "uuid",
  "x509-parser",
+ "yaml-rust2",
+ "yaml_serde",
 ]
 
 [[package]]
