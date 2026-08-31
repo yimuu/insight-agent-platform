@@ -11,16 +11,18 @@
 
 ## 当前规范
 
+- [Agent 产品体验收敛规范](product-experience/00-overview.md)：在不新增 `/v2`、业务authority、表或服务角色的
+  前提下，交付简化 `agent.yaml`、Agent CLI、Console authoring、渐进披露、预构建发行物和轻量单节点开发模式。
+  当前为 Draft / Architecture Revision，尚未授权实现或改变 `docs/current`；
 - [产品化收敛阶段目标](productization/00-goals.md)及其
-  [实施计划](productization/implementation-plan.md)：下一阶段停止横向扩展平台内核，交付一个命令的本地
-  平台、稳定的 CLI/HTTP 开发者入口、最小运行控制台、十条黄金场景和最终仓库 clean cut。当前正在执行 M0，尚未改变
-  `docs/current` 描述的产品行为；
+  [实施计划](productization/implementation-plan.md)：repository scope 已完成，CLI/HTTP、base/full profile、Console和
+  十条黄金场景已有证据；真实多节点Kubernetes、runsc、容量、混沌、restore、soak与production GitOps promotion仍是
+  未执行的外部L4～L6门禁；
 - [Platform v2 clean-cut 规范集合](platform-v2/00-overview.md)：重新定义 Agent、Skill、Capability、
-  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。00～18 与
-  [四阶段实现计划](platform-v2/implementation-plan.md)已按 CR-201 仓库范围关闭为 Verified；真实多节点
-  Kubernetes、runsc、production telemetry、容量/混沌/恢复/soak 与人工 GitOps promotion 仍是可选部署
-  资格，不属于未完成的 spec 实现任务。“v2”是架构代号，目标公共合同仍为 `insight.platform/v1` 和
-  `/v1`，不会提供 `/v2` 或兼容双栈；这些目标尚未完成对当前旧产品入口的 clean cut。
+  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。00～18 当前保持 Accepted/In Progress；
+  repository实现和L1～L3证据不等于真实环境Verified或production-ready。真实多节点Kubernetes、runsc、
+  production telemetry、容量/混沌/恢复/soak与人工GitOps promotion仍为L4～L6 `Not run`。“v2”是架构代号，
+  公共合同仍为 `insight.platform/v1` 和 `/v1`，不会提供 `/v2` 或兼容双栈。
 
 最近完成的规范：
 
