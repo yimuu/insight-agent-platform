@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-31 |
 | 适用面 | CLI、Console、Quickstart、产品DTO与错误信息 |
 
@@ -38,7 +38,7 @@ CLI和Console共享下列逻辑摘要；具体序列化类型必须closed并带`
 - `state`: `draft/validating/publishing/ready/blocked`
 - `environment`
 - `updated_at`
-- `required_features`
+- `required_features`：只来自current Agent Resource/Revision冻结的closed set
 
 ### RunSummary
 

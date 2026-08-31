@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-212 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-31 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
@@ -19,6 +19,10 @@
 > CR-212 impact：`AgentSummaryV1.name`与`RunSummaryV1.agent_name`只投影同一Agent Resource/Revision的bounded
 > `AgentResourceSpec.authoring_name`。该值在Resource创建后不可更名；list handler不得从client lock、authoring Artifact、display name或
 > current Deployment猜测。字段不增加新route、表、索引authority或tenant-wide uniqueness。
+
+> CR-213 impact：`AgentSummaryV1.required_features`只投影current Agent Resource document中随Revision冻结的closed
+> `AgentResourceSpec.required_features`。草稿和未激活Deployment的Agent因此仍有同一权威来源；handler不得检查client manifest、Plan
+> Artifact、active Deployment slots或Event来补值。
 
 > CR-209 impact：既有Agent Draft document增加nullable bounded `author_instructions`，属于closed `AgentResourceSpec`而非自由prompt
 > route。它随Draft CAS/publish/read和canonical request digest处理；Run create、list、summary、Event与Problem均不复制或回显正文。
@@ -379,7 +383,7 @@ GET /v1/runs?page_size=<1..50>&cursor=<opaque>&agent_id=<agt>&state=<closed>
 `snapshot_at`，后续页只读取`updated_at <= snapshot_at`并使用cursor中的exact keyset boundary。`state`是closed
 `draft | validating | publishing | ready | blocked`安全投影；它由Resource current Draft/gate、active Agent Deployment与其
 exact validation/publication Job authority确定，不能写回Resource或由Event重建。`name`只来自当前Agent Resource document的
-`authoring_name`，`environment`只来自active immutable Deployment。
+`authoring_name`，`required_features`只来自同一document的closed frozen set，`environment`只来自active immutable Deployment。
 
 ```rust
 struct AgentSummaryV1 {

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-212 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-30 |
 | 依赖 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md)、[`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) |
 | 直接下游 | 06、08、09、11、12、16、17、18 |
@@ -21,6 +21,10 @@
 > CR-212 impact：简化manifest的normalized `metadata.name`冻结到`AgentResourceSpec.authoring_name`，成为Agent Resource的
 > bounded authoring identity；创建后不可更名。Agent/Run产品summary只从该Resource authority投影，不从本地lock、Artifact文件名或
 > display name猜测。
+
+> CR-213 impact：简化compiler的closed `required_features`同时冻结到`AgentResourceSpec.required_features`。该bounded sorted set
+> 随Draft CAS与immutable Revision digest处理，是草稿态和发布态`AgentSummaryV1`的唯一来源；API不得从active Deployment、Plan Artifact、
+> client lock或Event反推。
 
 > Persistence ruling：Agent、Revision 与 Deployment 复用 02 的共享 Resource 模型；运行事实复用 03 的共享聚合。
 > 本规范不再定义 Agent 专用 lifecycle/evidence/head/suspension 表。
@@ -124,10 +128,12 @@ Agent Interface Revision 与 Agent Plan Revision 分离；一个 Agent Revision 
 `arev_<uuidv7>`。Interface没有独立Draft/Head/API；任何interface语义变化都随新Agent Revision发布，但多个
 Plan Revision可以在schema/digest完全相同时引用同一immutable Interface Revision。
 
-`AgentResourceSpec`包含`authoring_name`与nullable `author_instructions`。`authoring_name`必须匹配
+`AgentResourceSpec`包含`authoring_name`、closed `required_features`与nullable `author_instructions`。`authoring_name`必须匹配
 `[a-z][a-z0-9-]{0,62}`，由简化manifest的normalized `metadata.name`逐字节物化；Agent Resource创建后，Draft update必须保持同一值，
 不能用display name、Artifact文件名、project lock或当前Deployment重命名。name只需在project-local lock内唯一，不引入tenant-wide
-唯一约束。`author_instructions`非空时为1～16384 UTF-8 bytes并拒绝NUL；两者随完整Agent document参与canonical digest与Draft CAS，
+唯一约束。`required_features`是最多16项、按wire value严格排序且不重复的closed `AgentRequiredFeature`集合；简化compiler当前只允许
+`model`，`deterministic`物化空集合，`model_chat`物化`[model]`。高级authoring也必须显式提交该字段，不能在读取时从Plan或Deployment猜测。
+`author_instructions`非空时为1～16384 UTF-8 bytes并拒绝NUL；这些字段随完整Agent document参与canonical digest与Draft CAS，
 publish后不可变。作者正文不是platform/system policy，不得改变Capability、Secret、Effect、approval、budget或exact binding authority。
 没有模型作者指令的Agent固定保存`null`，不能使用空字符串表示另一种状态。
 

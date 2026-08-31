@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-212 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -79,6 +79,9 @@ CR-211冻结简化compiler的Interface contract与model requirement digest preim
 
 CR-212关闭产品summary的authoring name authority缺口：normalized `metadata.name`物化到现有Agent Resource document，创建后不可更名；
 CLI lock只保存映射而不拥有name，Console/API不得用display name或Artifact内容猜测。
+
+CR-213关闭产品summary的required feature authority缺口：compiler结果物化到现有Agent Resource document的closed sorted set，
+草稿与发布态使用同一来源；CLI/Console/API不得从Plan Artifact、Deployment、lock或Event反推。
 
 ## 5. 完成定义
 

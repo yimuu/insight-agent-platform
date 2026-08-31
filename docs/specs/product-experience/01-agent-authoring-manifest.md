@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-212 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -86,7 +86,7 @@ value/schema的Compute或Capability节点；Return直接消费exact RunInput por
 project profile和已解析 exact binding；输出为：
 
 1. canonical manifest digest；
-2. closed `AgentResourceIntent`，包含normalized `authoring_name`、Resource业务字段、authoring/plan artifact purpose与digest，但不含Artifact ID；
+2. closed `AgentResourceIntent`，包含normalized `authoring_name`、closed sorted `required_features`、Resource业务字段、authoring/plan artifact purpose与digest，但不含Artifact ID；
 3. canonical Typed Plan v5 bytes与digest；
 4. input/output/error schema digest；
 5. Deployment binding intent；
@@ -96,6 +96,10 @@ project profile和已解析 exact binding；输出为：
 `prepare-upload`成功响应生成。publish executor必须先上传并验证compiler冻结的两组bytes/digest，再把服务端返回的exact
 `artifact_id + content_digest`填入`AgentResourceIntent::materialize`；该纯materializer重验purpose、digest、classification、Ready状态摘要
 与compiler intent后才构造现有closed `AgentResourceSpec`。调用方、lock或journal不得预留、猜测或替换Artifact ID。
+
+`AgentResourceIntent.required_features`由模板确定并在materialize时逐字节复制到`AgentResourceSpec.required_features`：
+`deterministic`固定为空，`model_chat`固定为`[model]`。该字段参与Resource document canonical digest与CAS；读取方不得从Plan、
+Deployment slot、project lock或Event重新推导。
 
 ordered lifecycle plan使用closed logical output reference（例如`authoring_artifact`、`typed_plan_artifact`）表达步骤依赖；这些reference
 只存在于客户端编排模型，不进入public request、PostgreSQL、Event或digest。Receipt request digest在每个HTTP步骤物化后绑定实际closed body，

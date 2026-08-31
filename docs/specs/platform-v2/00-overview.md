@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-212 |
+| 状态 | In Progress / CR-213 |
 | 日期 | 2026-08-31 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -39,6 +39,10 @@
 > `metadata.name`此前只存在于本地manifest/lock，服务端无法安全投影且不能用display name猜测。CR-212把normalized name冻结为
 > `AgentResourceSpec.authoring_name`；它在Resource创建后不可更名，随Draft CAS与immutable Revision digest处理，不新增表、route、
 > aggregate、ID或tenant-wide uniqueness。
+
+> 2026-08-31 implementation feedback（CR-213）：Agent产品summary要求草稿态也返回`required_features`，但compiler结果此前
+> 没有进入Resource authority，服务端只能从不存在的active Deployment或本地manifest猜测。CR-213把closed sorted feature set冻结为
+> `AgentResourceSpec.required_features`，随Draft CAS与immutable Revision digest处理；不新增表、route、aggregate、Job或Event projection。
 
 > 2026-08-30 implementation feedback（CR-205）：剩余full-profile产品化场景确认，八类public noun只能发布
 > Capability/Context Interface、Model/Sandbox Profile，却没有合法management surface发布它们依赖的Capability/Context
@@ -239,12 +243,12 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | In Progress / CR-211 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | In Progress / CR-213 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-201（CR-204 reviewed） | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-205 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-206 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-202（CR-204 reviewed） | 多租户、授权、Secret、Effect、Quota、Approval |
-| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-211 | Agent Interface、Typed Plan、Model Loop |
+| 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-213 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-203（CR-204 reviewed） | Run、NodeExecution、暂停、重试、取消 |
 | 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-203（CR-204 reviewed） | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-203（CR-204 reviewed） | Child Run、父子通信、取消传播和循环限制 |
@@ -256,8 +260,8 @@ Platform v2 采用以下不可逆的架构决定：
 | 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-205 | Python、Node、WASM、受信任 Shell、隔离和扩缩容 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-203（CR-204 reviewed） | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-209 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-211 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-213 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-213 | Kubernetes、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得

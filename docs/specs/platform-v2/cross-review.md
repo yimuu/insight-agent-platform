@@ -1,10 +1,23 @@
-# Platform v2 00～18 Cross-review（CR-212）
+# Platform v2 00～18 Cross-review（CR-213）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-212 |
+| 状态 | Accepted / CR-213 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-213 Agent required feature authority cross-review
+
+Phase 2 direct-authority list实现确认：`AgentSummaryV1.required_features`必须在Agent仍为Draft、正在验证或尚未激活Deployment时可读，
+但Phase 1 compiler的closed结果此前只存在于client intent/corpus；既有`AgentResourceSpec`没有对应字段。由active Deployment slot、
+Plan Artifact、project lock或Event推断都会造成状态缺失或第二authority。
+
+CR-213选择把最多16项、按wire value严格排序且不重复的closed `AgentRequiredFeature`集合加入既有
+`AgentResourceSpec.required_features`。compiler materializer逐字节复制其结果；Resource Draft CAS、validation、publish与immutable
+Revision digest继续复用既有authority。Agent list只投影current Resource document中的集合，不读取client或执行侧数据补值。
+
+影响按05→17→18→00、Product 01/04/06→00与implementation plan复核。该修订不新增表、aggregate、ResourceKind、route、
+Job/Task/Event/Receipt、role、migration、Deployment requirement或compatibility fallback；Run冻结与执行行为不变。
 
 ### CR-212 Agent authoring name authority cross-review
 
@@ -1125,7 +1138,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-212 cross-review没有未关闭P0/P1合同冲突；product-experience实现已进入Phase 2，因此00保持In Progress、17/18与
+CR-213 cross-review没有未关闭P0/P1合同冲突；product-experience实现已进入Phase 2，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 
