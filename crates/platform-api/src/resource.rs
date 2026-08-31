@@ -26,9 +26,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::product::{
-    list_filter_digest, AgentListFiltersV1, AgentSummaryV1, AuthorityListPage, ListCursorCodec,
-    ListCursorContext, ListError, ListKeysetBoundary, ListPageV1, ListRoutePurpose,
-    PRODUCT_LIST_CURSOR_TTL_SECONDS, PRODUCT_LIST_DEFAULT_PAGE_SIZE, PRODUCT_LIST_MAX_PAGE_SIZE,
+    list_filter_digest, AgentAuthoringProfileV1, AgentListFiltersV1, AgentSummaryV1,
+    AuthorityListPage, ListCursorCodec, ListCursorContext, ListError, ListKeysetBoundary,
+    ListPageV1, ListRoutePurpose, PRODUCT_LIST_CURSOR_TTL_SECONDS, PRODUCT_LIST_DEFAULT_PAGE_SIZE,
+    PRODUCT_LIST_MAX_PAGE_SIZE,
 };
 
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
@@ -690,6 +691,12 @@ pub struct ListAgentsIntent {
     pub deadline: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadAgentAuthoringProfileIntent {
+    pub principal: AuthenticatedPrincipal,
+    pub deadline: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceApplicationError {
     Invalid,
@@ -707,6 +714,13 @@ pub enum ResourceApplicationError {
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    async fn read_agent_authoring_profile(
+        &self,
+        _intent: ReadAgentAuthoringProfileIntent,
+    ) -> Result<AgentAuthoringProfileV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+
     async fn list_agents(
         &self,
         _intent: ListAgentsIntent,
@@ -816,6 +830,10 @@ impl ResourceHttpState {
 
 pub fn build_resource_router(state: ResourceHttpState) -> Router {
     Router::new()
+        .route(
+            "/v1/agent-authoring-profile",
+            get(read_agent_authoring_profile),
+        )
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route(
             "/v1/context-datasets/{dataset_id}/versions/{generation_id}",
@@ -849,6 +867,33 @@ pub fn build_resource_router(state: ResourceHttpState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_RESOURCE_REQUEST_BYTES))
         .with_state(state)
+}
+
+async fn read_agent_authoring_profile(
+    State(state): State<ResourceHttpState>,
+    principal: Option<Extension<AuthenticatedPrincipal>>,
+) -> Response {
+    let Some(Extension(principal)) = principal else {
+        return problem(ResourceApplicationError::Unauthenticated);
+    };
+    if principal.validate().is_err() {
+        return problem(ResourceApplicationError::Unauthenticated);
+    }
+    match state
+        .application
+        .read_agent_authoring_profile(ReadAgentAuthoringProfileIntent {
+            principal,
+            deadline: state.clock.now()
+                + Duration::milliseconds(RESOURCE_COMMAND_DEADLINE_MILLISECONDS),
+        })
+        .await
+    {
+        Ok(profile) if profile.validate().is_ok() => {
+            no_store((StatusCode::OK, Json(profile)).into_response())
+        }
+        Ok(_) => problem(ResourceApplicationError::Internal),
+        Err(error) => problem(error),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3468,6 +3513,14 @@ mod tests {
 
     #[async_trait]
     impl ResourceApplication for AgentListFixture {
+        async fn read_agent_authoring_profile(
+            &self,
+            _intent: ReadAgentAuthoringProfileIntent,
+        ) -> Result<AgentAuthoringProfileV1, ResourceApplicationError> {
+            AgentAuthoringProfileV1::build(policy_binding(71, 'f'), vec![])
+                .map_err(|_| ResourceApplicationError::Internal)
+        }
+
         async fn list_agents(
             &self,
             _intent: ListAgentsIntent,
@@ -3564,6 +3617,50 @@ mod tests {
         ) -> Result<PublishResourceDraftResponseV1, ResourceApplicationError> {
             Err(ResourceApplicationError::Internal)
         }
+    }
+
+    #[tokio::test]
+    async fn agent_authoring_profile_requires_authentication_and_is_private_no_store() {
+        let now = Utc::now();
+        let application = Arc::new(AgentListFixture {
+            calls: AtomicUsize::new(0),
+            snapshot_at: now,
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agent-authoring-profile")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agent-authoring-profile")
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let profile: AgentAuthoringProfileV1 = serde_json::from_slice(&body).unwrap();
+        assert_eq!(profile.validate(), Ok(()));
     }
 
     #[tokio::test]

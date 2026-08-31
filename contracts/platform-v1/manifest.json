@@ -1,12 +1,12 @@
 {
-  "contract_digest": "sha256:f0de2c2d5cd039394da70ccf838c2184e20cfab2e5581e927f350e818e9b69ce",
+  "contract_digest": "sha256:d39e6c9851d79037219dcec39333fe4b605dea5b7f8dbb3dad694bd3b3338a2f",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
-      "bytes": 92204,
+      "bytes": 96382,
       "media_type": "application/yaml",
       "path": "contracts/platform-v1/openapi.yaml",
-      "sha256": "750d9d18598547afbbe302d3d6009a6c53bed75f0822a8441e9b577736b6be68"
+      "sha256": "059ecf36de23b12e9696b966d14512c10556873800099bf758c90cd8c2e477ce"
     },
     {
       "bytes": 33721,
@@ -151,6 +151,12 @@
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
       "sha256": "5c1c757e61cbb8b7a6b77f5128467172784ca2ca58f664c64d385d317e858149"
+    },
+    {
+      "bytes": 4867,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/agent-authoring-profile-v1.schema.json",
+      "sha256": "6a4e5c7bf1e7dfe40e3e464376ecffaba5fffda94ce5577b68bff844c19fd92c"
     },
     {
       "bytes": 2093,

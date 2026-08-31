@@ -20,6 +20,26 @@ x-insight-trace-contract:
 servers:
   - url: /v1
 paths:
+  /agent-authoring-profile:
+    get:
+      operationId: getAgentAuthoringProfile
+      summary: Read the bounded tenant-scoped exact compiler profile for Agent authoring
+      tags: [Agents]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: policy.read
+      responses:
+        "200":
+          description: Exact current compiler bindings and limits from tenant Policy authority.
+          headers:
+            trace-id: {$ref: "#/components/headers/TraceId"}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentAuthoringProfileV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /agents:
     get:
       operationId: listAgents
@@ -1489,6 +1509,64 @@ components:
     PublicRunState:
       type: string
       enum: [queued, running, waiting, cancelling, succeeded, failed, cancelled, timed_out]
+    AgentAuthoringPolicyVersionRef:
+      type: object
+      additionalProperties: false
+      required: [revision_id, resource_kind, semantic_digest]
+      properties:
+        revision_id:
+          type: string
+          pattern: "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: policy_revision}
+        semantic_digest: {$ref: "#/components/schemas/Digest"}
+    AgentAuthoringPolicyDeploymentRef:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, resource_kind, deployment_digest]
+      properties:
+        deployment_id:
+          type: string
+          pattern: "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: policy_deployment}
+        deployment_digest: {$ref: "#/components/schemas/Digest"}
+    AgentAuthoringPolicyBindingV1:
+      type: object
+      additionalProperties: false
+      required: [deployment, revision]
+      properties:
+        deployment: {$ref: "#/components/schemas/AgentAuthoringPolicyDeploymentRef"}
+        revision: {$ref: "#/components/schemas/AgentAuthoringPolicyVersionRef"}
+    AgentModelLoopLimitsV1:
+      type: object
+      additionalProperties: false
+      required: [maximum_rounds, maximum_capability_calls, maximum_parallel_calls_per_round, token_budget]
+      properties:
+        maximum_rounds: {type: integer, minimum: 1, maximum: 65535}
+        maximum_capability_calls: {type: integer, minimum: 1, maximum: 4294967295}
+        maximum_parallel_calls_per_round: {type: integer, minimum: 1, maximum: 65535}
+        token_budget: {type: integer, minimum: 1, maximum: 9007199254740991}
+    AgentAuthoringModelBindingV1:
+      type: object
+      additionalProperties: false
+      required: [alias, deployment, selection_policy]
+      properties:
+        alias: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
+        deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+        selection_policy: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
+    AgentAuthoringProfileV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, default_deadline_seconds, default_environment, policy_versions, deployment_policies, execution_profile, model_loop, models, profile_digest]
+      properties:
+        schema_version: {const: 1}
+        default_deadline_seconds: {type: integer, minimum: 1, maximum: 3600}
+        default_environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
+        policy_versions: {type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentAuthoringPolicyVersionRef"}}
+        deployment_policies: {type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}}
+        execution_profile: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
+        model_loop: {$ref: "#/components/schemas/AgentModelLoopLimitsV1"}
+        models: {type: array, maxItems: 16, items: {$ref: "#/components/schemas/AgentAuthoringModelBindingV1"}}
+        profile_digest: {$ref: "#/components/schemas/Digest"}
     AgentSummaryV1:
       type: object
       additionalProperties: false

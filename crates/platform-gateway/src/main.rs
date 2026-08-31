@@ -30,18 +30,18 @@ use insight_platform_api::{
         OperationHttpState, SystemOperationClock,
     },
     product::{
-        AgentSummaryV1, AuthorityListPage, HmacListCursorCodec, ListCursorCodec,
-        ListKeysetBoundary, RunSummaryV1,
+        AgentAuthoringProfileV1, AgentSummaryV1, AuthorityListPage, HmacListCursorCodec,
+        ListCursorCodec, ListKeysetBoundary, RunSummaryV1,
     },
     resource::{
         build_resource_router, deployment_etag, resource_etag, resource_version_etag,
         BuildContextDatasetIntent, ControlDeploymentIntent, CreateDeploymentIntent,
         CreateResourceIntent, DeploymentViewV1, DiscoverMcpDeploymentIntent, ListAgentsIntent,
         PublishResourceDraftIntent, PublishResourceDraftRequestV1, PublishResourceDraftResponseV1,
-        PublishedResourceVersionSummaryV1, ReadDeploymentIntent, ReadResourceIntent,
-        ReadResourceVersionIntent, ResourceApplication, ResourceApplicationError,
-        ResourceHttpState, ResourceVersionViewV1, ResourceViewV1, SystemResourceClock,
-        UpdateResourceDraftIntent, ValidateResourceDraftIntent,
+        PublishedResourceVersionSummaryV1, ReadAgentAuthoringProfileIntent, ReadDeploymentIntent,
+        ReadResourceIntent, ReadResourceVersionIntent, ResourceApplication,
+        ResourceApplicationError, ResourceHttpState, ResourceVersionViewV1, ResourceViewV1,
+        SystemResourceClock, UpdateResourceDraftIntent, ValidateResourceDraftIntent,
     },
     run::{
         build_run_router, run_etag, ControlRunIntent, CreateRunIntent, HmacRunEventCursorCodec,
@@ -1749,6 +1749,26 @@ struct PgResources {
 
 #[async_trait]
 impl ResourceApplication for PgResources {
+    async fn read_agent_authoring_profile(
+        &self,
+        intent: ReadAgentAuthoringProfileIntent,
+    ) -> Result<AgentAuthoringProfileV1, ResourceApplicationError> {
+        if intent.deadline <= chrono::Utc::now() {
+            return Err(ResourceApplicationError::Unavailable);
+        }
+        let binding = self
+            .repository
+            .read_agent_authoring_policy_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+            )
+            .await
+            .map_err(map_resource_repository_error)?;
+        AgentAuthoringProfileV1::build(binding, Vec::new())
+            .map_err(|_| ResourceApplicationError::Internal)
+    }
+
     async fn list_agents(
         &self,
         intent: ListAgentsIntent,

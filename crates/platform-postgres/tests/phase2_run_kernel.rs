@@ -14,11 +14,12 @@ use insight_platform_contracts::{
     FrozenSlotBinding, FrozenSlotTarget, InteractionKind, JsonLimits, Permission, PermissionSet,
     PlanNodeKind, PlatformFailureCode, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
-    PublishedVersionPayload, ResourceDocument, ResourceId, Retryability, RunBindingsSnapshot,
-    SchedulingPolicyDocument, Sha256Digest, SkillArtifactSliceRef, SkillDeploymentClosure,
-    SkillInstructionAudience, SkillInstructionPhase, SkillInstructionSection, SkillInterface,
-    SkillPackageEntry, SkillPackageEntryKind, SkillPackageManifest, SkillResourceSpec,
-    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, SKILL_PACKAGE_MEDIA_TYPE,
+    PublishedVersionPayload, ResourceDocument, ResourceId, ResourceKind, Retryability,
+    RunBindingsSnapshot, SchedulingPolicyDocument, Sha256Digest, SkillArtifactSliceRef,
+    SkillDeploymentClosure, SkillInstructionAudience, SkillInstructionPhase,
+    SkillInstructionSection, SkillInterface, SkillPackageEntry, SkillPackageEntryKind,
+    SkillPackageManifest, SkillResourceSpec, TenantConfig, TenantPrincipalPayload,
+    ValidationSummary, ValueRef, SKILL_PACKAGE_MEDIA_TYPE,
 };
 use insight_platform_jobs::WakeSource;
 use insight_platform_orchestrator::{
@@ -700,6 +701,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let repository = PgRepository::new(pool.clone());
     seed_authorities(&repository, &pool).await;
     let (bindings, policy_deployment) = seed_agent_registry(&pool).await;
+    let expected_authoring_policy = policy_deployment.clone();
     let root_target = repository
         .resolve_root_run_target(&id(TENANT_ID), &id(AGENT_ID))
         .await
@@ -721,6 +723,39 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Applied(_)
     ));
     security.commit().await.unwrap();
+    let authoring_policy = repository
+        .read_agent_authoring_policy_for_principal(
+            &id(TENANT_ID),
+            &id(PRINCIPAL_ID),
+            PrincipalKind::AgentRunner,
+        )
+        .await
+        .unwrap();
+    assert_eq!(authoring_policy.deployment, expected_authoring_policy);
+    assert_eq!(
+        authoring_policy.revision.resource_kind,
+        ResourceKind::PolicyRevision
+    );
+    assert!(matches!(
+        repository
+            .read_agent_authoring_policy_for_principal(
+                &id(TENANT_ID),
+                &id(DENIED_PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+            )
+            .await,
+        Err(RepositoryError::PermissionDenied)
+    ));
+    assert!(matches!(
+        repository
+            .read_agent_authoring_policy_for_principal(
+                &id(TENANT_B_ID),
+                &id(PRINCIPAL_ID),
+                PrincipalKind::AgentRunner,
+            )
+            .await,
+        Err(RepositoryError::NotFound("tenant Agent authoring Policy binding"))
+    ));
     repository
         .create_quota_account(NewQuotaAccount {
             tenant_id: TENANT_ID.to_owned(),
@@ -10321,6 +10356,7 @@ async fn seed_authorities(repository: &PgRepository, pool: &PgPool) {
                     permissions: PermissionSet::new(vec![
                         Permission::AgentRun,
                         Permission::InteractionRespond,
+                        Permission::PolicyRead,
                         Permission::RuntimeControl,
                         Permission::TenantManage,
                     ])
@@ -11187,6 +11223,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
             PermissionSet::new(vec![
                 Permission::AgentRun,
                 Permission::InteractionRespond,
+                Permission::PolicyRead,
                 Permission::RuntimeControl,
                 Permission::TenantManage,
             ])

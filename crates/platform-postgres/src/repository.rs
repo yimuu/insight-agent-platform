@@ -10,17 +10,17 @@ use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
     ArtifactRetentionPolicy, AuthoringPackage, CandidateSelectionPolicyDocument, ClosedJsonSchema,
     ClosedJsonValue, CommandAudit, CommandOutcome, DataClassification, DeploymentClosure,
-    EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef,
-    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
-    HardLimitProfile, InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
-    NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
-    PolicyReferenceRole, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind,
-    PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload, RegistryResourceKind,
-    ResourceDocument, ResourceDraftPayload, ResourceId, ResourceKind, Retryability,
-    RunBindingsSnapshot, RunState, SandboxArtifactIoPolicyDocument, SchedulerPriority,
-    SchedulingPolicyDocument, ScopeState, SecretBindingPayload, SecretPurpose, Sha256Digest,
-    TenantConfig, TenantPrincipalPayload, TraceId, TraceIdentityV1, ValidationSummary, ValueRef,
-    WorkClass, MAX_RESOURCE_DEPENDENCIES,
+    EntityLifecycle, ExactDatasetGenerationRef, ExactDeploymentRef, ExactPolicyBinding,
+    ExactSecretBindingRef, ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource,
+    FrozenSlotTarget, HardLimitProfile, InstallationPrincipalBinding, InvocationState, JobKind,
+    JobState, JsonLimits, NodeExecutionState, Permission, PermissionSet, PlanNodeKind,
+    PlatformFailureCode, PolicyKind, PolicyReferenceRole, PrincipalBindingState,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublicRunEventType,
+    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
+    ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, RunState,
+    SandboxArtifactIoPolicyDocument, SchedulerPriority, SchedulingPolicyDocument, ScopeState,
+    SecretBindingPayload, SecretPurpose, Sha256Digest, TenantConfig, TenantPrincipalPayload,
+    TraceId, TraceIdentityV1, ValidationSummary, ValueRef, WorkClass, MAX_RESOURCE_DEPENDENCIES,
 };
 use insight_platform_invocations::{
     decide_control as decide_capability_control, AdmitCapabilityInvocation, CapabilityControlKind,
@@ -1100,6 +1100,58 @@ impl PgRepository {
         }
         transaction.commit().await?;
         Ok(resource)
+    }
+
+    pub async fn read_agent_authoring_policy_for_principal(
+        &self,
+        tenant_id: &ResourceId,
+        principal_id: &ResourceId,
+        principal_kind: PrincipalKind,
+    ) -> Result<ExactPolicyBinding, RepositoryError> {
+        let mut transaction = begin_read_only_repeatable(&self.pool).await?;
+        let principal = load_current_principal_snapshot(
+            &mut transaction,
+            tenant_id,
+            principal_id,
+            principal_kind,
+        )
+        .await?;
+        if !principal.permissions.contains(Permission::PolicyRead) {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT tenant_id, state, version, config_schema_version, config,
+                   config_digest, created_at, updated_at
+            FROM insight_platform.tenants
+            WHERE tenant_id = $1 AND state = 'active'
+            "#,
+        )
+        .bind(tenant_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("active tenant"))?;
+        let tenant = tenant_from_row(row)?;
+        let deployment = tenant
+            .config
+            .scheduling_policy
+            .ok_or_else(|| RepositoryError::NotFound("tenant Agent authoring Policy binding"))?;
+        let (revision, _) = load_exact_active_policy_deployment(
+            &mut transaction,
+            tenant_id,
+            &deployment,
+            PolicyKind::Scheduling,
+        )
+        .await?;
+        let binding = ExactPolicyBinding {
+            deployment,
+            revision,
+        };
+        binding
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        transaction.commit().await?;
+        Ok(binding)
     }
 
     pub async fn read_resource_version_for_principal(

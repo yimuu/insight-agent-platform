@@ -2,8 +2,9 @@ use crate::authentication::AuthenticatedPrincipal;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
-    canonical_digest, AgentProductState, AgentRequiredFeature, OpaqueListCursor, ResourceId,
-    ResourceKind, RunState, Sha256Digest, UtcTimestamp,
+    canonical_digest, AgentProductState, AgentRequiredFeature, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, OpaqueListCursor, ResourceId, ResourceKind, RunState,
+    Sha256Digest, UtcTimestamp,
 };
 use ring::hmac;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,123 @@ use serde::{Deserialize, Serialize};
 pub const PRODUCT_LIST_MAX_PAGE_SIZE: u16 = 50;
 pub const PRODUCT_LIST_DEFAULT_PAGE_SIZE: u16 = 25;
 pub const PRODUCT_LIST_CURSOR_TTL_SECONDS: i64 = 900;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelLoopLimitsV1 {
+    pub maximum_rounds: u16,
+    pub maximum_capability_calls: u32,
+    pub maximum_parallel_calls_per_round: u16,
+    pub token_budget: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAuthoringModelBindingV1 {
+    pub alias: String,
+    pub deployment: ExactDeploymentRef,
+    pub selection_policy: ExactPolicyBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAuthoringProfileV1 {
+    pub schema_version: u32,
+    pub default_deadline_seconds: u32,
+    pub default_environment: String,
+    pub policy_versions: Vec<ExactVersionRef>,
+    pub deployment_policies: Vec<ExactPolicyBinding>,
+    pub execution_profile: ExactPolicyBinding,
+    pub model_loop: AgentModelLoopLimitsV1,
+    pub models: Vec<AgentAuthoringModelBindingV1>,
+    pub profile_digest: Sha256Digest,
+}
+
+impl AgentAuthoringProfileV1 {
+    pub fn build(
+        execution_profile: ExactPolicyBinding,
+        models: Vec<AgentAuthoringModelBindingV1>,
+    ) -> Result<Self, ListError> {
+        let mut profile = Self {
+            schema_version: 1,
+            default_deadline_seconds: 120,
+            default_environment: "development".to_owned(),
+            policy_versions: vec![execution_profile.revision.clone()],
+            deployment_policies: vec![execution_profile.clone()],
+            execution_profile,
+            model_loop: AgentModelLoopLimitsV1 {
+                maximum_rounds: 1,
+                maximum_capability_calls: 1,
+                maximum_parallel_calls_per_round: 1,
+                token_budget: 2_304,
+            },
+            models,
+            profile_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .parse()
+                    .map_err(|_| ListError::Invalid)?,
+        };
+        profile.profile_digest = profile.expected_digest()?;
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    pub fn validate(&self) -> Result<(), ListError> {
+        if self.schema_version != 1
+            || self.default_deadline_seconds == 0
+            || self.default_deadline_seconds > 3_600
+            || !valid_environment(&self.default_environment)
+            || self.policy_versions.is_empty()
+            || self.policy_versions.len() > 16
+            || self.deployment_policies.is_empty()
+            || self.deployment_policies.len() > 16
+            || self.models.len() > 16
+            || self.model_loop.maximum_rounds == 0
+            || self.model_loop.maximum_capability_calls == 0
+            || self.model_loop.maximum_parallel_calls_per_round == 0
+            || self.model_loop.token_budget == 0
+            || self.execution_profile.validate().is_err()
+            || self.policy_versions.iter().any(|revision| {
+                revision.resource_kind != ResourceKind::PolicyRevision
+                    || revision.validate().is_err()
+            })
+            || self
+                .deployment_policies
+                .iter()
+                .any(|binding| binding.validate().is_err())
+            || self
+                .models
+                .windows(2)
+                .any(|pair| pair[0].alias >= pair[1].alias)
+            || self.models.iter().any(|binding| {
+                !valid_environment(&binding.alias)
+                    || binding.deployment.resource_kind != ResourceKind::ModelDeployment
+                    || binding.deployment.validate().is_err()
+                    || binding.selection_policy.validate().is_err()
+            })
+            || self.expected_digest()? != self.profile_digest
+        {
+            return Err(ListError::Invalid);
+        }
+        Ok(())
+    }
+
+    fn expected_digest(&self) -> Result<Sha256Digest, ListError> {
+        canonical_digest(&serde_json::json!({
+            "default_deadline_seconds": self.default_deadline_seconds,
+            "default_environment": self.default_environment,
+            "deployment_policies": self.deployment_policies,
+            "execution_profile": self.execution_profile,
+            "model_loop": self.model_loop,
+            "models": self.models,
+            "policy_versions": self.policy_versions,
+            "schema_version": self.schema_version,
+        }))
+        .map_err(|_| ListError::Invalid)?
+        .parse()
+        .map_err(|_| ListError::Invalid)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -458,6 +576,35 @@ mod tests {
             credential_expires_at: Utc::now() + chrono::Duration::hours(1),
             trace: TraceIdentityV1::generate(),
         }
+    }
+
+    fn policy_binding(suffix: u16, marker: char) -> ExactPolicyBinding {
+        ExactPolicyBinding {
+            deployment: ExactDeploymentRef::new(
+                id(ResourceKind::PolicyDeployment, suffix),
+                digest(marker),
+            )
+            .unwrap(),
+            revision: ExactVersionRef::new(
+                id(ResourceKind::PolicyRevision, suffix),
+                digest(marker),
+            )
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn agent_authoring_profile_is_closed_bounded_and_digest_protected() {
+        let mut profile = AgentAuthoringProfileV1::build(policy_binding(10, 'b'), vec![]).unwrap();
+        assert_eq!(profile.validate(), Ok(()));
+
+        profile.default_deadline_seconds = 3_601;
+        assert_eq!(profile.validate(), Err(ListError::Invalid));
+
+        let profile = AgentAuthoringProfileV1::build(policy_binding(11, 'c'), vec![]).unwrap();
+        let mut value = serde_json::to_value(profile).unwrap();
+        value["credential"] = serde_json::json!("forbidden");
+        assert!(serde_json::from_value::<AgentAuthoringProfileV1>(value).is_err());
     }
 
     #[test]

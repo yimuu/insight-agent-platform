@@ -57,6 +57,26 @@ x-insight-trace-contract:
 servers:
   - url: /v1
 paths:
+  /agent-authoring-profile:
+    get:
+      operationId: getAgentAuthoringProfile
+      summary: Read the bounded tenant-scoped exact compiler profile for Agent authoring
+      tags: [Agents]
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: policy.read
+      responses:
+        "200":
+          description: Exact current compiler bindings and limits from tenant Policy authority.
+          headers:
+            trace-id: {$ref: "#/components/headers/TraceId"}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentAuthoringProfileV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /agents:
     get:
       operationId: listAgents
@@ -1526,6 +1546,64 @@ components:
     PublicRunState:
       type: string
       enum: [queued, running, waiting, cancelling, succeeded, failed, cancelled, timed_out]
+    AgentAuthoringPolicyVersionRef:
+      type: object
+      additionalProperties: false
+      required: [revision_id, resource_kind, semantic_digest]
+      properties:
+        revision_id:
+          type: string
+          pattern: "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: policy_revision}
+        semantic_digest: {$ref: "#/components/schemas/Digest"}
+    AgentAuthoringPolicyDeploymentRef:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, resource_kind, deployment_digest]
+      properties:
+        deployment_id:
+          type: string
+          pattern: "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        resource_kind: {const: policy_deployment}
+        deployment_digest: {$ref: "#/components/schemas/Digest"}
+    AgentAuthoringPolicyBindingV1:
+      type: object
+      additionalProperties: false
+      required: [deployment, revision]
+      properties:
+        deployment: {$ref: "#/components/schemas/AgentAuthoringPolicyDeploymentRef"}
+        revision: {$ref: "#/components/schemas/AgentAuthoringPolicyVersionRef"}
+    AgentModelLoopLimitsV1:
+      type: object
+      additionalProperties: false
+      required: [maximum_rounds, maximum_capability_calls, maximum_parallel_calls_per_round, token_budget]
+      properties:
+        maximum_rounds: {type: integer, minimum: 1, maximum: 65535}
+        maximum_capability_calls: {type: integer, minimum: 1, maximum: 4294967295}
+        maximum_parallel_calls_per_round: {type: integer, minimum: 1, maximum: 65535}
+        token_budget: {type: integer, minimum: 1, maximum: 9007199254740991}
+    AgentAuthoringModelBindingV1:
+      type: object
+      additionalProperties: false
+      required: [alias, deployment, selection_policy]
+      properties:
+        alias: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
+        deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+        selection_policy: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
+    AgentAuthoringProfileV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, default_deadline_seconds, default_environment, policy_versions, deployment_policies, execution_profile, model_loop, models, profile_digest]
+      properties:
+        schema_version: {const: 1}
+        default_deadline_seconds: {type: integer, minimum: 1, maximum: 3600}
+        default_environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
+        policy_versions: {type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentAuthoringPolicyVersionRef"}}
+        deployment_policies: {type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}}
+        execution_profile: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
+        model_loop: {$ref: "#/components/schemas/AgentModelLoopLimitsV1"}
+        models: {type: array, maxItems: 16, items: {$ref: "#/components/schemas/AgentAuthoringModelBindingV1"}}
+        profile_digest: {$ref: "#/components/schemas/Digest"}
     AgentSummaryV1:
       type: object
       additionalProperties: false
@@ -2291,6 +2369,7 @@ pub const CONTRACT_MANIFEST_INPUTS: &[&str] = &[
     "contracts/platform-v1/schemas/nominal/digest.schema.json",
     "contracts/platform-v1/schemas/nominal/failure.schema.json",
     "contracts/platform-v1/schemas/nominal/opaque-list-cursor.schema.json",
+    "contracts/platform-v1/schemas/agent-authoring-profile-v1.schema.json",
     "contracts/platform-v1/schemas/agent-summary-v1.schema.json",
     "contracts/platform-v1/schemas/run-summary-v1.schema.json",
     "contracts/platform-v1/schemas/agent-list-page-v1.schema.json",
@@ -2510,6 +2589,7 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
     let artifact_retention_policy_schema = artifact_retention_policy_schema();
     let scheduling_policy_schema = scheduling_policy_schema();
     let public_run_payload_schema = durable_public_run_payload_schema();
+    let agent_authoring_profile_schema = agent_authoring_profile_schema();
     let agent_summary_schema = agent_summary_schema();
     let run_summary_schema = run_summary_schema();
     let agent_list_page_schema = product_list_page_schema(
@@ -2556,6 +2636,10 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
         (
             "events/public-run-payloads.schema.json",
             pretty(&public_run_payload_schema),
+        ),
+        (
+            "schemas/agent-authoring-profile-v1.schema.json",
+            pretty(&agent_authoring_profile_schema),
         ),
         (
             "schemas/agent-summary-v1.schema.json",
@@ -2632,6 +2716,93 @@ pub fn generated_contracts() -> BTreeMap<&'static str, Vec<u8>> {
 
 fn nullable_ref(reference: &str) -> Value {
     json!({"oneOf": [{"$ref": reference}, {"type": "null"}]})
+}
+
+fn agent_authoring_profile_schema() -> Value {
+    let exact_revision = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision_id", "resource_kind", "semantic_digest"],
+        "properties": {
+            "revision_id": {"type": "string", "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "resource_kind": {"const": "policy_revision"},
+            "semantic_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    });
+    let exact_policy_deployment = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment_id", "resource_kind", "deployment_digest"],
+        "properties": {
+            "deployment_id": {"type": "string", "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "resource_kind": {"const": "policy_deployment"},
+            "deployment_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    });
+    let exact_model_deployment = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment_id", "resource_kind", "deployment_digest"],
+        "properties": {
+            "deployment_id": {"type": "string", "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+            "resource_kind": {"const": "model_deployment"},
+            "deployment_digest": {"$ref": "nominal/digest.schema.json"}
+        }
+    });
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:insight:platform:v1:agent-authoring-profile-v1",
+        "title": "AgentAuthoringProfileV1",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "default_deadline_seconds", "default_environment", "policy_versions", "deployment_policies", "execution_profile", "model_loop", "models", "profile_digest"],
+        "properties": {
+            "schema_version": {"const": 1},
+            "default_deadline_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+            "default_environment": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_.-]{0,63}$"},
+            "policy_versions": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/PolicyRevision"}},
+            "deployment_policies": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/PolicyBinding"}},
+            "execution_profile": {"$ref": "#/$defs/PolicyBinding"},
+            "model_loop": {"$ref": "#/$defs/ModelLoopLimits"},
+            "models": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/ModelBinding"}},
+            "profile_digest": {"$ref": "nominal/digest.schema.json"}
+        },
+        "$defs": {
+            "PolicyRevision": exact_revision,
+            "PolicyDeployment": exact_policy_deployment,
+            "PolicyBinding": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["deployment", "revision"],
+                "properties": {
+                    "deployment": {"$ref": "#/$defs/PolicyDeployment"},
+                    "revision": {"$ref": "#/$defs/PolicyRevision"}
+                }
+            },
+            "ModelDeployment": exact_model_deployment,
+            "ModelLoopLimits": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["maximum_rounds", "maximum_capability_calls", "maximum_parallel_calls_per_round", "token_budget"],
+                "properties": {
+                    "maximum_rounds": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "maximum_capability_calls": {"type": "integer", "minimum": 1, "maximum": 4294967295_u64},
+                    "maximum_parallel_calls_per_round": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "token_budget": {"type": "integer", "minimum": 1, "maximum": MAX_SAFE_JSON_INTEGER}
+                }
+            },
+            "ModelBinding": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["alias", "deployment", "selection_policy"],
+                "properties": {
+                    "alias": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_.-]{0,63}$"},
+                    "deployment": {"$ref": "#/$defs/ModelDeployment"},
+                    "selection_policy": {"$ref": "#/$defs/PolicyBinding"}
+                }
+            }
+        }
+    })
 }
 
 fn agent_summary_schema() -> Value {

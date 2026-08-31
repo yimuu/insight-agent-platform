@@ -1,0 +1,204 @@
+{
+  "$defs": {
+    "ModelBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "alias": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "deployment": {
+          "$ref": "#/$defs/ModelDeployment"
+        },
+        "selection_policy": {
+          "$ref": "#/$defs/PolicyBinding"
+        }
+      },
+      "required": [
+        "alias",
+        "deployment",
+        "selection_policy"
+      ],
+      "type": "object"
+    },
+    "ModelDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "deployment_id": {
+          "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "resource_kind": {
+          "const": "model_deployment"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "ModelLoopLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_capability_calls": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_parallel_calls_per_round": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_rounds": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "token_budget": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_rounds",
+        "maximum_capability_calls",
+        "maximum_parallel_calls_per_round",
+        "token_budget"
+      ],
+      "type": "object"
+    },
+    "PolicyBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment": {
+          "$ref": "#/$defs/PolicyDeployment"
+        },
+        "revision": {
+          "$ref": "#/$defs/PolicyRevision"
+        }
+      },
+      "required": [
+        "deployment",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PolicyDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "deployment_id": {
+          "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "resource_kind": {
+          "const": "policy_deployment"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "PolicyRevision": {
+      "additionalProperties": false,
+      "properties": {
+        "resource_kind": {
+          "const": "policy_revision"
+        },
+        "revision_id": {
+          "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "semantic_digest": {
+          "$ref": "nominal/digest.schema.json"
+        }
+      },
+      "required": [
+        "revision_id",
+        "resource_kind",
+        "semantic_digest"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:insight:platform:v1:agent-authoring-profile-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "default_deadline_seconds": {
+      "maximum": 3600,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "default_environment": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "deployment_policies": {
+      "items": {
+        "$ref": "#/$defs/PolicyBinding"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "execution_profile": {
+      "$ref": "#/$defs/PolicyBinding"
+    },
+    "model_loop": {
+      "$ref": "#/$defs/ModelLoopLimits"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/$defs/ModelBinding"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "policy_versions": {
+      "items": {
+        "$ref": "#/$defs/PolicyRevision"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "profile_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "default_deadline_seconds",
+    "default_environment",
+    "policy_versions",
+    "deployment_policies",
+    "execution_profile",
+    "model_loop",
+    "models",
+    "profile_digest"
+  ],
+  "title": "AgentAuthoringProfileV1",
+  "type": "object"
+}
