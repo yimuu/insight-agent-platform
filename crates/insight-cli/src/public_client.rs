@@ -414,6 +414,32 @@ impl PublicHttpClient {
         self.send_mutation(path, Some(body), expected_status, idempotency_key, if_match)
     }
 
+    pub fn put_json<Request: Serialize, ResponseBody: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Request,
+        expected_status: StatusCode,
+        idempotency_key: &str,
+        if_match: &str,
+    ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
+        let body = serde_json::to_vec(body).map_err(|_| {
+            PublicClientError::InvalidConfiguration("public request body is not serializable")
+        })?;
+        if body.len() > MAX_PUBLIC_REQUEST_BYTES {
+            return Err(PublicClientError::InvalidConfiguration(
+                "public request body exceeds the client limit",
+            ));
+        }
+        self.send_mutation_with_method(
+            Method::PUT,
+            path,
+            Some(body),
+            expected_status,
+            idempotency_key,
+            Some(if_match),
+        )
+    }
+
     pub fn post_empty<ResponseBody: DeserializeOwned>(
         &self,
         path: &str,
@@ -432,6 +458,25 @@ impl PublicHttpClient {
         idempotency_key: &str,
         if_match: Option<&str>,
     ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
+        self.send_mutation_with_method(
+            Method::POST,
+            path,
+            body,
+            expected_status,
+            idempotency_key,
+            if_match,
+        )
+    }
+
+    fn send_mutation_with_method<ResponseBody: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        expected_status: StatusCode,
+        idempotency_key: &str,
+        if_match: Option<&str>,
+    ) -> Result<PublicJsonResponse<ResponseBody>, PublicClientError> {
         validate_public_path(path)?;
         let idempotency_key = bounded_header(idempotency_key, "idempotency key")?;
         let expected_trace_id = TraceId::new();
@@ -439,7 +484,7 @@ impl PublicHttpClient {
         let traceparent = format!("00-{expected_trace_id}-{span_id}-01");
         let mut request = self
             .client
-            .request(Method::POST, format!("{}{}", self.base_url, path))
+            .request(method, format!("{}{}", self.base_url, path))
             .header(ACCEPT, JSON_CONTENT_TYPE)
             .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token))
             .header(IDEMPOTENCY_KEY, idempotency_key)

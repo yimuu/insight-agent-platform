@@ -223,6 +223,12 @@ pub struct LoadedAgentProject {
     pub output_schema_bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentManifestResolution {
+    pub execution_kind: AgentExecutionKind,
+    pub model_ref: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceIntent {
@@ -434,6 +440,17 @@ pub fn load_project_sources(
             MAX_CLOSED_SCHEMA_BYTES,
             "output schema",
         )?,
+    })
+}
+
+pub fn inspect_manifest(
+    manifest_bytes: &[u8],
+) -> Result<AgentManifestResolution, AgentCompilerError> {
+    let manifest = parse_manifest(manifest_bytes)?;
+    validate_manifest(&manifest)?;
+    Ok(AgentManifestResolution {
+        execution_kind: manifest.spec.execution.kind,
+        model_ref: manifest.spec.model.map(|model| model.r#ref),
     })
 }
 

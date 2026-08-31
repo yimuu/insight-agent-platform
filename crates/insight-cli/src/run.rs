@@ -3,7 +3,7 @@
 use crate::public_client::{
     PublicClientError, PublicHttpClient, PublicJsonResponse, PublicSseFrame,
 };
-use crate::run_journal::{self, RunControlJournalV1, RunJournalError};
+use crate::run_journal::{self, RunControlJournalV1, RunCursorJournalV1, RunJournalError};
 use insight_platform_contracts::{
     canonical_digest, parse_strict_json, DataClassification, EventDurability, JsonLimits,
     PublicRunEvent, ResourceId, ResourceKind, RunState, Sha256Digest, UtcTimestamp, ValueRef,
@@ -360,6 +360,109 @@ pub fn watch_run<W: Write>(
             thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+pub fn watch_run_with_cursor_journal<W: Write>(
+    client: &PublicHttpClient,
+    run_id: &ResourceId,
+    timeout: Duration,
+    writer: &mut W,
+    journal_directory: &Path,
+) -> Result<RunViewV1, RunClientError> {
+    require_run_id(run_id)?;
+    if timeout.is_zero() || timeout > Duration::from_secs(3_600) {
+        return Err(RunClientError::InvalidRequest(
+            "watch timeout is outside 1..=3600 seconds".to_owned(),
+        ));
+    }
+    let path = run_journal::cursor_journal_path(journal_directory, run_id);
+    let mut journal =
+        run_journal::load_cursor(&path)?.unwrap_or_else(|| RunCursorJournalV1::new(run_id.clone()));
+    if journal.run_id != *run_id {
+        return Err(RunClientError::InvalidRequest(
+            "cursor journal belongs to a different Run".to_owned(),
+        ));
+    }
+    run_journal::save_cursor(&path, &journal)?;
+    let started = Instant::now();
+    loop {
+        let frames = client.get_sse_json::<PublicRunEvent>(
+            &format!("/v1/runs/{run_id}/events"),
+            journal.cursor.as_deref(),
+        )?;
+        let page_is_full = frames.len() == 128;
+        for frame in frames {
+            let (next_cursor, sequence) =
+                validate_event_frame(&frame, run_id, journal.last_sequence)?;
+            write_watch_record(
+                writer,
+                &RunWatchRecordV1::Event {
+                    schema_version: 1,
+                    event: frame.data,
+                },
+            )?;
+            journal.cursor = Some(next_cursor);
+            journal.last_sequence = sequence;
+            run_journal::save_cursor(&path, &journal)?;
+        }
+        let run = read_run(client, run_id)?;
+        if terminal_run_state(run.state) && !page_is_full {
+            write_watch_record(
+                writer,
+                &RunWatchRecordV1::Terminal {
+                    schema_version: 1,
+                    run: run.clone(),
+                },
+            )?;
+            return Ok(run);
+        }
+        if started.elapsed() >= timeout {
+            return Err(RunClientError::WatchTimeout {
+                run_id: run_id.to_string(),
+                timeout_seconds: timeout.as_secs(),
+            });
+        }
+        if journal.cursor.is_none() || !page_is_full {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+pub fn read_run_events_with_cursor_journal<W: Write>(
+    client: &PublicHttpClient,
+    run_id: &ResourceId,
+    writer: &mut W,
+    journal_directory: &Path,
+) -> Result<usize, RunClientError> {
+    require_run_id(run_id)?;
+    let path = run_journal::cursor_journal_path(journal_directory, run_id);
+    let mut journal =
+        run_journal::load_cursor(&path)?.unwrap_or_else(|| RunCursorJournalV1::new(run_id.clone()));
+    if journal.run_id != *run_id {
+        return Err(RunClientError::InvalidRequest(
+            "cursor journal belongs to a different Run".to_owned(),
+        ));
+    }
+    run_journal::save_cursor(&path, &journal)?;
+    let frames = client.get_sse_json::<PublicRunEvent>(
+        &format!("/v1/runs/{run_id}/events"),
+        journal.cursor.as_deref(),
+    )?;
+    let count = frames.len();
+    for frame in frames {
+        let (next_cursor, sequence) = validate_event_frame(&frame, run_id, journal.last_sequence)?;
+        write_watch_record(
+            writer,
+            &RunWatchRecordV1::Event {
+                schema_version: 1,
+                event: frame.data,
+            },
+        )?;
+        journal.cursor = Some(next_cursor);
+        journal.last_sequence = sequence;
+        run_journal::save_cursor(&path, &journal)?;
+    }
+    Ok(count)
 }
 
 fn validate_event_frame(

@@ -6,6 +6,7 @@
 
 pub mod agent_compiler;
 
+mod agent;
 mod apply;
 mod apply_journal;
 mod artifact;
@@ -21,9 +22,11 @@ mod task_journal;
 mod workspace_assets;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, ArtifactPurpose, ArtifactRetentionPolicy, DataClassification, PublicJobState,
-    ResourceId, ResourceKind, SandboxArtifactIoPolicyDocument, SchedulingPolicyDocument,
+    canonical_digest, parse_strict_json, ArtifactPurpose, ArtifactRetentionPolicy,
+    DataClassification, JsonLimits, PublicJobState, ResourceDocument, ResourceId, ResourceKind,
+    RunState, SandboxArtifactIoPolicyDocument, SchedulingPolicyDocument, UtcTimestamp, ValueRef,
 };
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rcgen::{
@@ -187,6 +190,54 @@ pub enum CliCommand {
         display_name: Option<String>,
         timeout_seconds: u64,
     },
+    AgentValidate {
+        root: PathBuf,
+        file: PathBuf,
+        online: bool,
+        output: agent::AgentOutputOptions,
+    },
+    AgentPublish {
+        root: PathBuf,
+        file: PathBuf,
+        wait: bool,
+        output: agent::AgentOutputOptions,
+    },
+    AgentList {
+        root: PathBuf,
+        output: agent::AgentOutputOptions,
+    },
+    AgentGet {
+        root: PathBuf,
+        selector: String,
+        output: agent::AgentOutputOptions,
+    },
+    AgentAdopt {
+        root: PathBuf,
+        name: String,
+        agent_id: String,
+        output: agent::AgentOutputOptions,
+    },
+    AgentRun {
+        root: PathBuf,
+        selector: String,
+        input: Option<String>,
+        file: Option<PathBuf>,
+        detach: bool,
+        timeout_seconds: u64,
+        output: agent::AgentOutputOptions,
+    },
+    AgentLogs {
+        root: PathBuf,
+        selector: String,
+        follow: bool,
+        output: agent::AgentOutputOptions,
+    },
+    AgentResult {
+        root: PathBuf,
+        run_id: String,
+        output: agent::AgentOutputOptions,
+    },
+    AdvancedHelp,
     Help,
 }
 
@@ -262,6 +313,7 @@ pub enum CliError {
     Run(run::RunClientError),
     Task(task::TaskClientError),
     Artifact(artifact::ArtifactClientError),
+    Agent(agent::AgentCommandError),
     OperationTerminal {
         operation_id: String,
         state: String,
@@ -349,6 +401,7 @@ impl std::fmt::Display for CliError {
             Self::Run(error) => write!(formatter, "{error}"),
             Self::Task(error) => write!(formatter, "{error}"),
             Self::Artifact(error) => write!(formatter, "{error}"),
+            Self::Agent(error) => write!(formatter, "{error}"),
             Self::OperationTerminal {
                 operation_id,
                 state,
@@ -415,6 +468,7 @@ impl CliError {
             | Self::Run(_)
             | Self::Task(_)
             | Self::Artifact(_)
+            | Self::Agent(_)
             | Self::OperationTerminal { .. } => 1,
             Self::ProjectAlreadyInitialized(_) => 1,
         }
@@ -446,6 +500,16 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         "run" => parse_run(&arguments[1..]),
         "task" => parse_task(&arguments[1..]),
         "artifact" => parse_artifact(&arguments[1..]),
+        "agent" => parse_agent(&arguments[1..]),
+        "advanced" => {
+            if arguments.len() == 1
+                || (arguments.len() == 2 && matches!(arguments[1].to_str(), Some("--help" | "-h")))
+            {
+                Ok(CliCommand::AdvancedHelp)
+            } else {
+                Err(CliError::Usage)
+            }
+        }
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
 }
@@ -1071,6 +1135,336 @@ fn valid_runtime_role(value: &str) -> bool {
             | "sandbox-controller"
             | "sandbox-executor"
     )
+}
+
+#[derive(Default)]
+struct AgentCommonOptions {
+    root: Option<PathBuf>,
+    output_mode: Option<agent::AgentOutputMode>,
+    verbose: bool,
+    debug_authority: bool,
+}
+
+impl AgentCommonOptions {
+    fn parse_flag(&mut self, arguments: &[OsString], cursor: &mut usize) -> Result<bool, CliError> {
+        let flag = arguments[*cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--path" => {
+                if self.root.is_some() {
+                    return Err(CliError::DuplicateOption("--path"));
+                }
+                let value = arguments
+                    .get(*cursor + 1)
+                    .ok_or(CliError::MissingValue("--path"))?;
+                self.root = Some(PathBuf::from(value));
+                *cursor += 2;
+                Ok(true)
+            }
+            "--output" => {
+                if self.output_mode.is_some() {
+                    return Err(CliError::DuplicateOption("--output"));
+                }
+                let value = arguments
+                    .get(*cursor + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or(CliError::MissingValue("--output"))?;
+                self.output_mode = Some(match value {
+                    "text" => agent::AgentOutputMode::Text,
+                    "json" => agent::AgentOutputMode::Json,
+                    _ => {
+                        return Err(CliError::InvalidOptionValue {
+                            option: "--output",
+                            value: value.to_owned(),
+                        })
+                    }
+                });
+                *cursor += 2;
+                Ok(true)
+            }
+            "--verbose" => {
+                if self.verbose {
+                    return Err(CliError::DuplicateOption("--verbose"));
+                }
+                self.verbose = true;
+                *cursor += 1;
+                Ok(true)
+            }
+            "--debug-authority" => {
+                if self.debug_authority {
+                    return Err(CliError::DuplicateOption("--debug-authority"));
+                }
+                self.debug_authority = true;
+                *cursor += 1;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root.clone().unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn output(&self) -> agent::AgentOutputOptions {
+        agent::AgentOutputOptions {
+            mode: self.output_mode.unwrap_or(agent::AgentOutputMode::Text),
+            verbose: self.verbose,
+            debug_authority: self.debug_authority,
+        }
+    }
+}
+
+fn parse_agent(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let Some(action) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    match action {
+        "validate" | "publish" => parse_agent_compile_command(action, &arguments[1..]),
+        "list" => {
+            let mut common = AgentCommonOptions::default();
+            let mut cursor = 1;
+            while cursor < arguments.len() {
+                if !common.parse_flag(arguments, &mut cursor)? {
+                    return Err(CliError::UnsupportedOption(lossy(&arguments[cursor])));
+                }
+            }
+            Ok(CliCommand::AgentList {
+                root: common.root(),
+                output: common.output(),
+            })
+        }
+        "get" | "result" | "logs" => {
+            let selector = arguments
+                .get(1)
+                .and_then(|value| value.to_str())
+                .ok_or(CliError::Usage)?
+                .to_owned();
+            let mut common = AgentCommonOptions::default();
+            let mut follow = false;
+            let mut cursor = 2;
+            while cursor < arguments.len() {
+                if common.parse_flag(arguments, &mut cursor)? {
+                    continue;
+                }
+                if action == "logs" && arguments[cursor] == "--follow" {
+                    if follow {
+                        return Err(CliError::DuplicateOption("--follow"));
+                    }
+                    follow = true;
+                    cursor += 1;
+                    continue;
+                }
+                return Err(CliError::UnsupportedOption(lossy(&arguments[cursor])));
+            }
+            match action {
+                "get" => Ok(CliCommand::AgentGet {
+                    root: common.root(),
+                    selector,
+                    output: common.output(),
+                }),
+                "logs" => Ok(CliCommand::AgentLogs {
+                    root: common.root(),
+                    selector,
+                    follow,
+                    output: common.output(),
+                }),
+                "result" => Ok(CliCommand::AgentResult {
+                    root: common.root(),
+                    run_id: selector,
+                    output: common.output(),
+                }),
+                _ => unreachable!(),
+            }
+        }
+        "adopt" => parse_agent_adopt(&arguments[1..]),
+        "run" => parse_agent_run(&arguments[1..]),
+        _ => Err(CliError::UnknownCommand(format!("agent {action}"))),
+    }
+}
+
+fn parse_agent_compile_command(
+    action: &str,
+    arguments: &[OsString],
+) -> Result<CliCommand, CliError> {
+    let mut common = AgentCommonOptions::default();
+    let mut file = None;
+    let mut online = false;
+    let mut wait = true;
+    let mut cursor = 0;
+    while cursor < arguments.len() {
+        if common.parse_flag(arguments, &mut cursor)? {
+            continue;
+        }
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--file" => {
+                if file.is_some() {
+                    return Err(CliError::DuplicateOption("--file"));
+                }
+                file = Some(PathBuf::from(
+                    arguments
+                        .get(cursor + 1)
+                        .ok_or(CliError::MissingValue("--file"))?,
+                ));
+                cursor += 2;
+            }
+            "--online" if action == "validate" => {
+                if online {
+                    return Err(CliError::DuplicateOption("--online"));
+                }
+                online = true;
+                cursor += 1;
+            }
+            "--wait" if action == "publish" => {
+                wait = true;
+                cursor += 1;
+            }
+            "--wait=false" if action == "publish" => {
+                wait = false;
+                cursor += 1;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    let file = file.ok_or(CliError::MissingValue("--file"))?;
+    if action == "validate" {
+        Ok(CliCommand::AgentValidate {
+            root: common.root(),
+            file,
+            online,
+            output: common.output(),
+        })
+    } else {
+        Ok(CliCommand::AgentPublish {
+            root: common.root(),
+            file,
+            wait,
+            output: common.output(),
+        })
+    }
+}
+
+fn parse_agent_adopt(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let name = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .ok_or(CliError::Usage)?
+        .to_owned();
+    let mut common = AgentCommonOptions::default();
+    let mut agent_id = None;
+    let mut cursor = 1;
+    while cursor < arguments.len() {
+        if common.parse_flag(arguments, &mut cursor)? {
+            continue;
+        }
+        if arguments[cursor] == "--agent-id" {
+            if agent_id.is_some() {
+                return Err(CliError::DuplicateOption("--agent-id"));
+            }
+            agent_id = Some(
+                arguments
+                    .get(cursor + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or(CliError::MissingValue("--agent-id"))?
+                    .to_owned(),
+            );
+            cursor += 2;
+        } else {
+            return Err(CliError::UnsupportedOption(lossy(&arguments[cursor])));
+        }
+    }
+    Ok(CliCommand::AgentAdopt {
+        root: common.root(),
+        name,
+        agent_id: agent_id.ok_or(CliError::MissingValue("--agent-id"))?,
+        output: common.output(),
+    })
+}
+
+fn parse_agent_run(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let selector = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .ok_or(CliError::Usage)?
+        .to_owned();
+    let mut common = AgentCommonOptions::default();
+    let mut input = None;
+    let mut file = None;
+    let mut detach = false;
+    let mut timeout_seconds = None;
+    let mut cursor = 1;
+    while cursor < arguments.len() {
+        if common.parse_flag(arguments, &mut cursor)? {
+            continue;
+        }
+        let flag = arguments[cursor].to_string_lossy();
+        match flag.as_ref() {
+            "--input" => {
+                if input.is_some() {
+                    return Err(CliError::DuplicateOption("--input"));
+                }
+                input = Some(
+                    arguments
+                        .get(cursor + 1)
+                        .and_then(|value| value.to_str())
+                        .ok_or(CliError::MissingValue("--input"))?
+                        .to_owned(),
+                );
+                cursor += 2;
+            }
+            "--file" => {
+                if file.is_some() {
+                    return Err(CliError::DuplicateOption("--file"));
+                }
+                file = Some(PathBuf::from(
+                    arguments
+                        .get(cursor + 1)
+                        .ok_or(CliError::MissingValue("--file"))?,
+                ));
+                cursor += 2;
+            }
+            "--detach" => {
+                if detach {
+                    return Err(CliError::DuplicateOption("--detach"));
+                }
+                detach = true;
+                cursor += 1;
+            }
+            "--timeout-seconds" => {
+                if timeout_seconds.is_some() {
+                    return Err(CliError::DuplicateOption("--timeout-seconds"));
+                }
+                let value = arguments
+                    .get(cursor + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or(CliError::MissingValue("--timeout-seconds"))?;
+                timeout_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|seconds| (1..=3_600).contains(seconds))
+                        .ok_or_else(|| CliError::InvalidOptionValue {
+                            option: "--timeout-seconds",
+                            value: value.to_owned(),
+                        })?,
+                );
+                cursor += 2;
+            }
+            _ => return Err(CliError::UnsupportedOption(flag.into_owned())),
+        }
+    }
+    if input.is_some() == file.is_some() {
+        return Err(CliError::Usage);
+    }
+    Ok(CliCommand::AgentRun {
+        root: common.root(),
+        selector,
+        input,
+        file,
+        detach,
+        timeout_seconds: timeout_seconds.unwrap_or(300),
+        output: common.output(),
+    })
 }
 
 fn lossy(value: &OsString) -> String {
@@ -4569,6 +4963,7 @@ pub fn execute(
 ) -> Result<String, CliError> {
     match command {
         CliCommand::Help => Ok(usage().to_owned()),
+        CliCommand::AdvancedHelp => Ok(advanced_usage().to_owned()),
         CliCommand::Doctor { json } => {
             let report = doctor_report_at(probe, current_directory, SystemTime::now());
             let output = if json {
@@ -4717,6 +5112,81 @@ pub fn execute(
                 timeout_seconds,
             )
         }
+        CliCommand::AgentValidate {
+            root,
+            file,
+            online,
+            output,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let file = resolve_root(current_directory, file);
+            validate_local_agent(&root, &file, online, output)
+        }
+        CliCommand::AgentPublish {
+            root,
+            file,
+            wait,
+            output,
+        } => {
+            let root = resolve_root(current_directory, root);
+            let file = resolve_root(current_directory, file);
+            publish_local_agent(&root, &file, wait, output)
+        }
+        CliCommand::AgentList { root, output } => {
+            list_local_agents(&resolve_root(current_directory, root), output)
+        }
+        CliCommand::AgentGet {
+            root,
+            selector,
+            output,
+        } => get_local_agent(&resolve_root(current_directory, root), &selector, output),
+        CliCommand::AgentAdopt {
+            root,
+            name,
+            agent_id,
+            output,
+        } => adopt_local_agent(
+            &resolve_root(current_directory, root),
+            &name,
+            &agent_id,
+            output,
+        ),
+        CliCommand::AgentRun {
+            root,
+            selector,
+            input,
+            file,
+            detach,
+            timeout_seconds,
+            output,
+        } => {
+            let file = file.map(|path| resolve_root(current_directory, path));
+            run_local_agent(
+                &resolve_root(current_directory, root),
+                &selector,
+                input.as_deref(),
+                file.as_deref(),
+                detach,
+                timeout_seconds,
+                output,
+            )
+        }
+        CliCommand::AgentLogs {
+            root,
+            selector,
+            follow,
+            output,
+        } => read_local_agent_logs(
+            &resolve_root(current_directory, root),
+            &selector,
+            follow,
+            output,
+        ),
+        CliCommand::AgentResult {
+            root,
+            run_id,
+            output,
+        } => read_local_agent_result(&resolve_root(current_directory, root), &run_id, output),
     }
 }
 
@@ -4751,7 +5221,511 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform development CLI\n\nUsage:\n  insight doctor [--json]\n  insight init [--path <directory>] [--name <name>]\n  insight token [--path <directory>]\n  insight dev [--path <directory>] [--profile base|full]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight run result <run_id> [--path <directory>]\n  insight run watch <run_id> [--timeout-seconds <1..3600>] [--path <directory>]\n  insight task get <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [--media-type <type>] [--display-name <name>] [--timeout-seconds <1..3600>] [--path <directory>]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`token` writes a short-lived local development token and prints it only to stdout. `apply` executes the explicit public Resource lifecycle. `run`, `task`, and `artifact` use only the Runtime Gateway `/v1` authority and emit closed machine-readable views. `run watch` reconnects with the opaque durable cursor and flushes JSON Lines incrementally. Artifact upload isolates its secret-bearing HTTPS target from the OIDC client; downloaded content is integrity-checked before atomic output. `operation wait` preserves a closed Problem response. `base` starts the deterministic first-Run closure; `full` adds the independent Model, remote Capability, MCP, Context, Security/Egress, Artifact Maintenance, Callback and local restricted-WASI roles.\n"
+    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--profile base|full]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
+}
+
+fn advanced_usage() -> &'static str {
+    "Insight Platform automation and diagnostics\n\nUsage:\n  insight doctor [--json]\n  insight token [--path <directory>]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get|result|watch <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight task get|approve|reject|cancel <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [options]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\nAll mutations use the public `/v1` authority. Receipt, ETag, Operation, and cursor details remain managed by the client unless an Agent command explicitly enables `--debug-authority`.\n"
+}
+
+fn validate_local_agent(
+    root: &Path,
+    file: &Path,
+    online: bool,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let profile = if online {
+        let (client, _) = local_public_http_client(root)?;
+        agent::online_compiler_profile(
+            &client,
+            &root
+                .join(PROJECT_DIRECTORY)
+                .join(RUNTIME_DIRECTORY)
+                .join(RUNTIME_CONFIGURATION_DIRECTORY),
+        )
+        .map_err(CliError::Agent)?
+    } else {
+        agent::offline_compiler_profile(
+            root,
+            &root
+                .join(PROJECT_DIRECTORY)
+                .join(RUNTIME_DIRECTORY)
+                .join(RUNTIME_CONFIGURATION_DIRECTORY),
+        )
+        .map_err(CliError::Agent)?
+    };
+    let compiled = agent::compile_project(root, file, profile).map_err(CliError::Agent)?;
+    let report = agent::validation_report(&compiled);
+    match output.mode {
+        agent::AgentOutputMode::Json => render_json(&report),
+        agent::AgentOutputMode::Text => {
+            let features = if report.required_features.is_empty() {
+                "none".to_owned()
+            } else {
+                report
+                    .required_features
+                    .iter()
+                    .map(|feature| format!("{feature:?}").to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let mut text = format!(
+                "Validated {}\nExecution: {:?}\nRequired features: {features}\n",
+                report.agent_name, report.execution_kind
+            );
+            if output.verbose || output.debug_authority {
+                text.push_str(&format!("Manifest: {}\n", report.manifest_digest));
+            }
+            Ok(text)
+        }
+    }
+}
+
+fn publish_local_agent(
+    root: &Path,
+    file: &Path,
+    wait: bool,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    if !wait {
+        return Err(CliError::InvalidOptionValue {
+            option: "--wait",
+            value: "false (publication handles are not enabled in this build)".to_owned(),
+        });
+    }
+    let (management_client, tenant_id) = local_public_http_client(root)?;
+    let (runtime_client, runtime_tenant_id) = local_runtime_http_client(root)?;
+    if tenant_id != runtime_tenant_id {
+        return Err(CliError::RuntimeState(
+            "management and runtime Gateway tenant identities differ".to_owned(),
+        ));
+    }
+    let profile = agent::online_compiler_profile(
+        &management_client,
+        &root
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY)
+            .join(RUNTIME_CONFIGURATION_DIRECTORY),
+    )
+    .map_err(CliError::Agent)?;
+    let compiled = agent::compile_project(root, file, profile).map_err(CliError::Agent)?;
+    let report = agent::publish_agent(
+        root,
+        &management_client,
+        &runtime_client,
+        &tenant_id,
+        &compiled,
+        Duration::from_secs(300),
+    )
+    .map_err(CliError::Agent)?;
+    match output.mode {
+        agent::AgentOutputMode::Json => {
+            let value = serde_json::json!({
+                "schema_version": report.schema_version,
+                "agent_name": report.agent_name,
+                "agent_id": report.agent_id,
+                "state": report.state,
+                "environment": report.environment,
+                "manifest_digest": (output.verbose || output.debug_authority).then_some(report.manifest_digest),
+                "unchanged": report.unchanged,
+                "validation_operation_id": output.debug_authority.then_some(report.validation_operation_id).flatten(),
+                "active_deployment_id": output.debug_authority.then_some(report.active_deployment_id).flatten()
+            });
+            render_json(&value)
+        }
+        agent::AgentOutputMode::Text => {
+            let action = if report.unchanged {
+                "Unchanged"
+            } else {
+                "Published"
+            };
+            let mut text = format!(
+                "{action} {} to {}\nStatus: {}\nRun: insight agent run {} --input '{{}}'\n",
+                report.agent_name, report.environment, report.state, report.agent_name
+            );
+            if output.verbose || output.debug_authority {
+                text.push_str(&format!("Manifest: {}\n", report.manifest_digest));
+            }
+            if output.debug_authority {
+                text.push_str(&format!(
+                    "Agent: {}\nValidation operation: {}\nActive deployment: {}\n",
+                    report.agent_id,
+                    report
+                        .validation_operation_id
+                        .as_ref()
+                        .map_or_else(|| "unchanged".to_owned(), ToString::to_string),
+                    report
+                        .active_deployment_id
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_owned(), ToString::to_string)
+                ));
+            }
+            Ok(text)
+        }
+    }
+}
+
+fn list_local_agents(root: &Path, output: agent::AgentOutputOptions) -> Result<String, CliError> {
+    let lock = agent::load_lock(root).map_err(CliError::Agent)?;
+    let (client, _) = local_public_http_client(root)?;
+    let remote = agent::list_remote_agents(&client);
+    let remote_by_id = remote
+        .as_ref()
+        .ok()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| (item.agent_id.clone(), item))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let items = lock
+        .agents
+        .iter()
+        .map(|(name, entry)| {
+            let remote = remote_by_id.get(&entry.agent_id);
+            let status = match remote {
+                Some(remote) if remote.name == *name && remote.state == insight_platform_contracts::AgentProductState::Ready => "ready",
+                Some(_) => "drifted",
+                None if remote_by_id.is_empty() => "unreachable",
+                None => "drifted",
+            };
+            serde_json::json!({
+                "schema_version": 1,
+                "agent_name": name,
+                "agent_id": entry.agent_id,
+                "state": status,
+                "environment": remote.and_then(|item| item.environment.as_deref()).or(entry.environment.as_deref()),
+                "manifest_digest": (output.verbose || output.debug_authority).then_some(&entry.manifest_digest),
+                "active_deployment_id": output.debug_authority.then_some(entry.active_deployment_id.as_ref()).flatten()
+            })
+        })
+        .collect::<Vec<_>>();
+    if output.mode == agent::AgentOutputMode::Json {
+        return render_json(&serde_json::json!({
+            "schema_version": 1,
+            "agents": items
+        }));
+    }
+    if items.is_empty() {
+        return Ok("No Agents are managed by this project.\n".to_owned());
+    }
+    let mut text = String::from("NAME\tSTATE\tENVIRONMENT\tAGENT ID\n");
+    for item in &items {
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            item["agent_name"].as_str().unwrap_or("invalid"),
+            item["state"].as_str().unwrap_or("invalid"),
+            item["environment"].as_str().unwrap_or("-"),
+            item["agent_id"].as_str().unwrap_or("invalid")
+        ));
+    }
+    Ok(text)
+}
+
+fn get_local_agent(
+    root: &Path,
+    selector: &str,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let agent_id = agent::resolve_agent_id(root, selector).map_err(CliError::Agent)?;
+    let (client, _) = local_public_http_client(root)?;
+    let resource = agent::read_resource(&client, &agent_id).map_err(CliError::Agent)?;
+    let ResourceDocument::Agent(spec) = &resource.draft.document else {
+        return Err(CliError::RuntimeState(
+            "Agent Resource returned a non-Agent document".to_owned(),
+        ));
+    };
+    let state = if resource.gate_state == insight_platform_contracts::AdministrativeGate::Enabled {
+        "ready"
+    } else {
+        "draft"
+    };
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "agent_name": spec.authoring_name,
+        "agent_id": agent_id,
+        "display_name": resource.draft.display_name,
+        "state": state,
+        "required_features": spec.required_features,
+        "input_classification": spec.input_classification,
+        "default_deadline_seconds": spec.default_deadline_seconds,
+        "manifest_digest": (output.verbose || output.debug_authority).then_some(&spec.authoring_package.manifest_digest),
+        "resource_version": output.debug_authority.then_some(resource.version),
+        "etag": output.debug_authority.then_some(&resource.etag)
+    });
+    if output.mode == agent::AgentOutputMode::Json {
+        render_json(&value)
+    } else {
+        let mut text = format!(
+            "Agent: {}\nName: {}\nStatus: {}\nInput: {}\nDeadline: {} seconds\n",
+            agent_id,
+            spec.authoring_name,
+            state,
+            spec.input_classification,
+            spec.default_deadline_seconds
+        );
+        if output.verbose || output.debug_authority {
+            text.push_str(&format!(
+                "Manifest: {}\n",
+                spec.authoring_package.manifest_digest
+            ));
+        }
+        if output.debug_authority {
+            text.push_str(&format!("Resource ETag: {}\n", resource.etag));
+        }
+        Ok(text)
+    }
+}
+
+fn adopt_local_agent(
+    root: &Path,
+    name: &str,
+    agent_id: &str,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let agent_id = ResourceId::parse_expected(agent_id, ResourceKind::Agent).map_err(|_| {
+        CliError::InvalidOptionValue {
+            option: "--agent-id",
+            value: agent_id.to_owned(),
+        }
+    })?;
+    let (client, _) = local_public_http_client(root)?;
+    let entry = agent::adopt_agent(root, &client, name, agent_id).map_err(CliError::Agent)?;
+    if output.mode == agent::AgentOutputMode::Json {
+        render_json(&serde_json::json!({
+            "schema_version": 1,
+            "agent_name": name,
+            "agent_id": entry.agent_id,
+            "state": "adopted",
+            "environment": entry.environment,
+            "manifest_digest": (output.verbose || output.debug_authority).then_some(entry.manifest_digest)
+        }))
+    } else {
+        let mut text = format!("Adopted {name}\nAgent: {}\n", entry.agent_id);
+        if output.verbose || output.debug_authority {
+            text.push_str(&format!("Manifest: {}\n", entry.manifest_digest));
+        }
+        Ok(text)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AgentRunReportV1<'a> {
+    schema_version: u16,
+    agent_name: &'a str,
+    agent_id: &'a ResourceId,
+    run_id: &'a ResourceId,
+    run_state: RunState,
+    result: Option<&'a ValueRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authority: Option<serde_json::Value>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_local_agent(
+    root: &Path,
+    selector: &str,
+    inline_input: Option<&str>,
+    input_file: Option<&Path>,
+    detach: bool,
+    timeout_seconds: u64,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let agent_id = agent::resolve_agent_id(root, selector).map_err(CliError::Agent)?;
+    let lock = agent::load_lock(root).map_err(CliError::Agent)?;
+    let agent_name = lock
+        .agents
+        .iter()
+        .find(|(_, entry)| entry.agent_id == agent_id)
+        .map_or_else(|| selector.to_owned(), |(name, _)| name.clone());
+    let (management, _) = local_public_http_client(root)?;
+    let resource = agent::read_resource(&management, &agent_id).map_err(CliError::Agent)?;
+    if resource.gate_state != insight_platform_contracts::AdministrativeGate::Enabled {
+        return Err(CliError::RuntimeState(format!(
+            "Agent {agent_name:?} has no active Deployment"
+        )));
+    }
+    let ResourceDocument::Agent(spec) = resource.draft.document else {
+        return Err(CliError::RuntimeState(
+            "Agent Resource returned a non-Agent document".to_owned(),
+        ));
+    };
+    let input_bytes = match (inline_input, input_file) {
+        (Some(value), None) => value.as_bytes().to_vec(),
+        (None, Some(path)) => read_bounded_run_request(path)?,
+        _ => return Err(CliError::Usage),
+    };
+    let input_value = parse_strict_json(
+        &input_bytes,
+        JsonLimits {
+            max_bytes: 1_048_576,
+            max_depth: 64,
+            max_properties_per_object: 256,
+            max_items_per_array: 4_096,
+            max_string_bytes: 262_144,
+        },
+    )
+    .map_err(|error| CliError::RuntimeState(format!("Agent input is invalid JSON: {error}")))?;
+    spec.input_schema
+        .validate_instance(&input_value)
+        .map_err(|error| {
+            CliError::RuntimeState(format!("Agent input does not match its schema: {error}"))
+        })?;
+    let deadline_seconds = u64::from(spec.default_deadline_seconds).min(timeout_seconds);
+    let deadline_delta =
+        i64::try_from(deadline_seconds).map_err(|_| CliError::InvalidOptionValue {
+            option: "--timeout-seconds",
+            value: timeout_seconds.to_string(),
+        })?;
+    let request = run::CreateRunRequestV1 {
+        agent_id: agent_id.clone(),
+        input: run::CreateRunInputV1 {
+            classification: spec.input_classification,
+            schema_digest: spec.input_schema.canonical_digest.clone(),
+            value: ValueRef::Inline { value: input_value },
+        },
+        deadline: UtcTimestamp::from_datetime(Utc::now() + ChronoDuration::seconds(deadline_delta)),
+    };
+    let request_bytes =
+        serde_json::to_vec(&request).map_err(|error| CliError::RuntimeState(error.to_string()))?;
+    let (runtime, _) = local_runtime_http_client(root)?;
+    let created = run::create_run(&runtime, &request_bytes).map_err(CliError::Run)?;
+    if lock.agents.contains_key(&agent_name) {
+        agent::remember_run(root, &agent_name, created.run_id.clone()).map_err(CliError::Agent)?;
+    }
+    if detach {
+        return render_agent_run_report(&agent_name, &agent_id, &created, None, output);
+    }
+    let mut event_output = Vec::new();
+    let terminal = run::watch_run_with_cursor_journal(
+        &runtime,
+        &created.run_id,
+        Duration::from_secs(timeout_seconds),
+        &mut event_output,
+        &root.join(PROJECT_DIRECTORY).join("run-events"),
+    )
+    .map_err(CliError::Run)?;
+    let result = if terminal.state == RunState::Succeeded {
+        Some(run::read_run_result(&runtime, &terminal.run_id).map_err(CliError::Run)?)
+    } else {
+        None
+    };
+    let rendered =
+        render_agent_run_report(&agent_name, &agent_id, &terminal, result.as_ref(), output)?;
+    if terminal.state != RunState::Succeeded {
+        return Err(CliError::RuntimeState(format!(
+            "Run {} reached terminal state {}",
+            terminal.run_id, terminal.state
+        )));
+    }
+    Ok(rendered)
+}
+
+fn render_agent_run_report(
+    agent_name: &str,
+    agent_id: &ResourceId,
+    run: &run::RunViewV1,
+    result: Option<&run::RunResultViewV1>,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let report = AgentRunReportV1 {
+        schema_version: 1,
+        agent_name,
+        agent_id,
+        run_id: &run.run_id,
+        run_state: run.state,
+        result: result.map(|result| &result.value),
+        authority: output.debug_authority.then(|| {
+            serde_json::json!({
+                "agent_deployment_id": run.agent_deployment_id,
+                "run_etag": run.etag
+            })
+        }),
+    };
+    if output.mode == agent::AgentOutputMode::Json {
+        return render_json(&report);
+    }
+    let mut text = format!(
+        "Run: {}\nAgent: {}\nStatus: {}\n",
+        run.run_id, agent_name, run.state
+    );
+    if let Some(result) = result {
+        let value = serde_json::to_string_pretty(&result.value)
+            .map_err(|error| CliError::RuntimeState(error.to_string()))?;
+        text.push_str(&format!("Result: {value}\n"));
+    }
+    if output.debug_authority {
+        text.push_str(&format!(
+            "Deployment: {}\nRun ETag: {}\n",
+            run.agent_deployment_id, run.etag
+        ));
+    }
+    Ok(text)
+}
+
+fn read_local_agent_logs(
+    root: &Path,
+    selector: &str,
+    follow: bool,
+    _output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let run_id = match ResourceId::parse_expected(selector, ResourceKind::Run) {
+        Ok(run_id) => run_id,
+        Err(_) => agent::latest_run_for_agent(root, selector).map_err(CliError::Agent)?,
+    };
+    let (client, _) = local_runtime_http_client(root)?;
+    let mut bytes = Vec::new();
+    if follow {
+        run::watch_run_with_cursor_journal(
+            &client,
+            &run_id,
+            Duration::from_secs(3_600),
+            &mut bytes,
+            &root.join(PROJECT_DIRECTORY).join("run-events"),
+        )
+        .map_err(CliError::Run)?;
+    } else {
+        run::read_run_events_with_cursor_journal(
+            &client,
+            &run_id,
+            &mut bytes,
+            &root.join(PROJECT_DIRECTORY).join("run-events"),
+        )
+        .map_err(CliError::Run)?;
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| CliError::RuntimeState("Run event output is not UTF-8".to_owned()))
+}
+
+fn read_local_agent_result(
+    root: &Path,
+    run_id: &str,
+    output: agent::AgentOutputOptions,
+) -> Result<String, CliError> {
+    let run_id = parse_run_id(run_id)?;
+    let (client, _) = local_runtime_http_client(root)?;
+    let result = run::read_run_result(&client, &run_id).map_err(CliError::Run)?;
+    if output.mode == agent::AgentOutputMode::Json {
+        return render_json(&serde_json::json!({
+            "schema_version": 1,
+            "run_id": result.run_id,
+            "run_state": "succeeded",
+            "result": result.value,
+            "schema_digest": output.debug_authority.then_some(result.schema_digest),
+            "content_digest": output.debug_authority.then_some(result.content_digest)
+        }));
+    }
+    let value = serde_json::to_string_pretty(&result.value)
+        .map_err(|error| CliError::RuntimeState(error.to_string()))?;
+    let mut text = format!("Run: {}\nResult: {value}\n", result.run_id);
+    if output.debug_authority {
+        text.push_str(&format!(
+            "Schema: {}\nContent: {}\n",
+            result.schema_digest, result.content_digest
+        ));
+    }
+    Ok(text)
 }
 
 fn apply_local_manifest(
@@ -6118,5 +7092,86 @@ mod tests {
             ]),
             Err(CliError::MissingValue("--file"))
         ));
+    }
+
+    #[test]
+    fn command_parser_accepts_the_closed_agent_journey() {
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("agent"),
+                OsString::from("validate"),
+                OsString::from("--file"),
+                OsString::from("agent.yaml"),
+                OsString::from("--output"),
+                OsString::from("json"),
+            ]),
+            Ok(CliCommand::AgentValidate {
+                file,
+                output: agent::AgentOutputOptions {
+                    mode: agent::AgentOutputMode::Json,
+                    ..
+                },
+                ..
+            }) if file == Path::new("agent.yaml")
+        ));
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("agent"),
+                OsString::from("publish"),
+                OsString::from("--file"),
+                OsString::from("agent.yaml"),
+                OsString::from("--verbose"),
+                OsString::from("--debug-authority"),
+            ]),
+            Ok(CliCommand::AgentPublish {
+                wait: true,
+                output: agent::AgentOutputOptions {
+                    verbose: true,
+                    debug_authority: true,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("agent"),
+                OsString::from("run"),
+                OsString::from("echo-agent"),
+                OsString::from("--input"),
+                OsString::from("{\"message\":\"hello\"}"),
+                OsString::from("--detach"),
+                OsString::from("--timeout-seconds"),
+                OsString::from("90"),
+            ]),
+            Ok(CliCommand::AgentRun {
+                selector,
+                detach: true,
+                timeout_seconds: 90,
+                ..
+            }) if selector == "echo-agent"
+        ));
+        assert!(matches!(
+            parse_command(&[
+                OsString::from("agent"),
+                OsString::from("run"),
+                OsString::from("echo-agent"),
+                OsString::from("--input"),
+                OsString::from("{}"),
+                OsString::from("--file"),
+                OsString::from("input.json"),
+            ]),
+            Err(CliError::Usage)
+        ));
+    }
+
+    #[test]
+    fn default_help_keeps_platform_automation_behind_advanced_help() {
+        let default = usage();
+        assert!(default.contains("insight agent publish"));
+        assert!(!default.contains("insight apply --file"));
+        let advanced = advanced_usage();
+        assert!(advanced.contains("insight apply --file"));
+        assert!(advanced.contains("insight artifact upload"));
     }
 }
