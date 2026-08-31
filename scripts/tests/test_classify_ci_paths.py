@@ -39,8 +39,8 @@ class ClassifyCiPathsTests(unittest.TestCase):
     def test_base_journey_runner_uses_cli_without_runtime(self) -> None:
         result = MODULE.classify(
             [
-                "scripts/run-productization-base-journey.sh",
-                "scripts/tests/test_productization_base_journey_runner.py",
+                "scripts/run-productization-journey.sh",
+                "scripts/tests/test_productization_journey_runner.py",
             ]
         )
         self.assertTrue(result["cli"])

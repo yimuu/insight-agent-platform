@@ -13,6 +13,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::dev_profile;
+
 const DEFAULT_RELEASE_BASE_URL: &str = "https://github.com/yimuu/insight-agent-platform/releases";
 const MAX_BUNDLE_BYTES: usize = 1_048_576;
 const MAX_SIGNATURE_BYTES: usize = 16_384;
@@ -87,6 +89,13 @@ pub struct ReleaseBundleV1 {
     pub cli: Vec<ReleaseCliV1>,
     pub images: Vec<ReleaseImageV1>,
     pub metadata: Vec<ReleaseArtifactV1>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedRelease {
+    pub bundle_digest: String,
+    pub version: String,
+    pub runtime_image: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +204,135 @@ fn fetch_verified_bundle(version: Option<&str>) -> Result<ReleaseBundleV1, Relea
     verify_release_bundle(&bundle, &detached, &embedded_public_key()?)
 }
 
+pub fn load_current_release(
+    cache_root: &Path,
+    offline: bool,
+) -> Result<VerifiedRelease, ReleaseError> {
+    // Establish the compiled organization trust root before doing any network or Docker work.
+    // Development/source builds deliberately have no release trust root and must fail closed
+    // without contacting the release service.
+    let public_key = embedded_public_key()?;
+    let version = env!("CARGO_PKG_VERSION");
+    let cache = cache_root.join("releases").join(version);
+    let bundle_path = cache.join("release-bundle.json");
+    let signature_path = cache.join("release-bundle.signature.json");
+    let (bundle_bytes, signature_bytes) = if offline {
+        (
+            fs::read(&bundle_path).map_err(|_| {
+                ReleaseError::new(format!(
+                    "offline release cache misses {}; reconnect and run `insight dev` once",
+                    bundle_path.display()
+                ))
+            })?,
+            fs::read(&signature_path).map_err(|_| {
+                ReleaseError::new(format!(
+                    "offline release cache misses {}; reconnect and run `insight dev` once",
+                    signature_path.display()
+                ))
+            })?,
+        )
+    } else {
+        let base = release_asset_base(Some(version))?;
+        let bundle = fetch_bytes(&asset_url(&base, "release-bundle.json")?, MAX_BUNDLE_BYTES)?;
+        let signature = fetch_bytes(
+            &asset_url(&base, "release-bundle.signature.json")?,
+            MAX_SIGNATURE_BYTES,
+        )?;
+        (bundle, signature)
+    };
+    let bundle = verify_release_bundle(&bundle_bytes, &signature_bytes, &public_key)?;
+    if bundle.version != version {
+        return Err(ReleaseError::new(format!(
+            "verified release {} does not match CLI version {version}",
+            bundle.version
+        )));
+    }
+    if bundle.development_profile_digest
+        != dev_profile::registry_content_digest().map_err(ReleaseError::new)?
+        || bundle.profile_schema_digest != dev_profile::registry_schema_digest()
+    {
+        return Err(ReleaseError::new(
+            "CLI embedded profile/schema does not match the verified ReleaseBundle",
+        ));
+    }
+    verify_current_executable(&bundle)?;
+    if !offline {
+        write_release_cache(&cache, &bundle_bytes, &signature_bytes)?;
+    }
+    let runtime = bundle
+        .images
+        .iter()
+        .find(|image| image.name == "runtime")
+        .ok_or_else(|| ReleaseError::new("verified release has no runtime image"))?;
+    Ok(VerifiedRelease {
+        bundle_digest: digest_bytes(&bundle_bytes),
+        version: bundle.version,
+        runtime_image: format!("{}@{}", runtime.subject, runtime.index_digest),
+    })
+}
+
+fn verify_current_executable(bundle: &ReleaseBundleV1) -> Result<(), ReleaseError> {
+    let target = current_target().ok_or_else(|| {
+        ReleaseError::new("this operating system and architecture has no supported CLI release")
+    })?;
+    let expected = bundle
+        .cli
+        .iter()
+        .find(|entry| entry.target == target)
+        .ok_or_else(|| ReleaseError::new(format!("verified release does not contain {target}")))?;
+    let path = env::current_exe().map_err(|error| {
+        ReleaseError::new(format!("cannot locate current insight binary: {error}"))
+    })?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        ReleaseError::new(format!("cannot inspect current insight binary: {error}"))
+    })?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != expected.binary.bytes
+        || metadata.len() > MAX_CLI_BYTES
+    {
+        return Err(ReleaseError::new(
+            "current insight binary does not match the verified release metadata",
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        ReleaseError::new(format!("cannot verify current insight binary: {error}"))
+    })?;
+    if digest_bytes(&bytes) != expected.binary.sha256 {
+        return Err(ReleaseError::new(
+            "current insight binary digest does not match the verified ReleaseBundle",
+        ));
+    }
+    Ok(())
+}
+
+fn write_release_cache(cache: &Path, bundle: &[u8], signature: &[u8]) -> Result<(), ReleaseError> {
+    fs::create_dir_all(cache)
+        .map_err(|error| ReleaseError::new(format!("cannot create release cache: {error}")))?;
+    write_cache_file(&cache.join("release-bundle.json"), bundle)?;
+    write_cache_file(&cache.join("release-bundle.signature.json"), signature)
+}
+
+fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<(), ReleaseError> {
+    let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| ReleaseError::new(format!("cannot stage release cache: {error}")))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| ReleaseError::new(format!("cannot persist release cache: {error}")))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| ReleaseError::new(format!("cannot replace release cache: {error}")))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn release_asset_base(version: Option<&str>) -> Result<String, ReleaseError> {
     let root =
         env::var("INSIGHT_UPDATE_BASE_URL").unwrap_or_else(|_| DEFAULT_RELEASE_BASE_URL.to_owned());
@@ -225,7 +363,15 @@ fn fetch_bytes(url: &str, maximum: usize) -> Result<Vec<u8>, ReleaseError> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::limited(3))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.url().scheme() != "https" {
+                attempt.error("release redirect must preserve HTTPS")
+            } else if attempt.previous().len() >= 3 {
+                attempt.error("release redirect limit exceeded")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|error| ReleaseError::new(format!("cannot initialize update client: {error}")))?;
     let response = client

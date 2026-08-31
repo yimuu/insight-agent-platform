@@ -39,6 +39,8 @@ POLICY_PATHS = (
     Path("scripts/build-product-release.py"),
     Path("scripts/build-release-image-metadata.py"),
     Path("scripts/build-release-performance.py"),
+    Path("scripts/build-development-profile-performance.py"),
+    Path("scripts/qualify-development-profile.sh"),
     Path("scripts/sign-product-release.py"),
     Path("scripts/check-platform-candidate-pipeline.py"),
     Path("scripts/check-product-release.py"),

@@ -6,7 +6,7 @@
     {
       "id": "deterministic-first-run",
       "owner": "cli-and-orchestration",
-      "profile": "base",
+      "profile": "starter",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
       "fixture": "tests/productization/deterministic_first_run.rs",
       "automation_layer": "P2",
@@ -18,7 +18,7 @@
     {
       "id": "exact-model-streaming-chat",
       "owner": "model-worker",
-      "profile": "full",
+      "profile": "starter+model",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_model_worker", "platform_egress_broker", "platform_security_authority"],
       "fixture": "tests/productization/exact_model_streaming_chat.rs",
       "automation_layer": "P3",
@@ -30,7 +30,7 @@
     {
       "id": "native-and-remote-capability",
       "owner": "capability-workers",
-      "profile": "full",
+      "profile": "starter+remote-capability",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker", "platform_capability_remote_worker", "platform_egress_broker", "platform_security_authority"],
       "fixture": "tests/productization/native_and_remote_capability.rs",
       "automation_layer": "P3",
@@ -42,7 +42,7 @@
     {
       "id": "remote-mcp-tool-and-resource",
       "owner": "mcp-host",
-      "profile": "full",
+      "profile": "starter+mcp,remote-capability",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "platform_mcp_host", "platform_mcp_resource_host", "platform_egress_broker", "platform_security_authority"],
       "fixture": "tests/productization/remote_mcp_tool_and_resource.rs",
       "automation_layer": "P3",
@@ -54,7 +54,7 @@
     {
       "id": "context-retrieval-and-citation",
       "owner": "context-and-artifact",
-      "profile": "full",
+      "profile": "starter+context",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_context_worker", "platform_remote_context_worker", "platform_artifact_gateway", "platform_artifact_data_worker", "platform_egress_broker", "platform_security_authority"],
       "fixture": "tests/productization/context_retrieval_and_citation.rs",
       "automation_layer": "P3",
@@ -66,7 +66,7 @@
     {
       "id": "approval-task-resume",
       "owner": "tasks-and-orchestration",
-      "profile": "base",
+      "profile": "starter",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
       "fixture": "tests/productization/approval_task_resume.rs",
       "automation_layer": "P2",
@@ -78,7 +78,7 @@
     {
       "id": "timer-signal-restart-recovery",
       "owner": "orchestration-recovery",
-      "profile": "base",
+      "profile": "starter",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
       "fixture": "tests/productization/timer_signal_restart_recovery.rs",
       "automation_layer": "P2",
@@ -90,7 +90,7 @@
     {
       "id": "subagent-quota-and-cancel",
       "owner": "orchestration-and-quota",
-      "profile": "base",
+      "profile": "starter",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_native_worker"],
       "fixture": "tests/productization/subagent_quota_and_cancel.rs",
       "automation_layer": "P2",
@@ -102,7 +102,7 @@
     {
       "id": "artifact-lifecycle-and-rejection",
       "owner": "artifact-service",
-      "profile": "full",
+      "profile": "starter+wasi",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_artifact_gateway", "platform_artifact_data_worker", "platform_artifact_maintenance"],
       "fixture": "tests/productization/artifact_lifecycle_and_rejection.rs",
       "automation_layer": "P3",
@@ -114,7 +114,7 @@
     {
       "id": "wasi-and-remote-framework-capability",
       "owner": "sandbox-and-capability",
-      "profile": "full",
+      "profile": "starter+remote-capability,wasi",
       "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "platform_sandbox_controller", "platform_sandbox_attestor", "platform_sandbox_executor", "platform_egress_broker", "platform_security_authority"],
       "fixture": "tests/productization/wasi_and_remote_framework_capability.rs",
       "automation_layer": "P3",

@@ -1,22 +1,27 @@
-name: Productization base journey
+name: Productization starter and feature journey
 
 on:
   workflow_dispatch:
     inputs:
-      profile:
-        description: Closed local profile to qualify
+      features:
+        description: Closed starter feature set to qualify
         required: true
-        default: base
+        default: starter
         type: choice
         options:
-          - base
-          - full
+          - starter
+          - model
+          - remote-capability
+          - context
+          - mcp
+          - wasi
+          - all
 
 permissions:
   contents: read
 
 concurrency:
-  group: productization-journey-${{ github.ref }}-${{ inputs.profile }}
+  group: productization-journey-${{ github.ref }}-${{ inputs.features }}
   cancel-in-progress: true
 
 env:
@@ -26,8 +31,8 @@ env:
   CARGO_PROFILE_RELEASE_DEBUG: "0"
 
 jobs:
-  fresh-base-console:
-    name: Fresh ${{ inputs.profile }} CLI and real Console journey
+  fresh-starter-console:
+    name: Fresh starter + ${{ inputs.features }} CLI and real Console journey
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -42,8 +47,8 @@ jobs:
           node-version: "24"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: "v1-productization-base"
-          shared-key: "productization-base"
+          prefix-key: "v1-productization-starter"
+          shared-key: "productization-starter"
           cache-on-failure: "false"
       - name: Enable exact Console package manager
         run: |
@@ -52,45 +57,47 @@ jobs:
       - name: Run fresh public CLI and real Gateway Console journey
         run: |
           arguments=(
-            --project "$RUNNER_TEMP/insight-productization-${{ inputs.profile }}"
-            --profile "${{ inputs.profile }}"
+            --project "$RUNNER_TEMP/insight-productization-${{ inputs.features }}"
             --console-browser
             --node-bin "$(command -v node)"
             --browser-bin "$(command -v google-chrome)"
             --report-directory "$RUNNER_TEMP/productization-reports"
           )
-          if [[ "${{ inputs.profile }}" == "base" ]]; then
+          if [[ "${{ inputs.features }}" != "starter" ]]; then
+            arguments+=(--features "${{ inputs.features }}")
+          fi
+          if [[ "${{ inputs.features }}" == "starter" ]]; then
             arguments+=(
               --north-star-report "$RUNNER_TEMP/productization-north-star.json"
               --journey-started-epoch "$PLATFORM_PRODUCTIZATION_STARTED_EPOCH"
               --fresh-checkout
             )
           fi
-          scripts/run-productization-base-journey.sh "${arguments[@]}"
+          scripts/run-productization-journey.sh "${arguments[@]}"
       - name: Preserve bounded runtime diagnostics on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-${{ inputs.profile }}-failure-diagnostics-${{ github.sha }}
+          name: productization-${{ inputs.features }}-failure-diagnostics-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/logs/*.log
-            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/profile.json
-            ${{ runner.temp }}/insight-productization-${{ inputs.profile }}/.insight/runtime/processes.json
+            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/logs/*.log
+            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/profile.json
+            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/processes.json
           if-no-files-found: warn
           retention-days: 7
       - name: Preserve exact-revision scenario reports
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}
+          name: productization-${{ inputs.features }}-scenario-reports-${{ github.sha }}
           path: ${{ runner.temp }}/productization-reports/*.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve fresh-checkout north-star report
-        if: ${{ always() && inputs.profile == 'base' }}
+        if: ${{ always() && inputs.features == 'starter' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-base-north-star-${{ github.sha }}
+          name: productization-starter-north-star-${{ github.sha }}
           path: ${{ runner.temp }}/productization-north-star.json
           if-no-files-found: error
           retention-days: 14

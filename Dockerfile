@@ -8,6 +8,7 @@ COPY crates ./crates
 COPY src ./src
 COPY catalog ./catalog
 COPY contracts ./contracts
+COPY release ./release
 COPY proto ./proto
 COPY database ./database
 RUN cargo chef prepare --recipe-path recipe.json
@@ -19,6 +20,8 @@ COPY --from=planner /workspace/recipe.json recipe.json
 COPY proto ./proto
 RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin insight \
+    --bin platform-schema \
+    --bin platform-dev-bootstrap \
     --bin platform-callback-api \
     --bin platform-gateway \
     --bin platform-model-worker \
@@ -50,10 +53,13 @@ COPY crates ./crates
 COPY src ./src
 COPY catalog ./catalog
 COPY contracts ./contracts
+COPY release ./release
 COPY database ./database
 
 RUN cargo build --locked --release --workspace \
     --bin insight \
+    --bin platform-schema \
+    --bin platform-dev-bootstrap \
     --bin platform-callback-api \
     --bin platform-gateway \
     --bin platform-model-worker \
@@ -93,6 +99,8 @@ WORKDIR /app
 FROM runtime-base AS runtime
 
 COPY --from=builder /workspace/target/release/insight /usr/local/bin/insight
+COPY --from=builder /workspace/target/release/platform-schema /usr/local/bin/platform-schema
+COPY --from=builder /workspace/target/release/platform-dev-bootstrap /usr/local/bin/platform-dev-bootstrap
 COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/bin/platform-callback-api
 COPY --from=builder /workspace/target/release/platform-gateway /usr/local/bin/platform-gateway
 COPY --from=builder /workspace/target/release/platform-model-worker /usr/local/bin/platform-model-worker

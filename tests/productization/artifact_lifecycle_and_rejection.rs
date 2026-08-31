@@ -45,7 +45,7 @@ impl ArtifactLifecycleEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "artifact-lifecycle-and-rejection",
             "contract_profile": "insight.platform/v1",
-            "profile": "full",
+            "profile": "starter+wasi",
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {

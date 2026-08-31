@@ -59,9 +59,9 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
         or path.name == "sign-product-release.py"
         or path.name == "check-product-release.py"
         or path.name == "test_product_release.py"
-        or path.name == "run-productization-base-journey.sh"
+        or path.name == "run-productization-journey.sh"
         or path.name == "qualify-productization-first-run.py"
-        or path.name == "test_productization_base_journey_runner.py"
+        or path.name == "test_productization_journey_runner.py"
         for path in normalized
     )
     policy = any(
@@ -99,10 +99,10 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
                     or path.name == "check-product-release.py"
                     or path.name == "test_product_release.py"
                     or path.name == "classify-ci-paths.py"
-                    or path.name == "run-productization-base-journey.sh"
+                    or path.name == "run-productization-journey.sh"
                     or path.name == "qualify-productization-first-run.py"
                     or path.name == "test_classify_ci_paths.py"
-                    or path.name == "test_productization_base_journey_runner.py"
+                    or path.name == "test_productization_journey_runner.py"
                     or path.name == "test_productization_scenario_reports.py"
                 )
             )

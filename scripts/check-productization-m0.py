@@ -32,7 +32,15 @@ REQUIRED_FIELDS = {
     "assertions",
     "failure_probes",
 }
-ALLOWED_PROFILES = {"base", "full"}
+ALLOWED_PROFILES = {
+    "starter",
+    "starter+context",
+    "starter+mcp,remote-capability",
+    "starter+model",
+    "starter+remote-capability",
+    "starter+remote-capability,wasi",
+    "starter+wasi",
+}
 REQUIRED_ENTRYPOINTS = {"cli", "http_fixture", "console"}
 
 
@@ -76,7 +84,7 @@ def main() -> None:
         if not isinstance(scenario.get("owner"), str) or not scenario["owner"]:
             fail(f"{scenario_id}.owner must name one responsible implementation surface")
         if scenario.get("profile") not in ALLOWED_PROFILES:
-            fail(f"{scenario_id}.profile must be base or full")
+            fail(f"{scenario_id}.profile is not a closed starter feature profile")
         for field in ("dependencies", "capabilities", "entrypoints", "assertions", "failure_probes"):
             list_of_strings(scenario.get(field), field, scenario_id)
         fixture = scenario.get("fixture")

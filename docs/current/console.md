@@ -16,4 +16,4 @@ corepack pnpm run lint
 corepack pnpm run build
 ```
 
-fresh full-profile journey 已用 headless Chrome 对真实 Gateway/PostgreSQL 完成 Run/Task/Artifact/Operation 读取和 mutation。
+fresh `all` feature journey 已用 headless Chrome 对真实 Gateway/PostgreSQL 完成 Run/Task/Artifact/Operation 读取和 mutation。

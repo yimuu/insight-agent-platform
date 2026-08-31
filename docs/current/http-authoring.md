@@ -10,7 +10,7 @@ examples/productization/http-resource-lifecycle.sh \
   --timeout-seconds 120
 ```
 
-前置条件是已经执行 `insight init` 和 `insight dev --profile base`，并安装 `curl`、`jq`。输入文件与
+前置条件是已经执行 `insight init` 和默认 `insight dev` starter，并安装 `curl`、`jq`。输入文件与
 `insight apply --file` 相同：`schema_version = 1`、`kind = insight.platform.apply/v1`，其中 `create`、
 `publish` 和 `deployment` 分别是公开请求正文。fixture 不调用 `insight apply`、数据库或 internal RPC，也不生成
 Secret value、Plan 或 mutable binding。

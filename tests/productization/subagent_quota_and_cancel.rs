@@ -36,7 +36,7 @@ impl SubagentEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "subagent-quota-and-cancel",
             "contract_profile": "insight.platform/v1",
-            "profile": "base",
+            "profile": "starter",
             "automation_layer": "P2",
             "source_revision": revision,
             "environment": {

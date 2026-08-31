@@ -4,7 +4,8 @@ set -euo pipefail
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project=""
 report_directory=""
-profile="base"
+features=""
+profile_label="starter"
 insight_bin="${PLATFORM_INSIGHT_BIN:-$workspace/target/release/insight}"
 keep_dependencies=false
 console_browser=false
@@ -17,18 +18,18 @@ fresh_checkout=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-productization-base-journey.sh [options]
+Usage: scripts/run-productization-journey.sh [options]
 
 Runs a fresh selected-profile productization journey against real local Platform roles.
 
 Options:
   --project <new-path>          Use this not-yet-existing project path instead of mktemp.
   --report-directory <path>    Write and validate exact-revision scenario evidence.
-  --profile <base|full>        Start the selected closed local profile (default: base).
+  --features <list|all>        Add a canonical feature closure to starter (default: none).
   --insight-bin <path>         Use an existing insight binary (default: target/release/insight).
   --keep-dependencies          Leave the exact Docker Compose dependencies running.
   --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
-  --node-bin <path>           Node.js executable for full remote fixtures and --console-browser (default: current or login-shell PATH).
+  --node-bin <path>           Node.js executable for the remote-framework fixture and --console-browser (default: current or login-shell PATH).
   --browser-bin <path>        Chromium/Chrome executable for --console-browser.
   --north-star-report <path>  Write a closed checkout-to-first-Run qualification report.
   --journey-started-epoch <s> Start clock captured before the fresh checkout.
@@ -49,9 +50,9 @@ while (($# > 0)); do
       report_directory=$2
       shift 2
       ;;
-    --profile)
-      (($# >= 2)) || { echo "--profile requires a value" >&2; exit 2; }
-      profile=$2
+    --features)
+      (($# >= 2)) || { echo "--features requires a value" >&2; exit 2; }
+      features=$2
       shift 2
       ;;
     --insight-bin)
@@ -103,13 +104,35 @@ while (($# > 0)); do
   esac
 done
 
-if [[ "$profile" != "base" && "$profile" != "full" ]]; then
-  echo "--profile must be base or full" >&2
+if ! features="$(python3 - "$features" <<'PY'
+import sys
+
+raw = sys.argv[1]
+allowed = {"context", "mcp", "model", "remote-capability", "wasi"}
+if not raw:
+    print("")
+elif raw == "all":
+    print("all")
+else:
+    values = raw.split(",")
+    if any(not value or value.strip() != value or value not in allowed for value in values):
+        raise SystemExit("invalid feature closure")
+    if len(values) != len(set(values)):
+        raise SystemExit("duplicate feature")
+    print(",".join(sorted(values)))
+PY
+)"; then
+  echo "--features must be all or a unique comma-separated set of context,mcp,model,remote-capability,wasi" >&2
   exit 2
 fi
+if [[ "$features" == "all" ]]; then
+  profile_label="all"
+elif [[ -n "$features" ]]; then
+  profile_label="starter+$features"
+fi
 if [[ -n "$north_star_report" ]]; then
-  if [[ "$profile" != "base" ]]; then
-    echo "--north-star-report only qualifies the base profile" >&2
+  if [[ -n "$features" ]]; then
+    echo "--north-star-report only qualifies the starter profile" >&2
     exit 2
   fi
   if [[ "$fresh_checkout" != true || ! "$journey_started_epoch" =~ ^[0-9]{10}$ ]]; then
@@ -129,7 +152,11 @@ if ! command -v pgrep >/dev/null 2>&1; then
   echo "pgrep is required to prove that no repository-local Platform process is already running" >&2
   exit 2
 fi
-if [[ "$profile" == "full" || "$console_browser" == true ]]; then
+requires_node=false
+if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",wasi,"*) || "$console_browser" == true ]]; then
+  requires_node=true
+fi
+if [[ "$requires_node" == true ]]; then
   if [[ -z "$node_bin" ]]; then
     node_bin="$(command -v node || true)"
   fi
@@ -142,14 +169,14 @@ if [[ "$profile" == "full" || "$console_browser" == true ]]; then
     fi
   fi
   if [[ -z "$node_bin" || ! -x "$node_bin" ]]; then
-    echo "the full profile and --console-browser require an executable Node.js; pass --node-bin if it is not exposed by the current or login-shell PATH" >&2
+    echo "the selected remote-framework fixture or --console-browser requires an executable Node.js; pass --node-bin if it is not exposed by the current or login-shell PATH" >&2
     exit 2
   fi
 fi
-if [[ "$profile" == "full" || "$console_browser" == true ]]; then
+if [[ "$requires_node" == true ]]; then
   corepack_bin="$(dirname "$node_bin")/corepack"
   if [[ ! -x "$corepack_bin" ]]; then
-    echo "the full profile and --console-browser require corepack next to the selected Node.js executable" >&2
+    echo "the selected remote-framework fixture or --console-browser requires corepack next to the selected Node.js executable" >&2
     exit 2
   fi
 fi
@@ -234,7 +261,7 @@ trap cleanup EXIT
 
 cd "$workspace"
 cargo build --locked --release -p insight-cli --bin insight
-if [[ "$profile" == "full" ]]; then
+if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",wasi,"*) ]]; then
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
     --dir "$workspace/examples/productization/langgraph-reference" install --frozen-lockfile
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
@@ -252,10 +279,14 @@ if [[ ! -x "$insight_bin" ]]; then
 fi
 
 "$insight_bin" doctor --json
-"$insight_bin" init --path "$project" --name "productization-$profile"
-"$insight_bin" dev --path "$project" --profile "$profile"
+"$insight_bin" init --path "$project" --name "productization-${profile_label%%+*}"
+dev_arguments=(--path "$project" --from-source)
+if [[ -n "$features" ]]; then
+  dev_arguments+=(--features "$features")
+fi
+"$insight_bin" dev "${dev_arguments[@]}"
 "$insight_bin" status --path "$project"
-# The full profile can spend longer than the deliberately short local token TTL
+# A feature-rich profile can spend longer than the deliberately short local token TTL
 # compiling and starting every role. Rotate only after the runtime is ready so
 # the public journey receives a fresh credential. Never print the bearer token
 # into CI logs; the CLI persists it with the existing private-file permissions.
@@ -264,7 +295,7 @@ fi
 test_environment=(
   "PLATFORM_INSIGHT_BIN=$insight_bin"
   "PLATFORM_PRODUCTIZATION_PROJECT=$project"
-  "PLATFORM_PRODUCTIZATION_PROFILE=$profile"
+  "PLATFORM_PRODUCTIZATION_FEATURES=$features"
 )
 if [[ -n "$node_bin" ]]; then
   test_environment+=("PLATFORM_PRODUCTIZATION_NODE_BIN=$node_bin")

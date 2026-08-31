@@ -46,7 +46,7 @@ impl WasiFrameworkEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "wasi-and-remote-framework-capability",
             "contract_profile": "insight.platform/v1",
-            "profile": "full",
+            "profile": "starter+remote-capability,wasi",
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},

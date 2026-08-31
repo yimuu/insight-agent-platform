@@ -47,7 +47,7 @@ impl ExactModelEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "exact-model-streaming-chat",
             "contract_profile": "insight.platform/v1",
-            "profile": "full",
+            "profile": "starter+model",
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},
@@ -55,7 +55,7 @@ impl ExactModelEvidence {
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "status": if self.console_passed { "passed" } else { "incomplete" },
             "entrypoints": [
-                check("cli", "passed", "public apply/run/watch/result commands completed against the fresh full profile"),
+                check("cli", "passed", "public apply/run/watch/result commands completed against the fresh starter+model profile"),
                 check("http_fixture", "passed", "the exact installed Egress closure streamed a deterministic TLS response from the bounded local fixture"),
                 console,
             ],

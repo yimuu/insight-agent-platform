@@ -29,7 +29,7 @@ impl McpEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "remote-mcp-tool-and-resource",
             "contract_profile": "insight.platform/v1",
-            "profile": "full",
+            "profile": "starter+mcp,remote-capability",
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},

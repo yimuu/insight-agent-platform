@@ -23,7 +23,7 @@ pnpm run dev
 和 `/v1`，不保存 token、不改写业务响应，也不拥有状态：
 
 ```bash
-scripts/run-productization-base-journey.sh --console-browser \
+scripts/run-productization-journey.sh --console-browser \
   --node-bin "$(command -v node)" \
   --browser-bin "/path/to/Chromium-or-Chrome"
 ```

@@ -47,7 +47,7 @@ def main() -> None:
         "report_kind": "insight.productization.north-star-report/v1",
         "contract_profile": "insight.platform/v1",
         "source_revision": arguments.source_revision,
-        "profile": "base",
+        "profile": "starter",
         "environment": {
             "os": platform.system().lower(),
             "architecture": platform.machine().lower(),
@@ -60,7 +60,7 @@ def main() -> None:
         "maximum_elapsed_ms": 600_000,
         "documented_manual_commands": [
             "git clone <repository> && cd insight-agent-platform",
-            "scripts/run-productization-base-journey.sh --profile base --console-browser --report-directory <directory>",
+            "scripts/run-productization-journey.sh --console-browser --report-directory <directory>",
         ],
         "maximum_manual_commands": 3,
         "external_model_key_required": False,

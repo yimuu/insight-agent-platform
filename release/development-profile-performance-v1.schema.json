@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight:development-profile-performance:v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "version", "git_commit", "profile", "environment", "measurements", "gates", "qualification", "status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "insight.dev.performance-report/v1"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "features", "digest"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "features": {"type": "array", "uniqueItems": true, "items": {"enum": ["context", "mcp", "model", "remote-capability", "wasi"]}},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["class", "deployment", "production", "cpu_count", "memory_bytes", "network_mbps"],
+      "properties": {
+        "class": {"const": "development"}, "deployment": {"const": "single_node"}, "production": {"const": false},
+        "cpu_count": {"type": "integer", "minimum": 1}, "memory_bytes": {"type": "integer", "minimum": 1}, "network_mbps": {"type": "integer", "minimum": 1}
+      }
+    },
+    "measurements": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cold_ready_seconds", "warm_ready_seconds", "download_seconds", "download_content_bytes", "download_bytes_method", "idle_stabilization_seconds", "idle_rss_bytes", "idle_cpu_percent_single_core", "project_disk_bytes", "source_compilations"],
+      "properties": {
+        "cold_ready_seconds": {"type": "number", "minimum": 0}, "warm_ready_seconds": {"type": "number", "minimum": 0},
+        "download_seconds": {"type": "number", "minimum": 0}, "download_content_bytes": {"type": "integer", "minimum": 1},
+        "download_bytes_method": {"const": "verified_image_content_size"}, "idle_stabilization_seconds": {"type": "integer", "minimum": 1},
+        "idle_rss_bytes": {"type": "integer", "minimum": 1}, "idle_cpu_percent_single_core": {"type": "number", "minimum": 0},
+        "project_disk_bytes": {"type": "integer", "minimum": 1}, "source_compilations": {"type": "integer", "minimum": 0}
+      }
+    },
+    "gates": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object", "additionalProperties": false, "required": ["name", "observed", "budget", "status"], "properties": {"name": {"type": "string"}, "observed": {"type": "number"}, "budget": {"type": "number"}, "status": {"enum": ["passed", "failed"]}}}},
+    "qualification": {"type": "object", "additionalProperties": false, "required": ["L4", "L5", "L6"], "properties": {"L4": {"const": "not_run"}, "L5": {"const": "not_run"}, "L6": {"const": "not_run"}}},
+    "status": {"enum": ["passed", "failed"]}
+  }
+}

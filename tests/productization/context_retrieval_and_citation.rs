@@ -38,7 +38,7 @@ impl ContextRetrievalEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "context-retrieval-and-citation",
             "contract_profile": "insight.platform/v1",
-            "profile": "full",
+            "profile": "starter+context",
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {
@@ -50,7 +50,7 @@ impl ContextRetrievalEvidence {
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "status": if self.console_passed { "passed" } else { "incomplete" },
             "entrypoints": [
-                check("cli", "passed", "public insight apply/operation/run/watch/result commands completed against the fresh full profile"),
+                check("cli", "passed", "public insight apply/operation/run/watch/result commands completed against the fresh starter+context profile"),
                 check("http_fixture", "passed", "raw /v1 triggered the Dataset build, read its typed Operation result and exact immutable generation, and exercised invalid build admission"),
                 console,
             ],

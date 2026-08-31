@@ -39,8 +39,14 @@ const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
 const REPORT_DIRECTORY_ENV: &str = "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY";
 const FRESH_PROFILE_ENV: &str = "PLATFORM_PRODUCTIZATION_FRESH_PROFILE";
 const FIRST_RUN_MARKER_ENV: &str = "PLATFORM_PRODUCTIZATION_FIRST_RUN_MARKER";
+const FEATURES_ENV: &str = "PLATFORM_PRODUCTIZATION_FEATURES";
 const CONTRACT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn feature_enabled(name: &str) -> bool {
+    let selected = env::var(FEATURES_ENV).unwrap_or_default();
+    selected == "all" || selected.split(',').any(|feature| feature == name)
+}
 
 struct RestartedOrchestrationWorker(Child);
 
@@ -912,18 +918,17 @@ fn public_cli_deterministic_first_run() {
     );
     assert_eq!(result["schema_digest"], schema_digest);
 
-    let mut capability_evidence =
-        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
-            native_and_remote_capability::run(
-                insight,
-                project,
-                fixture.path(),
-                &authoring_ref,
-                &qualification_ref,
-            )
-        });
-    let mut mcp_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
-        .then(|| {
+    let mut capability_evidence = feature_enabled("remote-capability").then(|| {
+        native_and_remote_capability::run(
+            insight,
+            project,
+            fixture.path(),
+            &authoring_ref,
+            &qualification_ref,
+        )
+    });
+    let mut mcp_evidence =
+        (feature_enabled("mcp") && feature_enabled("remote-capability")).then(|| {
             remote_mcp_tool_and_resource::run(
                 insight,
                 project,
@@ -933,7 +938,7 @@ fn public_cli_deterministic_first_run() {
             )
         });
     let mut wasi_framework_evidence =
-        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
+        (feature_enabled("wasi") && feature_enabled("remote-capability")).then(|| {
             wasi_and_remote_framework_capability::run(
                 insight,
                 project,
@@ -942,16 +947,15 @@ fn public_cli_deterministic_first_run() {
                 &qualification_ref,
             )
         });
-    let mut model_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
-        .then(|| {
-            exact_model_streaming_chat::run(
-                insight,
-                project,
-                fixture.path(),
-                &authoring_ref,
-                &qualification_ref,
-            )
-        });
+    let mut model_evidence = feature_enabled("model").then(|| {
+        exact_model_streaming_chat::run(
+            insight,
+            project,
+            fixture.path(),
+            &authoring_ref,
+            &qualification_ref,
+        )
+    });
     let (mut timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
         insight,
         project,
@@ -969,16 +973,15 @@ fn public_cli_deterministic_first_run() {
         &agent_report,
         &qualification_ref,
     );
-    let mut context_evidence =
-        (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full")).then(|| {
-            context_retrieval_and_citation::run(
-                insight,
-                project,
-                fixture.path(),
-                &authoring_ref,
-                &qualification_ref,
-            )
-        });
+    let mut context_evidence = feature_enabled("context").then(|| {
+        context_retrieval_and_citation::run(
+            insight,
+            project,
+            fixture.path(),
+            &authoring_ref,
+            &qualification_ref,
+        )
+    });
     let approval_evidence = approval_task_resume::run(
         insight,
         project,
@@ -1007,17 +1010,16 @@ fn public_cli_deterministic_first_run() {
                 .map(|evidence| evidence.run_id.as_str()),
         ),
     );
-    let artifact_evidence = (env::var("PLATFORM_PRODUCTIZATION_PROFILE").as_deref() == Ok("full"))
-        .then(|| {
-            artifact_lifecycle_and_rejection::run(
-                insight,
-                project,
-                fixture.path(),
-                &plan_upload,
-                &plan,
-                approval_evidence.console_passed,
-            )
-        });
+    let artifact_evidence = feature_enabled("wasi").then(|| {
+        artifact_lifecycle_and_rejection::run(
+            insight,
+            project,
+            fixture.path(),
+            &plan_upload,
+            &plan,
+            approval_evidence.console_passed,
+        )
+    });
     if approval_evidence.console_passed {
         timer_signal_evidence.mark_console_passed();
         subagent_evidence.mark_console_passed();
@@ -1078,20 +1080,8 @@ fn public_cli_deterministic_first_run() {
         String::from_utf8_lossy(&stopped.stdout),
         String::from_utf8_lossy(&stopped.stderr)
     );
-    let selected_profile =
-        env::var("PLATFORM_PRODUCTIZATION_PROFILE").unwrap_or_else(|_| "base".to_owned());
-    assert!(
-        matches!(selected_profile.as_str(), "base" | "full"),
-        "productization profile must be closed"
-    );
     let restarted = Command::new(insight)
-        .args([
-            "dev",
-            "--profile",
-            &selected_profile,
-            "--path",
-            project.to_str().unwrap(),
-        ])
+        .args(["start", "--path", project.to_str().unwrap()])
         .output()
         .expect("insight dev restart starts");
     assert!(
@@ -1185,7 +1175,7 @@ fn public_cli_deterministic_first_run() {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "deterministic-first-run",
             "contract_profile": "insight.platform/v1",
-            "profile": "base",
+            "profile": "starter",
             "automation_layer": "P2",
             "source_revision": revision.clone(),
             "environment": {
@@ -1197,7 +1187,7 @@ fn public_cli_deterministic_first_run() {
             "finished_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
             "status": deterministic_status,
             "entrypoints": [
-                check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh base profile"),
+                check("cli", "passed", "public insight apply/artifact/run/task/operation commands completed against a fresh starter profile"),
                 check("http_fixture", "passed", "checked curl completed create/replay/conflict/validate/publish/deploy/activate and independent raw HTTP read the terminal Run through /v1"),
                 deterministic_console,
             ],

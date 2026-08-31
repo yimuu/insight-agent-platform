@@ -1,6 +1,7 @@
 # 当前产品文档
 
-这里仅描述已由 productization P0～P4 证明的 `insight.platform/v1` 与 `/v1` 产品：
+这里描述当前 `insight.platform/v1` 与 `/v1` Agent 产品，包括预构建 CLI、Console、默认 `starter` 和显式
+feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L6 状态在对应文档中保持 `Not run`。
 
 - [架构与 authority 边界](architecture.md)
 - [`insight` CLI](cli.md)

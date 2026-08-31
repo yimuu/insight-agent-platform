@@ -6,10 +6,10 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-RUNNER = ROOT / "scripts" / "run-productization-base-journey.sh"
+RUNNER = ROOT / "scripts" / "run-productization-journey.sh"
 
 
-class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
+class ProductizationJourneyRunnerTests(unittest.TestCase):
     def run_runner(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(RUNNER), *arguments],
@@ -24,7 +24,7 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fresh selected-profile", result.stdout)
         self.assertIn("--report-directory", result.stdout)
-        self.assertIn("--profile <base|full>", result.stdout)
+        self.assertIn("--features <list|all>", result.stdout)
         self.assertIn("--keep-dependencies", result.stdout)
         self.assertIn("--north-star-report", result.stdout)
 
@@ -71,31 +71,30 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertIn("does not already exist", result.stderr)
         self.assertNotIn("Compiling", result.stderr)
 
-    def test_unknown_profile_is_rejected_before_build(self) -> None:
-        result = self.run_runner("--profile", "expanded")
+    def test_unknown_feature_is_rejected_before_build(self) -> None:
+        result = self.run_runner("--features", "expanded")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("--profile must be base or full", result.stderr)
+        self.assertIn("--features must be all or", result.stderr)
         self.assertNotIn("Compiling", result.stderr)
 
-    def test_full_profile_can_emit_full_scenario_reports(self) -> None:
+    def test_all_features_can_emit_all_scenario_reports(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
-        workflow = (ROOT / ".github/workflows/productization-base-journey.yml").read_text(
+        workflow = (ROOT / ".github/workflows/productization-journey.yml").read_text(
             encoding="utf-8"
         )
-        self.assertNotIn("describes base-profile scenarios only", source)
         self.assertIn(
             '"PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY=$report_directory"', source
         )
-        self.assertIn('"PLATFORM_PRODUCTIZATION_PROFILE=$profile"', source)
+        self.assertIn('"PLATFORM_PRODUCTIZATION_FEATURES=$features"', source)
         scenario_upload = workflow.split(
             "- name: Preserve exact-revision scenario reports", 1
         )[1].split("- name: Preserve fresh-checkout north-star report", 1)[0]
-        self.assertNotIn("inputs.profile == 'base'", scenario_upload)
+        self.assertNotIn("inputs.features == 'starter'", scenario_upload)
         self.assertIn(
             '--report-directory "$RUNNER_TEMP/productization-reports"', workflow
         )
         self.assertIn(
-            "productization-${{ inputs.profile }}-scenario-reports-${{ github.sha }}",
+            "productization-${{ inputs.features }}-scenario-reports-${{ github.sha }}",
             workflow,
         )
 
@@ -106,7 +105,7 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertNotIn("Compiling", result.stderr)
 
     def test_workflow_starts_clock_before_checkout_and_preserves_report(self) -> None:
-        workflow = (ROOT / ".github/workflows/productization-base-journey.yml").read_text(
+        workflow = (ROOT / ".github/workflows/productization-journey.yml").read_text(
             encoding="utf-8"
         )
         clock = "Record fresh-checkout journey start"
@@ -114,7 +113,7 @@ class ProductizationBaseJourneyRunnerTests(unittest.TestCase):
         self.assertLess(workflow.index(clock), workflow.index(checkout))
         self.assertIn("--journey-started-epoch", workflow)
         self.assertIn("--fresh-checkout", workflow)
-        self.assertIn("productization-base-north-star-${{ github.sha }}", workflow)
+        self.assertIn("productization-starter-north-star-${{ github.sha }}", workflow)
 
 
 if __name__ == "__main__":

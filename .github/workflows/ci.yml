@@ -73,10 +73,11 @@ jobs:
             --source-revision 0000000000000000000000000000000000000000
           python3 -m unittest \
             scripts/tests/test_classify_ci_paths.py \
-            scripts/tests/test_productization_base_journey_runner.py \
+            scripts/tests/test_productization_journey_runner.py \
             scripts/tests/test_productization_http_lifecycle.py \
             scripts/tests/test_productization_north_star_report.py \
             scripts/tests/test_productization_scenario_reports.py \
+            scripts/tests/test_development_profile_performance.py \
             scripts/tests/test_product_release.py
 
   lint:

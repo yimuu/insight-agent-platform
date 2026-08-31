@@ -33,7 +33,7 @@ impl ApprovalTaskEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "approval-task-resume",
             "contract_profile": "insight.platform/v1",
-            "profile": "base",
+            "profile": "starter",
             "automation_layer": "P2",
             "source_revision": revision,
             "environment": {
@@ -45,7 +45,7 @@ impl ApprovalTaskEvidence {
             "finished_at": self.finished_at.to_rfc3339_opts(SecondsFormat::Micros, true),
             "status": status,
             "entrypoints": [
-                check("cli", "passed", "public insight apply/run/watch/task/result commands completed against a fresh base profile"),
+                check("cli", "passed", "public insight apply/run/watch/task/result commands completed against a fresh starter profile"),
                 check("http_fixture", "passed", "an independent raw /v1 Task mutation exercised the stale ETag and distinct Receipt fence"),
                 console,
             ],

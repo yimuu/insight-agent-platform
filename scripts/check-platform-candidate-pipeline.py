@@ -60,7 +60,7 @@ if workflow.count("cosign sign-blob") < 2:
     failures.append("candidate workflow must independently sign the CandidateManifest and release bundle index")
 
 production_bins = (
-    "insight", "platform-callback-api", "platform-gateway",
+    "insight", "platform-schema", "platform-dev-bootstrap", "platform-callback-api", "platform-gateway",
     "platform-model-worker", "platform-context-worker", "platform-context-dataset-worker", "platform-remote-context-worker",
     "platform-subscription-context-worker", "platform-orchestration-worker",
     "platform-registry-validation-worker",

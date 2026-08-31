@@ -9,10 +9,10 @@ ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 candidate = (ROOT / ".github/workflows/platform-production-candidate.yml").read_text(
     encoding="utf-8"
 )
-base_journey = (
-    ROOT / ".github/workflows/productization-base-journey.yml"
+starter_journey = (
+    ROOT / ".github/workflows/productization-journey.yml"
 ).read_text(encoding="utf-8")
-journey_runner = (ROOT / "scripts/run-productization-base-journey.sh").read_text(
+journey_runner = (ROOT / "scripts/run-productization-journey.sh").read_text(
     encoding="utf-8"
 )
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -68,38 +68,38 @@ if dockerfile.count("cargo build --locked --release") != 1:
 if "cargo build --locked --release --workspace" not in dockerfile:
     failures.append("candidate Dockerfile must use one workspace binary build graph")
 
-journey_trigger = base_journey.split("permissions:", 1)[0]
+journey_trigger = starter_journey.split("permissions:", 1)[0]
 if "workflow_dispatch:" not in journey_trigger:
-    failures.append("base journey qualification is not explicitly dispatched")
+    failures.append("starter journey qualification is not explicitly dispatched")
 for forbidden_trigger in ("push:", "pull_request:", "schedule:"):
     if forbidden_trigger in journey_trigger:
         failures.append(
-            f"base journey qualification contains automatic trigger {forbidden_trigger!r}"
+            f"starter journey qualification contains automatic trigger {forbidden_trigger!r}"
         )
 for marker in (
     "runs-on: ubuntu-24.04",
-    "scripts/run-productization-base-journey.sh",
+    "scripts/run-productization-journey.sh",
     "--report-directory",
     "--console-browser",
     "Record fresh-checkout journey start",
     "--north-star-report",
     "--journey-started-epoch",
     "--fresh-checkout",
-    "productization-base-north-star-${{ github.sha }}",
+    "productization-starter-north-star-${{ github.sha }}",
     'node-version: "24"',
     "pnpm@11.19.0",
     "timeout-minutes: 60",
     "type: choice",
-    "--profile \"${{ inputs.profile }}\"",
+    "--features \"${{ inputs.features }}\"",
 ):
-    if marker not in base_journey:
-        failures.append(f"base journey qualification misses {marker!r}")
+    if marker not in starter_journey:
+        failures.append(f"starter journey qualification misses {marker!r}")
 if "scripts/qualify-productization-first-run.py" not in journey_runner:
-    failures.append("base journey runner misses the lightweight first-Run qualifier")
+    failures.append("starter journey runner misses the lightweight first-Run qualifier")
 for forbidden in ("cosign sign", "docker/build-push-action@", "docker push"):
-    if forbidden in base_journey:
+    if forbidden in starter_journey:
         failures.append(
-            f"base journey qualification contains candidate-only operation {forbidden!r}"
+            f"starter journey qualification contains candidate-only operation {forbidden!r}"
         )
 
 if failures:
