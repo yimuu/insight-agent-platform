@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-207 |
+| 状态 | In Progress / CR-208 |
 | 日期 | 2026-08-31 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -17,6 +17,11 @@
 > 两个direct-authority bounded list projection，以tenant/principal/filter/purpose-bound opaque cursor执行stable keyset；不新增表、cache、
 > Event current projection、route noun或服务role。ADR-0003/0004/0005同步clean-cut为starter feature profile、默认Agent CLI与authoring Console。
 > product-experience 00～06完成cross-review后进入Accepted；实现仍须按manifest compiler→API/CLI/Console→distribution/profile顺序取证。
+
+> 2026-08-31 implementation feedback（CR-208）：Spec 01纯本地compiler曾要求输出完整Agent `ResourceDocument`，但该closed
+> document必须携带只有Artifact upload成功后才存在的authoring/plan Artifact ID，形成新的身份环。CR-208把compiler输出收敛为
+> 无服务端ID的`AgentResourceIntent`与logical lifecycle dependency；publish executor在两项Artifact Ready后用exact返回值纯物化并重验
+> 现有`AgentResourceSpec`。不改变public DTO、Artifact/Resource authority、route、table、Job或Receipt语义。
 
 > 2026-08-30 implementation feedback（CR-205）：剩余full-profile产品化场景确认，八类public noun只能发布
 > Capability/Context Interface、Model/Sandbox Profile，却没有合法management surface发布它们依赖的Capability/Context
@@ -217,7 +222,7 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | In Progress / CR-207 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | In Progress / CR-208 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-201（CR-204 reviewed） | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-205 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-206 | PostgreSQL、事务、Outbox、Lease、恢复 |

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-208 |
 | 日期 | 2026-08-31 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |

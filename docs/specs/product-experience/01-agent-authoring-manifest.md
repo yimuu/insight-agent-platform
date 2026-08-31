@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-208 |
 | 日期 | 2026-08-31 |
 | 输入 | `agent.yaml` |
 | 输出 | 现有 `/v1` Resource、Artifact、Version、Deployment 与 activation 请求 |
@@ -85,11 +85,20 @@ spec:
 project profile和已解析 exact binding；输出为：
 
 1. canonical manifest digest；
-2. closed Agent `ResourceDocument`；
+2. closed `AgentResourceIntent`，包含Resource业务字段、authoring/plan artifact purpose与digest，但不含Artifact ID；
 3. canonical Typed Plan v5 bytes与digest；
 4. input/output/error schema digest；
 5. Deployment binding intent；
 6. 有序 lifecycle request plan，但不包含尚未由服务端生成的ID、ETag或Receipt。
+
+完整`ResourceDocument::Agent`不是纯编译输出：它强制包含authoring与Typed Plan的exact Artifact ID，而这些ID只能由
+`prepare-upload`成功响应生成。publish executor必须先上传并验证compiler冻结的两组bytes/digest，再把服务端返回的exact
+`artifact_id + content_digest`填入`AgentResourceIntent::materialize`；该纯materializer重验purpose、digest、classification、Ready状态摘要
+与compiler intent后才构造现有closed `AgentResourceSpec`。调用方、lock或journal不得预留、猜测或替换Artifact ID。
+
+ordered lifecycle plan使用closed logical output reference（例如`authoring_artifact`、`typed_plan_artifact`）表达步骤依赖；这些reference
+只存在于客户端编排模型，不进入public request、PostgreSQL、Event或digest。Receipt request digest在每个HTTP步骤物化后绑定实际closed body，
+不能把placeholder发给Gateway。
 
 相同输入必须字节级产生相同输出；文件遍历顺序、YAML map 顺序、操作系统和 CPU 架构不得影响 digest。
 CLI 与 Console 实现若使用不同语言，必须共享同一 conformance fixture corpus并逐字节比较编译产物。
@@ -103,6 +112,7 @@ parse/validate locally
 -> resolve exact bindings
 -> compile plan
 -> upload and verify authoring/plan artifacts
+-> materialize exact Agent ResourceDocument from returned Artifact authority
 -> create or update Agent Draft
 -> validate Draft and wait Operation
 -> publish immutable revisions

@@ -1,10 +1,25 @@
-# Platform v2 00～18 Cross-review（CR-207）
+# Platform v2 00～18 Cross-review（CR-208）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
+| 状态 | Accepted / CR-208 |
 | 日期 | 2026-08-31 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0005、AGENTS.md |
+
+### CR-208 Agent compiler Artifact identity cross-review
+
+实现前类型审计确认`ResourceDocument::Agent`中的`authoring_package.artifact.artifact_id`和`typed_plan_artifact_id`都是required
+server-owned identity。Spec 01原先又把完整ResourceDocument列为无网络compiler输出，合法客户端既不能预知ID，也不能向Artifact prepare请求
+指定ID；继续实现只能伪造ID、发送placeholder或在upload后悄悄重新编译，都会破坏digest/recovery合同。
+
+CR-208把边界拆为两个closed纯类型：compiler产出无server ID的`AgentResourceIntent`和有logical dependency的lifecycle plan；publish
+executor完成authoring/plan upload并观察Ready authority后，以返回的exact ID/digest调用纯`materialize`构造既有`AgentResourceSpec`。
+materializer重验purpose、digest、classification与intent，HTTP Receipt digest绑定最终实际request body，logical reference不出客户端。
+
+复核确认Artifact仍是ID/Ready/storage authority，Resource仍是Draft/current authority，compiler/lock/journal均不是authority；crash恢复从
+Receipt/Artifact read重建相同步骤，不生成新随机ID假装第一次未发生。CR-208不修改Platform 02～18 machine contract，不增加route、table、
+aggregate、ResourceKind、ArtifactPurpose、Job/Task/Event/Receipt kind、role、Secret路径或compatibility fallback。product-experience 01与00、
+implementation plan已按此修订并恢复Accepted/Implementing，授权Phase 1实现。
 
 ### CR-207 Agent product experience cross-review
 
@@ -1050,7 +1065,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-207 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
+CR-208 cross-review没有未关闭P0/P1合同冲突；product-experience实现尚未开始，因此00保持In Progress、17/18与
 product-experience 00～06保持Accepted，不得标记Implemented或Verified。具体仓库任务以
 [`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 
