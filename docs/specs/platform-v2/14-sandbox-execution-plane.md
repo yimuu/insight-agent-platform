@@ -80,7 +80,7 @@ strong multi-tenant、HA 或 production-qualified。
 | BatchSandbox Controller | reconciliation、Pod create/delete、TTL | physical lifecycle only |
 | Physical attempt | 一个 provisioning token 下的一组 bounded inert candidates 与一个 selected candidate | bounded external evidence，不是业务 aggregate |
 | Candidate | OpenSandbox 创建且尚未启动 Package 的 sandbox | `Armed` 前提下可安全删除 |
-| Fixed runner | image 内按 digest 冻结的 PID 1 与 closed protocol | 验证输入、一次性激活、写入结果 |
+| Fixed runner | image 内按 digest 冻结、由官方 execd init 监督的唯一 workload command 与 closed protocol | 验证输入、一次性激活、写入结果 |
 | Sandbox Package | publication 产生的 immutable OCI image/package evidence | ResourceVersion/Artifact authority |
 
 PostgreSQL 是 Job/Invocation/Run 唯一业务 authority。Kubernetes API 保存 BatchSandbox/Pod physical state，但不能投影为业务
@@ -297,8 +297,11 @@ OpenSandbox lifecycle API；只读 provider readiness 与资格探针可以核�
 
 ## 9. Fixed Armed runner 协议
 
-runner 是 image 内 immutable PID 1，以非 root 启动。它先验证 create frame 并生成每次 container start 唯一的 bounded `boot_id`，
-然后进入 `Armed`。它只暴露 fixed internal port 与三个 closed operation：
+OpenSandbox Kubernetes provider 固定通过官方 `bootstrap.sh` 注入 execd；Profile 必须冻结
+`execd_run_as_init=true`，因此 execd 是 PID 1 并只监督 image 内 immutable、非 root fixed runner 这一个 workload
+command。runner 是 Package 唯一 activation authority，但不得被描述为容器 PID 1；Platform 不调用 execd 的 general
+exec/file API。runner 先验证 create frame 并生成每次 container start 唯一的 bounded `boot_id`，然后进入 `Armed`。它只暴露
+fixed internal port 与三个 closed operation：
 
 ```text
 GET  /v1/state
@@ -481,7 +484,8 @@ URL。Platform trace header 不注入 workload 或第三方请求。
 - 独立 Sandbox Dispatcher workload identity、Sandbox Job DB role、NATS consumer、DB pool、permits 与 NetworkPolicy；
 - internal ClusterIP OpenSandbox Server `v0.2.3`，只允许 Dispatcher source/audience；
 - BatchSandbox CRD 与 Controller `v0.2.0`，developer Profile 单 replica、leader election enabled；
-- execd `v1.0.22` 作为上游 pod component，但 Platform 不调用其 general exec/file API；
+- execd `v1.0.22` 作为上游 pod component，固定 `execd_run_as_init=true` 作为 PID 1 监督 fixed runner；Platform 不调用其
+  general exec/file API；
 - immutable Platform Armed runner OCI manifest digest；
 - Kubernetes/containerd-runc 与 CNI exact closure；无 Docker socket、RuntimeClass/runsc、host runtime socket 或 public ingress；
 - 两套预安装 NetworkPolicy：`Direct` 与 `Disabled`；Invocation 不生成任意 policy；

@@ -22,7 +22,7 @@ BatchSandbox/Pod/runner physical lifecycle。ADR-0007 取代 ADR-0002；实现�
 | idempotency | Platform 保证 command Receipt、PostgreSQL candidate-selection first-winner、runner activation replay-safe/最多一次 Package start、Job terminal first-winner；不保证一个 token 历史上只有一个 inert object，也不拥有 workload 外部副作用幂等 |
 | transactions | current fence 先持久化 provisioning intent；provider I/O 在事务外；candidate selection 与 activation authorization 分别 CAS；`PotentiallyStarted` 先于外部 activate；terminal 再重验 latest fence；OpenSandbox 不加入业务事务 |
 | errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
-| permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
+| permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；官方 execd init 只监督 fixed runner 且 Platform 不调用 general exec/file API；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
 | network/Secret | Profile 只允许 `Disabled | Direct` operator policy；默认 deny ingress，无 public exposure；Direct 拒绝 internal/metadata CIDR，Disabled 零 egress；Secret injection disabled |
 | capacity | `WorkClass::Sandbox` 不变；candidate count/quiescence/time、Dispatcher permits、OpenSandbox API、BatchSandbox/Pod、result bytes 与 cleanup backlog 独立有界，饱和不得消耗其他 lane |
 | recovery | create response loss 先 list inert candidates；PostgreSQL 只选一个；`ActivationAuthorized/PotentiallyStarted` 后只查询/重放同 runner/token，boot 变化则 UnknownOutcome；delete/TTL/orphan sweep 不推进业务 state |
