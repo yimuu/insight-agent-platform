@@ -59,14 +59,21 @@ specification and cross-review first, then continue from the reviewed contract.
   API, Scheduler, Model Worker, Capability Worker, and MCP Host processes must not spawn them. If
   managed MCP stdio is introduced after the first release, it must obey the same boundary.
 - Sandbox submission is an authenticated service operation backed by a durable shared Job. The
-  executor may report a fenced physical outcome; it cannot directly mutate Run, NodeExecution, or
-  Invocation authority.
+  Sandbox Dispatcher may report a fenced physical outcome; OpenSandbox cannot directly mutate Job,
+  Run, NodeExecution, or Invocation authority.
 - Isolate Sandbox queue, permits, connection pools, pods, and where required node pools from the
   control plane. Sandbox exhaustion or failure must not consume API, Scheduler, Model, native
   Capability, or MCP admission capacity.
-- The first release has exactly two code backends: restricted WASI and per-Job gVisor sandboxed
-  containers. Plain runc/OCI and host execution are forbidden. microVM, Firecracker, KVM, managed
-  stdio sessions, and hardware-virtualized backends are outside the first-release contract.
+- The first release has exactly one physical code provider: an internal OpenSandbox Server using
+  explicit per-attempt Docker/runc containers. There is no WASI, gVisor, host, microVM, Firecracker,
+  KVM, managed-stdio, hardware-virtualized, or silent fallback backend in the first-release contract.
+- Sandbox provisioning and shared Job terminal commit are idempotent and fenced. Once a workload
+  may have started, recovery must not automatically submit it again. Network/database/message/API
+  side effects created inside the workload, including their idempotency, are owned by the Sandbox
+  Package and target service rather than the platform.
+- A published Sandbox Profile may enable direct outbound network access. This is not a Platform
+  Egress Broker or exactly-once boundary, and it must not grant host networking, runtime sockets,
+  Platform credentials, public OpenSandbox ingress, or direct business-state mutation.
 - Runtime dependencies are resolved, scanned, and frozen during publication. Do not run package
   managers, mutable image tags, string-built shell commands, or arbitrary installers at execution
   time.

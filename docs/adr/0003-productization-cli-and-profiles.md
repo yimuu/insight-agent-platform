@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-207 |
-| 日期 | 2026-08-31 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 影响阶段 | Productization、Agent Product Experience |
 
 ## 决策
@@ -21,9 +21,11 @@ gRPC 或生成特权身份 header。
 - `starter` 为 deterministic first Run 所需的最小真实多进程 closure；
 - `starter` 也包括 Runtime Gateway 和 Orchestration 启动时强制连接的 Artifact Gateway、Artifact Data Worker 与
   HTTPS S3/KMS-compatible local dependency；这是实际 process closure，不是把 Artifact 语义塞进 Gateway 的例外；
-- `model | remote-capability | context | mcp | wasi`分别追加已存在的exact role、identity、config、dependency与image；
+- `model | remote-capability | context | mcp | sandbox`分别追加已存在的exact role、identity、config、dependency与image；
 - `all`是上述feature的规范排序并集，不是单独的宽松profile；
-- `qualification` 只运行 runsc/Kubernetes preflight，不能声明 gVisor 实测通过。
+- `sandbox`固定Sandbox Dispatcher、OpenSandbox Server、persistent physical store、Docker/runc provider、bridge network与
+  atomic provisioning extension；只有OpenSandbox可访问Docker socket，CLI不获得OpenSandbox API key；
+- `qualification`运行OpenSandbox/Docker/fence/cleanup preflight，不能把单节点runc声明为强多租户或production隔离。
 
 不保留`base/full`别名。unknown、duplicate或不满足依赖的feature必须在pull、build、provision和进程启动前失败。
 `insight dev`默认消费同一release的签名`ReleaseBundle`和exact image digest；贡献者必须显式使用`--from-source`才从

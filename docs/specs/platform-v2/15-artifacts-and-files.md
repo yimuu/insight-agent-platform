@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-27 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | 02、03、04、07、09、10、12、13 |
 | 直接下游 | 16、17、18 |
+
+> CR-216 impact：OpenSandbox没有object-store credential，首条Sandbox实现只允许Inline canonical input/output。
+> Sandbox Artifact port保留为未来shared Artifact Data Worker集成合同，但在本批Profile中不可activate；不得用OpenSandbox volume、snapshot、
+> host bind mount或provider store替代Artifact authority。其他Capability/Context/MCP Artifact语义不变。
 
 > CR-200 impact：Artifact stage policy必须从TenantConfig exact `ArtifactIo` v3同时冻结write storage binding digest与encryption domain ID。
 > Data Worker仅可按该digest选择installed provider；MCP/Context/Capability/Sandbox caller不得提交locator、bucket、key、binding或encryption domain。
@@ -143,7 +147,8 @@ plain HTTP、仅NetworkPolicy来源或调用方提供的tenant/principal/body ID
 
 ### 5.2 Internal workload stage
 
-Capability、Context、MCP和Sandbox必须在owner Job开始前预分配Artifact/Blob identity和quota。Artifact Data Worker只接受
+Capability、Context和MCP，以及未来启用Artifact port的Sandbox，必须在owner Job开始前预分配Artifact/Blob identity和quota。CR-216
+首条OpenSandbox Profile拒绝Sandbox Artifact port。Artifact Data Worker只接受
 closed request，绑定tenant、caller capability、owner kind/ID、Job lease generation、declared port、media、maximum bytes、digest mode、
 classification和retention。不接受object key或通用owner JSON。
 
@@ -226,8 +231,8 @@ read流程：
 5. 可选消耗single-use grant并写有界audit Event。
 
 public download与internal read可共享domain library，但不共享server identity或public principal权限。Data Worker的closed caller
-capability区分`ReadWorkloadArtifact | ReadSandboxArtifact | StageWorkloadArtifact | VerifyArtifact | DeriveArtifact`；不再区分
-WASI/microVM/Model专用RPC。
+capability区分`ReadWorkloadArtifact | ReadSandboxArtifact | StageWorkloadArtifact | VerifyArtifact | DeriveArtifact`；其中Sandbox
+variant在CR-216首条Profile中是reserved、不可activate的future contract，不再区分WASI/microVM/Model专用RPC。
 
 ## 8. Derived Artifact 与provenance
 
@@ -240,13 +245,15 @@ provenance使用ArtifactLink和Event，不增加transform专用表。
 - Model：首版request/response为有界Inline value，不读写Artifact-backed Model正文；
 - Context：index/manifest/source body使用Artifact，query result保留citation/provenance；
 - MCP：large Resource/Prompt body使用Artifact，但未reviewed Prompt仍不受信任；
-- Sandbox：package/input/output file只通过declared Artifact ports，Executor无storage credential；
+- Sandbox：CR-216首条OpenSandbox流程只允许Inline canonical input/output；未来package/input/output file只通过declared Artifact ports，
+  OpenSandbox与Dispatcher都无storage credential；
 - Capability：Interface显式Artifact field才使用ArtifactRef；不得用metadata代替对物化正文的schema验证。
 
 ## 10. Inline 与Artifact value
 
 RunValue storage shape可为`Inline | ArtifactBacked`，但逻辑schema始终描述物化正文。超过effective inline threshold
-的Capability/Sandbox/Context value必须使用Artifact；调用方不能通过hint改变存储形状。每个信任边界
+的Capability/Context value必须使用Artifact；Sandbox首条Profile超过Inline threshold返回stable `sandbox_output_too_large`，直到
+其Artifact port通过独立资格后才可使用Artifact。调用方不能通过hint改变存储形状。每个信任边界
 物化后都要重验digest、length和logical schema。
 
 Model是首版例外：它的request/response hard limit必须不超过Inline上限；超过时返回stable
@@ -274,10 +281,9 @@ maintenance backlog。预留在object I/O前发生，terminal/recovery原子sett
 
 Gateway、Data Worker和Maintenance必须使用三个独立Deployment、ServiceAccount、DB pool、storage identity、queue、permit
 和autoscaling signal。一个role饱和不得占用其他role、API、Scheduler、Model、MCP或Sandbox的保留容量。
-Data Worker内部的read、stage、verify/derive使用独立有界queue/permit/byte budget，防止大写入或scanner饱和阻塞读取；
-gVisor guest read使用独立token-authenticated listener：只接受专用audience的短期Pod-bound ServiceAccount JWT，离线验证
-发布时安装的JWKS，并在每次package/input读取前复核exact Pod UID、Job fence、request digest与Artifact grant。该listener不接受
-public principal，也不复用Controller mTLS identity。
+Data Worker内部的read、stage、verify/derive使用独立有界queue/permit/byte budget，防止大写入或scanner饱和阻塞读取。
+CR-216删除gVisor guest listener/JWT合同，且不允许OpenSandbox或Dispatcher持有storage identity；未来Sandbox Artifact port必须定义新的
+exact Job fence workload authentication并另行cross-review，不能复用OpenSandbox API key作为Artifact权限。
 这些是同一role的capacity lane，不创建新server identity、aggregate或state machine。
 
 ## 13. Persistence 与machine contract
@@ -323,6 +329,7 @@ Gateway做principal authorization，Data Worker做workload capability与exact ow
 - Link在owner正常状态推进后仍可读；只有release command使用owner current expected version；
 - Data Worker不能直推Ready或改写Run/Invocation/Job current state；
 - Model超过Inline hard limit时返回stable error，不创建Model Artifact；
+- Sandbox首条Profile超过Inline hard limit时返回stable error，不把OpenSandbox volume/snapshot作为Artifact；
 - Gateway、Data Worker和Maintenance三个role的identity、DB/storage权限与permit负向矩阵通过；
 - object-store/KMS超时、重复callback、process kill和NATS丢失后可恢复，不伪造success；
 - retention/hold/link/grant阻塞删除，orphan GC不删除可达generation。
@@ -338,6 +345,7 @@ production-equivalent saturation/fault qualification分层运行。不以表数�
 - tenant self-service storage/KMS binding、cross-region replication和client-side encryption；
 - 通用public grant API、public transform pipeline和跨tenant dedup；
 - microVM专用Artifact protocol。
+- OpenSandbox Sandbox Artifact port、large input/output与provider volume bridge。
 
 ## 19. 未决问题
 

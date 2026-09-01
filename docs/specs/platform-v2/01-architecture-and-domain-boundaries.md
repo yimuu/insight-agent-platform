@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-201 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
+
+> CR-216 impact：Sandbox物理边界clean-cut为`Sandbox Dispatcher -> OpenSandbox Server -> Docker/runc`。
+> shared Job仍是唯一业务work authority；Dispatcher拥有claim/fence/terminal提交，OpenSandbox只拥有container/runner/file physical lifecycle，
+> 不获得Platform PostgreSQL或Run/Invocation mutation权限。ADR-0007取代ADR-0002。
 
 > CR-197 impact：跨plane correlation由03的durable `TraceIdentityV1`和每hop ephemeral span组成。Gateway、Scheduler、Worker、MCP、
 > Sandbox、Artifact、Security/Egress只传播opaque trace ID和新span parent；不得把trace header当作tenant/owner authority，也不得向首版第三方
@@ -29,7 +33,7 @@ Orchestration Plane
   Run / NodeExecution / Invocation / ChildRun / HumanTask
                          ↓ durable dispatch
 Execution Plane
-  Model Executor | Capability Worker | Context Worker | MCP Host | Sandbox Executor
+  Model Executor | Capability Worker | Context Worker | MCP Host | Sandbox Dispatcher -> OpenSandbox
                          ↓
 Data Plane
   PostgreSQL | S3-compatible Artifact Store | NATS wake/event transport
@@ -117,8 +121,9 @@ MCP Host 拥有 MCP wire、transport、OAuth、session、discovery、Tasks、Sub
 
 ### 3.7 Sandbox
 
-Sandbox 是不可信或动态代码的执行环境。Sandbox Execution Plane 拥有进程、文件系统、运行时、网络和
-资源限制；平台编排面只提交结构化 Execution Request 并接收结果或 Artifact。
+Sandbox 是不可信或动态代码的执行环境。Sandbox Execution Plane中的OpenSandbox拥有进程、文件系统、runtime、network和
+physical lifecycle；Platform Sandbox Dispatcher只提交结构化Execution Request、观察bounded evidence并以current Job fence提交结果。
+OpenSandbox状态不能成为Run、Invocation或Job current state。
 
 ### 3.8 Artifact
 
@@ -160,7 +165,7 @@ Execution Plane 分为以下 bulkhead：
 | Model Executor | Provider adapter、stream、tool-call response | 是 |
 | Capability Dispatcher | Native/HTTP/gRPC 调用与结果归一化 | 是 |
 | MCP Host | MCP session、OAuth、remote Task、subscription | 是 |
-| Sandbox Executor | WASI进程执行或gVisor single-Job Pod launch/observe/cleanup | 是且必须物理分离 |
+| Sandbox Dispatcher / OpenSandbox | Dispatcher拥有Job claim/fence/commit；OpenSandbox拥有Docker sandbox/runner physical lifecycle | 是且必须与API/普通Worker物理分离 |
 | Context Worker | 检索、重排、citation assembly | 是 |
 | Artifact Gateway | public upload/download、授权与流控 | 是 |
 | Artifact Data Worker | Context、MCP、Capability与Sandbox的受信读写、验证与派生 | 是 |
@@ -194,7 +199,8 @@ session或Secret value。调用与结果都必须是有界、credential-free机�
 | `capability-worker` | Capability Invocation dispatch | Script process |
 | `context-worker` | Context Query、授权过滤、检索、citation assembly及subscription refresh Job terminal | MCP wire/session/Secret、Capability 副作用与 Agent Plan |
 | `mcp-host` | MCP 协议、连接状态及fenced Resource Refresh adapter | Context Job/Result current authority与 Agent Plan |
-| `sandbox-executor` | WASI代码运行；或受限创建/观察/清理gVisor single-Job Pod | Run state authority、任意Kubernetes管理 |
+| `sandbox-dispatcher` | Sandbox Job claim、OpenSandbox request、physical evidence校验、fenced terminal commit与cleanup reconcile | 在自身进程执行用户代码、绕过Job fence、自由第三方API语义 |
+| `opensandbox-server` | Docker/runc sandbox/runner、diagnostics、TTL/delete和physical metadata | Platform PostgreSQL、Run/Invocation/Job mutation、public API与业务重试决策 |
 | `artifact-gateway` | public upload/download、grant与边界限流 | 业务owner状态推进、内部Worker凭据 |
 | `artifact-data-worker` | exact owner绑定的stage/read/verify/derive | public API、Run/Invocation current state |
 | `artifact-maintenance` | scan、retention、quarantine、delete和GC | 新业务引用、public upload/download |
@@ -204,7 +210,8 @@ session或Secret value。调用与结果都必须是有界、credential-free机�
 | `artifact-store` | blob I/O、integrity、GC | Run 状态机 |
 
 物理部署可以复用同一个 Rust workspace，但不同 Worker role 必须使用独立 Deployment、连接池、并发
-配置和 readiness。Sandbox Executor 可以采用独立仓库或语言实现，只能通过版本化机器协议接入。
+配置和readiness。Sandbox Dispatcher消费固定OpenSandbox lifecycle、provisioning-extension与execd read-only result schema；OpenSandbox可以独立发布，但只能通过
+ADR-0007版本化internal protocol接入，不能获得Platform repository port。
 Artifact 首版只有Gateway、Data Worker和Maintenance三个物理role，分别使用独立
 Deployment、ServiceAccount、数据库连接池、storage identity与permit。业务owner通过同一事务形成Ready引用，
 Artifact进程不直接改写Run、Invocation或Job。Model输入输出首版都是Inline-only，因而不建设Model专用Broker或Producer。
@@ -213,11 +220,12 @@ credential-free closed request，并只返回sanitized metadata与bounded byte s
 返回给Worker，或接受调用方提供的URL、header、proxy和redirect target。
 `secret-broker`是该角色内的独立Rust所有权边界，不是第二个持久化服务：它只组合PostgreSQL的只读SecretBinding authority、
 KMS/AEAD reference unsealer和进程安装的外部Secret Provider client。普通Management/Runtime/Host代码不得依赖受信resolution
-projection；Sandbox若通过内部`SecretBrokerService`消费同一能力，Secret也只能进入一次性内存/tmpfs grant，不能回到普通Worker。
+projection。需要Secret的Sandbox Deployment只有在OpenSandbox安装并通过独立secret-injection合同后才能activate；首条CR-216
+无Secret流程不得通过明文environment或调用方input绕过该边界。
 
-gVisor物理实现由[ADR-0002](../../adr/0002-gvisor-kubernetes-launcher.md)固定：专用Launcher只在一个execution namespace内
-使用受限Pod API，所有guest Pod由fail-closed admission锁定到exact `runsc` RuntimeClass和发布清单。这个例外不授予Controller、
-API、Scheduler、WASI Executor或guest Pod任何Kubernetes API；Pod status不是第二Job authority。
+OpenSandbox物理实现由[ADR-0007](../../adr/0007-opensandbox-execution-provider.md)固定：首版显式使用Docker/runc与bridge network，
+每个physical attempt创建ephemeral sandbox。OpenSandbox lifecycle/command status只是外部evidence；Dispatcher terminal transaction仍重验
+current Job lease fence。OpenSandbox没有Platform DB、Artifact store、Docker host以外的编排权限，也不能直接调用Run/Invocation mutation接口。
 
 ## 6. 依赖规则
 
@@ -235,11 +243,11 @@ Storage / transport implementations
 
 以下依赖被禁止：
 
-- Domain crate 依赖 Axum、SQLx、NATS、Kubernetes SDK 或具体 Provider SDK（gVisor Launcher adapter可在domain port之外依赖Kubernetes client）；
+- Domain crate 依赖 Axum、SQLx、NATS、Docker SDK、OpenSandbox SDK或具体Provider SDK；
 - Storage crate 依赖 API 或 Runtime composition；
 - Skill crate 依赖 Sandbox、MCP transport 或 Secret resolver；
 - MCP wire crate 依赖 Agent DSL；
-- Sandbox Executor 直接写 Run、NodeExecution 或 Invocation 表；
+- OpenSandbox Server直接写Job、Run、NodeExecution或Invocation，或Sandbox Dispatcher绕过owner terminal transaction；
 - Model 输出直接构造数据库 command；
 - 任一 Execution Plane 组件移动 active head 或发布 Revision。
 

@@ -1,10 +1,15 @@
-# Platform v2 四阶段实现计划（CR-206）
+# Platform v2 四阶段实现计划（CR-216）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-206 Context Dataset result discovery; fresh full scenarios pending |
-| 日期 | 2026-08-30 |
-| 合同输入 | 00～18、cross-review CR-206、ADR-0001、ADR-0002、AGENTS.md |
+| 状态 | In Progress / CR-216 OpenSandbox replacement pending |
+| 日期 | 2026-09-01 |
+| 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
+
+> 2026-09-01 CR-216：Sandbox physical implementation clean-cut为OpenSandbox-only + Docker/runc。按
+> contract/types -> OpenSandbox atomic provisioning extension -> Sandbox Dispatcher -> fixed runner -> cleanup/recovery -> deployment/profile
+> 顺序实现；随后删除WASI/gVisor/attestor runtime composition与资格入口。shared Job、Invocation与public `/v1`不重建、不兼容双跑。
+> OpenSandbox L1～L3未执行前，旧WASI/gVisor历史证据不能推进本批状态。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
@@ -1237,7 +1242,8 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ### 5.1 目标
 
-交付Context、remote MCP、Artifact三role、Egress/Secret、真实Model adapter以及WASI + gVisor的物理隔离实现。
+保留已交付的Context、remote MCP、Artifact三role、Egress/Secret与真实Model adapter，并将Sandbox physical execution
+clean-cut为OpenSandbox Server + Docker/runc。状态：**CR-216 Sandbox replacement Pending**。
 
 ### 5.2 实现批次
 
@@ -1264,14 +1270,18 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
    - Egress Broker last-hop Secret resolution、catalog endpoint、SSRF/TLS/redirect/DNS/rate/byte/time limits；
    - 无stdio process、persistent Sandbox session或session child Job。
 
-4. **WASI + gVisor Sandbox**
+4. **OpenSandbox-only Sandbox**
 
-   - publication-time package/dependency/image/SBOM/provenance/scan freeze；
-   - shared Job fenced Controller protocol、Executor无DB凭据；
-   - real WASI ABI/fuel/memory/interrupt；
-   - `RuntimeClass=runsc`、admission-locked single-Job Pod、受限Launcher RBAC、no-runc-fallback、filesystem/network/Secret/Artifact grant与cleanup的
-     manifests、preflight与negative qualification tooling；
-   - process kill、Controller restart、timeout/cancel和orphan reconciliation。
+   - 生成OpenSandbox-only Runtime/Profile/ExecutionRequest/ProvisioningKey/RunnerFrame closed contract与schema digest；
+   - 固定OpenSandbox commit/image、Lifecycle schema、execd read-only result schema、Docker runtime和Platform provisioning extension digest；
+   - 在OpenSandbox Server内部实现atomic same-key/same-digest reuse与same-key/different-digest conflict，持久化restart-safe receipt；
+   - 实现Sandbox Dispatcher：Sandbox Job claim/heartbeat、provisioning intent/evidence CAS、observe、output validation、fenced terminal commit、
+     cancel/timeout/delete/absence/orphan reconcile；
+   - 构建immutable Sandbox runner image，create array entrypoint只运行published package argv一次，将typed result frame原子写入固定路径并等待delete；
+     Dispatcher只允许execd exact fixed-path bounded read，禁止execd command、任意filesystem mutation、PTY、snapshot、public endpoint、runtime installer与mutable tag；
+   - `Disabled | Direct` Docker bridge network正负；默认Secret injection disabled，Sandbox Artifact port不可activate；
+   - 删除/退出首版composition的Wasmtime/WASI Executor、gVisor Launcher/guest、attestor、RuntimeClass/RBAC/admission及其fallback/checker；
+   - Dispatcher/OpenSandbox强杀、create response loss、provider restart、runner-start unknown、late result、TTL/delete/orphan cleanup。
 
 5. **Real Model/provider path**
 
@@ -1283,7 +1293,9 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 - real PostgreSQL + NATS + S3/KMS-compatible + fake/real protocol endpoints的端到端fixture通过；
 - Artifact三role权限矩阵、wrong tenant/owner/fence/digest/storage generation全部fail closed；
-- MCP protocol/OAuth/subscription、WASI ABI、gVisor admission/RBAC/cleanup合同和Model adapter tests通过；真实runsc/node-loss归environment gate；
+- MCP protocol/OAuth/subscription与Model adapter既有tests保持通过；OpenSandbox provisioning/runner/fence/cleanup/network L1～L3通过；
+- same provisioning key并发/response loss/restart只有一个sandbox与一次runner start，可能已开始的workload不自动重跑；
+- OpenSandbox无Platform DB/Run/Invocation mutation，Docker socket只属于OpenSandbox Server；
 - Sandbox/Artifact/MCP/Model单lane饱和时其他lane与critical-control可用；
 - default artifact/image/runtime不包含microVM、Managed stdio、Model Artifact或dynamic installer。
 
@@ -1305,7 +1317,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 2. **Production topology**
 
    - 按18部署隔舱创建ServiceAccount、DB role/pool、NetworkPolicy、PDB/HPA、startup manifest和digest门禁；
-   - WASI/gVisor节点/runtime、Artifact三role和Egress/Secret隔离；
+   - Sandbox Dispatcher/OpenSandbox Server/Docker socket、Artifact三role和Egress/Secret隔离；
    - PostgreSQL/NATS/S3/KMS/Secret的backup、restore、rotation和failure runbook。
 
 3. **Observability 与qualification**
@@ -1325,7 +1337,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 - 17的minimal OpenAPI与internal RPC正负conformance全部通过；
 - 18的qualification profile、candidate/evidence validator、topology/workload preflight、backup/restore、rollout/rollback和soak runbook完整；
-- 仓库可执行的跨tenant、Secret/log、runc fallback、旧fence、重放和不确定outcome负向测试通过；
+- 仓库可执行的跨tenant、Secret/log、provider fallback、旧fence、provisioning重放和不确定outcome负向测试通过；
 - production candidate/GitOps输入只接受exact已签名digest与closed profile；
 - 实现、规范、ADR、runbook、deployment和仓库evidence对齐，无P0/P1遗留；
 - 真实集群L4～L6明确记录为Not run，未生成passed evidence、production CapacityProfile或production-ready声明。
@@ -1355,9 +1367,8 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ## 8. 总体完成标准
 
-Platform v2仓库实现已在Phase 1～4 repository exit gate、CR-201 cross-review、schema v8、部署/资格工具和CI candidate闭包通过后完成。
-证据基线为commit `1efcbabc17af73bef9f21237eee65a5e6af78f19`：GitHub CI run `33182282744`与production-candidate run
-`33183969085`均成功。
+CR-216之前的Platform v2仓库实现曾通过旧Phase 1～4 repository exit gate；该证据只保留为历史基线。OpenSandbox replacement
+完成的必要条件是本计划第5节新批次及相应第6节部署/资格门禁实际通过，旧WASI/gVisor CI不能抵扣。
 
-这项完成结论不表示schema已在production首次发布、production CapacityProfile经L4～L6证明、GitOps clean cut已执行或目标环境已
-production-ready。未来部署方若需要这些声明，必须执行18与资格手册中的environment gate。
+当前不得声明OpenSandbox已替换现行runtime、schema已在production首次发布、production CapacityProfile经L4～L6证明、GitOps clean cut
+已执行或目标环境production-ready。实现完成后仍必须按18区分仓库L1～L3与environment L4～L6 evidence。

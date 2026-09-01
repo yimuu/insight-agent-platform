@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
+| 状态 | In Progress / CR-216；OpenSandbox profile batch pending |
 | 日期 | 2026-09-01 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
+
+> CR-216重新打开Phase 6/7中的Sandbox切片：`wasi` feature clean-cut为`sandbox`，组合Sandbox Dispatcher、OpenSandbox Server与
+> Docker/runc。其他产品体验实现证据保留；旧WASI/gVisor或静态Docker evidence不能抵扣新OpenSandbox provisioning/fence/cleanup门禁。
 
 本计划只把Accepted合同拆成可验证、单一职责的实现批次。每批通过相称门禁后独立提交；失败或发现P0/P1合同冲突时，
 先修上游spec与cross-review，不用兼容层、fallback或测试fixture伪造完成。
@@ -103,12 +106,15 @@ high-contrast/ARIA，以及既有Task/Artifact安全回归。
 
 ## Phase 6：starter与feature profile
 
-状态：**Complete（implementation + L1～L3）**；真实预构建Docker的cold/warm/idle资源实测仍为**Not run**。
+状态：**In Progress**；既有非Sandbox profile已完成，CR-216 `sandbox` feature implementation/L1～L3与真实资源实测为**Pending/Not run**。
 
 交付：
 
 - `insight dev [--features ...] [--offline|--from-source]`及closed canonical feature registry；
-- starter与model/remote-capability/context/mcp/wasi/all exact role/image/config/identity/readiness closure；
+- starter与model/remote-capability/context/mcp/sandbox/all exact role/image/config/identity/readiness closure；
+- `sandbox`追加Sandbox Dispatcher、OpenSandbox Server、persistent physical store、Docker provider/bridge、默认`Direct` exact Profile与
+  atomic provisioning extension；
+- feature启动前固定OpenSandbox release/image、lifecycle/extension/runner/Docker config digest，unknown/drift零create；
 - `start/stop/reset`语义、drift/preflight/doctor、feature_not_enabled零I/O；
 - cold/warm/idle machine report与single-node/non-production/L4～L6 Not run声明。
 
@@ -117,12 +123,13 @@ recovery、deterministic Agent在starter/all结果与authority一致。资源预
 
 ## Phase 7：总回归与clean cut
 
-状态：**Complete（repository L1～L3）**；fresh预构建发行环境与L4～L6资格仍为**Not run**。
+状态：**Pending for CR-216 Sandbox slice**；其他repository L1～L3历史证据保留，fresh OpenSandbox发行环境与L4～L6为**Not run**。
 
 交付：
 
 - L1～L3适用workspace门禁、Console与release/profile checks；
 - 北极星fresh journey与machine-readable evidence；
+- 带`sandbox` feature的fresh journey覆盖publish sandbox Capability、Run、Direct/Disabled network、provider restart与cleanup；
 - README、`docs/current`、CLI help和Console同一commit clean cut；
 - product-experience状态按真实证据推进，保留L4～L6 Not run。
 

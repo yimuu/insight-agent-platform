@@ -2,10 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-26 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
+
+> CR-216 impact：`WorkClass::Sandbox`不变，physical worker收敛为唯一Sandbox Dispatcher pool；OpenSandbox Server是
+> credential-isolated provider pool，不claim Job、不连接Platform PostgreSQL、不持有business permit。旧WASI/gVisor双pool与fallback选择删除。
 
 > CR-197 impact：每个claim从durable Job/owner snapshot加载trace ID并安装本attempt context；heartbeat不创建业务span，dispatch/RPC/commit
 > 各生成有界child span。Worker强杀后reclaim保持trace ID、生成新span ID。缺失/非法内部`traceparent`在解码业务envelope前拒绝，但不得改变
@@ -70,7 +73,7 @@ WorkClass是closed machine registry，由03拥有。backend映射固定如下：
   不执行Context backend，也不占Context permit；
 - 上述Job使用closed `Context -> McpOperation` owner pair；claim必须同时要求source row为同tenant `mcp_subscription`且payload是12定义的
   subscription refresh类型，普通MCP Job仍使用`Mcp -> McpOperation`，两者不得互相claim；
-- WASI或gVisor代码 → `Sandbox`；
+- OpenSandbox代码执行 → `Sandbox`；
 - Artifact stage/read/verify/maintenance → `Artifact`。
 - Resource Draft validation → `RegistryValidation`，且只由`RegistryValidationWorker` claim；它不复用
   `ManagementApi`、`SchedulerRecovery`或其他Worker的pool/manifest。
@@ -165,7 +168,8 @@ atomic start receipt才把Job从`Leased`推进为`Running`并增加attempt count
 orchestration | model | remote-capability | mcp | context | sandbox | artifact | critical-control
 ```
 
-Sandbox不得与API、Orchestration或Model共用Pod、queue、DB pool或semaphore。Artifact Data Worker和
+Sandbox Dispatcher不得与API、Orchestration或Model共用process、queue、DB pool或semaphore；OpenSandbox Server使用独立
+API capacity和Docker resource limits且没有Platform DB pool。Artifact Data Worker和
 critical-control也有独立pool。一个pool的100%饱和不得使其他pool的readiness失败。
 
 ## 7. 公平性与背压
@@ -208,7 +212,8 @@ Draining立即停止新claim，已开始generation在grace内提交结果或dura
 最低指标：`ready_count`、`oldest_ready_age`、`in_flight`、`permit_utilization`、
 `claim_total{outcome}`、`lease_lost_total`和`fairness_lag`。tenant/backend ID不进metric label。
 
-Worker只有自身WorkClass的claim/commit权限；Sandbox Executor无数据库直连；Secret以scoped handle延迟解析；
+Worker只有自身WorkClass的claim/commit权限；Sandbox Dispatcher只拥有Sandbox Job repository port，OpenSandbox Server无数据库直连；
+Secret以scoped handle延迟解析；
 tenant无法生成critical-control work。
 
 ## 10. 验收标准

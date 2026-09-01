@@ -2,11 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted |
-| 日期 | 2026-08-21 |
+| 状态 | Superseded by [ADR-0007](0007-opensandbox-execution-provider.md) |
+| 日期 | 2026-09-01 |
 | 影响规范 | 01、03、04、07、14、18、cross-review、implementation-plan |
 
 ## 背景
+
+> 本ADR保留为历史决策记录。CR-216 clean-cut移除首版WASI/gVisor自建执行器，并由ADR-0007的
+> OpenSandbox-only物理执行合同替代；不得把本文件作为新实现输入。
 
 CR-166 要求首版 gVisor 为每个 shared Job 创建全新 sandbox，同时禁止 plain runc fallback、privileged、hostPath、
 device、host PID/network、runtime socket、metadata 和通用 Kubernetes API。实现审计发现，把 `runsc create/start/wait`

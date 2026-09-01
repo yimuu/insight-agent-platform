@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-203 |
-| 日期 | 2026-08-25 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
+
+> CR-216 impact：Sandbox dispatch固定为`Sandbox Dispatcher -> OpenSandbox`，但Invocation与shared Job authority不变。
+> 首版平台幂等只覆盖Invocation command Receipt、OpenSandbox provisioning和Job terminal commit；workload内部第三方API调用不进入
+> Platform idempotency contract。一旦OpenSandbox create可能已启动fixed runner，恢复不得创建新sandbox重新执行。
 
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
@@ -105,7 +109,7 @@ approval winner与Invocation transition同事务提交。拒绝或过期不创�
 | Native | CapabilityNative | Capability Worker |
 | HTTP/gRPC | CapabilityRemote | Capability Worker + Egress Broker |
 | MCP Tool | CapabilityRemote | Capability Worker + MCP Host |
-| Sandbox | Sandbox | Sandbox Controller/Executor |
+| Sandbox | Sandbox | Sandbox Dispatcher + OpenSandbox Server |
 
 Job payload只携带immutable Invocation snapshot identity和expected owner version，不接受自由URL、header、shell command、
 runtime installer或Secret value。
@@ -113,8 +117,9 @@ runtime installer或Secret value。
 Capability Worker claim必须证明自身closed Worker manifest digest等于Invocation冻结的required manifest；dispatcher再从进程静态registry
 解析09 exact codec identity并重算descriptor digest。mapping digest本身不能实例化codec，错镜像/缺codec在任何Egress/MCP调用前失败。
 
-Sandbox调用直接以Invocation为typed owner创建`work_class=Sandbox`的Job。Controller通过带
-`JobId + lease_generation + worker_process_generation`的closed RPC与Executor交互；Executor不直接写数据库。
+Sandbox调用直接以Invocation为typed owner创建`work_class=Sandbox`的Job。Dispatcher以
+`tenant_id + JobId + physical_attempt + provisioning lease_generation + execution_request_digest`构造14的provisioning identity并调用OpenSandbox；
+OpenSandbox不直接写数据库，Dispatcher只在owner transaction重新验证current Job fence后提交physical outcome。
 
 ## 6. Outcome
 
@@ -156,6 +161,11 @@ Worker在提交Deferred后释放execution permit和lease。callback、poll、can
 - 非幂等或返回不确定的backend进入`Reconciling`或`UnknownOutcome`；
 - recovery只在验证current owner/Job fence后创建新generation。
 
+Sandbox physical create只允许用同一provisioning key重放并取得同一sandbox。一旦create可能已启动fixed runner，response loss、Dispatcher crash、
+lease expiry或OpenSandbox暂时不可观察均不得创建新key/sandbox重跑；有sandbox ID或key时只observe/terminate，无可关联physical evidence且
+不能证明未启动时进入`UnknownOutcome`并执行absence reconcile。
+Invocation Receipt防止同一Platform command重复创建逻辑Invocation，但不把Sandbox workload内部外部副作用变成幂等。
+
 ## 9. Model loop 集成
 
 Model只能从09的Capability Interface获取tool schema。tool intent先被正规化和验证，再创建Invocation。
@@ -179,7 +189,7 @@ RunValue返回Model loop。
 - Sandbox Invocation只有一个shared Job和JobId；
 - MCP Tool首版只走remote Streamable HTTP Host，不产生stdio session child；
 - NATS丢失和Worker崩溃后可从PostgreSQL恢复；
-- non-idempotent timeout不被伪造为安全重试。
+- non-idempotent timeout不被伪造为安全重试；Sandbox exec不确定时不自动重发。
 - remote claim的Worker manifest及dispatch的codec identity/module/descriptor任一漂移都在Egress/MCP I/O前fail closed。
 
 ## 12. 分层证据
@@ -190,7 +200,7 @@ fault/isolated-capacity tests分层运行。一个低层fixture不同时声明�
 ## 13. 明确推迟
 
 - Managed MCP stdio、persistent sandbox session与parent/child Job例外；
-- microVM backend；
+- restricted WASI、自建gVisor与microVM backend；
 - 自动cross-backend failover；
 - 对外部副作用的exactly-once保证。
 

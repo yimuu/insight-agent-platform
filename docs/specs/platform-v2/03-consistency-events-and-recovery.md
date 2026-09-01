@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-206 |
-| 日期 | 2026-08-30 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
+
+> CR-216 impact：Sandbox provisioning幂等拆成两段唯一authority。Platform shared Job保存canonical provisioning key digest、
+> exact external sandbox ID与physical attempt evidence；OpenSandbox Server在自身physical store原子执行同key/same digest复用、
+> same key/different digest冲突。OpenSandbox state不复制Job state，Dispatcher的terminal commit仍以current Job lease fence first-winner。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
 > `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
@@ -110,8 +114,9 @@ subscription aggregate identity，不产生新的Context current-state aggregate
 当前实施证据：r269已把该pair写入Rust closed machine authority、generated registry/root manifest与独立合同checker，并以正反unit fixture
 证明只开放目标方向。PostgreSQL source-row/payload验证和跨WorkClass claim仍待后续L2/L3证据。
 
-Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。MCP首版无stdio session child。Operation无owner variant；
-它直接投影Job的typed owner。
+Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。Job的bounded physical evidence可以保存OpenSandbox
+`provisioning_key_digest + sandbox_id + physical_attempt`，但不得复制OpenSandbox lifecycle state。MCP首版无stdio
+session child。Operation无owner variant；它直接投影Job的typed owner。
 
 ## 5. Optimistic concurrency 与fence
 
@@ -208,6 +213,11 @@ Event retention和Outbox delivery retention不同。Outbox terminal后可按poli
 retry只由owner Effect、idempotency、failure class、attempt budget、deadline和published policy决定，并将`retry_at`持久化。
 Worker不内存sleep。cancel/timeout先写durable intent，物理cancel是best effort，不把unknown external effect改写为“未发生”。
 
+Sandbox是更严格的specialization：provisioning只允许用同一`SandboxProvisioningKeyV1`重放；一旦OpenSandbox create可能已启动
+fixed runner，Dispatcher response loss、crash或lease loss都不得创建新key/sandbox重跑。已有sandbox ID或key时只observe/terminate，
+没有可关联physical evidence且不能证明未启动时Job进入`UnknownOutcome`并执行absence reconcile。这个规则保护Platform不制造重复执行，但不声称Sandbox workload
+内部访问的网络、数据库、消息或第三方API具备幂等或exactly-once。
+
 `Context -> McpOperation` subscription refresh Job固定为ReadOnly physical attempt。Context owner以Job lease/fence调用协议adapter；
 成功只允许保存closed terminal evidence（request/response/resource digest、item/byte count、observed time），不把remote body、session或
 Secret写入Job/Event/Receipt，也不声称创建Context Observation、dataset generation或cache。owner按`JobCommit` Receipt原子提交
@@ -223,6 +233,10 @@ execution identity。最终JobCommit Receipt摘要最新commit attempt与respons
 reconciliation冻结exact owner/Job generation、backend idempotency/correlation identity、known evidence、deadline/budget和closed decision policy。
 只能返回`ConfirmedSucceeded | ConfirmedFailed | StillUnknown | RetryableProbeFailure`。不确定保持Unknown/Reconciling并交由人/运维
 处置，不伪造terminal success。
+
+OpenSandbox cleanup reconcile只能按已持久化sandbox ID或opaque Job/provisioning metadata做bounded observe/delete/absence proof。
+`list(metadata) -> create`不能替代原子provisioning幂等；orphan sweeper删除physical sandbox前必须确认对应Job不是current running generation，
+且它只改变provider physical state，不直接推进Run/Invocation。
 
 ## 11. Recovery scan
 
@@ -246,7 +260,7 @@ UnknownOutcome | InternalInvariant`。retryable是由owner policy决定的属性
 - 所有Receipt/Event/Outbox为tenant-scoped，无installation/fake tenant scope；
 - Operation与Job共享ID/state/version，不存在并行aggregate；
 - NATS全丢/重复时Outbox/safety scan恢复并且consumer幂等；
-- external timeout按Effect进入retry/reconcile/Unknown，不伪造安全failure；
+- external timeout按Effect进入retry/reconcile/Unknown，不伪造安全failure；Sandbox exec可能已开始时不自动重发；
 - ArtifactLink在owner正常version推进后仍有效，release使用current owner fence；
 - transaction kill/deadlock/serialization fixture不留半成品owner/Event/Outbox/Receipt；
 - JSONB/registry/codegen/conformance与size limits全部fail closed。

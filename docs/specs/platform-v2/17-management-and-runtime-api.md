@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-215 |
+| 状态 | Accepted / CR-216 |
 | 日期 | 2026-09-01 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
+
+> CR-216 impact：不新增public Sandbox/OpenSandbox route。OpenSandbox lifecycle API是只允许Sandbox Dispatcher访问的内部provider边界，
+> 不是Platform `/v1`资源或Operation authority。public Operation继续只投影shared Job；OpenSandbox ID、provisioning key、container status、
+> diagnostics与network endpoint不进入public response。
 
 > CR-206 impact：`SafeJobResult`升级为closed tagged union。`digest`保持普通成功Operation的安全摘要；
 > `context_dataset_generation`只允许`ContextDatasetBuild + ContextDataset target + succeeded`，并携带exact `generation_id`
@@ -134,7 +138,9 @@ struct ApiProblemV1 {
 
 stable problem code至少包含`invalid_request | unauthenticated | forbidden | not_found | conflict | precondition_required |
 precondition_failed | idempotency_conflict | quota_exceeded | rate_limited | dependency_unavailable | timeout |
-output_too_large | internal`。domain terminal failure通过resource view/Event表示，不滥用HTTP status重写历史。
+output_too_large | internal`。Sandbox provider的`provisioning_idempotency_conflict | sandbox_provider_unavailable |
+sandbox_unknown_outcome | secret_injection_unsupported | sandbox_output_too_large`只作为内部closed failure映射进入Job safe failure/Event，
+不得泄漏OpenSandbox ID、API body或diagnostics。domain terminal failure通过resource view/Event表示，不滥用HTTP status重写历史。
 
 ## 5. 最小Management API
 
@@ -454,8 +460,8 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 | Service | 职责 | 关键限制 |
 |---|---|---|
 | EgressBroker | catalog-bound HTTP/provider/MCP egress与last-hop Secret resolution | 不接受自由URL/header/Secret |
-| SandboxController | Submit/Cancel/Observe fenced Job | Executor无DB直连 |
-| SandboxExecutor | WASI/gVisor physical execution | 不改写业务state |
+| SandboxDispatcher | claim/observe/cancel OpenSandbox physical attempt并提交fenced Job outcome | 只拥有Sandbox Job repository port，不在本进程执行代码 |
+| OpenSandboxLifecycle | idempotent create、observe、diagnostics、terminate、absence与orphan page | 内部HTTP；无Platform DB/Run/Invocation mutation/public exposure |
 | ArtifactGateway | 经Public Gateway转发的public upload/download HTTP语义 | exact public-gateway mTLS audience + current principal rebinding |
 | ArtifactDataWorker | internal stage/read/verify/derive | exact workload capability + owner/Job fence |
 | ArtifactMaintenance | delete/GC/quarantine/reconcile | closed maintenance transition |
@@ -464,7 +470,7 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 `McpResourceRefresh` request携带dispatch时完整fence与不可变execution identity；heartbeat后的version不要求重发RPC，也不进入Host response
 identity。调用方最终提交必须使用最新owner fence，server response只绑定原始execution identity与exact request digest。
 
-没有Model Artifact Producer、Model/Sandbox专用Artifact Broker、microVM RPC、Managed stdio runner或Installation release service。
+没有Model Artifact Producer、Model/Sandbox专用Artifact Broker、WASI/gVisor/microVM RPC、Managed stdio runner或Installation release service。
 Artifact public hop保持同一个OpenAPI HTTP请求/响应语义，不生成一份字段对等protobuf；其余internal RPC使用protobuf。所有跨进程调用使用
 mTLS workload identity、exact audience、tenant/owner/fence重绑定、bounded deadline/message/stream和stable status mapping。
 
@@ -529,7 +535,7 @@ production-equivalent load/fault qualification分层运行。不在每层重复�
 
 - Installation Release/Candidate/Gate runtime API和dynamic storage/KMS management；
 - generic GraphQL、arbitrary resource CRUD和public internal-RPC proxy；
-- Managed stdio、microVM、Model Artifact与专用RPC；
+- Managed stdio、WASI/gVisor/microVM、Model Artifact与专用RPC；
 - cross-region public cursor/stream migration和exactly-once SSE。
 
 ## 20. 未决问题

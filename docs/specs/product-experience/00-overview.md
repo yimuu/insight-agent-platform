@@ -2,14 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-215；L1～L3 passed，L4～L6 Not run |
+| 状态 | Accepted / CR-216；OpenSandbox profile implementation pending |
 | 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
-| 当前行为 | 已 clean-cut 实现；现行使用说明以 [`docs/current`](../../current/README.md) 为准 |
+| 当前行为 | CR-216尚未实现；现行使用说明仍以 [`docs/current`](../../current/README.md) 为准 |
 | 前置阶段 | [`productization`](../productization/00-goals.md) repository scope 已完成 |
 
 本阶段把已经通过资格场景的平台内核收敛为普通开发者可使用的 Agent 产品。成功标准不是再增加
 ResourceKind、Job、Worker、表或资格证据，而是让默认用户只需要理解 Agent、发布、Run 和结果。
+
+> CR-216 impact：开发profile把`wasi` feature clean-cut为`sandbox`，启动Sandbox Dispatcher、OpenSandbox Server与Docker/runc。
+> CLI/Console不直接访问OpenSandbox，Run/Operation体验与shared Job authority不变。既有WASI profile证据只保留为历史，不能宣称
+> 新`sandbox` feature已实现或通过L1～L3。
 
 ## 1. 北极星旅程
 
@@ -68,6 +72,9 @@ ADR-0003/0004/0005与Platform 17→18→00已由CR-207完成修订；cross-revie
 Job/Task/Event/Receipt种类或常驻role。本目录00～06随后进入Accepted并授权clean-cut实现；实现与适用L1～L3仓库门禁
 现已完成，`docs/current`已同步，状态推进为Implemented。尚未运行的发行环境与L4～L6资格不据此推进为Verified。
 
+上述是CR-215历史完成记录。CR-216重新打开00/06及implementation plan：product route与manifest compiler不变，但开发profile的
+Sandbox feature必须按Platform 14/18与ADR-0007重新实现和取证；在此之前`docs/current`不改写。
+
 CR-215补充browser authoring-profile authority：Console只通过bounded Management projection取得exact compiler Policy binding；
 bundle、URL与browser persistence均不得保存generated Policy ID或充当fallback默认。
 
@@ -108,5 +115,5 @@ CLI/Console在lock丢失、adopt或跨设备读取后仍可从exact服务端事�
 - 可视化任意 Plan 图编辑器；
 - 插件市场或在线模板市场；
 - 用自然语言在服务端生成未审计 Plan；
-- 将单节点开发结果解释为 production capacity、HA 或 gVisor 资格；
+- 将单节点开发结果解释为production capacity、HA、强多租户隔离或OpenSandbox production资格；
 - 为简化入口删除底层 durable authority 或弱化 fail-closed 行为。

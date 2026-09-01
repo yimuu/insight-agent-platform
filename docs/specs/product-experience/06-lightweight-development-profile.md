@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-215；L1～L3 passed，资源实测与 L4～L6 Not run |
+| 状态 | Accepted / CR-216；OpenSandbox feature implementation/L1～L3 pending |
 | 日期 | 2026-09-01 |
 | 默认入口 | `insight dev` |
 | 部署性质 | 单机开发；不是production或L4证据 |
@@ -24,7 +24,7 @@ starter + model
 starter + remote-capability
 starter + context
 starter + mcp
-starter + wasi
+starter + sandbox
 all（上述feature的canonical union）
 qualification（独立，不属于dev feature）
 ```
@@ -108,12 +108,17 @@ Restart with: insight dev --features model
 - dependency重启：Run/Job authority保持PostgreSQL current state并按现有恢复语义继续；
 - profile/image/schema drift：启动前fail closed并给出exact update命令；
 - Docker资源不足、端口冲突、磁盘不足：`doctor`指出资源和建议，不自动删除用户容器/volume；
-- macOS没有runsc：starter/WASI能力不冒充gVisor，qualification继续显示unavailable。
+- Docker/OpenSandbox不可用：`sandbox` feature保持not ready并由`doctor`报告exact dependency；starter不冒充Sandbox capability；
+- `sandbox`使用OpenSandbox Docker/runc且是single-node developer preview，不冒充强多租户或production隔离；
+- `sandbox`内置Profile固定`network_mode=Direct`并允许普通outbound网络；用户选择`Disabled`时必须绑定显式Profile，不能由单次Run覆盖；
 
 ## 8. 验收
 
 - fresh预构建CLI在支持的macOS/Linux完成`init -> dev -> agent publish -> agent run`；
 - starter和每个单feature、all组合均有closed config、readiness和negative fixture；
+- `sandbox` feature固定Sandbox Dispatcher、OpenSandbox Server、persistent physical store、Docker provider、bridge network与
+  provisioning extension digest；CLI/Console不获得OpenSandbox endpoint/API key；
+- same-key create并发/response loss/OpenSandbox restart只产生一个sandbox，stop/start与orphan cleanup不重复runner；
 - feature顺序重排得到相同profile digest，unknown组合在零I/O前失败；
 - warm/cold/idle资源门禁产生机器可读报告；
 - stop/start、Gateway/Worker kill、dependency短暂不可用后现有Run不丢失或重复effect；

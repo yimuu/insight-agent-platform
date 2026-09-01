@@ -2,10 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-205 |
-| 日期 | 2026-08-30 |
+| 状态 | Accepted / CR-216 |
+| 日期 | 2026-09-01 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
+
+> CR-216 impact：Sandbox backend的唯一physical provider是OpenSandbox。Implementation/Deployment冻结OCI image digest、
+> fixed argv entrypoint、OpenSandbox lifecycle schema digest、Docker resource/network profile与provisioning extension digest；
+> 不再冻结或选择WASI/gVisor isolation variant。
 
 > CR-205 impact：Capability Implementation不是可由Worker进程配置替代的隐式对象。closed
 > `capability-implementations` management noun允许author发布引用exact Interface Revision的Implementation Version；该kind
@@ -331,12 +335,14 @@ schema和data policy。详细协议由13定义。
 
 Sandbox Implementation Revision固定：
 
-- code/package Artifact digest；
-- fixed entrypoint；
+- immutable OCI image digest与package Artifact digest；
+- fixed argv entrypoint；
 - dependency lock digest；
-- input/output mapping。
+- input/output mapping；
+- required OpenSandbox lifecycle、provisioning extension及execd read-only result contract digest。
 
-Capability Deployment再固定Sandbox Package/Runtime/Profile Revision、isolation/network/resource policy和部署证据。
+Capability Deployment再固定Sandbox Package/Runtime/Profile Revision、OpenSandbox provider binding、`Disabled | Direct` network mode、
+resource limits与部署证据。首版没有backend selector：任何WASI/gVisor/microVM/host variant或provider fallback均fail closed。
 
 Shell 只能是 ReviewedPublished implementation 的固定 entrypoint。参数作为结构化 argv/JSON 传递，不拼接
 `sh -c`。ModelGenerated code 由专用动态执行 Capability 和更强 isolation policy 承载。
@@ -398,7 +404,7 @@ enum CapabilityBackendBinding {
 }
 ```
 
-Deployment固定Interface、Implementation、实际backend、SecretBinding、network/isolation/resource Policy、runtime
+Deployment固定Interface、Implementation、实际backend、SecretBinding、network/provider/resource Policy、runtime
 identity与绑定exact环境的conformance evidence。backend binding与Revision的backend contract variant必须一致；其
 credential requirements必须被SecretBinding完整且仅按purpose满足。Agent Deployment可以引用一个或多个已批准
 Capability Deployment候选，但RunBindings必须同时固定集合、exact Selection Policy和模型tool name mapping。Selection
