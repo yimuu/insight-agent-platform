@@ -14,7 +14,7 @@
       "required": ["name", "features", "digest"],
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
-        "features": {"type": "array", "uniqueItems": true, "items": {"enum": ["context", "mcp", "model", "remote-capability", "wasi"]}},
+        "features": {"type": "array", "uniqueItems": true, "items": {"enum": ["context", "mcp", "model", "remote-capability", "sandbox"]}},
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
       }
     },

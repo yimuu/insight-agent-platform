@@ -102,8 +102,8 @@
     {
       "id": "artifact-lifecycle-and-rejection",
       "owner": "artifact-service",
-      "profile": "starter+wasi",
-      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_artifact_gateway", "platform_artifact_data_worker", "platform_artifact_maintenance"],
+      "profile": "starter",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_artifact_gateway", "platform_artifact_data_worker"],
       "fixture": "tests/productization/artifact_lifecycle_and_rejection.rs",
       "automation_layer": "P3",
       "capabilities": ["artifact_prepare", "artifact_verify", "artifact_read"],
@@ -112,16 +112,16 @@
       "failure_probes": ["digest_mismatch", "wrong_tenant_read"]
     },
     {
-      "id": "wasi-and-remote-framework-capability",
+      "id": "sandbox-and-remote-framework-capability",
       "owner": "sandbox-and-capability",
-      "profile": "starter+remote-capability,wasi",
-      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "platform_sandbox_controller", "platform_sandbox_attestor", "platform_sandbox_executor", "platform_egress_broker", "platform_security_authority"],
-      "fixture": "tests/productization/wasi_and_remote_framework_capability.rs",
+      "profile": "starter+remote-capability,sandbox",
+      "dependencies": ["local_oidc", "postgresql", "nats", "platform_gateway", "platform_orchestration_worker", "platform_capability_remote_worker", "sandbox_dispatcher", "opensandbox_server", "opensandbox_controller", "sandbox_runner", "platform_egress_broker", "platform_security_authority"],
+      "fixture": "tests/productization/sandbox_and_remote_framework_capability.rs",
       "automation_layer": "P3",
-      "capabilities": ["restricted_wasi", "remote_framework_capability", "framework_isolation"],
+      "capabilities": ["bounded_sandbox", "remote_framework_capability", "framework_isolation"],
       "entrypoints": ["cli", "http_fixture", "console"],
-      "assertions": ["wasi_limit", "remote_framework_result", "no_platform_database_access"],
-      "failure_probes": ["wasi_limit_rejection", "framework_network_rejection"]
+      "assertions": ["sandbox_limit", "remote_framework_result", "no_platform_database_access"],
+      "failure_probes": ["sandbox_limit_rejection", "framework_network_rejection"]
     }
   ]
 }

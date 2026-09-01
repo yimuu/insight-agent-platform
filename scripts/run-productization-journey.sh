@@ -108,7 +108,7 @@ if ! features="$(python3 - "$features" <<'PY'
 import sys
 
 raw = sys.argv[1]
-allowed = {"context", "mcp", "model", "remote-capability", "wasi"}
+allowed = {"context", "mcp", "model", "remote-capability", "sandbox"}
 if not raw:
     print("")
 elif raw == "all":
@@ -122,7 +122,7 @@ else:
     print(",".join(sorted(values)))
 PY
 )"; then
-  echo "--features must be all or a unique comma-separated set of context,mcp,model,remote-capability,wasi" >&2
+  echo "--features must be all or a unique comma-separated set of context,mcp,model,remote-capability,sandbox" >&2
   exit 2
 fi
 if [[ "$features" == "all" ]]; then
@@ -153,7 +153,7 @@ if ! command -v pgrep >/dev/null 2>&1; then
   exit 2
 fi
 requires_node=false
-if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",wasi,"*) || "$console_browser" == true ]]; then
+if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",sandbox,"*) || "$console_browser" == true ]]; then
   requires_node=true
 fi
 if [[ "$requires_node" == true ]]; then
@@ -197,9 +197,7 @@ if [[ -n "$orphaned_processes" ]]; then
 fi
 
 if [[ -z "$project" ]]; then
-  # Keep the default project path short enough for the Sandbox attestor's Unix
-  # registration socket. macOS TMPDIR paths commonly exceed the 100-byte
-  # closed socket-path limit once `.insight/runtime/registration.sock` is added.
+  # Keep the retained journey path short and easy to inspect on macOS and Linux.
   project="$(mktemp -d "/tmp/insight-productization.XXXXXX")"
 fi
 project="$(cd "$(dirname "$project")" && pwd)/$(basename "$project")"
@@ -261,7 +259,7 @@ trap cleanup EXIT
 
 cd "$workspace"
 cargo build --locked --release -p insight-cli --bin insight
-if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",wasi,"*) ]]; then
+if [[ "$features" == "all" || (",$features," == *",remote-capability,"* && ",$features," == *",sandbox,"*) ]]; then
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \
     --dir "$workspace/examples/productization/langgraph-reference" install --frozen-lockfile
   PATH="$(dirname "$node_bin"):$PATH" "$corepack_bin" pnpm \

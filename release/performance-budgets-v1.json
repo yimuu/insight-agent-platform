@@ -4,7 +4,7 @@
     "cli_build": 1200,
     "console_build": 300,
     "runtime_build_push": 3600,
-    "sandbox_guest_build_push": 1800,
+    "sandbox_runner_build_push": 1800,
     "console_image_build_push": 300,
     "sbom": 1200,
     "provenance": 300,

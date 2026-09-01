@@ -15,7 +15,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   RUNTIME_IMAGE: ghcr.io/${{ github.repository }}/platform-runtime
-  SANDBOX_GUEST_IMAGE: ghcr.io/${{ github.repository }}/platform-sandbox-guest
+  SANDBOX_RUNNER_IMAGE: ghcr.io/${{ github.repository }}/platform-sandbox-runner
   CONSOLE_IMAGE: ghcr.io/${{ github.repository }}/platform-console
 
 jobs:
@@ -152,22 +152,22 @@ jobs:
           cache-to: type=gha,mode=max,scope=product-release-runtime
       - name: Mark runtime build finish
         run: date +%s > "$RUNNER_TEMP/runtime-finish"
-      - name: Mark sandbox guest build start
-        run: date +%s > "$RUNNER_TEMP/guest-start"
-      - name: Build and push exact sandbox guest manifest list
-        id: sandbox_guest
+      - name: Mark sandbox runner build start
+        run: date +%s > "$RUNNER_TEMP/runner-start"
+      - name: Build and push exact sandbox runner manifest list
+        id: sandbox_runner
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          target: sandbox-guest
+          target: sandbox-runner
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.SANDBOX_GUEST_IMAGE }}:${{ github.ref_name }}
+          tags: ${{ env.SANDBOX_RUNNER_IMAGE }}:${{ github.ref_name }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=product-release-runtime
-      - name: Mark sandbox guest build finish
-        run: date +%s > "$RUNNER_TEMP/guest-finish"
+      - name: Mark sandbox runner build finish
+        run: date +%s > "$RUNNER_TEMP/runner-finish"
       - name: Mark Console image build start
         run: date +%s > "$RUNNER_TEMP/console-image-start"
       - name: Build and push exact Console manifest list
@@ -190,14 +190,14 @@ jobs:
         shell: bash
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
-          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+          SANDBOX_RUNNER_DIGEST: ${{ steps.sandbox_runner.outputs.digest }}
           CONSOLE_DIGEST: ${{ steps.console.outputs.digest }}
         run: |
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/cosign-start"
           for subject in \
             "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" \
-            "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" \
+            "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" \
             "${CONSOLE_IMAGE}@${CONSOLE_DIGEST}"; do
             cosign sign --yes "$subject"
             cosign verify \
@@ -210,13 +210,13 @@ jobs:
         shell: bash
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
-          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+          SANDBOX_RUNNER_DIGEST: ${{ steps.sandbox_runner.outputs.digest }}
           CONSOLE_DIGEST: ${{ steps.console.outputs.digest }}
         run: |
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/sbom-start"
           syft "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" -o spdx-json="$RUNNER_TEMP/release-assets/runtime.spdx.json"
-          syft "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" -o spdx-json="$RUNNER_TEMP/release-assets/sandbox-guest.spdx.json"
+          syft "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" -o spdx-json="$RUNNER_TEMP/release-assets/sandbox-runner.spdx.json"
           syft "${CONSOLE_IMAGE}@${CONSOLE_DIGEST}" -o spdx-json="$RUNNER_TEMP/release-assets/console.spdx.json"
           date +%s > "$RUNNER_TEMP/sbom-finish"
       - name: Mark provenance start
@@ -227,11 +227,11 @@ jobs:
           subject-name: ${{ env.RUNTIME_IMAGE }}
           subject-digest: ${{ steps.runtime.outputs.digest }}
           push-to-registry: true
-      - name: Attest sandbox guest provenance
+      - name: Attest sandbox runner provenance
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-name: ${{ env.SANDBOX_GUEST_IMAGE }}
-          subject-digest: ${{ steps.sandbox_guest.outputs.digest }}
+          subject-name: ${{ env.SANDBOX_RUNNER_IMAGE }}
+          subject-digest: ${{ steps.sandbox_runner.outputs.digest }}
           push-to-registry: true
       - name: Attest Console provenance
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
@@ -243,16 +243,16 @@ jobs:
         shell: bash
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
-          SANDBOX_GUEST_DIGEST: ${{ steps.sandbox_guest.outputs.digest }}
+          SANDBOX_RUNNER_DIGEST: ${{ steps.sandbox_runner.outputs.digest }}
           CONSOLE_DIGEST: ${{ steps.console.outputs.digest }}
         run: |
           set -euo pipefail
           docker buildx imagetools inspect --raw "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" > "$RUNNER_TEMP/runtime-index.json"
-          docker buildx imagetools inspect --raw "${SANDBOX_GUEST_IMAGE}@${SANDBOX_GUEST_DIGEST}" > "$RUNNER_TEMP/sandbox-guest-index.json"
+          docker buildx imagetools inspect --raw "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" > "$RUNNER_TEMP/sandbox-runner-index.json"
           docker buildx imagetools inspect --raw "${CONSOLE_IMAGE}@${CONSOLE_DIGEST}" > "$RUNNER_TEMP/console-index.json"
           python3 scripts/build-release-image-metadata.py \
             --runtime-subject "${RUNTIME_IMAGE}:${GITHUB_REF_NAME}" --runtime-digest "$RUNTIME_DIGEST" --runtime-index "$RUNNER_TEMP/runtime-index.json" \
-            --sandbox-guest-subject "${SANDBOX_GUEST_IMAGE}:${GITHUB_REF_NAME}" --sandbox-guest-digest "$SANDBOX_GUEST_DIGEST" --sandbox-guest-index "$RUNNER_TEMP/sandbox-guest-index.json" \
+            --sandbox-runner-subject "${SANDBOX_RUNNER_IMAGE}:${GITHUB_REF_NAME}" --sandbox-runner-digest "$SANDBOX_RUNNER_DIGEST" --sandbox-runner-index "$RUNNER_TEMP/sandbox-runner-index.json" \
             --console-subject "${CONSOLE_IMAGE}:${GITHUB_REF_NAME}" --console-digest "$CONSOLE_DIGEST" --console-index "$RUNNER_TEMP/console-index.json" \
             --output "$RUNNER_TEMP/release-assets/images.json"
           python3 - "$RUNNER_TEMP/release-assets/images.json" "$RUNNER_TEMP/release-assets/build-provenance.intoto.jsonl" <<'PY'
@@ -296,7 +296,7 @@ jobs:
           values = [
               {"name": "console_build", "duration_seconds": console_finish - console_start},
               {"name": "runtime_build_push", "duration_seconds": elapsed("runtime")},
-              {"name": "sandbox_guest_build_push", "duration_seconds": elapsed("guest")},
+              {"name": "sandbox_runner_build_push", "duration_seconds": elapsed("runner")},
               {"name": "console_image_build_push", "duration_seconds": elapsed("console-image")},
               {"name": "sbom", "duration_seconds": elapsed("sbom")},
               {"name": "provenance", "duration_seconds": elapsed("provenance")},

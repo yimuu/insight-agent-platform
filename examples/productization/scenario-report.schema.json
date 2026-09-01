@@ -32,8 +32,8 @@
         "starter+mcp,remote-capability",
         "starter+model",
         "starter+remote-capability",
-        "starter+remote-capability,wasi",
-        "starter+wasi"
+        "starter+remote-capability,sandbox",
+        "starter+sandbox"
       ]
     },
     "automation_layer": { "enum": ["P2", "P3"] },

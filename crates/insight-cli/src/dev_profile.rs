@@ -6,8 +6,8 @@ const MODEL: u8 = 1 << 0;
 const REMOTE_CAPABILITY: u8 = 1 << 1;
 const CONTEXT: u8 = 1 << 2;
 const MCP: u8 = 1 << 3;
-const WASI: u8 = 1 << 4;
-const ALL: u8 = MODEL | REMOTE_CAPABILITY | CONTEXT | MCP | WASI;
+const SANDBOX: u8 = 1 << 4;
+const ALL: u8 = MODEL | REMOTE_CAPABILITY | CONTEXT | MCP | SANDBOX;
 const REGISTRY_BYTES: &[u8] = include_bytes!("../../../release/development-profile-v1.json");
 const REGISTRY_SCHEMA_BYTES: &[u8] =
     include_bytes!("../../../release/development-profile-v1.schema.json");
@@ -89,7 +89,7 @@ impl DevProfile {
                         "remote-capability" => REMOTE_CAPABILITY,
                         "context" => CONTEXT,
                         "mcp" => MCP,
-                        "wasi" => WASI,
+                        "sandbox" => SANDBOX,
                         _ => return Err(format!("unknown development feature {value:?}")),
                     };
                 }
@@ -108,7 +108,7 @@ impl DevProfile {
             (MCP, "mcp"),
             (MODEL, "model"),
             (REMOTE_CAPABILITY, "remote-capability"),
-            (WASI, "wasi"),
+            (SANDBOX, "sandbox"),
         ]
         .into_iter()
         .filter_map(|(bit, name)| (self.features & bit != 0).then_some(name))
@@ -165,8 +165,8 @@ impl DevProfile {
         self.features & MCP != 0
     }
 
-    pub const fn has_wasi(self) -> bool {
-        self.features & WASI != 0
+    pub const fn has_sandbox(self) -> bool {
+        self.features & SANDBOX != 0
     }
 
     pub const fn needs_egress(self) -> bool {
@@ -191,10 +191,6 @@ impl DevProfile {
             "mcp-host" | "mcp-discovery" | "mcp-subscription" | "mcp-cleanup" | "callback-api" => {
                 self.features & MCP != 0
             }
-            "sandbox-attestor"
-            | "sandbox-controller"
-            | "sandbox-executor"
-            | "artifact-maintenance" => self.features & WASI != 0,
             "security-authority" | "egress-broker" => {
                 self.features & (MODEL | REMOTE_CAPABILITY | CONTEXT | MCP) != 0
             }
@@ -242,7 +238,7 @@ fn registry() -> Result<Value, String> {
         .and_then(Value::as_object)
         .ok_or_else(|| "embedded development feature registry has no features".to_owned())?;
     if features.keys().map(String::as_str).collect::<BTreeSet<_>>()
-        != BTreeSet::from(["context", "mcp", "model", "remote-capability", "wasi"])
+        != BTreeSet::from(["context", "mcp", "model", "remote-capability", "sandbox"])
     {
         return Err("embedded development feature set is not closed".to_owned());
     }

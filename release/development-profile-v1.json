@@ -4,7 +4,7 @@
   "environment_class": "development",
   "deployment": "single_node",
   "production_qualification": false,
-  "release_images": ["runtime", "sandbox_guest", "console"],
+  "release_images": ["runtime", "sandbox_runner", "console"],
   "dependencies": [
     {"name": "postgresql", "image": "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"},
     {"name": "nats", "image": "nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927"},
@@ -55,16 +55,16 @@
       "memory_mib": 384,
       "cpu_millicores": 200
     },
-    "wasi": {
-      "roles": ["artifact_maintenance", "sandbox_attestor", "sandbox_controller", "sandbox_executor"],
-      "configs": ["artifact-maintenance", "sandbox-attestor", "sandbox-controller", "sandbox-executor"],
-      "identities": ["artifact_maintenance", "sandbox_attestor", "sandbox_controller", "sandbox_executor"],
-      "readiness": ["artifact_maintenance", "sandbox_attestor", "sandbox_controller", "sandbox_executor"],
-      "provides": ["wasi"],
+    "sandbox": {
+      "roles": ["opensandbox_controller", "opensandbox_server", "sandbox_dispatcher", "sandbox_runner"],
+      "configs": ["sandbox-kubernetes"],
+      "identities": ["opensandbox_controller", "opensandbox_server", "sandbox_dispatcher", "sandbox_workload"],
+      "readiness": ["batchsandbox_crd", "containerd_runc", "direct_network", "disabled_network", "opensandbox_controller", "opensandbox_server", "sandbox_dispatcher"],
+      "provides": ["sandbox"],
       "memory_mib": 768,
       "cpu_millicores": 300
     }
   },
-  "aliases": {"all": ["context", "mcp", "model", "remote-capability", "wasi"]},
+  "aliases": {"all": ["context", "mcp", "model", "remote-capability", "sandbox"]},
   "qualification": {"dev_feature": false, "levels": {"L4": "not_run", "L5": "not_run", "L6": "not_run"}}
 }

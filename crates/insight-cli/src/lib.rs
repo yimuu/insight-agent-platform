@@ -88,6 +88,7 @@ const RUNTIME_ARTIFACT_DATA_CONFIG_FILE: &str = "artifact-data.json";
 const RUNTIME_ORCHESTRATION_CONFIG_FILE: &str = "orchestration.json";
 const RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE: &str = "capability-native.json";
 const RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE: &str = "registry-validation.json";
+const RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE: &str = "sandbox-kubernetes.json";
 const RUNTIME_CURSOR_KEY_FILE: &str = "run-event-cursor-key";
 const RUNTIME_PROFILE_STATE_FILE: &str = "profile.json";
 const RUNTIME_BUILD_STATE_FILE: &str = "build.json";
@@ -112,6 +113,13 @@ const MINIMUM_DEVELOPMENT_DISK_KIB: u64 = 8 * 1024 * 1024;
 const DEFAULT_PORTS: &[u16] = &[5432, 4222, 4566];
 const DOCTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCTOR_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const OPENSANDBOX_SOURCE_COMMIT: &str = "c39b814f36ded4c61d5ac6f9332ee4dfbab86c00";
+const OPENSANDBOX_SERVER_IMAGE_DIGEST: &str =
+    "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778";
+const OPENSANDBOX_CONTROLLER_IMAGE_DIGEST: &str =
+    "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a";
+const OPENSANDBOX_EXECD_IMAGE_DIGEST: &str =
+    "sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -1239,9 +1247,6 @@ fn valid_runtime_role(value: &str) -> bool {
             | "mcp-cleanup"
             | "context-subscription"
             | "callback-api"
-            | "sandbox-attestor"
-            | "sandbox-controller"
-            | "sandbox-executor"
     )
 }
 
@@ -1657,7 +1662,6 @@ struct RuntimePortBindings {
     artifact_gateway: u16,
     artifact_gateway_observability: u16,
     artifact_data_controller: u16,
-    artifact_data_guest: u16,
     artifact_data_observability: u16,
     orchestration_observability: u16,
     capability_native_observability: u16,
@@ -1668,7 +1672,7 @@ struct RuntimePortBindings {
 
 impl RuntimePortBindings {
     fn allocate() -> Result<Self, CliError> {
-        let mut listeners = Vec::with_capacity(33);
+        let mut listeners = Vec::with_capacity(28);
         let mut next = || -> Result<u16, CliError> {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
                 CliError::RuntimeUnavailable(format!(
@@ -1692,7 +1696,6 @@ impl RuntimePortBindings {
             artifact_gateway: next()?,
             artifact_gateway_observability: next()?,
             artifact_data_controller: next()?,
-            artifact_data_guest: next()?,
             artifact_data_observability: next()?,
             orchestration_observability: next()?,
             capability_native_observability: next()?,
@@ -1710,7 +1713,6 @@ impl RuntimePortBindings {
             artifact_gateway: 18081,
             artifact_gateway_observability: 19090,
             artifact_data_controller: 19443,
-            artifact_data_guest: 19444,
             artifact_data_observability: 19091,
             orchestration_observability: 19092,
             capability_native_observability: 19093,
@@ -2373,38 +2375,6 @@ fn ensure_selected_feature_identity(
             ),
         ]);
     }
-    if selected_profile.has_wasi() {
-        identities.extend([
-            (
-                full_profile::SANDBOX_ATTESTOR_CERTIFICATE_FILE,
-                full_profile::SANDBOX_ATTESTOR_PRIVATE_KEY_FILE,
-                &["sandbox-attestor.local"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::SANDBOX_CONTROLLER_CERTIFICATE_FILE,
-                full_profile::SANDBOX_CONTROLLER_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE,
-                full_profile::SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::SANDBOX_CONTROLLER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE,
-                full_profile::SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::WASI_EXECUTOR_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-        ]);
-    }
     for (certificate, private_key, dns_names, workload_identity, usage) in identities {
         ensure_local_leaf_certificate(
             &tls_directory,
@@ -2428,19 +2398,6 @@ fn ensure_selected_feature_identity(
                 .join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY)
                 .join(full_profile::MCP_OAUTH_STATE_KEY_FILE),
             &Sha256::digest(Uuid::now_v7().as_bytes()),
-        )?;
-    }
-    if selected_profile.has_wasi() {
-        let sandbox_state_directory = runtime.join(full_profile::SANDBOX_STATE_DIRECTORY);
-        fs::create_dir_all(&sandbox_state_directory).map_err(|source| {
-            CliError::InitializeProject {
-                path: sandbox_state_directory.display().to_string(),
-                source,
-            }
-        })?;
-        ensure_sensitive_random_file(
-            &runtime.join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE),
-            Uuid::now_v7().hyphenated().to_string().as_bytes(),
         )?;
     }
     Ok(())
@@ -2714,16 +2671,7 @@ fn prepare_runtime_profile_inner(
                     "schema_version": 1,
                     "audience": "data_worker",
                     "controller_listen_address": loopback_address(ports.artifact_data_controller),
-                    "guest_listen_address": loopback_address(ports.artifact_data_guest),
                     "observability_listen_address": loopback_address(ports.artifact_data_observability),
-                    "guest_identity": {
-                        "issuer": identity.issuer,
-                        "audience": "insight-platform-gvisor-guest",
-                        "namespace": "insight-platform-sandbox-guests",
-                        "service_account_name": "insight-platform-gvisor-guest",
-                        "jwks": jwks,
-                        "jwks_digest": identity.jwks_digest,
-                    },
                     "read_database_max_connections": 4,
                     "work_database_max_connections": 4,
                     "database_acquire_timeout_milliseconds": 5000,
@@ -2848,28 +2796,6 @@ fn prepare_runtime_profile_inner(
         &secret_provider_catalog,
         selected_profile,
     )?;
-    if selected_profile.has_wasi() {
-        let sandbox_executor = &feature_configs
-            .get("sandbox-executor")
-            .ok_or_else(|| CliError::InvalidLocalIdentity {
-                path: "local Sandbox executor configuration".to_owned(),
-            })?
-            .1;
-        let sandbox_worker_manifest_digest = canonical_digest(&sandbox_executor["worker_manifest"])
-            .map_err(|_| CliError::InvalidLocalIdentity {
-                path: "local Sandbox executor WorkerManifest".to_owned(),
-            })?;
-        let sandbox_backend_contract_digest = sandbox_executor["backend_contract_digest"].clone();
-        configs
-            .get_mut("orchestration")
-            .ok_or_else(|| CliError::InvalidLocalIdentity {
-                path: "local orchestration configuration".to_owned(),
-            })?
-            .1["sandbox"] = sandbox_orchestration_config(
-            &sandbox_worker_manifest_digest,
-            sandbox_backend_contract_digest,
-        )?;
-    }
     configs.extend(feature_configs);
     let mut digests = BTreeMap::new();
     for (role, (file_name, config)) in configs {
@@ -2920,37 +2846,6 @@ fn prepare_runtime_profile_inner(
     Ok(digests)
 }
 
-fn sandbox_orchestration_config(
-    worker_manifest_digest: &str,
-    backend_contract_digest: serde_json::Value,
-) -> Result<serde_json::Value, CliError> {
-    Ok(serde_json::json!({
-        "executor_worker_manifest_digest": worker_manifest_digest,
-        "isolation_backend_contract_digest": backend_contract_digest,
-        "callback_audience_identity_digest": local_digest("sandbox-callback-audience")?,
-        "resources": {
-            "cpu_millicores": 100,
-            "memory_mebibytes": 64,
-            "pids": 1,
-            "files": 1,
-            "io_bytes": 1048576,
-            "stdout_bytes": 1024,
-            "stderr_bytes": 1024,
-            "result_bytes": 4096,
-            "artifact_output_bytes": 0,
-            "network_connections": 0,
-            "network_request_bytes": 0,
-            "network_response_bytes": 0,
-            "startup_milliseconds": 10000,
-            "idle_milliseconds": 10000,
-            "wall_milliseconds": 10000,
-            "cleanup_milliseconds": 1000,
-            "wasm_fuel": 100000,
-            "wasm_memory_pages": 1024
-        }
-    }))
-}
-
 fn selected_feature_configs(
     runtime: &Path,
     ports: &RuntimePortBindings,
@@ -2964,7 +2859,6 @@ fn selected_feature_configs(
     let mcp_oauth_state_key_root = runtime.join(full_profile::MCP_OAUTH_STATE_KEY_DIRECTORY);
     let mcp_oauth_state_key_path =
         mcp_oauth_state_key_root.join(full_profile::MCP_OAUTH_STATE_KEY_FILE);
-    let local_instance_uid_path = runtime.join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE);
     let (mcp_state_key_reference_digest, mcp_oauth_state_key_reference_digest) =
         if selected_profile.needs_egress() {
             (
@@ -3008,14 +2902,61 @@ fn selected_feature_configs(
             mcp_oauth_state_key_reference_digest: &mcp_oauth_state_key_reference_digest,
             artifact_data_worker_port: ports.artifact_data_controller,
         },
-        full_profile::SandboxConfigInputs {
-            runtime,
-            local_instance_uid_path: &local_instance_uid_path,
-            artifact_data_worker_port: ports.artifact_data_controller,
-        },
     );
     configs.retain(|role, _| selected_profile.includes_role(role));
+    if selected_profile.has_sandbox() {
+        configs.insert(
+            "sandbox-kubernetes".to_owned(),
+            (
+                RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE,
+                sandbox_kubernetes_config(),
+            ),
+        );
+    }
     Ok(configs)
+}
+
+fn sandbox_kubernetes_config() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "kind": "insight.dev.sandbox-kubernetes/v1",
+        "environment_class": "single_node_development",
+        "production_qualification": false,
+        "provider": "opensandbox_kubernetes_batchsandbox",
+        "source": {
+            "repository": "https://github.com/opensandbox-group/OpenSandbox",
+            "commit": OPENSANDBOX_SOURCE_COMMIT,
+        },
+        "images": {
+            "server": OPENSANDBOX_SERVER_IMAGE_DIGEST,
+            "controller": OPENSANDBOX_CONTROLLER_IMAGE_DIGEST,
+            "execd": OPENSANDBOX_EXECD_IMAGE_DIGEST,
+        },
+        "runtime_contract": {
+            "lifecycle_schema_digest": "sha256:97dbdff2dbbf571c8e3ac77acd24454bc774275478decc1990918cbf7c518351",
+            "batchsandbox_crd_digest": "sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4",
+            "kubernetes_provider_template_digest": "sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a",
+            "runner_protocol_digest": "sha256:4a8df3b9f4469e1e4781ff6831a23c5c60b139a8cabc128121a0832d203b4bf7",
+            "container_runtime_digest": "sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e",
+            "network_policy_digest": "sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0",
+        },
+        "namespaces": {
+            "control": "platform-sandbox",
+            "workloads": "platform-sandbox-workloads",
+        },
+        "components": [
+            "sandbox-dispatcher",
+            "opensandbox-server",
+            "opensandbox-controller",
+            "sandbox-runner",
+        ],
+        "network": {
+            "default": "direct",
+            "supported": ["direct", "disabled"],
+            "policies": ["armed-runner-direct", "armed-runner-disabled", "armed-runner-ingress"],
+        },
+        "qualification": {"L4": "not_run", "L5": "not_run", "L6": "not_run"},
+    })
 }
 
 fn append_selected_feature_configs(
@@ -3037,7 +2978,6 @@ fn append_selected_feature_configs(
         &secret_catalog,
         selected_profile,
     )?;
-    let mut sandbox_config = None;
     for (role, (file_name, config)) in configs {
         let digest = canonical_digest(&config).map_err(|_| CliError::InvalidLocalIdentity {
             path: configuration.display().to_string(),
@@ -3075,62 +3015,7 @@ fn append_selected_feature_configs(
             state.config_digests.insert(role.clone(), digest);
             write_runtime_json_replace(&runtime.join(RUNTIME_PROFILE_STATE_FILE), state)?;
         }
-        if role == "sandbox-executor" {
-            sandbox_config = Some(config);
-        }
     }
-    if selected_profile.has_wasi() {
-        append_sandbox_orchestration_config(
-            &configuration,
-            state,
-            sandbox_config.ok_or_else(|| {
-                CliError::RuntimeState("selected WASI closure has no executor config".to_owned())
-            })?,
-        )?;
-    }
-    Ok(())
-}
-
-fn append_sandbox_orchestration_config(
-    configuration: &Path,
-    state: &mut RuntimeProfileState,
-    sandbox_executor: serde_json::Value,
-) -> Result<(), CliError> {
-    let path = configuration.join(RUNTIME_ORCHESTRATION_CONFIG_FILE);
-    let mut orchestration = fs::read(&path)
-        .map_err(|source| CliError::InitializeProject {
-            path: path.display().to_string(),
-            source,
-        })
-        .and_then(|bytes| {
-            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
-                CliError::RuntimeState(format!(
-                    "persisted orchestration config is invalid: {error}"
-                ))
-            })
-        })?;
-    if orchestration.get("sandbox").is_some() {
-        return Ok(());
-    }
-    let worker_manifest_digest = canonical_digest(&sandbox_executor["worker_manifest"])
-        .map_err(|_| CliError::RuntimeState("sandbox WorkerManifest is invalid".to_owned()))?;
-    orchestration["sandbox"] = sandbox_orchestration_config(
-        &worker_manifest_digest,
-        sandbox_executor["backend_contract_digest"].clone(),
-    )?;
-    let digest = canonical_digest(&orchestration)
-        .map_err(|_| CliError::RuntimeState("orchestration config is invalid".to_owned()))?;
-    write_runtime_json_replace(&path, &orchestration)?;
-    state
-        .config_digests
-        .insert("orchestration".to_owned(), digest);
-    write_runtime_json_replace(
-        &configuration
-            .parent()
-            .ok_or_else(|| CliError::RuntimeState("configuration path has no runtime".to_owned()))?
-            .join(RUNTIME_PROFILE_STATE_FILE),
-        state,
-    )?;
     Ok(())
 }
 
@@ -3404,6 +3289,9 @@ fn run_development_profile(
                     .to_owned(),
             ));
         }
+    }
+    if profile.has_sandbox() {
+        ensure_sandbox_kubernetes_dependency()?;
     }
     ensure_selected_feature_identity(&state_directory, profile)?;
     if let Some(state) = existing_profile_state.as_mut() {
@@ -3966,26 +3854,6 @@ fn ensure_runtime_binaries(
             "platform-subscription-context-worker",
         ]);
     }
-    if profile.has_wasi() {
-        command.args([
-            "-p",
-            "insight-platform-artifact-service",
-            "--bin",
-            "platform-artifact-maintenance",
-            "-p",
-            "insight-platform-sandbox-attestor",
-            "--bin",
-            "platform-sandbox-attestor",
-            "-p",
-            "insight-platform-sandbox-controller",
-            "--bin",
-            "platform-sandbox-controller",
-            "-p",
-            "insight-platform-sandbox-executor",
-            "--bin",
-            "platform-sandbox-executor",
-        ]);
-    }
     if profile.needs_egress() {
         command.args([
             "-p",
@@ -4200,16 +4068,6 @@ fn runtime_binary_paths(release: &Path, profile: DevProfile) -> BTreeMap<&'stati
             "platform-remote-context-worker",
             "platform-subscription-context-worker",
             "platform-mcp-resource-host",
-        ] {
-            include(name);
-        }
-    }
-    if profile.has_wasi() {
-        for name in [
-            "platform-artifact-maintenance",
-            "platform-sandbox-attestor",
-            "platform-sandbox-controller",
-            "platform-sandbox-executor",
         ] {
             include(name);
         }
@@ -5406,6 +5264,185 @@ fn run_bounded_doctor_command(
     }
 }
 
+fn required_kubectl_output(arguments: &[&str], dependency: &str) -> Result<String, CliError> {
+    let output = run_bounded_doctor_command("kubectl", arguments, DOCTOR_COMMAND_TIMEOUT).map_err(
+        |error| {
+            CliError::RuntimeUnavailable(format!(
+                "sandbox feature requires {dependency}: kubectl {} failed: {}",
+                arguments.join(" "),
+                truncate_detail(&error)
+            ))
+        },
+    )?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::RuntimeUnavailable(format!(
+            "sandbox feature requires {dependency}: kubectl {} failed: {}",
+            arguments.join(" "),
+            truncate_detail(detail.trim())
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn ensure_sandbox_kubernetes_dependency() -> Result<(), CliError> {
+    required_kubectl_output(
+        &["version", "--client=true", "--output=json"],
+        "an installed kubectl client and reachable local Kubernetes context",
+    )?;
+    let established = required_kubectl_output(
+        &[
+            "get",
+            "crd",
+            "batchsandboxes.sandbox.opensandbox.io",
+            "-o",
+            "jsonpath={.status.conditions[?(@.type=='Established')].status}",
+        ],
+        "the Established OpenSandbox BatchSandbox CRD",
+    )?;
+    if established != "True" {
+        return Err(CliError::RuntimeUnavailable(
+            "sandbox feature requires the Established OpenSandbox BatchSandbox CRD".to_owned(),
+        ));
+    }
+    required_kubectl_output(
+        &[
+            "-n",
+            "platform-sandbox",
+            "wait",
+            "--for=condition=Available",
+            "deployment/sandbox-dispatcher",
+            "deployment/opensandbox-server",
+            "deployment/opensandbox-controller",
+            "--timeout=5s",
+        ],
+        "Available Sandbox Dispatcher, OpenSandbox Server, and BatchSandbox Controller deployments",
+    )?;
+    let policies = required_kubectl_output(
+        &[
+            "-n",
+            "platform-sandbox-workloads",
+            "get",
+            "networkpolicy",
+            "armed-runner-ingress",
+            "armed-runner-direct",
+            "armed-runner-disabled",
+            "-o",
+            "name",
+        ],
+        "the fixed Armed runner ingress, Direct, and Disabled network policies",
+    )?;
+    for policy in [
+        "armed-runner-ingress",
+        "armed-runner-direct",
+        "armed-runner-disabled",
+    ] {
+        if !policies.lines().any(|line| line.ends_with(policy)) {
+            return Err(CliError::RuntimeUnavailable(format!(
+                "sandbox feature requires NetworkPolicy {policy} in platform-sandbox-workloads"
+            )));
+        }
+    }
+    let runtimes = required_kubectl_output(
+        &[
+            "get",
+            "nodes",
+            "-o",
+            "jsonpath={range .items[*]}{.status.nodeInfo.containerRuntimeVersion}{'\\n'}{end}",
+        ],
+        "a Ready single-node containerd/runc Kubernetes runtime",
+    )?;
+    if runtimes.lines().next().is_none()
+        || runtimes
+            .lines()
+            .any(|runtime| !runtime.starts_with("containerd://"))
+    {
+        return Err(CliError::RuntimeUnavailable(
+            "sandbox feature requires every selected Kubernetes node to report containerd runtime"
+                .to_owned(),
+        ));
+    }
+    let service_types = required_kubectl_output(
+        &[
+            "-n",
+            "platform-sandbox",
+            "get",
+            "service",
+            "opensandbox-server",
+            "sandbox-dispatcher",
+            "-o",
+            "jsonpath={range .items[*]}{.spec.type}{'\\n'}{end}",
+        ],
+        "internal-only OpenSandbox Server and Dispatcher services",
+    )?;
+    if service_types.lines().count() != 2 || service_types.lines().any(|kind| kind != "ClusterIP") {
+        return Err(CliError::RuntimeUnavailable(
+            "sandbox feature requires exactly ClusterIP OpenSandbox Server and Dispatcher services"
+                .to_owned(),
+        ));
+    }
+    let ingress = required_kubectl_output(
+        &["-n", "platform-sandbox", "get", "ingress", "-o", "name"],
+        "a control namespace with no public ingress",
+    )?;
+    if !ingress.is_empty() {
+        return Err(CliError::RuntimeUnavailable(
+            "sandbox feature refuses a platform-sandbox namespace containing public Ingress"
+                .to_owned(),
+        ));
+    }
+    let source_commit = required_kubectl_output(
+        &[
+            "-n",
+            "platform-sandbox",
+            "get",
+            "configmap",
+            "opensandbox-server-config",
+            "-o",
+            "jsonpath={.metadata.annotations.insight\\.platform/upstream-commit}",
+        ],
+        "the source-pinned OpenSandbox Server configuration",
+    )?;
+    if source_commit != OPENSANDBOX_SOURCE_COMMIT {
+        return Err(CliError::RuntimeUnavailable(format!(
+            "sandbox feature requires OpenSandbox source commit {OPENSANDBOX_SOURCE_COMMIT}; observed {source_commit}"
+        )));
+    }
+    for (deployment, component, expected_digest) in [
+        (
+            "opensandbox-server",
+            "server",
+            OPENSANDBOX_SERVER_IMAGE_DIGEST,
+        ),
+        (
+            "opensandbox-controller",
+            "manager",
+            OPENSANDBOX_CONTROLLER_IMAGE_DIGEST,
+        ),
+    ] {
+        let image = required_kubectl_output(
+            &[
+                "-n",
+                "platform-sandbox",
+                "get",
+                "deployment",
+                deployment,
+                "-o",
+                &format!(
+                    "jsonpath={{.spec.template.spec.containers[?(@.name=='{component}')].image}}"
+                ),
+            ],
+            "the exact digest-pinned official OpenSandbox images",
+        )?;
+        if !image.ends_with(expected_digest) {
+            return Err(CliError::RuntimeUnavailable(format!(
+                "sandbox feature requires {deployment} image {expected_digest}; observed {image}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn truncate_detail(detail: &str) -> String {
     detail.chars().take(160).collect()
 }
@@ -5459,9 +5496,9 @@ pub fn doctor_report(probe: &dyn DoctorProbe) -> DoctorReport {
     )));
     checks.push(disk_resource_check(probe.command("df", &["-Pk", "."])));
     checks.push(command_check(
-        "runsc",
+        "kubectl_client",
         false,
-        probe.command("runsc", &["--version"]),
+        probe.command("kubectl", &["version", "--client=true", "--output=json"]),
     ));
     for port in DEFAULT_PORTS {
         checks.push(port_check(*port, probe.port_available(*port)));
@@ -5960,7 +5997,7 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--features model,remote-capability,context,mcp,wasi|all] [--offline|--from-source]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n\nInstall and update:\n  insight version [--json]\n  insight update check\n  insight update apply --version <exact-version>\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
+    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--features model,remote-capability,context,mcp,sandbox|all] [--offline|--from-source]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n\nInstall and update:\n  insight version [--json]\n  insight update check\n  insight update apply --version <exact-version>\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
 }
 
 fn advanced_usage() -> &'static str {
@@ -7001,7 +7038,14 @@ mod tests {
                 Ok("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 16777216 1 16777215 1% /".to_owned()),
             );
             probe.commands.insert(
-                ("runsc".to_owned(), vec!["--version".to_owned()]),
+                (
+                    "kubectl".to_owned(),
+                    vec![
+                        "version".to_owned(),
+                        "--client=true".to_owned(),
+                        "--output=json".to_owned(),
+                    ],
+                ),
                 Err("not installed".to_owned()),
             );
             for port in DEFAULT_PORTS {
@@ -7031,13 +7075,12 @@ mod tests {
     }
 
     #[test]
-    fn doctor_accepts_optional_missing_runsc() {
+    fn doctor_accepts_optional_missing_kubectl() {
         let report = doctor_report(&FakeProbe::ready());
         assert!(report.ready);
-        assert!(report
-            .checks
-            .iter()
-            .any(|check| check.name == "runsc" && check.status == DoctorStatus::Unavailable));
+        assert!(report.checks.iter().any(
+            |check| check.name == "kubectl_client" && check.status == DoctorStatus::Unavailable
+        ));
     }
 
     #[test]
@@ -7246,17 +7289,6 @@ mod tests {
         assert!(!tls
             .join(full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE)
             .exists());
-        assert!(!tls
-            .join(full_profile::SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE)
-            .exists());
-        let sandbox_local_instance_uid = root
-            .join(RUNTIME_DIRECTORY)
-            .join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE);
-        assert!(!sandbox_local_instance_uid.exists());
-        assert!(!root
-            .join(RUNTIME_DIRECTORY)
-            .join(full_profile::SANDBOX_STATE_DIRECTORY)
-            .exists());
         let verifier = InstalledOidcVerifierConfig {
             issuer: persisted.identity.issuer.clone(),
             audience: persisted.identity.audience.clone(),
@@ -7459,7 +7491,6 @@ mod tests {
             full_profile::MODEL_WORKER_CONFIG_FILE,
             full_profile::CONTEXT_NATIVE_CONFIG_FILE,
             full_profile::MCP_HOST_CONFIG_FILE,
-            full_profile::SANDBOX_EXECUTOR_CONFIG_FILE,
         ] {
             assert!(!configurations.join(file).exists(), "{file}");
         }
@@ -7481,7 +7512,10 @@ mod tests {
             workspace,
             DevProfile::parse(Some("all"), false, true).unwrap(),
         );
-        for binary in full_profile::INITIAL_BINARY_NAMES {
+        for binary in full_profile::INITIAL_BINARY_NAMES
+            .into_iter()
+            .filter(|binary| *binary != "platform-artifact-maintenance")
+        {
             assert!(!base.contains_key(binary));
             assert!(full.contains_key(binary));
         }
@@ -7499,7 +7533,7 @@ mod tests {
         assert!(model.contains_key("platform-egress-broker"));
         assert!(!model.contains_key("platform-context-worker"));
         assert!(!model.contains_key("platform-mcp-host"));
-        assert!(!model.contains_key("platform-sandbox-executor"));
+        assert!(!model.contains_key("platform-sandbox-dispatcher"));
         assert!(!model.contains_key("platform-capability-remote-worker"));
     }
 
@@ -7536,21 +7570,28 @@ mod tests {
         ensure_selected_feature_identity(&state_directory, all).unwrap();
         append_selected_feature_configs(&state_directory, &project.identity, &mut state, all)
             .unwrap();
-        assert_eq!(state.config_digests.len(), 26);
+        assert_eq!(state.config_digests.len(), 23);
         for role in [
             "context-native",
             "model-worker",
             "capability-remote",
             "mcp-host",
-            "sandbox-executor",
         ] {
             assert!(state.config_digests.contains_key(role), "{role}");
         }
+        assert!(state.config_digests.contains_key("sandbox-kubernetes"));
+        let sandbox_config = fs::read_to_string(
+            runtime
+                .join(RUNTIME_CONFIGURATION_DIRECTORY)
+                .join(RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE),
+        )
+        .unwrap();
+        assert!(sandbox_config.contains(OPENSANDBOX_SOURCE_COMMIT));
+        assert!(sandbox_config.contains(OPENSANDBOX_SERVER_IMAGE_DIGEST));
+        assert!(!sandbox_config.contains("api_key"));
+        assert!(!sandbox_config.contains("endpoint"));
         assert!(tls
             .join(full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE)
-            .is_file());
-        assert!(runtime
-            .join(full_profile::SANDBOX_LOCAL_INSTANCE_UID_FILE)
             .is_file());
         let orchestration: serde_json::Value = serde_json::from_slice(
             &fs::read(
@@ -7561,7 +7602,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(orchestration.get("sandbox").is_some());
+        assert!(orchestration.get("sandbox").is_none());
     }
 
     #[test]

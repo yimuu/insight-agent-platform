@@ -25,7 +25,7 @@ REQUIRED_METADATA = (
     "development-profile-v1.json",
     "release-performance.json",
     "runtime.spdx.json",
-    "sandbox-guest.spdx.json",
+    "sandbox-runner.spdx.json",
 )
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -118,8 +118,8 @@ def main() -> None:
         raise ValueError("created-at must be UTC with six fractional digits")
     root = args.artifacts.resolve()
     images = strict_json(args.images)
-    if not isinstance(images, dict) or set(images) != {"console", "runtime", "sandbox_guest"}:
-        raise ValueError("images input must close console, runtime, and sandbox_guest")
+    if not isinstance(images, dict) or set(images) != {"console", "runtime", "sandbox_runner"}:
+        raise ValueError("images input must close console, runtime, and sandbox_runner")
 
     profile_source = ROOT / "release/development-profile-v1.json"
     profile_schema = ROOT / "release/development-profile-v1.schema.json"

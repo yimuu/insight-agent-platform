@@ -14,7 +14,7 @@ on:
           - remote-capability
           - context
           - mcp
-          - wasi
+          - sandbox
           - all
 
 permissions:

@@ -50,7 +50,7 @@ def image(name: str, subject: str, digest: str, index_path: Path) -> dict[str, o
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    for name in ("runtime", "sandbox_guest", "console"):
+    for name in ("runtime", "sandbox_runner", "console"):
         option = name.replace("_", "-")
         parser.add_argument(f"--{option}-subject", required=True)
         parser.add_argument(f"--{option}-digest", required=True)
@@ -58,7 +58,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     result = {}
-    for name in ("runtime", "sandbox_guest", "console"):
+    for name in ("runtime", "sandbox_runner", "console"):
         result[name] = image(
             name,
             getattr(args, f"{name}_subject"),

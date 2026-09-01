@@ -18,7 +18,7 @@ EXPECTED_IDS = {
     "timer-signal-restart-recovery",
     "subagent-quota-and-cancel",
     "artifact-lifecycle-and-rejection",
-    "wasi-and-remote-framework-capability",
+    "sandbox-and-remote-framework-capability",
 }
 REQUIRED_FIELDS = {
     "id",
@@ -38,8 +38,8 @@ ALLOWED_PROFILES = {
     "starter+mcp,remote-capability",
     "starter+model",
     "starter+remote-capability",
-    "starter+remote-capability,wasi",
-    "starter+wasi",
+    "starter+remote-capability,sandbox",
+    "starter+sandbox",
 }
 REQUIRED_ENTRYPOINTS = {"cli", "http_fixture", "console"}
 

@@ -10,11 +10,11 @@
     "environment_class": {"const": "development"},
     "deployment": {"const": "single_node"},
     "production_qualification": {"const": false},
-    "release_images": {"const": ["runtime", "sandbox_guest", "console"]},
+    "release_images": {"const": ["runtime", "sandbox_runner", "console"]},
     "dependencies": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["name", "image"], "properties": {"name": {"enum": ["postgresql", "nats", "object_storage"]}, "image": {"type": "string", "pattern": "^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$"}}}},
     "starter": {"$ref": "#/$defs/closure"},
-    "features": {"type": "object", "additionalProperties": false, "required": ["context", "mcp", "model", "remote-capability", "wasi"], "properties": {"context": {"$ref": "#/$defs/feature"}, "mcp": {"$ref": "#/$defs/feature"}, "model": {"$ref": "#/$defs/feature"}, "remote-capability": {"$ref": "#/$defs/feature"}, "wasi": {"$ref": "#/$defs/feature"}}},
-    "aliases": {"const": {"all": ["context", "mcp", "model", "remote-capability", "wasi"]}},
+    "features": {"type": "object", "additionalProperties": false, "required": ["context", "mcp", "model", "remote-capability", "sandbox"], "properties": {"context": {"$ref": "#/$defs/feature"}, "mcp": {"$ref": "#/$defs/feature"}, "model": {"$ref": "#/$defs/feature"}, "remote-capability": {"$ref": "#/$defs/feature"}, "sandbox": {"$ref": "#/$defs/feature"}}},
+    "aliases": {"const": {"all": ["context", "mcp", "model", "remote-capability", "sandbox"]}},
     "qualification": {"const": {"dev_feature": false, "levels": {"L4": "not_run", "L5": "not_run", "L6": "not_run"}}}
   },
   "$defs": {

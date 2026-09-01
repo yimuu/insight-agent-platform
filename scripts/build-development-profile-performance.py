@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 
 
-FEATURES = {"context", "mcp", "model", "remote-capability", "wasi"}
+FEATURES = {"context", "mcp", "model", "remote-capability", "sandbox"}
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")

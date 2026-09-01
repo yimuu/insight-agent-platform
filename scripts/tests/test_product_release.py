@@ -23,7 +23,7 @@ TARGETS = (
 )
 METADATA = (
     "build-provenance.intoto.jsonl", "cli.spdx.json", "console.spdx.json",
-    "release-performance.json", "runtime.spdx.json", "sandbox-guest.spdx.json",
+    "release-performance.json", "runtime.spdx.json", "sandbox-runner.spdx.json",
 )
 
 
@@ -60,7 +60,7 @@ class ProductReleaseTests(unittest.TestCase):
                 "index_digest": digest(f"index-{name}"),
                 "platforms": {platform: digest(f"{name}-{platform}") for platform in ("linux/amd64", "linux/arm64")},
             }
-            for name in ("console", "runtime", "sandbox_guest")
+            for name in ("console", "runtime", "sandbox_runner")
         }
         image_path = root / "images.json"
         image_path.write_text(json.dumps(images), encoding="utf-8")
@@ -82,7 +82,7 @@ class ProductReleaseTests(unittest.TestCase):
             self.assertEqual(raw, json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":")).encode())
             bundle = json.loads(raw)
             self.assertEqual(list(TARGETS), [item["target"] for item in bundle["cli"]])
-            self.assertEqual(["console", "runtime", "sandbox_guest"], [item["name"] for item in bundle["images"]])
+            self.assertEqual(["console", "runtime", "sandbox_runner"], [item["name"] for item in bundle["images"]])
             self.assertIn("release-bundle.json", (root / "checksums.txt").read_text())
 
     def test_missing_arch_partial_image_and_archive_extra_fail_closed(self) -> None:
@@ -133,7 +133,7 @@ class ProductReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             arguments = []
-            for name in ("runtime", "sandbox-guest", "console"):
+            for name in ("runtime", "sandbox-runner", "console"):
                 index = root / f"{name}.json"
                 index.write_text(json.dumps({"manifests": [
                     {"digest": digest(f"{name}-amd64"), "platform": {"os": "linux", "architecture": "amd64"}},
@@ -155,7 +155,7 @@ class ProductReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             phases = [
-                "console_build", "runtime_build_push", "sandbox_guest_build_push",
+                "console_build", "runtime_build_push", "sandbox_runner_build_push",
                 "console_image_build_push", "sbom", "provenance", "cosign", "cold_pull", "warm_reuse",
             ] + [f"cli_build:{target}" for target in TARGETS]
             evidence = [{"name": name, "duration_seconds": 1} for name in phases]

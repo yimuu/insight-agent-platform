@@ -16,7 +16,7 @@ TARGETS = {
     "x86_64-apple-darwin", "x86_64-unknown-linux-gnu",
 }
 PHASES = {
-    "console_build", "runtime_build_push", "sandbox_guest_build_push",
+    "console_build", "runtime_build_push", "sandbox_runner_build_push",
     "console_image_build_push", "sbom", "provenance", "cosign", "cold_pull", "warm_reuse",
 }
 

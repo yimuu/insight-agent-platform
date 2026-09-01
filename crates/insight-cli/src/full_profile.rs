@@ -13,7 +13,7 @@ use insight_platform_contracts::{
     builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
     canonical_digest, CapabilityBackendContract, GrpcCapabilityContract, HttpCapabilityContract,
     HttpCapabilityMethod, McpToolCapabilityContract, ResourceKind, BUILTIN_JSON_CODEC_ID,
-    BUILTIN_JSON_CODEC_VERSION, WASI_ABI_V1_RUNTIME_VERSION,
+    BUILTIN_JSON_CODEC_VERSION,
 };
 pub(crate) use insight_platform_contracts::{
     CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
@@ -21,7 +21,6 @@ pub(crate) use insight_platform_contracts::{
     MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
     MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
     MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
-    SANDBOX_CONTROLLER_WORKLOAD_IDENTITY, WASI_EXECUTOR_WORKLOAD_IDENTITY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -45,9 +44,6 @@ pub(crate) const MCP_SUBSCRIPTION_CONFIG_FILE: &str = "mcp-subscription-worker.j
 pub(crate) const MCP_CLEANUP_CONFIG_FILE: &str = "mcp-cleanup-worker.json";
 pub(crate) const CONTEXT_SUBSCRIPTION_CONFIG_FILE: &str = "subscription-context-worker.json";
 pub(crate) const CALLBACK_API_CONFIG_FILE: &str = "callback-api.json";
-pub(crate) const SANDBOX_ATTESTOR_CONFIG_FILE: &str = "sandbox-attestor.json";
-pub(crate) const SANDBOX_CONTROLLER_CONFIG_FILE: &str = "sandbox-controller.json";
-pub(crate) const SANDBOX_EXECUTOR_CONFIG_FILE: &str = "sandbox-executor-wasi.json";
 pub(crate) const SECURITY_AUTHORITY_CERTIFICATE_FILE: &str = "security-authority.pem";
 pub(crate) const SECURITY_AUTHORITY_PRIVATE_KEY_FILE: &str = "security-authority-key.pem";
 pub(crate) const EGRESS_BROKER_CLIENT_CERTIFICATE_FILE: &str = "egress-broker-client.pem";
@@ -89,20 +85,7 @@ pub(crate) const CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE: &str =
     "context-subscription-client-key.pem";
 pub(crate) const CALLBACK_CLIENT_CERTIFICATE_FILE: &str = "callback-client.pem";
 pub(crate) const CALLBACK_CLIENT_PRIVATE_KEY_FILE: &str = "callback-client-key.pem";
-pub(crate) const SANDBOX_ATTESTOR_CERTIFICATE_FILE: &str = "sandbox-attestor.pem";
-pub(crate) const SANDBOX_ATTESTOR_PRIVATE_KEY_FILE: &str = "sandbox-attestor-key.pem";
-pub(crate) const SANDBOX_CONTROLLER_CERTIFICATE_FILE: &str = "sandbox-controller.pem";
-pub(crate) const SANDBOX_CONTROLLER_PRIVATE_KEY_FILE: &str = "sandbox-controller-key.pem";
-pub(crate) const SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE: &str = "sandbox-controller-client.pem";
-pub(crate) const SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE: &str =
-    "sandbox-controller-client-key.pem";
-pub(crate) const SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE: &str = "sandbox-executor-client.pem";
-pub(crate) const SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE: &str = "sandbox-executor-client-key.pem";
-pub(crate) const SANDBOX_STATE_DIRECTORY: &str = "sandbox-attestor";
-pub(crate) const SANDBOX_REGISTRATION_SOCKET_FILE: &str = "registration.sock";
-pub(crate) const SANDBOX_REGISTRY_FILE: &str = "registrations.json";
-pub(crate) const SANDBOX_LOCAL_INSTANCE_UID_FILE: &str = "sandbox-local-instance-uid";
-pub(crate) const INITIAL_BINARY_NAMES: [&str; 18] = [
+pub(crate) const INITIAL_BINARY_NAMES: [&str; 15] = [
     "platform-context-worker",
     "platform-artifact-maintenance",
     "platform-security-authority",
@@ -117,9 +100,6 @@ pub(crate) const INITIAL_BINARY_NAMES: [&str; 18] = [
     "platform-mcp-cleanup-worker",
     "platform-subscription-context-worker",
     "platform-callback-api",
-    "platform-sandbox-attestor",
-    "platform-sandbox-controller",
-    "platform-sandbox-executor",
     "platform-context-dataset-worker",
 ];
 
@@ -160,12 +140,6 @@ pub(crate) struct WorkerDigests<'a> {
     pub(crate) openai_contract: &'a str,
 }
 
-pub(crate) struct SandboxConfigInputs<'a> {
-    pub(crate) runtime: &'a Path,
-    pub(crate) local_instance_uid_path: &'a Path,
-    pub(crate) artifact_data_worker_port: u16,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PortBindings {
     pub(crate) context_native_observability: u16,
@@ -200,16 +174,6 @@ pub(crate) struct PortBindings {
     pub(crate) context_subscription_observability: u16,
     #[serde(default = "default_callback_api_port")]
     pub(crate) callback_api: u16,
-    #[serde(default = "default_sandbox_attestor_port")]
-    pub(crate) sandbox_attestor: u16,
-    #[serde(default = "default_sandbox_attestor_observability_port")]
-    pub(crate) sandbox_attestor_observability: u16,
-    #[serde(default = "default_sandbox_controller_port")]
-    pub(crate) sandbox_controller: u16,
-    #[serde(default = "default_sandbox_controller_observability_port")]
-    pub(crate) sandbox_controller_observability: u16,
-    #[serde(default = "default_sandbox_executor_observability_port")]
-    pub(crate) sandbox_executor_observability: u16,
     #[serde(default = "default_context_dataset_observability_port")]
     pub(crate) context_dataset_observability: u16,
 }
@@ -235,11 +199,6 @@ impl PortBindings {
             mcp_cleanup_observability: next()?,
             context_subscription_observability: next()?,
             callback_api: next()?,
-            sandbox_attestor: next()?,
-            sandbox_attestor_observability: next()?,
-            sandbox_controller: next()?,
-            sandbox_controller_observability: next()?,
-            sandbox_executor_observability: next()?,
             context_dataset_observability: next()?,
         })
     }
@@ -264,11 +223,6 @@ impl PortBindings {
             mcp_cleanup_observability: default_mcp_cleanup_observability_port(),
             context_subscription_observability: default_context_subscription_observability_port(),
             callback_api: default_callback_api_port(),
-            sandbox_attestor: default_sandbox_attestor_port(),
-            sandbox_attestor_observability: default_sandbox_attestor_observability_port(),
-            sandbox_controller: default_sandbox_controller_port(),
-            sandbox_controller_observability: default_sandbox_controller_observability_port(),
-            sandbox_executor_observability: default_sandbox_executor_observability_port(),
             context_dataset_observability: default_context_dataset_observability_port(),
         }
     }
@@ -330,28 +284,8 @@ const fn default_callback_api_port() -> u16 {
     19_112
 }
 
-const fn default_sandbox_attestor_port() -> u16 {
-    19_113
-}
-
-const fn default_sandbox_attestor_observability_port() -> u16 {
-    19_114
-}
-
-const fn default_sandbox_controller_port() -> u16 {
-    19_115
-}
-
-const fn default_sandbox_controller_observability_port() -> u16 {
-    19_116
-}
-
-const fn default_sandbox_executor_observability_port() -> u16 {
-    19_117
-}
-
 const fn default_context_dataset_observability_port() -> u16 {
-    19_118
+    19_113
 }
 
 impl Default for PortBindings {
@@ -365,7 +299,6 @@ pub(crate) fn initial_configs(
     artifact_provider_catalog: &Value,
     digests: WorkerDigests<'_>,
     egress: EgressConfigInputs<'_>,
-    sandbox: SandboxConfigInputs<'_>,
 ) -> BTreeMap<String, (&'static str, Value)> {
     let model_manifest = json!({
         "manifest_version": 1,
@@ -971,110 +904,6 @@ pub(crate) fn initial_configs(
                         }],
                     },
                     "shutdown_grace_milliseconds": 30000,
-                }),
-            ),
-        ),
-        (
-            "sandbox-attestor".to_owned(),
-            (
-                SANDBOX_ATTESTOR_CONFIG_FILE,
-                json!({
-                    "schema_version": 1,
-                    "process_observer": "local_unix",
-                    "registration_socket_path": sandbox.runtime
-                        .join(SANDBOX_REGISTRATION_SOCKET_FILE)
-                        .display().to_string(),
-                    "controller_listen_address": loopback_address(ports.sandbox_attestor),
-                    "observability_listen_address": loopback_address(ports.sandbox_attestor_observability),
-                    "proc_root": "/",
-                    "node_uid_authority_path": sandbox.local_instance_uid_path.display().to_string(),
-                    "registry_path": sandbox.runtime
-                        .join(SANDBOX_STATE_DIRECTORY)
-                        .join(SANDBOX_REGISTRY_FILE)
-                        .display().to_string(),
-                    "maximum_registrations": 1024,
-                    "absent_retention_seconds": 3900,
-                    "attestor_identity_digest": closed_local_digest("sandbox-attestor-identity"),
-                    "tls_handshake_timeout_milliseconds": 5000,
-                    "shutdown_grace_milliseconds": 30000,
-                    "allow_loopback_advertised_route": true,
-                }),
-            ),
-        ),
-        (
-            "sandbox-controller".to_owned(),
-            (
-                SANDBOX_CONTROLLER_CONFIG_FILE,
-                json!({
-                    "schema_version": 1,
-                    "listen_address": loopback_address(ports.sandbox_controller),
-                    "observability_listen_address": loopback_address(ports.sandbox_controller_observability),
-                    "database_business_max_connections": 6,
-                    "database_critical_control_max_connections": 2,
-                    "outcome_convergence": {
-                        "maximum_in_flight": 1,
-                        "scan_interval_milliseconds": 1000,
-                        "scan_jitter_milliseconds": 100,
-                        "failure_backoff_milliseconds": 100,
-                        "receipt_ttl_seconds": 7200,
-                    },
-                    "artifact_broker": {
-                        "endpoint": format!("https://localhost:{}/", sandbox.artifact_data_worker_port),
-                        "tls_server_name": "localhost",
-                        "maximum_request_bytes": 1048576,
-                        "maximum_chunk_bytes": 262144,
-                        "maximum_in_flight_responses": 1,
-                    },
-                    "process_isolation_attestor": {
-                        "tls_server_name": "sandbox-attestor.local",
-                        "attestor_identity_digest": closed_local_digest("sandbox-attestor-identity"),
-                        "maximum_cached_routes": 128,
-                        "controller_port": ports.sandbox_attestor,
-                        "allow_loopback_routes": true,
-                        "allowed_node_cidrs": ["127.0.0.1/32"],
-                    },
-                    "connect_timeout_milliseconds": 5000,
-                    "request_timeout_milliseconds": 30000,
-                    "shutdown_grace_milliseconds": 30000,
-                }),
-            ),
-        ),
-        (
-            "sandbox-executor".to_owned(),
-            (
-                SANDBOX_EXECUTOR_CONFIG_FILE,
-                json!({
-                    "schema_version": 1,
-                    "worker_manifest": {
-                        "manifest_version": 1,
-                        "worker_role": "sandbox-executor.wasi",
-                        "work_class": "sandbox",
-                        "adapter_runtime_digest": closed_local_digest("sandbox-wasi-adapter"),
-                        "protocol_version": 1,
-                        "max_concurrency": 4,
-                        "critical_control_reserved_slots": 1,
-                    },
-                    "backend": {
-                        "kind": "wasi",
-                        "runtime_version": WASI_ABI_V1_RUNTIME_VERSION,
-                    },
-                    "backend_contract_digest": closed_local_digest("sandbox-wasi-backend-contract"),
-                    "authority_endpoint": format!("https://localhost:{}/", ports.sandbox_controller),
-                    "authority_tls_server_name": "localhost",
-                    "process_registration_attestor_socket_path": sandbox.runtime
-                        .join(SANDBOX_REGISTRATION_SOCKET_FILE)
-                        .display().to_string(),
-                    "process_registration_attestor_tls_server_name": "sandbox-attestor.local",
-                    "process_registration_attestor_identity_digest": closed_local_digest("sandbox-attestor-identity"),
-                    "nats_endpoint": "tls://localhost:4222",
-                    "observability_listen_address": loopback_address(ports.sandbox_executor_observability),
-                    "receipt_ttl_seconds": 7200,
-                    "claim_scan_milliseconds": 100,
-                    "claim_failure_backoff_milliseconds": 25,
-                    "drain_grace_milliseconds": 30000,
-                    "control_request_timeout_milliseconds": 5000,
-                    "connect_timeout_milliseconds": 5000,
-                    "request_timeout_milliseconds": 30000,
                 }),
             ),
         ),
@@ -1897,249 +1726,8 @@ pub(crate) fn initial_process_launches(
             extra_environment: Vec::new(),
         },
         ProcessLaunch {
-            role: "sandbox-attestor",
-            binary: binary(INITIAL_BINARY_NAMES[14]),
-            ready_address: loopback_address(ports.sandbox_attestor_observability),
-            environment: vec![
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CONFIG",
-                    paths
-                        .configuration
-                        .join(SANDBOX_ATTESTOR_CONFIG_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CONFIG_DIGEST",
-                    config_digests["sandbox-attestor"].clone(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_EXECUTOR_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_ATTESTOR_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_REGISTRATION_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_ATTESTOR_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_ATTESTOR_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CONTROLLER_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_ATTESTOR_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_ADVERTISED_IP",
-                    "127.0.0.1".to_owned(),
-                ),
-            ],
-            extra_environment: Vec::new(),
-        },
-        ProcessLaunch {
-            role: "sandbox-controller",
-            binary: binary(INITIAL_BINARY_NAMES[15]),
-            ready_address: loopback_address(ports.sandbox_controller_observability),
-            environment: vec![
-                (
-                    "PLATFORM_SANDBOX_CONTROLLER_CONFIG",
-                    paths
-                        .configuration
-                        .join(SANDBOX_CONTROLLER_CONFIG_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_CONTROLLER_CONFIG_DIGEST",
-                    config_digests["sandbox-controller"].clone(),
-                ),
-                ("PLATFORM_DATABASE_URL", database_url.to_owned()),
-                (
-                    "PLATFORM_SANDBOX_GRPC_CLIENT_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_GRPC_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_GRPC_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ARTIFACT_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ARTIFACT_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ARTIFACT_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_CONTROLLER_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            extra_environment: Vec::new(),
-        },
-        ProcessLaunch {
-            role: "sandbox-executor",
-            binary: binary(INITIAL_BINARY_NAMES[16]),
-            ready_address: loopback_address(ports.sandbox_executor_observability),
-            environment: vec![
-                (
-                    "PLATFORM_SANDBOX_EXECUTOR_CONFIG",
-                    paths
-                        .configuration
-                        .join(SANDBOX_EXECUTOR_CONFIG_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_EXECUTOR_CONFIG_DIGEST",
-                    config_digests["sandbox-executor"].clone(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_GRPC_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_GRPC_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_GRPC_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_NATS_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_NATS_CERT_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_EXECUTOR_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_NATS_KEY_PATH",
-                    paths
-                        .tls
-                        .join(SANDBOX_EXECUTOR_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_SANDBOX_ATTESTOR_CA_PATH",
-                    paths
-                        .tls
-                        .join(paths.ca_certificate_file)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            extra_environment: Vec::new(),
-        },
-        ProcessLaunch {
             role: "context-dataset",
-            binary: binary(INITIAL_BINARY_NAMES[17]),
+            binary: binary(INITIAL_BINARY_NAMES[14]),
             ready_address: loopback_address(ports.context_dataset_observability),
             environment: vec![
                 (
@@ -2221,12 +1809,7 @@ mod tests {
             mcp_cleanup_observability: 31_016,
             context_subscription_observability: 31_017,
             callback_api: 31_018,
-            sandbox_attestor: 31_019,
-            sandbox_attestor_observability: 31_020,
-            sandbox_controller: 31_021,
-            sandbox_controller_observability: 31_022,
-            sandbox_executor_observability: 31_023,
-            context_dataset_observability: 31_024,
+            context_dataset_observability: 31_019,
         };
         let catalog = json!({"schema_version": 1});
         let adapter = digest('a');
@@ -2253,11 +1836,6 @@ mod tests {
                     "/project/runtime/mcp-oauth-state-keys/current",
                 ),
                 mcp_oauth_state_key_reference_digest: &digest('9'),
-                artifact_data_worker_port: 30_999,
-            },
-            SandboxConfigInputs {
-                runtime: Path::new("/project/runtime"),
-                local_instance_uid_path: Path::new("/project/runtime/sandbox-local-instance-uid"),
                 artifact_data_worker_port: 30_999,
             },
         );
@@ -2307,28 +1885,8 @@ mod tests {
             "127.0.0.1:31018"
         );
         assert_eq!(
-            configs["sandbox-attestor"].1["process_observer"],
-            "local_unix"
-        );
-        assert_eq!(
-            configs["sandbox-attestor"].1["registration_socket_path"],
-            "/project/runtime/registration.sock"
-        );
-        assert_eq!(
-            configs["sandbox-executor"].1["process_registration_attestor_socket_path"],
-            "/project/runtime/registration.sock"
-        );
-        assert_eq!(
-            configs["sandbox-controller"].1["process_isolation_attestor"]["allowed_node_cidrs"][0],
-            "127.0.0.1/32"
-        );
-        assert_eq!(
-            configs["sandbox-executor"].1["backend"]["runtime_version"],
-            WASI_ABI_V1_RUNTIME_VERSION
-        );
-        assert_eq!(
             configs["context-dataset"].1["observability_listen_address"],
-            "127.0.0.1:31024"
+            "127.0.0.1:31019"
         );
         assert_eq!(
             configs["context-dataset"].1["sources"][0]["binding"]["adapter_contract_digest"],
@@ -2357,12 +1915,7 @@ mod tests {
             mcp_cleanup_observability: 31_016,
             context_subscription_observability: 31_017,
             callback_api: 31_018,
-            sandbox_attestor: 31_019,
-            sandbox_attestor_observability: 31_020,
-            sandbox_controller: 31_021,
-            sandbox_controller_observability: 31_022,
-            sandbox_executor_observability: 31_023,
-            context_dataset_observability: 31_024,
+            context_dataset_observability: 31_019,
         };
         let digests = BTreeMap::from([
             ("context-native".to_owned(), digest('a')),
@@ -2379,9 +1932,6 @@ mod tests {
             ("mcp-cleanup".to_owned(), digest('6')),
             ("context-subscription".to_owned(), digest('7')),
             ("callback-api".to_owned(), digest('8')),
-            ("sandbox-attestor".to_owned(), digest('9')),
-            ("sandbox-controller".to_owned(), digest('a')),
-            ("sandbox-executor".to_owned(), digest('b')),
             ("context-dataset".to_owned(), digest('c')),
         ]);
         let launches = initial_process_launches(
@@ -2418,9 +1968,6 @@ mod tests {
                 "mcp-cleanup",
                 "context-subscription",
                 "callback-api",
-                "sandbox-attestor",
-                "sandbox-controller",
-                "sandbox-executor",
                 "context-dataset"
             ]
         );
@@ -2438,9 +1985,7 @@ mod tests {
         assert_eq!(launches[11].ready_address, "127.0.0.1:31016");
         assert_eq!(launches[12].ready_address, "127.0.0.1:31017");
         assert_eq!(launches[13].ready_address, "127.0.0.1:31018");
-        assert_eq!(launches[14].ready_address, "127.0.0.1:31020");
-        assert_eq!(launches[15].ready_address, "127.0.0.1:31022");
-        assert_eq!(launches[16].ready_address, "127.0.0.1:31023");
+        assert_eq!(launches[14].ready_address, "127.0.0.1:31019");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
@@ -2491,18 +2036,6 @@ mod tests {
             == "PLATFORM_CALLBACK_API_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/callback-client.pem"));
         assert!(launches[14].environment.iter().any(|(name, value)| *name
-            == "PLATFORM_SANDBOX_ATTESTOR_ADVERTISED_IP"
-            && value == "127.0.0.1"));
-        assert!(launches[15].environment.iter().any(|(name, value)| *name
-            == "PLATFORM_SANDBOX_ARTIFACT_CERT_PATH"
-            && value == "/project/runtime/tls/sandbox-controller-client.pem"));
-        assert!(launches[16]
-            .environment
-            .iter()
-            .any(|(name, value)| *name == "PLATFORM_SANDBOX_NATS_CERT_PATH"
-                && value == "/project/runtime/tls/sandbox-executor-client.pem"));
-        assert_eq!(launches[17].ready_address, "127.0.0.1:31024");
-        assert!(launches[17].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_CERT_PATH"
             && value == "/project/runtime/tls/context-dataset-client.pem"));
     }
@@ -2530,11 +2063,6 @@ mod tests {
         assert_eq!(ports.mcp_cleanup_observability, 19_110);
         assert_eq!(ports.context_subscription_observability, 19_111);
         assert_eq!(ports.callback_api, 19_112);
-        assert_eq!(ports.sandbox_attestor, 19_113);
-        assert_eq!(ports.sandbox_attestor_observability, 19_114);
-        assert_eq!(ports.sandbox_controller, 19_115);
-        assert_eq!(ports.sandbox_controller_observability, 19_116);
-        assert_eq!(ports.sandbox_executor_observability, 19_117);
-        assert_eq!(ports.context_dataset_observability, 19_118);
+        assert_eq!(ports.context_dataset_observability, 19_113);
     }
 }

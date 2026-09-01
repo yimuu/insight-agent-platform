@@ -15,7 +15,7 @@ for marker in (
     "environment: product-release", "aarch64-apple-darwin", "x86_64-apple-darwin",
     "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "cargo build --locked --release",
     "insight version --json", "insight doctor --json", "platforms: linux/amd64,linux/arm64",
-    "target: runtime", "target: sandbox-guest", "Dockerfile.release", "provenance: mode=max",
+    "target: runtime", "target: sandbox-runner", "Dockerfile.release", "provenance: mode=max",
     "sbom: true", "cosign sign --yes", "cosign verify", "cosign sign-blob",
     "release-bundle.signature.json", "build-release-performance.py", "timeout-minutes: 10",
     "qualify-development-profile.sh", "development-profile-performance.json",
@@ -35,7 +35,7 @@ for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTI
         failures.append(f"release action is not pinned to an immutable commit: {action}")
 
 if workflow.count("docker/build-push-action@") != 3:
-    failures.append("runtime, sandbox guest, and Console must each have one reusable BuildKit build")
+    failures.append("runtime, sandbox runner, and Console must each have one reusable BuildKit build")
 if workflow.count("cache-to: type=gha,mode=max") != 2:
     failures.append("only runtime and Console should export their independent BuildKit caches")
 if "REQUIRED_METADATA" not in generator or "validate_cli_archive" not in generator:

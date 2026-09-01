@@ -533,11 +533,11 @@ fn validate_bundle(bundle: &ReleaseBundleV1) -> Result<(), ReleaseError> {
         .iter()
         .map(|image| image.name.as_str())
         .collect::<BTreeSet<_>>();
-    if image_names != BTreeSet::from(["console", "runtime", "sandbox_guest"])
+    if image_names != BTreeSet::from(["console", "runtime", "sandbox_runner"])
         || bundle.images.len() != 3
     {
         return Err(ReleaseError::new(
-            "ReleaseBundle must bind runtime, sandbox_guest, and console images exactly once",
+            "ReleaseBundle must bind runtime, sandbox_runner, and console images exactly once",
         ));
     }
     for image in &bundle.images {
@@ -574,7 +574,7 @@ fn validate_bundle(bundle: &ReleaseBundleV1) -> Result<(), ReleaseError> {
         "development-profile-v1.json",
         "release-performance.json",
         "runtime.spdx.json",
-        "sandbox-guest.spdx.json",
+        "sandbox-runner.spdx.json",
     ]);
     if bundle.metadata.len() != metadata.len() || !required_metadata.is_subset(&metadata) {
         return Err(ReleaseError::new(
@@ -745,7 +745,7 @@ mod tests {
                     ),
                 })
                 .collect(),
-            images: ["console", "runtime", "sandbox_guest"]
+            images: ["console", "runtime", "sandbox_runner"]
                 .iter()
                 .map(|name| ReleaseImageV1 {
                     name: (*name).to_owned(),
@@ -767,7 +767,7 @@ mod tests {
                 "development-profile-v1.json",
                 "release-performance.json",
                 "runtime.spdx.json",
-                "sandbox-guest.spdx.json",
+                "sandbox-runner.spdx.json",
             ]
             .iter()
             .map(|path| artifact((*path).to_owned(), path))
