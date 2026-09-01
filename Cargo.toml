@@ -44,6 +44,8 @@ members = [
     "crates/platform-rpc-trace",
     "crates/platform-sandbox",
     "crates/platform-sandbox-controller",
+    "crates/platform-sandbox-runner",
+    "crates/platform-opensandbox-client",
     "crates/platform-sandbox-attestor",
     "crates/platform-sandbox-executor",
     "crates/platform-sandbox-guest",
@@ -171,6 +173,8 @@ insight-platform-rpc-trace = { path = "crates/platform-rpc-trace" }
 insight-platform-runtime = { path = "crates/platform-runtime" }
 insight-platform-sandbox = { path = "crates/platform-sandbox" }
 insight-platform-sandbox-controller = { path = "crates/platform-sandbox-controller" }
+insight-platform-sandbox-runner = { path = "crates/platform-sandbox-runner" }
+insight-platform-opensandbox-client = { path = "crates/platform-opensandbox-client" }
 insight-platform-sandbox-attestor = { path = "crates/platform-sandbox-attestor" }
 insight-platform-sandbox-executor = { path = "crates/platform-sandbox-executor" }
 insight-platform-sandbox-rpc = { path = "crates/platform-sandbox-rpc" }
