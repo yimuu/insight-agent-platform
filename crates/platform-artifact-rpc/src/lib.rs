@@ -1,9 +1,6 @@
 //! Versioned internal gRPC boundary for the independently deployed Artifact Broker.
 //!
-//! The Sandbox Controller submits exact, credential-free read authority
-//! requests. The Broker returns bytes only after PostgreSQL authorization, exact-version object
-//! verification and a second authorization. The wire is bounded, canonical and chunked; it never
-//! carries an object locator, storage credential or generic operation name supplied by the caller.
+//! Scheduler reads and workload staging remain closed, bounded, canonical and credential-free.
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -14,15 +11,10 @@ use insight_platform_artifacts::{
     StageWorkloadArtifactRequest, StagedWorkloadArtifact,
 };
 use insight_platform_contracts::{
-    parse_strict_json, ArtifactRef, JsonLimits, ResourceKind, Sha256Digest,
+    parse_strict_json, ArtifactRef, JsonLimits, Sha256Digest,
     CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
 };
 use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
-use insight_platform_sandbox::{
-    AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError, GvisorGuestBootstrapRequest,
-    GvisorGuestExecutionPlan, GvisorGuestPodIdentity, WasiArtifactBroker, WasiArtifactReadPurpose,
-};
-pub use insight_platform_sandbox::{WasiArtifactBrokerError, WasiArtifactReadRequest};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -47,38 +39,25 @@ pub mod proto {
 use proto::{
     artifact_data_worker_service_client::ArtifactDataWorkerServiceClient,
     artifact_data_worker_service_server::ArtifactDataWorkerService,
-    artifact_gvisor_guest_service_client::ArtifactGvisorGuestServiceClient,
-    artifact_gvisor_guest_service_server::ArtifactGvisorGuestService,
-    artifact_sandbox_broker_service_client::ArtifactSandboxBrokerServiceClient,
-    artifact_sandbox_broker_service_server::ArtifactSandboxBrokerService,
     artifact_scheduler_service_client::ArtifactSchedulerServiceClient,
     artifact_scheduler_service_server::ArtifactSchedulerService, ArtifactReadChunk,
     ClosedArtifactReadRequest, ClosedArtifactWriteRequest, ClosedArtifactWriteResponse,
-    ClosedGvisorGuestPlan,
 };
 
 pub const ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_WORKER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/model-worker";
-pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-controller";
 pub const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 pub const MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/mcp-discovery-worker";
 pub const MAX_ARTIFACT_RPC_REQUEST_BYTES_HARD: usize = 1_048_576;
 pub const MAX_ARTIFACT_RPC_WRITE_REQUEST_BYTES_HARD: usize = 96 * 1_048_576;
 pub const MAX_ARTIFACT_RPC_CHUNK_BYTES_HARD: usize = 262_144;
-const WASI_ARTIFACT_READ_OPERATION: &str = "artifact.sandbox.wasi.read/v1";
-const WASI_ARTIFACT_CHUNK_OPERATION: &str = "artifact.sandbox.wasi.chunk/v1";
 const SCHEDULER_TYPED_PLAN_READ_OPERATION: &str = "artifact.scheduler.typed-plan.read/v1";
 const SCHEDULER_TYPED_PLAN_CHUNK_OPERATION: &str = "artifact.scheduler.typed-plan.chunk/v1";
 const SCHEDULER_RUN_VALUE_READ_OPERATION: &str = "artifact.scheduler.run-value.read/v1";
 const SCHEDULER_RUN_VALUE_CHUNK_OPERATION: &str = "artifact.scheduler.run-value.chunk/v1";
 const SCHEDULER_SKILL_PACKAGE_READ_OPERATION: &str = "artifact.scheduler.skill-package.read/v1";
 const SCHEDULER_SKILL_PACKAGE_CHUNK_OPERATION: &str = "artifact.scheduler.skill-package.chunk/v1";
-const GVISOR_GUEST_AUTHORIZE_OPERATION: &str = "artifact.gvisor.guest.authorize/v1";
-const GVISOR_GUEST_READ_OPERATION: &str = "artifact.gvisor.guest.read/v1";
-const GVISOR_GUEST_PACKAGE_CHUNK_OPERATION: &str = "artifact.gvisor.guest.package.chunk/v1";
-const GVISOR_GUEST_INPUT_CHUNK_OPERATION: &str = "artifact.gvisor.guest.input.chunk/v1";
 const WORKLOAD_ARTIFACT_STAGE_OPERATION: &str = "artifact.data-worker.workload.stage/v1";
 const RPC_MESSAGE_OVERHEAD_BYTES: usize = 8_192;
 
@@ -170,23 +149,6 @@ impl tonic::service::Interceptor for ModelWorkerWorkloadIdentity {
             .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
         require_exact_workload_uri(leaf.as_ref(), MODEL_WORKER_WORKLOAD_IDENTITY)?;
         Ok(request)
-    }
-}
-
-/// Authorizes only the Sandbox Controller at the Sandbox materialization boundary.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SandboxControllerWorkloadIdentity;
-
-impl tonic::service::Interceptor for SandboxControllerWorkloadIdentity {
-    fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
-        let certificates = request
-            .peer_certs()
-            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
-        let leaf = certificates
-            .first()
-            .ok_or_else(|| Status::unauthenticated("client certificate is required"))?;
-        require_exact_workload_uri(leaf.as_ref(), SANDBOX_CONTROLLER_WORKLOAD_IDENTITY)?;
-        require_trace_interceptor(request)
     }
 }
 
@@ -540,64 +502,6 @@ fn validate_chunk(
     Ok(())
 }
 
-/// Credential-free client used only by the Sandbox Controller. The closed WASI method keeps
-/// runtime selection out of untrusted requests.
-type TracedArtifactSandboxBrokerServiceClient = ArtifactSandboxBrokerServiceClient<
-    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, PropagateTrace>,
->;
-
-#[derive(Clone)]
-pub struct ArtifactSandboxBrokerGrpcClient {
-    client: TracedArtifactSandboxBrokerServiceClient,
-    rpc_limits: ArtifactInternalRpcLimits,
-}
-
-impl ArtifactSandboxBrokerGrpcClient {
-    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
-        let maximum = rpc_limits.maximum_message_bytes();
-        Self {
-            client: ArtifactSandboxBrokerServiceClient::with_interceptor(channel, PropagateTrace)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
-            rpc_limits,
-        }
-    }
-}
-
-#[async_trait]
-impl WasiArtifactBroker for ArtifactSandboxBrokerGrpcClient {
-    async fn read_exact(
-        &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
-        validate_wasi_read_request(&request)?;
-        let artifact = request.artifact.clone();
-        let maximum_bytes = request.maximum_bytes;
-        let envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &request, self.rpc_limits)
-            .map_err(|_| WasiArtifactBrokerError::Integrity)?;
-        let request_digest = envelope.request_digest.clone();
-        let deadline = SystemTime::from(request.deadline);
-        let request =
-            request_with_domain_deadline(envelope, deadline).map_err(map_wasi_client_read_error)?;
-        let mut client = self.client.clone();
-        let mut response = await_rpc_before_deadline(deadline, client.read_wasi_artifact(request))
-            .await
-            .map_err(map_wasi_client_read_error)?
-            .into_inner();
-        collect_artifact_stream(
-            &mut response,
-            &request_digest,
-            WASI_ARTIFACT_CHUNK_OPERATION,
-            &artifact,
-            maximum_bytes,
-            self.rpc_limits,
-            deadline,
-        )
-        .await
-        .map_err(map_wasi_client_read_error)
-    }
-}
-
 #[derive(Clone)]
 pub struct ArtifactSchedulerGrpcClient {
     client: TracedArtifactSchedulerServiceClient,
@@ -740,193 +644,6 @@ impl SchedulerSkillPackageReader for ArtifactSchedulerGrpcClient {
     }
 }
 
-#[derive(Clone)]
-pub struct ArtifactGvisorGuestGrpcClient {
-    client: ArtifactGvisorGuestServiceClient<tonic::transport::Channel>,
-    rpc_limits: ArtifactInternalRpcLimits,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GvisorGuestClientError {
-    Unavailable,
-    Denied,
-    InvalidEvidence,
-    TooLarge,
-}
-
-impl ArtifactGvisorGuestGrpcClient {
-    pub fn new(channel: tonic::transport::Channel, rpc_limits: ArtifactInternalRpcLimits) -> Self {
-        let maximum = rpc_limits.maximum_message_bytes();
-        Self {
-            client: ArtifactGvisorGuestServiceClient::new(channel)
-                .max_encoding_message_size(maximum)
-                .max_decoding_message_size(maximum),
-            rpc_limits,
-        }
-    }
-
-    pub async fn authorize(
-        &self,
-        request: GvisorGuestBootstrapRequest,
-        bearer_token: &str,
-    ) -> Result<GvisorGuestExecutionPlan, GvisorGuestClientError> {
-        request
-            .validate()
-            .map_err(|_| GvisorGuestClientError::Denied)?;
-        let domain_request_digest = request.request_digest.clone();
-        let envelope = encode_request(GVISOR_GUEST_AUTHORIZE_OPERATION, &request, self.rpc_limits)
-            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
-        let deadline = SystemTime::now()
-            .checked_add(StdDuration::from_secs(30))
-            .ok_or(GvisorGuestClientError::Unavailable)?;
-        let request = bearer_request(envelope, bearer_token, deadline)?;
-        let mut client = self.client.clone();
-        let response = await_rpc_before_deadline(deadline, client.authorize_guest(request))
-            .await
-            .map_err(map_guest_client_read_error)?
-            .into_inner();
-        if response.schema_version != ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION
-            || response.operation != GVISOR_GUEST_AUTHORIZE_OPERATION
-            || response.canonical_plan_json.is_empty()
-            || response.canonical_plan_json.len() > self.rpc_limits.maximum_request_bytes()
-            || response.plan_digest != digest_bytes(&response.canonical_plan_json).to_string()
-        {
-            return Err(GvisorGuestClientError::InvalidEvidence);
-        }
-        let value = parse_strict_json(
-            &response.canonical_plan_json,
-            JsonLimits {
-                max_bytes: self.rpc_limits.maximum_request_bytes(),
-                max_depth: 64,
-                max_items_per_array: 1_024,
-                max_properties_per_object: 1_024,
-                max_string_bytes: self.rpc_limits.maximum_request_bytes(),
-            },
-        )
-        .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
-        if serde_jcs::to_vec(&value).ok().as_deref() != Some(&response.canonical_plan_json) {
-            return Err(GvisorGuestClientError::InvalidEvidence);
-        }
-        let plan: GvisorGuestExecutionPlan =
-            serde_json::from_value(value).map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
-        plan.validate()
-            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
-        if plan.request_digest != domain_request_digest {
-            return Err(GvisorGuestClientError::InvalidEvidence);
-        }
-        Ok(plan)
-    }
-
-    pub async fn read_artifact(
-        &self,
-        bootstrap: GvisorGuestBootstrapRequest,
-        plan: &GvisorGuestExecutionPlan,
-        section: GvisorGuestArtifactSection,
-        bearer_token: &str,
-    ) -> Result<Vec<u8>, GvisorGuestClientError> {
-        if bootstrap.request_digest != plan.request_digest {
-            return Err(GvisorGuestClientError::Denied);
-        }
-        let artifact = match section {
-            GvisorGuestArtifactSection::RuntimeBundle => plan.runtime_bundle_artifact.clone(),
-            GvisorGuestArtifactSection::InputValue => match &plan.input_ref {
-                insight_platform_contracts::ValueRef::Artifact { artifact } => artifact.clone(),
-                insight_platform_contracts::ValueRef::Inline { .. } => {
-                    return Err(GvisorGuestClientError::Denied)
-                }
-            },
-        };
-        let read = GvisorGuestArtifactReadRequest {
-            bootstrap,
-            section: section.clone(),
-        };
-        let envelope = encode_request(GVISOR_GUEST_READ_OPERATION, &read, self.rpc_limits)
-            .map_err(|_| GvisorGuestClientError::InvalidEvidence)?;
-        let request_digest = envelope.request_digest.clone();
-        let deadline = SystemTime::from(plan.deadline);
-        let request = bearer_request(envelope, bearer_token, deadline)?;
-        let mut client = self.client.clone();
-        let mut response = await_rpc_before_deadline(deadline, client.read_guest_artifact(request))
-            .await
-            .map_err(map_guest_client_read_error)?
-            .into_inner();
-        let operation = match section {
-            GvisorGuestArtifactSection::RuntimeBundle => GVISOR_GUEST_PACKAGE_CHUNK_OPERATION,
-            GvisorGuestArtifactSection::InputValue => GVISOR_GUEST_INPUT_CHUNK_OPERATION,
-        };
-        collect_artifact_stream(
-            &mut response,
-            &request_digest,
-            operation,
-            &artifact,
-            usize::try_from(artifact.byte_length())
-                .map_err(|_| GvisorGuestClientError::TooLarge)?,
-            self.rpc_limits,
-            deadline,
-        )
-        .await
-        .map_err(map_guest_client_read_error)
-    }
-}
-
-fn bearer_request<T>(
-    message: T,
-    bearer_token: &str,
-    deadline: SystemTime,
-) -> Result<Request<T>, GvisorGuestClientError> {
-    if bearer_token.is_empty()
-        || bearer_token.len() > 16_384
-        || !bearer_token.is_ascii()
-        || bearer_token.bytes().any(|byte| byte.is_ascii_control())
-    {
-        return Err(GvisorGuestClientError::Denied);
-    }
-    let remaining = remaining_until(deadline).ok_or(GvisorGuestClientError::Unavailable)?;
-    let authorization = format!("Bearer {bearer_token}")
-        .parse()
-        .map_err(|_| GvisorGuestClientError::Denied)?;
-    let mut request = Request::new(message);
-    request
-        .metadata_mut()
-        .insert("authorization", authorization);
-    request.set_timeout(remaining);
-    Ok(request)
-}
-
-fn map_guest_client_read_error(error: ArtifactClientReadError) -> GvisorGuestClientError {
-    match error {
-        ArtifactClientReadError::Unavailable => GvisorGuestClientError::Unavailable,
-        ArtifactClientReadError::Denied | ArtifactClientReadError::NotFound => {
-            GvisorGuestClientError::Denied
-        }
-        ArtifactClientReadError::TooLarge => GvisorGuestClientError::TooLarge,
-        ArtifactClientReadError::Integrity => GvisorGuestClientError::InvalidEvidence,
-    }
-}
-
-fn validate_wasi_read_request(
-    request: &WasiArtifactReadRequest,
-) -> Result<(), WasiArtifactBrokerError> {
-    let grant_shape_valid = match request.purpose {
-        WasiArtifactReadPurpose::RuntimeBundle => request.read_grant.is_none(),
-        WasiArtifactReadPurpose::InputValue => request.read_grant.is_some(),
-    };
-    if request.tenant_id.kind() != ResourceKind::Tenant
-        || request.sandbox_job_id.kind() != ResourceKind::Job
-        || request.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
-        || request.lease_generation == 0
-        || request.maximum_bytes == 0
-        || request.artifact.validate().is_err()
-        || u64::try_from(request.maximum_bytes)
-            .ok()
-            .is_none_or(|maximum| maximum < request.artifact.byte_length())
-        || !grant_shape_valid
-    {
-        return Err(WasiArtifactBrokerError::Denied);
-    }
-    Ok(())
-}
-
 fn remaining_until(deadline: SystemTime) -> Option<StdDuration> {
     deadline
         .duration_since(SystemTime::now())
@@ -971,171 +688,6 @@ pub struct LeasedArtifactBytes {
     lease: Option<Box<dyn Send + 'static>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GvisorGuestArtifactSection {
-    RuntimeBundle,
-    InputValue,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GvisorGuestArtifactReadRequest {
-    bootstrap: GvisorGuestBootstrapRequest,
-    section: GvisorGuestArtifactSection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthenticatedGvisorGuestIdentity(pub GvisorGuestPodIdentity);
-
-#[async_trait]
-pub trait GvisorGuestResponseMaterializer: Send + Sync {
-    async fn authorize_guest(
-        &self,
-        request: &GvisorGuestBootstrapRequest,
-    ) -> Result<AuthorizedGvisorGuestBootstrap, GvisorGuestBootstrapError>;
-
-    async fn read_guest_for_response(
-        &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
-}
-
-pub struct ArtifactGvisorGuestGrpcService<M> {
-    materializer: Arc<M>,
-    rpc_limits: ArtifactInternalRpcLimits,
-}
-
-impl<M> ArtifactGvisorGuestGrpcService<M> {
-    pub fn new(materializer: Arc<M>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
-        Self {
-            materializer,
-            rpc_limits,
-        }
-    }
-
-    fn authenticated_request<T>(
-        &self,
-        request: &Request<T>,
-        claimed: &GvisorGuestBootstrapRequest,
-    ) -> Result<(), Status> {
-        let authenticated = request
-            .extensions()
-            .get::<AuthenticatedGvisorGuestIdentity>()
-            .ok_or_else(|| Status::unauthenticated("gVisor guest token is required"))?;
-        if authenticated.0 != claimed.pod {
-            return Err(Status::permission_denied(
-                "gVisor guest token does not match Pod identity",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[tonic::async_trait]
-impl<M> ArtifactGvisorGuestService for ArtifactGvisorGuestGrpcService<M>
-where
-    M: GvisorGuestResponseMaterializer + 'static,
-{
-    type ReadGuestArtifactStream = ArtifactReadStream;
-
-    async fn authorize_guest(
-        &self,
-        request: Request<ClosedArtifactReadRequest>,
-    ) -> Result<Response<ClosedGvisorGuestPlan>, Status> {
-        let bootstrap: GvisorGuestBootstrapRequest = decode_request(
-            request.get_ref().clone(),
-            GVISOR_GUEST_AUTHORIZE_OPERATION,
-            self.rpc_limits,
-        )
-        .map_err(Status::from)?;
-        self.authenticated_request(&request, &bootstrap)?;
-        let authorized = self
-            .materializer
-            .authorize_guest(&bootstrap)
-            .await
-            .map_err(map_guest_bootstrap_error)?;
-        authorized
-            .plan
-            .validate()
-            .map_err(map_guest_bootstrap_error)?;
-        let canonical_plan_json = serde_jcs::to_vec(&authorized.plan)
-            .map_err(|_| Status::data_loss("guest plan is not canonical"))?;
-        if canonical_plan_json.is_empty()
-            || canonical_plan_json.len() > self.rpc_limits.maximum_request_bytes()
-        {
-            return Err(Status::resource_exhausted("guest plan exceeds RPC bound"));
-        }
-        Ok(Response::new(ClosedGvisorGuestPlan {
-            schema_version: ARTIFACT_INTERNAL_RPC_SCHEMA_VERSION,
-            operation: GVISOR_GUEST_AUTHORIZE_OPERATION.to_owned(),
-            plan_digest: digest_bytes(&canonical_plan_json).to_string(),
-            canonical_plan_json,
-        }))
-    }
-
-    async fn read_guest_artifact(
-        &self,
-        request: Request<ClosedArtifactReadRequest>,
-    ) -> Result<Response<Self::ReadGuestArtifactStream>, Status> {
-        let request_digest = request.get_ref().request_digest.clone();
-        let read: GvisorGuestArtifactReadRequest = decode_request(
-            request.get_ref().clone(),
-            GVISOR_GUEST_READ_OPERATION,
-            self.rpc_limits,
-        )
-        .map_err(Status::from)?;
-        self.authenticated_request(&request, &read.bootstrap)?;
-        let authorized = self
-            .materializer
-            .authorize_guest(&read.bootstrap)
-            .await
-            .map_err(map_guest_bootstrap_error)?;
-        let exact = match read.section {
-            GvisorGuestArtifactSection::RuntimeBundle => authorized.package_read,
-            GvisorGuestArtifactSection::InputValue => authorized
-                .input_read
-                .ok_or_else(|| Status::failed_precondition("guest input is Inline"))?,
-        };
-        let artifact = exact.artifact.clone();
-        let maximum_bytes = exact.maximum_bytes;
-        let deadline = SystemTime::from(exact.deadline);
-        let response_read = tokio::time::timeout(
-            server_deadline_budget(deadline)?,
-            self.materializer.read_guest_for_response(exact),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("guest Artifact read deadline elapsed"))?
-        .map_err(map_wasi_server_error)?;
-        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
-        let chunk_operation = match read.section {
-            GvisorGuestArtifactSection::RuntimeBundle => GVISOR_GUEST_PACKAGE_CHUNK_OPERATION,
-            GvisorGuestArtifactSection::InputValue => GVISOR_GUEST_INPUT_CHUNK_OPERATION,
-        };
-        artifact_read_stream(
-            response_read,
-            &request_digest,
-            chunk_operation,
-            &artifact,
-            self.rpc_limits.maximum_chunk_bytes(),
-            deadline,
-        )
-    }
-}
-
-fn map_guest_bootstrap_error(error: GvisorGuestBootstrapError) -> Status {
-    match error {
-        GvisorGuestBootstrapError::Unavailable => {
-            Status::unavailable("guest bootstrap authority unavailable")
-        }
-        GvisorGuestBootstrapError::Denied => Status::permission_denied("guest bootstrap denied"),
-        GvisorGuestBootstrapError::NotFound => Status::not_found("guest bootstrap not found"),
-        GvisorGuestBootstrapError::InvalidEvidence => {
-            Status::failed_precondition("guest bootstrap evidence is invalid")
-        }
-    }
-}
-
 impl LeasedArtifactBytes {
     pub fn new<L>(bytes: Vec<u8>, lease: L) -> Self
     where
@@ -1165,14 +717,6 @@ impl Drop for LeasedArtifactBytes {
     fn drop(&mut self) {
         self.bytes.fill(0);
     }
-}
-
-#[async_trait]
-pub trait WasiArtifactResponseBroker: Send + Sync {
-    async fn read_wasi_for_response(
-        &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError>;
 }
 
 #[async_trait]
@@ -1328,70 +872,8 @@ where
     }
 }
 
-/// Server adapter for the exact Sandbox materialization authority. Endpoint-role
-/// authorization is installed by the process around the generated service and therefore runs
-/// before either method decodes a request or invokes the domain broker.
-pub struct ArtifactSandboxBrokerGrpcService<B> {
-    broker: Arc<B>,
-    rpc_limits: ArtifactInternalRpcLimits,
-}
-
-impl<B> ArtifactSandboxBrokerGrpcService<B> {
-    pub fn new(broker: Arc<B>, rpc_limits: ArtifactInternalRpcLimits) -> Self {
-        Self { broker, rpc_limits }
-    }
-
-    async fn read_wasi(
-        &self,
-        envelope: ClosedArtifactReadRequest,
-    ) -> Result<Response<ArtifactReadStream>, Status>
-    where
-        B: WasiArtifactResponseBroker + 'static,
-    {
-        let request_digest = envelope.request_digest.clone();
-        let read: WasiArtifactReadRequest =
-            decode_request(envelope, WASI_ARTIFACT_READ_OPERATION, self.rpc_limits)
-                .map_err(Status::from)?;
-        validate_wasi_read_request(&read).map_err(map_wasi_server_error)?;
-        let artifact = read.artifact.clone();
-        let maximum_bytes = read.maximum_bytes;
-        let deadline = SystemTime::from(read.deadline);
-        let response_read = tokio::time::timeout(
-            server_deadline_budget(deadline)?,
-            self.broker.read_wasi_for_response(read),
-        )
-        .await
-        .map_err(|_| Status::deadline_exceeded("Artifact read deadline elapsed"))?
-        .map_err(map_wasi_server_error)?;
-        require_broker_bytes(response_read.as_bytes(), &artifact, maximum_bytes)?;
-        artifact_read_stream(
-            response_read,
-            &request_digest,
-            WASI_ARTIFACT_CHUNK_OPERATION,
-            &artifact,
-            self.rpc_limits.maximum_chunk_bytes(),
-            deadline,
-        )
-    }
-}
-
 type ArtifactReadStream =
     Pin<Box<dyn Stream<Item = Result<ArtifactReadChunk, Status>> + Send + 'static>>;
-
-#[tonic::async_trait]
-impl<B> ArtifactSandboxBrokerService for ArtifactSandboxBrokerGrpcService<B>
-where
-    B: WasiArtifactResponseBroker + 'static,
-{
-    type ReadWasiArtifactStream = ArtifactReadStream;
-
-    async fn read_wasi_artifact(
-        &self,
-        request: Request<ClosedArtifactReadRequest>,
-    ) -> Result<Response<Self::ReadWasiArtifactStream>, Status> {
-        self.read_wasi(request.into_inner()).await
-    }
-}
 
 fn require_broker_bytes(
     bytes: &[u8],
@@ -1713,20 +1195,6 @@ fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
     encoded.parse().expect("SHA-256 encoding is canonical")
 }
 
-fn map_wasi_server_error(error: WasiArtifactBrokerError) -> Status {
-    match error {
-        WasiArtifactBrokerError::Unavailable => Status::unavailable("Artifact Broker unavailable"),
-        WasiArtifactBrokerError::Denied => Status::permission_denied("Artifact read denied"),
-        WasiArtifactBrokerError::NotFound => Status::not_found("Artifact not found"),
-        WasiArtifactBrokerError::TooLarge => {
-            Status::resource_exhausted("Artifact exceeds the read limit")
-        }
-        WasiArtifactBrokerError::Integrity => {
-            Status::data_loss("Artifact integrity verification failed")
-        }
-    }
-}
-
 fn classify_client_status(status: Status) -> ArtifactClientReadError {
     match status.code() {
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
@@ -1738,16 +1206,6 @@ fn classify_client_status(status: Status) -> ArtifactClientReadError {
         tonic::Code::NotFound => ArtifactClientReadError::NotFound,
         tonic::Code::ResourceExhausted => ArtifactClientReadError::TooLarge,
         _ => ArtifactClientReadError::Integrity,
-    }
-}
-
-fn map_wasi_client_read_error(error: ArtifactClientReadError) -> WasiArtifactBrokerError {
-    match error {
-        ArtifactClientReadError::Unavailable => WasiArtifactBrokerError::Unavailable,
-        ArtifactClientReadError::Denied => WasiArtifactBrokerError::Denied,
-        ArtifactClientReadError::NotFound => WasiArtifactBrokerError::NotFound,
-        ArtifactClientReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
-        ArtifactClientReadError::Integrity => WasiArtifactBrokerError::Integrity,
     }
 }
 
@@ -1864,7 +1322,6 @@ impl From<ArtifactRpcError> for Status {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use futures::StreamExt as _;
     use insight_platform_contracts::{
         ArtifactRef, DataClassification, ResourceId, ResourceKind, TraceFlags, TraceIdentityV1,
     };
@@ -1874,7 +1331,7 @@ mod tests {
         KeyPair, KeyUsagePurpose, SanType,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{oneshot, Semaphore};
+    use tokio::sync::oneshot;
     use tonic::transport::{
         server::TcpIncoming, Certificate, ClientTlsConfig, Endpoint, Identity, Server,
         ServerTlsConfig,
@@ -1888,33 +1345,6 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
-    }
-
-    fn artifact(bytes: &[u8], display_name: &str) -> ArtifactRef {
-        ArtifactRef::new(
-            id(ResourceKind::Artifact),
-            digest_bytes(bytes),
-            u64::try_from(bytes.len()).unwrap(),
-            "application/octet-stream",
-            DataClassification::Internal,
-            Some(display_name.to_owned()),
-        )
-        .unwrap()
-    }
-
-    fn wasi_request(bytes: &[u8]) -> WasiArtifactReadRequest {
-        WasiArtifactReadRequest {
-            tenant_id: id(ResourceKind::Tenant),
-            sandbox_job_id: id(ResourceKind::Job),
-            request_digest: digest('d'),
-            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-            lease_generation: 2,
-            artifact: artifact(bytes, "runtime.wasm"),
-            purpose: WasiArtifactReadPurpose::RuntimeBundle,
-            read_grant: None,
-            maximum_bytes: bytes.len(),
-            deadline: Utc::now() + Duration::minutes(1),
-        }
     }
 
     fn scheduler_request(bytes: &[u8]) -> SchedulerTypedPlanReadRequest {
@@ -1994,22 +1424,6 @@ mod tests {
         }
     }
 
-    struct RecordingSandboxBroker {
-        bytes: Vec<u8>,
-        wasi_calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl WasiArtifactResponseBroker for RecordingSandboxBroker {
-        async fn read_wasi_for_response(
-            &self,
-            _request: WasiArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
-            self.wasi_calls.fetch_add(1, Ordering::AcqRel);
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), ()))
-        }
-    }
-
     struct RecordingSchedulerBroker {
         bytes: Vec<u8>,
         typed_plan_calls: AtomicUsize,
@@ -2050,11 +1464,6 @@ mod tests {
         }
     }
 
-    struct AudienceCapacityBroker {
-        bytes: Vec<u8>,
-        sandbox: Arc<Semaphore>,
-    }
-
     struct RecordingStageAuthority {
         calls: AtomicUsize,
     }
@@ -2084,27 +1493,12 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl WasiArtifactResponseBroker for AudienceCapacityBroker {
-        async fn read_wasi_for_response(
-            &self,
-            _request: WasiArtifactReadRequest,
-        ) -> Result<LeasedArtifactBytes, WasiArtifactBrokerError> {
-            let permit = Arc::clone(&self.sandbox)
-                .try_acquire_owned()
-                .map_err(|_| WasiArtifactBrokerError::Unavailable)?;
-            Ok(LeasedArtifactBytes::new(self.bytes.clone(), permit))
-        }
-    }
-
     struct MtlsFixture {
         ca_pem: String,
         server_certificate_pem: String,
         server_key_pem: String,
         model_certificate_pem: String,
         model_key_pem: String,
-        sandbox_controller_certificate_pem: String,
-        sandbox_controller_key_pem: String,
         scheduler_certificate_pem: String,
         scheduler_key_pem: String,
         discovery_certificate_pem: String,
@@ -2143,12 +1537,6 @@ mod tests {
             )],
             ExtendedKeyUsagePurpose::ClientAuth,
         );
-        let (sandbox_controller_certificate_pem, sandbox_controller_key_pem) = issue(
-            vec![SanType::URI(
-                SANDBOX_CONTROLLER_WORKLOAD_IDENTITY.try_into().unwrap(),
-            )],
-            ExtendedKeyUsagePurpose::ClientAuth,
-        );
         let (scheduler_certificate_pem, scheduler_key_pem) = issue(
             vec![SanType::URI(
                 SCHEDULER_WORKLOAD_IDENTITY.try_into().unwrap(),
@@ -2181,8 +1569,6 @@ mod tests {
             server_key_pem,
             model_certificate_pem,
             model_key_pem,
-            sandbox_controller_certificate_pem,
-            sandbox_controller_key_pem,
             scheduler_certificate_pem,
             scheduler_key_pem,
             discovery_certificate_pem,
@@ -2217,49 +1603,40 @@ mod tests {
     #[test]
     fn request_envelope_is_canonical_and_digest_bound() {
         let limits = ArtifactInternalRpcLimits::default();
-        let wasi = wasi_request(b"wasi-runtime");
-        let envelope = encode_request(WASI_ARTIFACT_READ_OPERATION, &wasi, limits).unwrap();
-        let decoded: WasiArtifactReadRequest =
-            decode_request(envelope.clone(), WASI_ARTIFACT_READ_OPERATION, limits).unwrap();
-        assert_eq!(decoded, wasi);
+        let plan = scheduler_request(br#"{"schema_version":1}"#);
+        let envelope = encode_request(SCHEDULER_TYPED_PLAN_READ_OPERATION, &plan, limits).unwrap();
+        let decoded: SchedulerTypedPlanReadRequest = decode_request(
+            envelope.clone(),
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(decoded, plan);
 
         let mut whitespace = envelope.clone();
         whitespace.canonical_request_json.push(b' ');
         whitespace.request_digest = digest_bytes(&whitespace.canonical_request_json).to_string();
-        assert!(decode_request::<WasiArtifactReadRequest>(
+        assert!(decode_request::<SchedulerTypedPlanReadRequest>(
             whitespace,
-            WASI_ARTIFACT_READ_OPERATION,
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
             limits
         )
         .is_err());
 
-        let plan = scheduler_request(br#"{"schema_version":1}"#);
-        let scheduler_envelope =
-            encode_request(SCHEDULER_TYPED_PLAN_READ_OPERATION, &plan, limits).unwrap();
-        assert_eq!(
-            decode_request::<SchedulerTypedPlanReadRequest>(
-                scheduler_envelope,
-                SCHEDULER_TYPED_PLAN_READ_OPERATION,
-                limits,
-            )
-            .unwrap(),
-            plan
-        );
-
         let mut digest_tamper = envelope.clone();
         digest_tamper.request_digest = digest('9').to_string();
-        assert!(decode_request::<WasiArtifactReadRequest>(
+        assert!(decode_request::<SchedulerTypedPlanReadRequest>(
             digest_tamper,
-            WASI_ARTIFACT_READ_OPERATION,
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
             limits,
         )
         .is_err());
 
         let mut drift = envelope;
         drift.operation = "artifact.generic.read/v1".to_owned();
-        assert!(decode_request::<WasiArtifactReadRequest>(
+        assert!(decode_request::<SchedulerTypedPlanReadRequest>(
             drift,
-            WASI_ARTIFACT_READ_OPERATION,
+            SCHEDULER_TYPED_PLAN_READ_OPERATION,
             limits
         )
         .is_err());
@@ -2402,202 +1779,6 @@ mod tests {
             stalled.await.unwrap(),
             Err(ArtifactClientReadError::Unavailable)
         );
-    }
-
-    #[tokio::test]
-    async fn slow_streams_hold_sandbox_audience_capacity() {
-        let bytes = br#"{"messages":[]}"#.to_vec();
-        let broker = Arc::new(AudienceCapacityBroker {
-            bytes: bytes.clone(),
-            sandbox: Arc::new(Semaphore::new(1)),
-        });
-        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let sandbox_service =
-            ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits);
-
-        let wasi_envelope = || {
-            Request::new(
-                encode_request(
-                    WASI_ARTIFACT_READ_OPERATION,
-                    &wasi_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            )
-        };
-        let mut sandbox_stream = sandbox_service
-            .read_wasi_artifact(wasi_envelope())
-            .await
-            .unwrap()
-            .into_inner();
-        let rejected_concurrent = sandbox_service
-            .read_wasi_artifact(wasi_envelope())
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(rejected_concurrent.code(), tonic::Code::Unavailable);
-
-        while let Some(chunk) = sandbox_stream.next().await {
-            chunk.unwrap();
-        }
-        assert_eq!(broker.sandbox.available_permits(), 1);
-        let released_sandbox = sandbox_service
-            .read_wasi_artifact(wasi_envelope())
-            .await
-            .unwrap();
-        drop(released_sandbox);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_stream_releases_lease_at_domain_deadline_without_poll_or_drop() {
-        let bytes = br#"{"messages":[]}"#.to_vec();
-        let sandbox_capacity = Arc::new(Semaphore::new(1));
-        let broker = Arc::new(AudienceCapacityBroker {
-            bytes: bytes.clone(),
-            sandbox: Arc::clone(&sandbox_capacity),
-        });
-        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let service = ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits);
-
-        let mut stalled_request = wasi_request(&bytes);
-        stalled_request.deadline = Utc::now() + Duration::seconds(30);
-        let mut stalled_stream = service
-            .read_wasi_artifact(Request::new(
-                encode_request(WASI_ARTIFACT_READ_OPERATION, &stalled_request, rpc_limits).unwrap(),
-            ))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(sandbox_capacity.available_permits(), 0);
-
-        // Let the independently spawned deadline task register its timer, then advance time while
-        // retaining the stream without polling it. HTTP/2 backpressure has the same ownership
-        // shape: the stream and its buffered body remain live, but the capacity lease must not.
-        tokio::task::yield_now().await;
-        tokio::time::advance(StdDuration::from_secs(31)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(sandbox_capacity.available_permits(), 1);
-
-        let released_capacity = service
-            .read_wasi_artifact(Request::new(
-                encode_request(
-                    WASI_ARTIFACT_READ_OPERATION,
-                    &wasi_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            ))
-            .await
-            .unwrap();
-        drop(released_capacity);
-
-        let expired = stalled_stream.next().await.unwrap().unwrap_err();
-        assert_eq!(expired.code(), tonic::Code::DeadlineExceeded);
-    }
-
-    #[tokio::test]
-    async fn sandbox_mtls_streams_wasi_and_rejects_wrong_role_before_authority() {
-        let fixture = mtls_fixture();
-        let bytes = b"sandbox-runtime-material".to_vec();
-        let broker = Arc::new(RecordingSandboxBroker {
-            bytes: bytes.clone(),
-            wasi_calls: AtomicUsize::new(0),
-        });
-        let rpc_limits = ArtifactInternalRpcLimits::new(65_536, 5).unwrap();
-        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let address = incoming.local_addr().unwrap();
-        let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
-        let service =
-            proto::artifact_sandbox_broker_service_server::ArtifactSandboxBrokerServiceServer::new(
-                ArtifactSandboxBrokerGrpcService::new(Arc::clone(&broker), rpc_limits),
-            )
-            .max_encoding_message_size(rpc_limits.maximum_message_bytes())
-            .max_decoding_message_size(rpc_limits.maximum_message_bytes());
-        let service = tonic::service::interceptor::InterceptedService::new(
-            service,
-            SandboxControllerWorkloadIdentity,
-        );
-        let tls = ServerTlsConfig::new()
-            .identity(Identity::from_pem(
-                &fixture.server_certificate_pem,
-                &fixture.server_key_pem,
-            ))
-            .client_ca_root(Certificate::from_pem(&fixture.ca_pem));
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .tls_config(tls)
-                .unwrap()
-                .add_service(service)
-                .serve_with_incoming_shutdown(incoming, async {
-                    let _ = shutdown_receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        let endpoint = format!("https://localhost:{}", address.port());
-
-        let accepted_channel = channel(
-            &endpoint,
-            &fixture,
-            &fixture.sandbox_controller_certificate_pem,
-            &fixture.sandbox_controller_key_pem,
-        )
-        .await;
-        let mut missing_trace_client =
-            ArtifactSandboxBrokerServiceClient::new(accepted_channel.clone());
-        let missing_trace = missing_trace_client
-            .read_wasi_artifact(
-                encode_request(
-                    WASI_ARTIFACT_READ_OPERATION,
-                    &wasi_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(missing_trace.code(), tonic::Code::InvalidArgument);
-        let client = ArtifactSandboxBrokerGrpcClient::new(accepted_channel, rpc_limits);
-        let trace =
-            RpcTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled).unwrap();
-        let read = scope_trace(trace, async {
-            WasiArtifactBroker::read_exact(&client, wasi_request(&bytes)).await
-        })
-        .await
-        .unwrap();
-        assert_eq!(read, bytes);
-        assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
-
-        let wrong_channel = channel(
-            &endpoint,
-            &fixture,
-            &fixture.model_certificate_pem,
-            &fixture.model_key_pem,
-        )
-        .await;
-        let mut wrong_client = ArtifactSandboxBrokerServiceClient::new(wrong_channel);
-        let rejected_wasi = wrong_client
-            .read_wasi_artifact(
-                encode_request(
-                    WASI_ARTIFACT_READ_OPERATION,
-                    &wasi_request(&bytes),
-                    rpc_limits,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(rejected_wasi.code(), tonic::Code::PermissionDenied);
-        assert_eq!(broker.wasi_calls.load(Ordering::Acquire), 1);
-
-        drop(client);
-        drop(missing_trace_client);
-        drop(wrong_client);
-        shutdown_sender.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap();
     }
 
     #[tokio::test]
@@ -2837,8 +2018,8 @@ mod tests {
         let wrong_channel = channel(
             &endpoint,
             &fixture,
-            &fixture.sandbox_controller_certificate_pem,
-            &fixture.sandbox_controller_key_pem,
+            &fixture.model_certificate_pem,
+            &fixture.model_key_pem,
         )
         .await;
         let mut wrong_client = ArtifactSchedulerServiceClient::new(wrong_channel);

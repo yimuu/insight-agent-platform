@@ -14,7 +14,6 @@ aws-sdk-s3.workspace = true
 chrono.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-contracts.workspace = true
-insight-platform-sandbox.workspace = true
 serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true

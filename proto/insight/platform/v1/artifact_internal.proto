@@ -2,16 +2,6 @@ syntax = "proto3";
 
 package insight.platform.v1;
 
-// Internal-only, credential-free Model input boundary for the independently deployed Artifact
-// Broker. The request is one strict canonical Rust contract. Verified object bytes are chunked so
-// gRPC message size never becomes the object-size authority.
-// Internal-only Sandbox materialization boundary. The Sandbox Controller is the sole caller and
-// selects one of two closed domain requests; this service deliberately has no generic object-read
-// method and never accepts an object locator or storage credential.
-service ArtifactSandboxBrokerService {
-  rpc ReadWasiArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
-}
-
 // Internal-only Scheduler materialization boundary. Only the Scheduler workload may call it;
 // each closed request binds one live orchestration lease and an exact Typed Plan or RunValue
 // Artifact. There is deliberately no generic object-read operation.
@@ -19,14 +9,6 @@ service ArtifactSchedulerService {
   rpc ReadTypedPlan(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
   rpc ReadRunValue(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
   rpc ReadSkillPackage(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
-}
-
-// Token-authenticated boundary exposed only to admission-locked gVisor guest Pods. The caller
-// never supplies an object locator or storage credential. Authorization is re-evaluated for the
-// plan and for every exact package/input read.
-service ArtifactGvisorGuestService {
-  rpc AuthorizeGuest(ClosedArtifactReadRequest) returns (ClosedGvisorGuestPlan);
-  rpc ReadGuestArtifact(ClosedArtifactReadRequest) returns (stream ArtifactReadChunk);
 }
 
 // Internal-only workload output boundary. The MCP Host is the only first-release caller; the
@@ -53,13 +35,6 @@ message ArtifactReadChunk {
   string content_digest = 7;
   uint64 total_length = 8;
   bool terminal = 9;
-}
-
-message ClosedGvisorGuestPlan {
-  uint32 schema_version = 1;
-  string operation = 2;
-  bytes canonical_plan_json = 3;
-  string plan_digest = 4;
 }
 
 message ClosedArtifactWriteRequest {

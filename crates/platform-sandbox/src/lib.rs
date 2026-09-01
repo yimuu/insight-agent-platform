@@ -1,26 +1,7 @@
-//! Fail-closed Sandbox Execution Plane contracts for Platform v1.
+//! CR-216 OpenSandbox-only execution contracts and Dispatcher.
 //!
-//! This crate owns the typed execution envelope, isolation selection, physical Sandbox state and
-//! Executor orchestration ports. Durable current-state authority remains the shared Job/Receipt/
-//! Event/Outbox repository; concrete WASI and gVisor SDKs stay behind backend ports.
+//! Durable business state remains the shared Job/Invocation/RunValue authority. OpenSandbox owns
+//! physical lifecycle only; no legacy backend selector or execution fallback is compiled here.
 
-mod backend;
-mod broker;
-mod control;
 pub mod dispatcher;
-mod gvisor_guest;
 pub mod opensandbox;
-mod state;
-mod types;
-mod worker;
-
-pub use backend::*;
-pub use broker::*;
-pub use control::*;
-pub use gvisor_guest::*;
-pub use state::*;
-pub use types::*;
-pub use worker::*;
-
-#[cfg(test)]
-mod tests;

@@ -336,9 +336,14 @@ impl ApplyDeploymentClosure {
             }),
             Self::SandboxProfile(bindings) => {
                 CreateDeploymentClosureV1::SandboxProfile(SandboxProfileDeploymentClosure {
+                    schema_version: insight_platform_contracts::SANDBOX_CONTRACT_SCHEMA_VERSION,
                     profile_revision: exact(ResourceKind::SandboxProfileRevision)?,
                     runtime_revision: bindings.runtime_revision,
-                    policy_bindings: bindings.policy_bindings,
+                    provider_binding_digest: bindings.provider_binding_digest,
+                    network_mode: bindings.network_mode,
+                    limits: bindings.limits,
+                    provisioning_limits: bindings.provisioning_limits,
+                    secret_injection_disabled: bindings.secret_injection_disabled,
                     qualification_evidence: bindings.qualification_evidence,
                 })
             }
@@ -701,7 +706,11 @@ struct ApplyPolicyDeploymentBindings {
 #[serde(deny_unknown_fields)]
 struct ApplySandboxDeploymentBindings {
     runtime_revision: ExactVersionRef,
-    policy_bindings: Vec<ExactPolicyBinding>,
+    provider_binding_digest: Sha256Digest,
+    network_mode: insight_platform_contracts::SandboxNetworkMode,
+    limits: insight_platform_contracts::SandboxResourceLimitsV1,
+    provisioning_limits: insight_platform_contracts::SandboxProvisioningLimitsV1,
+    secret_injection_disabled: bool,
     qualification_evidence: ArtifactRef,
 }
 

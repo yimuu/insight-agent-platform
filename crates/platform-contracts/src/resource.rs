@@ -15,8 +15,8 @@ use crate::{
     McpServerLimits, McpTransportBinding, McpTransportKind, ModelCatalogEvidence, ModelLimits,
     ModelModalities, ModelToolContract, ModelUsageContract, PlanNodeKind, PolicyKind,
     PrincipalSnapshot, ProviderDataHandlingContract, ProviderModelIdentity, ProviderRequestLimits,
-    ResourceId, ResourceKind, SandboxAbiVersion, SandboxCleanupPolicy, SandboxEntrypointKind,
-    SandboxIsolationClass, SandboxRuntimeFamily, SecretPurpose, Sha256Digest,
+    ResourceId, ResourceKind, SandboxNetworkMode, SandboxProvisioningLimitsV1,
+    SandboxResourceLimitsV1, SandboxRuntimeContractV1, SecretPurpose, Sha256Digest,
     SkillInstructionAudience, SkillInstructionPhase, SkillPackageEntryKind,
     StructuredOutputContract,
 };
@@ -1374,12 +1374,8 @@ fn validate_sandbox_policy<T: SandboxPolicyDocument>(
     Ok(())
 }
 authoring_spec!(SandboxRuntimeResourceSpec {
-    runtime_family: SandboxRuntimeFamily,
-    runtime_version: String,
-    image_or_module_digest: Sha256Digest,
-    supported_isolation: Vec<SandboxIsolationClass>,
-    abi: SandboxAbiVersion,
-    builtin_modules_manifest_digest: Sha256Digest,
+    runtime_contract: SandboxRuntimeContractV1,
+    fixed_runner_argv: Vec<String>,
     sbom_artifact: ArtifactRef,
     provenance_evidence: ArtifactRef,
     semantic_digest: Sha256Digest,
@@ -1388,25 +1384,19 @@ authoring_spec!(SandboxPackageResourceSpec {
     source_artifact: ArtifactRef,
     source_digest: Sha256Digest,
     runtime_revision: ExactVersionRef,
-    entrypoint_kind: SandboxEntrypointKind,
-    entrypoint: String,
+    image_uri: String,
+    package_argv: Vec<String>,
     dependency_lock_digest: Sha256Digest,
-    runtime_bundle_artifact: ArtifactRef,
     build_evidence: ArtifactRef,
     trust_class: CodeTrustClass,
     package_digest: Sha256Digest,
 });
 authoring_spec!(SandboxProfileResourceSpec {
     allowed_trust_classes: Vec<CodeTrustClass>,
-    allowed_runtime_families: Vec<SandboxRuntimeFamily>,
-    minimum_isolation: SandboxIsolationClass,
-    isolation_policy: ExactVersionRef,
-    resource_policy: ExactVersionRef,
-    network_policy: ExactVersionRef,
-    artifact_io_policy: ExactVersionRef,
-    secret_policy: Option<ExactVersionRef>,
-    cleanup: SandboxCleanupPolicy,
-    max_job_duration_milliseconds: u64,
+    allowed_network_modes: Vec<SandboxNetworkMode>,
+    maximum_limits: SandboxResourceLimitsV1,
+    maximum_provisioning_limits: SandboxProvisioningLimitsV1,
+    secret_injection_disabled: bool,
     semantic_digest: Sha256Digest,
 });
 
@@ -1496,14 +1486,24 @@ impl PolicyDeploymentClosure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxProfileDeploymentClosure {
+    pub schema_version: u16,
     pub profile_revision: ExactVersionRef,
     pub runtime_revision: ExactVersionRef,
-    pub policy_bindings: Vec<ExactPolicyBinding>,
+    pub provider_binding_digest: Sha256Digest,
+    pub network_mode: SandboxNetworkMode,
+    pub limits: SandboxResourceLimitsV1,
+    pub provisioning_limits: SandboxProvisioningLimitsV1,
+    pub secret_injection_disabled: bool,
     pub qualification_evidence: ArtifactRef,
 }
 
 impl SandboxProfileDeploymentClosure {
     fn validate(&self) -> Result<(), ResourceContractError> {
+        if self.schema_version != crate::SANDBOX_CONTRACT_SCHEMA_VERSION
+            || !self.secret_injection_disabled
+        {
+            return Err(ResourceContractError::InvalidSandboxContract);
+        }
         require_kind(
             &self.profile_revision.revision_id,
             ResourceKind::SandboxProfileRevision,
@@ -1512,19 +1512,12 @@ impl SandboxProfileDeploymentClosure {
             &self.runtime_revision.revision_id,
             ResourceKind::SandboxRuntimeRevision,
         )?;
-        if self.policy_bindings.len() > MAX_RESOURCE_DEPENDENCIES {
-            return Err(ResourceContractError::UnboundedValue);
-        }
-        let mut deployments = BTreeSet::new();
-        let mut revisions = BTreeSet::new();
-        for binding in &self.policy_bindings {
-            binding.validate()?;
-            if !deployments.insert(&binding.deployment.deployment_id)
-                || !revisions.insert(&binding.revision.revision_id)
-            {
-                return Err(ResourceContractError::DuplicateValue);
-            }
-        }
+        self.limits
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidSandboxContract)?;
+        self.provisioning_limits
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidSandboxContract)?;
         self.qualification_evidence
             .validate()
             .map_err(|_| ResourceContractError::InvalidArtifact)
@@ -1729,19 +1722,18 @@ impl ResourceDocument {
             Self::Policy(spec) => spec.validate(),
             Self::SandboxRuntime(spec) => {
                 spec.validate()?;
+                spec.runtime_contract
+                    .validate()
+                    .map_err(|_| ResourceContractError::InvalidSandboxContract)?;
                 spec.sbom_artifact
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
                 spec.provenance_evidence
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
-                if !is_code(&spec.runtime_version)
-                    || spec.supported_isolation.is_empty()
-                    || spec.supported_isolation.len() > SandboxIsolationClass::ALL.len()
-                    || !spec
-                        .supported_isolation
-                        .windows(2)
-                        .all(|pair| pair[0].as_str() < pair[1].as_str())
+                if !crate::valid_absolute_argv(&spec.fixed_runner_argv)
+                    || !spec.dependency_versions.is_empty()
+                    || !spec.policy_versions.is_empty()
                 {
                     return Err(ResourceContractError::InvalidSandboxContract);
                 }
@@ -1752,14 +1744,6 @@ impl ResourceDocument {
                 spec.source_artifact
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
-                spec.runtime_bundle_artifact
-                    .validate()
-                    .map_err(|_| ResourceContractError::InvalidArtifact)?;
-                if spec.runtime_bundle_artifact.byte_length() == 0
-                    || spec.runtime_bundle_artifact.byte_length() > MAX_SANDBOX_RUNTIME_BUNDLE_BYTES
-                {
-                    return Err(ResourceContractError::InvalidSandboxContract);
-                }
                 spec.build_evidence
                     .validate()
                     .map_err(|_| ResourceContractError::InvalidArtifact)?;
@@ -1767,9 +1751,10 @@ impl ResourceDocument {
                     &spec.runtime_revision.revision_id,
                     ResourceKind::SandboxRuntimeRevision,
                 )?;
-                if !is_relative_path(&spec.entrypoint)
-                    || (spec.entrypoint_kind == SandboxEntrypointKind::ReviewedExecutable
-                        && spec.trust_class != CodeTrustClass::ReviewedPublished)
+                if !crate::valid_oci_digest_uri(&spec.image_uri)
+                    || !crate::valid_absolute_argv(&spec.package_argv)
+                    || spec.dependency_versions != [spec.runtime_revision.clone()]
+                    || !spec.policy_versions.is_empty()
                 {
                     return Err(ResourceContractError::InvalidSandboxContract);
                 }
@@ -1777,42 +1762,27 @@ impl ResourceDocument {
             }
             Self::SandboxProfile(spec) => {
                 spec.validate()?;
-                let policies = [
-                    &spec.isolation_policy,
-                    &spec.resource_policy,
-                    &spec.network_policy,
-                    &spec.artifact_io_policy,
-                ];
-                validate_distinct_policy_roles(&policies)?;
-                if let Some(secret_policy) = &spec.secret_policy {
-                    let mut with_secret = policies.to_vec();
-                    with_secret.push(secret_policy);
-                    validate_distinct_policy_roles(&with_secret)?;
-                }
-                let declared_policies = spec
-                    .policy_versions
-                    .iter()
-                    .map(exact_version_identity)
-                    .collect::<BTreeSet<_>>();
-                let mut role_policies = policies
-                    .iter()
-                    .map(|policy| exact_version_identity(policy))
-                    .collect::<BTreeSet<_>>();
-                role_policies.extend(spec.secret_policy.iter().map(exact_version_identity));
+                spec.maximum_limits
+                    .validate()
+                    .map_err(|_| ResourceContractError::InvalidSandboxContract)?;
+                spec.maximum_provisioning_limits
+                    .validate()
+                    .map_err(|_| ResourceContractError::InvalidSandboxContract)?;
                 if spec.allowed_trust_classes.is_empty()
                     || spec.allowed_trust_classes.len() > CodeTrustClass::ALL.len()
                     || !spec
                         .allowed_trust_classes
                         .windows(2)
                         .all(|pair| pair[0].as_str() < pair[1].as_str())
-                    || spec.allowed_runtime_families.is_empty()
-                    || spec.allowed_runtime_families.len() > SandboxRuntimeFamily::ALL.len()
+                    || spec.allowed_network_modes.is_empty()
+                    || spec.allowed_network_modes.len() > 2
                     || !spec
-                        .allowed_runtime_families
+                        .allowed_network_modes
                         .windows(2)
-                        .all(|pair| pair[0].as_str() < pair[1].as_str())
-                    || spec.max_job_duration_milliseconds == 0
-                    || declared_policies != role_policies
+                        .all(|pair| pair[0] < pair[1])
+                    || !spec.secret_injection_disabled
+                    || !spec.dependency_versions.is_empty()
+                    || !spec.policy_versions.is_empty()
                 {
                     return Err(ResourceContractError::InvalidSandboxContract);
                 }
@@ -1918,16 +1888,7 @@ impl ResourceDocument {
                 common!(spec);
                 refs.push(&spec.runtime_revision);
             }
-            Self::SandboxProfile(spec) => {
-                common!(spec);
-                refs.extend([
-                    &spec.isolation_policy,
-                    &spec.resource_policy,
-                    &spec.network_policy,
-                    &spec.artifact_io_policy,
-                ]);
-                refs.extend(spec.secret_policy.iter());
-            }
+            Self::SandboxProfile(spec) => common!(spec),
         }
         refs
     }
@@ -2218,12 +2179,6 @@ impl DeploymentClosure {
             Self::Policy(closure) => refs.push(&closure.policy_revision),
             Self::SandboxProfile(closure) => {
                 refs.extend([&closure.profile_revision, &closure.runtime_revision]);
-                refs.extend(
-                    closure
-                        .policy_bindings
-                        .iter()
-                        .map(|binding| &binding.revision),
-                );
             }
         }
         refs
@@ -2295,12 +2250,7 @@ impl DeploymentClosure {
                     refs.push(mcp_deployment);
                 }
             }
-            Self::SandboxProfile(closure) => refs.extend(
-                closure
-                    .policy_bindings
-                    .iter()
-                    .map(|binding| &binding.deployment),
-            ),
+            Self::SandboxProfile(_) => {}
             Self::McpServer(_) | Self::ModelProvider(_) | Self::Policy(_) => {}
         }
         refs
@@ -2351,7 +2301,7 @@ impl DeploymentClosure {
                 }
                 bindings
             }
-            Self::SandboxProfile(closure) => closure.policy_bindings.iter().collect(),
+            Self::SandboxProfile(_) => Vec::new(),
             Self::CapabilityInterface(_)
             | Self::ContextSourceInterface(_)
             | Self::McpServer(_)
@@ -3036,13 +2986,6 @@ fn validate_policy_bindings(values: &[ExactPolicyBinding]) -> Result<(), Resourc
     Ok(())
 }
 
-fn exact_version_identity(value: &ExactVersionRef) -> (String, String) {
-    (
-        value.revision_id.to_string(),
-        value.semantic_digest.to_string(),
-    )
-}
-
 fn validate_distinct_policy_roles(
     values: &[&ExactVersionRef],
 ) -> Result<(), ResourceContractError> {
@@ -3583,6 +3526,7 @@ mod tests {
             qualification_evidence: qualification_artifact(),
         });
         let sandbox = DeploymentClosure::SandboxProfile(SandboxProfileDeploymentClosure {
+            schema_version: 1,
             profile_revision: ExactVersionRef::new(
                 id("sxrev_0198f1c3-8f49-7c3e-b1f3-773c28367b84"),
                 digest('e'),
@@ -3593,7 +3537,28 @@ mod tests {
                 digest('f'),
             )
             .unwrap(),
-            policy_bindings: vec![policy_binding_pair],
+            provider_binding_digest: digest('1'),
+            network_mode: SandboxNetworkMode::Direct,
+            limits: SandboxResourceLimitsV1 {
+                maximum_input_bytes: 1_048_576,
+                maximum_output_bytes: 1_048_576,
+                cpu_millicores: 1_000,
+                memory_mebibytes: 512,
+                pids: 64,
+                ephemeral_storage_bytes: 1_048_576,
+                wall_milliseconds: 60_000,
+                cleanup_milliseconds: 30_000,
+            },
+            provisioning_limits: SandboxProvisioningLimitsV1 {
+                maximum_candidates: 4,
+                candidate_page_items: 16,
+                candidate_quiescence_milliseconds: 500,
+                provisioning_timeout_milliseconds: 30_000,
+                orphan_page_items: 100,
+                runner_header_bytes: 65_536,
+                diagnostic_bytes: 65_536,
+            },
+            secret_injection_disabled: true,
             qualification_evidence: qualification_artifact(),
         });
         assert!(skill.validate().is_ok());
@@ -4228,10 +4193,9 @@ mod tests {
             source_artifact: artifact("7bac", '5', 16),
             source_digest: digest('5'),
             runtime_revision,
-            entrypoint_kind: SandboxEntrypointKind::WasmExport,
-            entrypoint: "run".to_owned(),
+            image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
+            package_argv: vec!["/opt/insight/package".to_owned()],
             dependency_lock_digest: digest('6'),
-            runtime_bundle_artifact: artifact("7bad", '7', MAX_SANDBOX_RUNTIME_BUNDLE_BYTES),
             build_evidence: artifact("7bae", '8', 16),
             trust_class: CodeTrustClass::BuiltIn,
             package_digest: digest('9'),
@@ -4241,15 +4205,14 @@ mod tests {
             .unwrap();
 
         let mut empty = spec.clone();
-        empty.runtime_bundle_artifact = artifact("7baf", 'a', 0);
+        empty.image_uri = "registry.invalid/package:latest".to_owned();
         assert_eq!(
             ResourceDocument::SandboxPackage(empty).validate(),
             Err(ResourceContractError::InvalidSandboxContract)
         );
 
         let mut oversized = spec;
-        oversized.runtime_bundle_artifact =
-            artifact("7bb0", 'b', MAX_SANDBOX_RUNTIME_BUNDLE_BYTES + 1);
+        oversized.package_argv = vec!["relative-program".to_owned()];
         assert_eq!(
             ResourceDocument::SandboxPackage(oversized).validate(),
             Err(ResourceContractError::InvalidSandboxContract)

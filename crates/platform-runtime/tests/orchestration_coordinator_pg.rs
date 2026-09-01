@@ -108,7 +108,7 @@ impl ControllerCapabilityAdmissionProvider for EmptyCapabilityAdmissionProvider 
         Ok(ControllerCapabilityAdmissionDecision {
             policies: InvocationPolicyDecisionBundle::build(Vec::new(), None).unwrap(),
             mcp_runtime: None,
-            sandbox: None,
+            sandbox: false,
         })
     }
 }

@@ -28,8 +28,7 @@ use insight_platform_runtime::postgres::{
 use insight_platform_runtime::{
     start_production_orchestration, CoordinatorTiming, OrchestrationCoordinatorConfig,
     OrchestrationExecutorConfig, OrchestrationExecutorTiming, OrchestrationSafetyConfig,
-    ProductionOrchestrationConfig, ProductionSandboxCapabilityConfig,
-    RunningProductionOrchestration, SafetyDriverTiming, SandboxResourceEnvelope,
+    ProductionOrchestrationConfig, RunningProductionOrchestration, SafetyDriverTiming,
     SchedulerPlanMaterializerConfig,
 };
 use insight_platform_worker::LocalWorkerPools;
@@ -61,17 +60,6 @@ struct ProcessConfig {
     timing: TimingConfig,
     plan_maximum_bytes: usize,
     safety_shard: SafetyScanShard,
-    #[serde(default)]
-    sandbox: Option<SandboxCapabilityConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SandboxCapabilityConfig {
-    executor_worker_manifest_digest: Sha256Digest,
-    isolation_backend_contract_digest: Sha256Digest,
-    callback_audience_identity_digest: Sha256Digest,
-    resources: SandboxResourceEnvelope,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,15 +255,6 @@ impl ProcessConfig {
                 },
             )
             .map_err(|_| ProcessError::InvalidConfiguration)?,
-            sandbox: self
-                .sandbox
-                .clone()
-                .map(|sandbox| ProductionSandboxCapabilityConfig {
-                    executor_worker_manifest_digest: sandbox.executor_worker_manifest_digest,
-                    isolation_backend_contract_digest: sandbox.isolation_backend_contract_digest,
-                    callback_audience_identity_digest: sandbox.callback_audience_identity_digest,
-                    resources: sandbox.resources,
-                }),
         };
         config
             .validate()
@@ -707,7 +686,6 @@ mod tests {
             },
             plan_maximum_bytes: 1_048_576,
             safety_shard: SafetyScanShard::whole(),
-            sandbox: None,
         }
     }
 

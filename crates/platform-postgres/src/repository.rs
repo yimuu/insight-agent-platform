@@ -66,11 +66,7 @@ use insight_platform_registry::{
     RegistryValidationJobPayload, RequestResourceValidation, SetResourceGate,
     SuspendResourceDeployment, TransitionResourceLifecycle, UpdateResourceDraft,
 };
-use insight_platform_sandbox::{
-    SandboxCommandLimits, SandboxContractError as DomainSandboxContractError,
-    SandboxControlError as DomainSandboxControlError, SandboxJobPayload,
-    SandboxWorkerContractError as DomainSandboxWorkerContractError,
-};
+use insight_platform_sandbox::opensandbox::SandboxDispatcherJobPayloadV1;
 use insight_platform_scheduler::{
     select_weighted_deficit_round_robin, ReadyWork, SchedulerHardLimits, SchedulerLane,
     SchedulerStateSnapshot, TenantSchedulingPolicyBinding, TenantWindow,
@@ -349,32 +345,6 @@ impl From<DomainContextQueryError> for RepositoryError {
     }
 }
 
-impl From<DomainSandboxContractError> for RepositoryError {
-    fn from(failure: DomainSandboxContractError) -> Self {
-        match failure {
-            DomainSandboxContractError::StaleFence => Self::StaleFence,
-            _ => Self::InvalidInput(failure.to_string()),
-        }
-    }
-}
-
-impl From<DomainSandboxWorkerContractError> for RepositoryError {
-    fn from(failure: DomainSandboxWorkerContractError) -> Self {
-        match failure {
-            DomainSandboxWorkerContractError::Contract(DomainSandboxContractError::StaleFence) => {
-                Self::StaleFence
-            }
-            _ => Self::InvalidInput(failure.to_string()),
-        }
-    }
-}
-
-impl From<DomainSandboxControlError> for RepositoryError {
-    fn from(failure: DomainSandboxControlError) -> Self {
-        Self::InvalidInput(failure.to_string())
-    }
-}
-
 #[derive(Clone)]
 pub struct PgRepository {
     pool: PgPool,
@@ -382,7 +352,6 @@ pub struct PgRepository {
     invocation_limits: InvocationCommandLimits,
     context_query_limits: ContextQueryLimits,
     model_turn_limits: ModelTurnLimits,
-    sandbox_limits: SandboxCommandLimits,
     scheduler_limits: SchedulerHardLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
@@ -446,8 +415,6 @@ impl PgRepository {
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
             model_turn_limits: ModelTurnLimits::from_profile(profile)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
-            sandbox_limits: SandboxCommandLimits::from_profile(profile)
-                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
             scheduler_limits,
             plan_limits: PlanLimits::from_profile(profile)
                 .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?,
@@ -502,10 +469,6 @@ impl PgRepository {
 
     pub(crate) const fn scope_environment_limits(&self) -> ScopeEnvironmentLimits {
         self.scope_environment_limits
-    }
-
-    pub(crate) const fn sandbox_limits(&self) -> SandboxCommandLimits {
-        self.sandbox_limits
     }
 
     pub async fn bootstrap_installation_operator(
@@ -3713,7 +3676,6 @@ impl PgRepository {
             invocation_limits: self.invocation_limits,
             context_query_limits: self.context_query_limits,
             model_turn_limits: self.model_turn_limits,
-            sandbox_limits: self.sandbox_limits,
             plan_limits: self.plan_limits,
             scope_environment_limits: self.scope_environment_limits,
             expression_inline_limits: self.expression_inline_limits,
@@ -7400,7 +7362,6 @@ pub struct PgSchedulerTransaction {
     invocation_limits: InvocationCommandLimits,
     context_query_limits: ContextQueryLimits,
     model_turn_limits: ModelTurnLimits,
-    sandbox_limits: SandboxCommandLimits,
     plan_limits: PlanLimits,
     scope_environment_limits: ScopeEnvironmentLimits,
     expression_inline_limits: JsonLimits,
@@ -9478,18 +9439,12 @@ impl PgSchedulerTransaction {
                     .ok_or(RepositoryError::Conflict(
                         "Sandbox Capability admission configuration",
                     ))?;
-            let sandbox_command = crate::sandbox_repository::build_sandbox_capability_execution(
+            match crate::sandbox_repository::accept_sandbox_capability_in_transaction(
                 &mut transaction,
                 &admitted,
                 &command.capability_job_id,
                 submission,
-            )
-            .await?;
-            match crate::sandbox_repository::accept_sandbox_execution_in_transaction(
-                &mut transaction,
-                sandbox_command,
                 database_now,
-                self.sandbox_limits,
             )
             .await?
             {
@@ -30686,11 +30641,10 @@ fn validate_claimed_job_payload(job: &JobRecord) -> Result<(), RepositoryError> 
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
         }
         WorkClass::Sandbox => {
-            let payload: SandboxJobPayload = decode_versioned_payload(&job.payload, "Sandbox Job")?;
-            let limits = SandboxCommandLimits::from_profile(&checked_in_hard_limit_profile())
-                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let payload: SandboxDispatcherJobPayloadV1 =
+                decode_versioned_payload(&job.payload, "OpenSandbox Job")?;
             payload
-                .validate_for(&job_projection(job)?, limits)
+                .validate_for(&job_projection(job)?)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))
         }
         WorkClass::Context if owner_id.kind() == ResourceKind::ContextDataset => {
@@ -35563,8 +35517,15 @@ async fn require_ready_sandbox_runtime_bundle(
     require_ready_artifact_ref(
         transaction,
         tenant_id,
-        &package.runtime_bundle_artifact,
-        "ready Sandbox runtime bundle artifact",
+        &package.source_artifact,
+        "ready OpenSandbox Package source artifact",
+    )
+    .await?;
+    require_ready_artifact_ref(
+        transaction,
+        tenant_id,
+        &package.build_evidence,
+        "ready OpenSandbox Package build evidence",
     )
     .await
 }

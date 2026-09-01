@@ -28,7 +28,7 @@ use insight_platform_context::{
 use insight_platform_contracts::{
     canonical_digest, AllowedMcpServerCapabilities, ArtifactPurpose, ArtifactRef,
     ArtifactReferenceKind, ArtifactRetentionPolicy, ArtifactWorkloadAudience, AuthoringPackage,
-    CapabilityEndpointScheme, CodeTrustClass, CommandAudit, CommandOutcome, ContextBackendBinding,
+    CapabilityEndpointScheme, CommandAudit, CommandOutcome, ContextBackendBinding,
     ContextBackendContract, ContextBackendKind, ContextBackendLimits, ContextCitationContract,
     ContextCitationStrength, ContextConsistencyMode, ContextDataPolicyContract,
     ContextDeploymentClosure, ContextImplementationContract, ContextImplementationResourceSpec,
@@ -42,12 +42,10 @@ use insight_platform_contracts::{
     PermissionSet, PolicyDeploymentClosure, PolicyKind, PolicyResourceSpec,
     PrincipalBindingsPayload, PrincipalKind, PublishedMcpMethod, PublishedVersionPayload,
     QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
-    SandboxArtifactIoPolicyDocument, SandboxIsolationClass, SandboxIsolationPolicyDocument,
-    SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument, SandboxRuntimeFamily,
-    SandboxSecretDeliveryMode, SandboxSecretResolutionPolicyDocument, SecretBindingPayload,
-    SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary, WorkClass, WorkerManifest, MCP_PROTOCOL_BASELINE, WORKER_MANIFEST_VERSION,
-    WORKER_PROTOCOL_VERSION,
+    SandboxArtifactIoPolicyDocument, SandboxNetworkPolicyDocument, SandboxResourcePolicyDocument,
+    SecretBindingPayload, SecretPurpose, SecretResolutionPolicy, Sha256Digest, TenantConfig,
+    TenantPrincipalPayload, ValidationSummary, WorkClass, WorkerManifest, MCP_PROTOCOL_BASELINE,
+    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress::{
     AeadMcpRemoteTaskStateCodec, AeadMcpSubscriptionStateCodec, DnsResolutionError,
@@ -101,7 +99,6 @@ use insight_platform_postgres::{
     },
     verify_schema,
 };
-use insight_platform_sandbox::SandboxExecutionPolicyClosure;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
@@ -1093,20 +1090,17 @@ fn process_tls_fixture() -> ProcessTlsFixture {
     }
 }
 
+struct FixtureSandboxPolicies {
+    resource: SandboxResourcePolicyDocument,
+    network: SandboxNetworkPolicyDocument,
+    artifact_io: SandboxArtifactIoPolicyDocument,
+}
+
 fn sandbox_policy_closure(
-    token_purpose: SecretPurpose,
+    _token_purpose: SecretPurpose,
     write_storage_binding_digest: Sha256Digest,
-) -> SandboxExecutionPolicyClosure {
-    SandboxExecutionPolicyClosure {
-        isolation: SandboxIsolationPolicyDocument {
-            schema_version: 1,
-            minimum_isolation: SandboxIsolationClass::SandboxedContainer,
-            allowed_runtime_families: vec![SandboxRuntimeFamily::Python],
-            allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
-            deny_runtime_fallback: true,
-            fresh_jail_per_job: true,
-            deny_host_devices: true,
-        },
+) -> FixtureSandboxPolicies {
+    FixtureSandboxPolicies {
         resource: SandboxResourcePolicyDocument {
             schema_version: 1,
             maximum_cpu_millicores: 1_000,
@@ -1164,16 +1158,6 @@ fn sandbox_policy_closure(
             deny_sparse_file: true,
             archive_expansion_disabled: true,
         },
-        secret_resolution: Some(SandboxSecretResolutionPolicyDocument {
-            schema_version: 1,
-            allowed_purposes: vec![token_purpose],
-            maximum_reads_per_binding: 1,
-            delivery_mode: SandboxSecretDeliveryMode::BrokeredMemory,
-            deny_environment: true,
-            deny_argv: true,
-            deny_snapshot: true,
-            scrub_after_read: true,
-        }),
     }
 }
 

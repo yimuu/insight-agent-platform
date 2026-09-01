@@ -30,7 +30,6 @@ use insight_platform_invocations::{
     PrepareCapabilityDispatch, ResolveCapabilityApproval,
 };
 use insight_platform_orchestrator::ScopeEnvironmentLimits;
-use insight_platform_sandbox::SandboxCommandLimits;
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
     TaskState,
@@ -41,7 +40,6 @@ use std::str::FromStr;
 pub struct PgInvocationTransaction {
     pub(crate) transaction: Transaction<'static, Postgres>,
     pub(crate) limits: InvocationCommandLimits,
-    pub(crate) sandbox_limits: SandboxCommandLimits,
     context_limits: ContextQueryLimits,
     pub(crate) scope_environment_limits: ScopeEnvironmentLimits,
 }
@@ -53,7 +51,6 @@ impl PgRepository {
         Ok(PgInvocationTransaction {
             transaction: self.pool().begin().await?,
             limits: self.invocation_limits(),
-            sandbox_limits: self.sandbox_limits(),
             context_limits: self.context_query_limits(),
             scope_environment_limits: self.scope_environment_limits(),
         })

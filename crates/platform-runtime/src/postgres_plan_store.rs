@@ -36,7 +36,7 @@ use insight_platform_postgres::repository::{
     MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_postgres::sandbox_repository::SandboxCapabilitySubmission;
-use insight_platform_sandbox::{SandboxResourceEnvelope, SANDBOX_QUOTA_LINES};
+use insight_platform_postgres::sandbox_repository::SANDBOX_QUOTA_LINES;
 use insight_platform_tasks::TaskDefinition;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -292,15 +292,7 @@ pub struct ControllerCapabilityAdmissionRequest {
 pub struct ControllerCapabilityAdmissionDecision {
     pub policies: insight_platform_invocations::InvocationPolicyDecisionBundle,
     pub mcp_runtime: Option<insight_platform_invocations::McpCapabilityRuntimeRequest>,
-    pub sandbox: Option<ControllerSandboxCapabilityAdmission>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ControllerSandboxCapabilityAdmission {
-    pub executor_worker_manifest_digest: Sha256Digest,
-    pub isolation_backend_contract_digest: Sha256Digest,
-    pub callback_audience_identity_digest: Sha256Digest,
-    pub resources: SandboxResourceEnvelope,
+    pub sandbox: bool,
 }
 
 #[async_trait]
@@ -636,18 +628,13 @@ where
         let capability_job_id = self.new_id(ResourceKind::Job)?;
         let sandbox_submission = admission
             .sandbox
-            .map(|sandbox| {
+            .then(|| {
                 Ok::<_, DurablePlanDriverError>(SandboxCapabilitySubmission {
-                    executor_worker_manifest_digest: sandbox.executor_worker_manifest_digest,
-                    isolation_backend_contract_digest: sandbox.isolation_backend_contract_digest,
-                    callback_audience_identity_digest: sandbox.callback_audience_identity_digest,
                     output_value_id: ResourceId::from_uuid_v7(
                         ResourceKind::RunValue,
                         capability_job_id.uuid(),
                     )
                     .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
-                    input_artifact_grant_id: self.new_id(ResourceKind::ArtifactGrant)?,
-                    resources: sandbox.resources,
                     receipt_id: self.new_id(ResourceKind::Receipt)?,
                     event_id: self.new_id(ResourceKind::Event)?,
                     outbox_id: self.new_id(ResourceKind::OutboxEvent)?,

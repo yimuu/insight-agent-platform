@@ -6,13 +6,12 @@ use insight_platform_contracts::{
     ExactVersionRef, Permission, PermissionSet, PolicyDeploymentClosure, PolicyKind,
     PolicyResourceSpec, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
     PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
-    ResourceId, ResourceKind, RunBindingsSnapshot, SandboxCleanupPolicy, SandboxEntrypointKind,
-    SandboxIsolationClass, SandboxPackageResourceSpec, SandboxProfileDeploymentClosure,
-    SandboxProfileResourceSpec, SandboxRuntimeFamily, Sha256Digest, SkillArtifactSliceRef,
-    SkillDeploymentClosure, SkillInstructionAudience, SkillInstructionPhase,
-    SkillInstructionSection, SkillInterface, SkillPackageEntry, SkillPackageEntryKind,
-    SkillPackageManifest, SkillResourceSpec, TenantConfig, TenantPrincipalPayload,
-    ValidationSummary,
+    ResourceId, ResourceKind, RunBindingsSnapshot, SandboxNetworkMode, SandboxPackageResourceSpec,
+    SandboxProfileDeploymentClosure, SandboxProfileResourceSpec, SandboxProvisioningLimitsV1,
+    SandboxResourceLimitsV1, Sha256Digest, SkillArtifactSliceRef, SkillDeploymentClosure,
+    SkillInstructionAudience, SkillInstructionPhase, SkillInstructionSection, SkillInterface,
+    SkillPackageEntry, SkillPackageEntryKind, SkillPackageManifest, SkillResourceSpec,
+    TenantConfig, TenantPrincipalPayload, ValidationSummary,
 };
 use insight_platform_postgres::{
     product_repository::AgentProductListQuery,
@@ -147,7 +146,7 @@ fn sandbox_id(kind: ResourceKind, suffix: u16) -> ResourceId {
     .unwrap()
 }
 
-async fn prove_sandbox_package_runtime_bundle_publication(
+async fn prove_sandbox_package_image_publication(
     pool: &PgPool,
     repository: &PgRepository,
     authoring_artifact: &ArtifactRef,
@@ -165,9 +164,9 @@ async fn prove_sandbox_package_runtime_bundle_publication(
         sandbox_id(ResourceKind::Artifact, 6),
         digest('2'),
         32,
-        "application/wasm",
+        "application/octet-stream",
         DataClassification::Internal,
-        Some("published-module.wasm".to_owned()),
+        Some("package-source.tar".to_owned()),
     )
     .unwrap();
     let runtime_payload = TypedPayload::new(1, &json!({"fixture": "sandbox-runtime"})).unwrap();
@@ -214,15 +213,14 @@ async fn prove_sandbox_package_runtime_bundle_publication(
             manifest_digest: digest('3'),
         },
         contract_digest: digest('4'),
-        dependency_versions: vec![],
+        dependency_versions: vec![runtime_revision.clone()],
         policy_versions: vec![],
-        source_artifact: authoring_artifact.clone(),
-        source_digest: authoring_artifact.content_digest().clone(),
+        source_artifact: bundle_artifact.clone(),
+        source_digest: bundle_artifact.content_digest().clone(),
         runtime_revision,
-        entrypoint_kind: SandboxEntrypointKind::WasmExport,
-        entrypoint: "run".to_owned(),
+        image_uri: format!("registry.example.invalid/sandbox/package@{}", digest('4')),
+        package_argv: vec!["/opt/insight/package/run".to_owned()],
         dependency_lock_digest: digest('5'),
-        runtime_bundle_artifact: bundle_artifact.clone(),
         build_evidence: authoring_artifact.clone(),
         trust_class: CodeTrustClass::BuiltIn,
         package_digest: digest('6'),
@@ -296,11 +294,11 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     assert!(matches!(
         publish!("8a40", '7', '8', package_document.clone()),
         Err(RepositoryError::NotFound(
-            "ready Sandbox runtime bundle artifact"
+            "ready OpenSandbox Package source artifact"
         ))
     ));
 
-    let artifact_metadata = TypedPayload::new(1, &json!({"fixture": "runtime-bundle"})).unwrap();
+    let artifact_metadata = TypedPayload::new(1, &json!({"fixture": "package-source"})).unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifact_blobs (
@@ -326,7 +324,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
             verified_media_type, state, metadata_schema_version, metadata,
             metadata_digest, retention_policy_revision_id, retain_until, created_by
         ) VALUES ($1, $2, $3, 'package', 'internal', $4, $5,
-                  'application/wasm', 'application/wasm', 'ready', $6, $7, $8,
+                  'application/octet-stream', 'application/octet-stream', 'ready', $6, $7, $8,
                   $9, $10, $11)
         "#,
     )
@@ -347,7 +345,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     assert!(matches!(
         publish!("8a50", '9', 'a', package_document.clone()),
         Err(RepositoryError::NotFound(
-            "ready Sandbox runtime bundle artifact"
+            "ready OpenSandbox Package source artifact"
         ))
     ));
 
@@ -378,7 +376,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     assert!(matches!(
         publish!("8a60", 'b', 'c', package_document.clone()),
         Err(RepositoryError::NotFound(
-            "ready Sandbox runtime bundle artifact"
+            "ready OpenSandbox Package source artifact"
         ))
     ));
 
@@ -406,7 +404,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     assert!(matches!(
         publish!("8a70", 'd', 'e', package_document.clone()),
         Err(RepositoryError::NotFound(
-            "ready Sandbox runtime bundle artifact"
+            "ready OpenSandbox Package source artifact"
         ))
     ));
 
@@ -423,7 +421,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     assert!(matches!(
         publish!("8a80", 'f', '0', package_document.clone()),
         Err(RepositoryError::NotFound(
-            "ready Sandbox runtime bundle artifact"
+            "ready OpenSandbox Package source artifact"
         ))
     ));
 
@@ -453,7 +451,7 @@ async fn prove_sandbox_package_runtime_bundle_publication(
             verified_media_type, state, metadata_schema_version, metadata,
             metadata_digest, retention_policy_revision_id, retain_until, created_by
         ) VALUES ($1, $2, $3, 'package', 'internal', $4, $5,
-                  'application/wasm', 'application/wasm', 'ready', $6, $7, $8,
+                  'application/octet-stream', 'application/octet-stream', 'ready', $6, $7, $8,
                   $9, $10, $11)
         "#,
     )
@@ -475,7 +473,8 @@ async fn prove_sandbox_package_runtime_bundle_publication(
     let ResourceDocument::SandboxPackage(spec) = &mut drifted_published_document else {
         unreachable!();
     };
-    spec.runtime_bundle_artifact = alternate_bundle_artifact;
+    spec.source_digest = alternate_bundle_artifact.content_digest().clone();
+    spec.source_artifact = alternate_bundle_artifact;
     assert!(matches!(
         publish!("8a90", '0', '1', drifted_published_document),
         Err(RepositoryError::InvalidInput(message))
@@ -834,7 +833,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     .unwrap();
     bootstrap.commit().await.unwrap();
 
-    prove_sandbox_package_runtime_bundle_publication(&pool, &repository, &authoring_artifact).await;
+    prove_sandbox_package_image_publication(&pool, &repository, &authoring_artifact).await;
 
     let document = ResourceDocument::Policy(Box::new(PolicyResourceSpec {
         authoring_package: AuthoringPackage {
@@ -2391,10 +2390,25 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     );
     assert_eq!(suspended_skill.gate_state, "suspended");
 
-    let policy_revisions = policy_bindings
-        .iter()
-        .map(|binding| binding.revision.clone())
-        .collect::<Vec<_>>();
+    let sandbox_limits = SandboxResourceLimitsV1 {
+        maximum_input_bytes: 65_536,
+        maximum_output_bytes: 65_536,
+        cpu_millicores: 500,
+        memory_mebibytes: 512,
+        pids: 64,
+        ephemeral_storage_bytes: 16_777_216,
+        wall_milliseconds: 60_000,
+        cleanup_milliseconds: 10_000,
+    };
+    let sandbox_provisioning_limits = SandboxProvisioningLimitsV1 {
+        maximum_candidates: 2,
+        candidate_page_items: 4,
+        candidate_quiescence_milliseconds: 500,
+        provisioning_timeout_milliseconds: 30_000,
+        orphan_page_items: 16,
+        runner_header_bytes: 8_192,
+        diagnostic_bytes: 8_192,
+    };
     let sandbox_profile_document = ResourceDocument::SandboxProfile(SandboxProfileResourceSpec {
         authoring_package: AuthoringPackage {
             artifact: qualification_artifact.clone(),
@@ -2402,21 +2416,16 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         },
         contract_digest: digest('3'),
         dependency_versions: vec![],
-        policy_versions: policy_revisions.clone(),
+        policy_versions: vec![],
         allowed_trust_classes: vec![CodeTrustClass::BuiltIn],
-        allowed_runtime_families: vec![SandboxRuntimeFamily::WasmWasi],
-        minimum_isolation: SandboxIsolationClass::Wasm,
-        isolation_policy: policy_revisions[0].clone(),
-        resource_policy: policy_revisions[1].clone(),
-        network_policy: policy_revisions[2].clone(),
-        artifact_io_policy: policy_revisions[3].clone(),
-        secret_policy: None,
-        cleanup: SandboxCleanupPolicy::SingleUseDestroy,
-        max_job_duration_milliseconds: 60_000,
+        allowed_network_modes: vec![SandboxNetworkMode::Disabled, SandboxNetworkMode::Direct],
+        maximum_limits: sandbox_limits.clone(),
+        maximum_provisioning_limits: sandbox_provisioning_limits.clone(),
+        secret_injection_disabled: true,
         semantic_digest: digest('4'),
     });
     let sandbox_profile_draft = ResourceDraftPayload {
-        display_name: "WASI deployment profile".to_owned(),
+        display_name: "OpenSandbox deployment profile".to_owned(),
         document: sandbox_profile_document.clone(),
         validation: None,
     };
@@ -2478,6 +2487,7 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         .unwrap(),
     );
     let sandbox_profile_closure = SandboxProfileDeploymentClosure {
+        schema_version: insight_platform_contracts::SANDBOX_CONTRACT_SCHEMA_VERSION,
         profile_revision: ExactVersionRef::new(id(SANDBOX_PROFILE_VERSION_ID), digest('8'))
             .unwrap(),
         runtime_revision: ExactVersionRef::new(
@@ -2485,7 +2495,11 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
             digest('1'),
         )
         .unwrap(),
-        policy_bindings,
+        provider_binding_digest: digest('9'),
+        network_mode: SandboxNetworkMode::Direct,
+        limits: sandbox_limits,
+        provisioning_limits: sandbox_provisioning_limits,
+        secret_injection_disabled: true,
         qualification_evidence: qualification_artifact,
     };
     let wrong_owner_audit = audit(TENANT_ID, PRINCIPAL_ID, "9b23", '5', '8');

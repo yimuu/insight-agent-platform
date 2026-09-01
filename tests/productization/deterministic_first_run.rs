@@ -31,8 +31,6 @@ mod remote_mcp_tool_and_resource;
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
 mod timer_signal_restart_recovery;
-#[path = "wasi_and_remote_framework_capability.rs"]
-mod wasi_and_remote_framework_capability;
 
 const PROJECT_ENV: &str = "PLATFORM_PRODUCTIZATION_PROJECT";
 const INSIGHT_BIN_ENV: &str = "PLATFORM_INSIGHT_BIN";
@@ -937,16 +935,6 @@ fn public_cli_deterministic_first_run() {
                 &qualification_ref,
             )
         });
-    let mut wasi_framework_evidence =
-        (feature_enabled("wasi") && feature_enabled("remote-capability")).then(|| {
-            wasi_and_remote_framework_capability::run(
-                insight,
-                project,
-                fixture.path(),
-                &authoring_ref,
-                &qualification_ref,
-            )
-        });
     let mut model_evidence = feature_enabled("model").then(|| {
         exact_model_streaming_chat::run(
             insight,
@@ -1005,12 +993,9 @@ fn public_cli_deterministic_first_run() {
             mcp_evidence
                 .as_ref()
                 .map(|evidence| evidence.run_id.as_str()),
-            wasi_framework_evidence
-                .as_ref()
-                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
-    let artifact_evidence = feature_enabled("wasi").then(|| {
+    let artifact_evidence = feature_enabled("artifact").then(|| {
         artifact_lifecycle_and_rejection::run(
             insight,
             project,
@@ -1034,9 +1019,6 @@ fn public_cli_deterministic_first_run() {
         }
         if let Some(mcp_evidence) = &mut mcp_evidence {
             mcp_evidence.mark_console_passed();
-        }
-        if let Some(wasi_framework_evidence) = &mut wasi_framework_evidence {
-            wasi_framework_evidence.mark_console_passed();
         }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
@@ -1265,14 +1247,6 @@ fn public_cli_deterministic_first_run() {
                     .expect("MCP scenario report is canonicalizable"),
             )
             .expect("MCP scenario report is writable");
-        }
-        if let Some(wasi_framework_evidence) = wasi_framework_evidence {
-            fs::write(
-                report_directory.join("wasi-and-remote-framework-capability.json"),
-                serde_jcs::to_vec(&wasi_framework_evidence.report(&revision))
-                    .expect("WASI/framework scenario report is canonicalizable"),
-            )
-            .expect("WASI/framework scenario report is writable");
         }
     }
 }

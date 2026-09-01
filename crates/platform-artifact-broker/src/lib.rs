@@ -17,9 +17,6 @@ use insight_platform_artifacts::{
     SchedulerTypedPlanReader,
 };
 use insight_platform_contracts::{parse_strict_json, JsonLimits, Sha256Digest};
-use insight_platform_sandbox::{
-    WasiArtifactBroker, WasiArtifactBrokerError, WasiArtifactReadRequest,
-};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
@@ -335,13 +332,8 @@ impl InstalledArtifactObjectStoreCatalog {
     }
 }
 
-pub struct BrokeredSandboxArtifactBroker {
-    wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
-    core: ArtifactBrokerCore,
-}
-
 /// Public-Gateway Artifact reader. It shares the exact-generation, double-authorization path with
-/// sandbox reads while retaining an independent audience semaphore in the Gateway process.
+/// other exact readers while retaining an independent audience semaphore in the Gateway process.
 pub struct BrokeredGatewayArtifactReader {
     authority: Arc<dyn ArtifactObjectReadAuthority<GatewayArtifactReadRequest>>,
     core: ArtifactBrokerCore,
@@ -472,20 +464,6 @@ trait ArtifactReadRequest {
     fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef>;
 }
 
-impl ArtifactReadRequest for WasiArtifactReadRequest {
-    fn deadline(&self) -> chrono::DateTime<Utc> {
-        self.deadline
-    }
-
-    fn maximum_bytes(&self) -> usize {
-        self.maximum_bytes
-    }
-
-    fn artifact(&self) -> Option<&insight_platform_contracts::ArtifactRef> {
-        Some(&self.artifact)
-    }
-}
-
 impl ArtifactReadRequest for GatewayArtifactReadRequest {
     fn deadline(&self) -> chrono::DateTime<Utc> {
         self.deadline
@@ -549,25 +527,6 @@ enum ArtifactBrokerReadError {
     NotFound,
     TooLarge,
     Integrity,
-}
-
-impl BrokeredSandboxArtifactBroker {
-    pub fn new(
-        wasi_authority: Arc<dyn ArtifactObjectReadAuthority<WasiArtifactReadRequest>>,
-        unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
-        stores: InstalledArtifactObjectStoreCatalog,
-        limits: ArtifactBrokerLimits,
-    ) -> Result<Self, ArtifactBrokerConfigurationError> {
-        limits.validate()?;
-        Ok(Self {
-            wasi_authority,
-            core: ArtifactBrokerCore::new(unsealer, stores, limits)?,
-        })
-    }
-
-    pub fn capacity_snapshot(&self) -> ArtifactBrokerCapacitySnapshot {
-        self.core.capacity_snapshot()
-    }
 }
 
 impl BrokeredGatewayArtifactReader {
@@ -1092,18 +1051,6 @@ fn map_delete_store_failure(error: ArtifactObjectStoreError) -> ArtifactBackendF
     }
 }
 
-impl BrokeredSandboxArtifactBroker {
-    pub async fn read_wasi_for_response(
-        &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<BrokeredArtifactRead, WasiArtifactBrokerError> {
-        self.core
-            .read(self.wasi_authority.as_ref(), &request)
-            .await
-            .map_err(map_wasi_broker_error)
-    }
-}
-
 impl ArtifactBrokerCore {
     fn new(
         unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
@@ -1225,18 +1172,6 @@ impl ArtifactBrokerCore {
     }
 }
 
-#[async_trait]
-impl WasiArtifactBroker for BrokeredSandboxArtifactBroker {
-    async fn read_exact(
-        &self,
-        request: WasiArtifactReadRequest,
-    ) -> Result<Vec<u8>, WasiArtifactBrokerError> {
-        self.read_wasi_for_response(request)
-            .await
-            .map(BrokeredArtifactRead::into_bytes)
-    }
-}
-
 fn parse_locator(bytes: &[u8]) -> Result<ArtifactObjectLocator, ArtifactBrokerReadError> {
     let value = parse_strict_json(
         bytes,
@@ -1324,16 +1259,6 @@ fn map_store_error(error: ArtifactObjectStoreError) -> ArtifactBrokerReadError {
         ArtifactObjectStoreError::Rejected => ArtifactBrokerReadError::Denied,
         ArtifactObjectStoreError::TooLarge => ArtifactBrokerReadError::TooLarge,
         ArtifactObjectStoreError::InvalidEvidence => ArtifactBrokerReadError::Integrity,
-    }
-}
-
-fn map_wasi_broker_error(error: ArtifactBrokerReadError) -> WasiArtifactBrokerError {
-    match error {
-        ArtifactBrokerReadError::Unavailable => WasiArtifactBrokerError::Unavailable,
-        ArtifactBrokerReadError::Denied => WasiArtifactBrokerError::Denied,
-        ArtifactBrokerReadError::NotFound => WasiArtifactBrokerError::NotFound,
-        ArtifactBrokerReadError::TooLarge => WasiArtifactBrokerError::TooLarge,
-        ArtifactBrokerReadError::Integrity => WasiArtifactBrokerError::Integrity,
     }
 }
 

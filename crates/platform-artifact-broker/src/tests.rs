@@ -2,10 +2,11 @@ use super::*;
 use chrono::Duration as ChronoDuration;
 use insight_platform_artifacts::{
     ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError, AuthorizedArtifactObjectRead,
-    EncryptedArtifactObjectReference,
+    EncryptedArtifactObjectReference, GatewayArtifactReadRequest,
 };
-use insight_platform_contracts::{ArtifactRef, DataClassification, ResourceId, ResourceKind};
-use insight_platform_sandbox::{WasiArtifactReadPurpose, WasiArtifactReadRequest};
+use insight_platform_contracts::{
+    ArtifactRef, DataClassification, PrincipalKind, ResourceId, ResourceKind,
+};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
@@ -58,10 +59,10 @@ impl FixtureAuthority {
 }
 
 #[async_trait]
-impl ArtifactObjectReadAuthority<WasiArtifactReadRequest> for FixtureAuthority {
+impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for FixtureAuthority {
     async fn authorize_object_read(
         &self,
-        _request: &WasiArtifactReadRequest,
+        _request: &GatewayArtifactReadRequest,
     ) -> Result<AuthorizedArtifactObjectRead, ArtifactObjectReadAuthorityError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.projection(self.drift_after_first && call > 0))
@@ -156,8 +157,8 @@ impl InstalledArtifactObjectStore for FixtureStore {
 }
 
 struct Fixture {
-    broker: BrokeredSandboxArtifactBroker,
-    request: WasiArtifactReadRequest,
+    broker: BrokeredGatewayArtifactReader,
+    request: GatewayArtifactReadRequest,
     store: Arc<FixtureStore>,
 }
 
@@ -214,7 +215,7 @@ fn fixture_with_limits(
         bytes: Mutex::new(bytes.to_vec()),
         deleted: AtomicBool::new(false),
     });
-    let broker = BrokeredSandboxArtifactBroker::new(
+    let broker = BrokeredGatewayArtifactReader::new(
         authority,
         Arc::new(FixtureUnsealer {
             plaintext: Mutex::new(plaintext),
@@ -225,15 +226,12 @@ fn fixture_with_limits(
     .unwrap();
     Fixture {
         broker,
-        request: WasiArtifactReadRequest {
+        request: GatewayArtifactReadRequest {
             tenant_id,
-            sandbox_job_id: id(ResourceKind::Job),
+            principal_id: id(ResourceKind::Principal),
+            principal_kind: PrincipalKind::AgentRunner,
             request_digest: digest('d'),
-            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
-            lease_generation: 1,
             artifact,
-            purpose: WasiArtifactReadPurpose::RuntimeBundle,
-            read_grant: None,
             maximum_bytes: 1024,
             deadline: Utc::now() + ChronoDuration::minutes(1),
         },
@@ -290,9 +288,12 @@ async fn exact_object_is_returned_only_after_second_authorization() {
     assert!(parse_locator(&locator_bytes).is_ok());
     let fixture = fixture(bytes, locator_bytes, false, "version-1");
     assert_eq!(
-        WasiArtifactBroker::read_exact(&fixture.broker, fixture.request)
+        fixture
+            .broker
+            .read(&fixture.request)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_bytes(),
         bytes
     );
 }
@@ -310,11 +311,7 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
             ..ArtifactBrokerLimits::default()
         },
     );
-    let held = fixture
-        .broker
-        .read_wasi_for_response(fixture.request.clone())
-        .await
-        .unwrap();
+    let held = fixture.broker.read(&fixture.request).await.unwrap();
     assert_eq!(held.as_bytes(), bytes);
     assert_eq!(
         fixture.broker.capacity_snapshot(),
@@ -324,12 +321,8 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
         }
     );
     assert_eq!(
-        fixture
-            .broker
-            .read_wasi_for_response(fixture.request.clone())
-            .await
-            .err(),
-        Some(WasiArtifactBrokerError::Unavailable)
+        fixture.broker.read(&fixture.request).await.err(),
+        Some(GatewayArtifactReadError::Unavailable)
     );
 
     drop(held);
@@ -337,7 +330,7 @@ async fn audience_permit_is_held_until_the_response_lease_is_dropped() {
     assert_eq!(
         fixture
             .broker
-            .read_wasi_for_response(fixture.request)
+            .read(&fixture.request)
             .await
             .unwrap()
             .as_bytes(),
@@ -355,14 +348,18 @@ async fn authoritative_generation_and_post_io_authority_drift_fail_closed() {
         "version-2",
     );
     assert_eq!(
-        WasiArtifactBroker::read_exact(&wrong_generation.broker, wrong_generation.request).await,
-        Err(WasiArtifactBrokerError::Integrity)
+        wrong_generation
+            .broker
+            .read(&wrong_generation.request)
+            .await
+            .err(),
+        Some(GatewayArtifactReadError::Integrity)
     );
 
     let drift = fixture(bytes, locator(&digest('b'), "version-1"), true, "version-1");
     assert_eq!(
-        WasiArtifactBroker::read_exact(&drift.broker, drift.request).await,
-        Err(WasiArtifactBrokerError::Denied)
+        drift.broker.read(&drift.request).await.err(),
+        Some(GatewayArtifactReadError::Denied)
     );
 }
 
@@ -380,8 +377,8 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
         "version-1",
     );
     assert_eq!(
-        WasiArtifactBroker::read_exact(&noncanonical.broker, noncanonical.request).await,
-        Err(WasiArtifactBrokerError::Integrity)
+        noncanonical.broker.read(&noncanonical.request).await.err(),
+        Some(GatewayArtifactReadError::Integrity)
     );
 
     let corrupt = fixture(
@@ -392,8 +389,8 @@ async fn noncanonical_locator_and_content_digest_mismatch_fail_closed() {
     );
     *corrupt.store.bytes.lock().unwrap() = b"wasm-modulf".to_vec();
     assert_eq!(
-        WasiArtifactBroker::read_exact(&corrupt.broker, corrupt.request).await,
-        Err(WasiArtifactBrokerError::Integrity)
+        corrupt.broker.read(&corrupt.request).await.err(),
+        Some(GatewayArtifactReadError::Integrity)
     );
 }
 

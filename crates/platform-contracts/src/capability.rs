@@ -1,8 +1,8 @@
 use crate::{
-    canonical_digest, ArtifactRef, CapabilityBackendFeatures, CapabilityBackendKind,
-    DataClassification, DataRegion, ExactDeploymentRef, ExactVersionRef, ResourceId, ResourceKind,
-    SandboxEntrypointKind, SandboxIsolationClass, SecretPurpose, Sha256Digest, MAX_ARTIFACT_BYTES,
-    WORKER_PROTOCOL_VERSION,
+    canonical_digest, valid_absolute_argv, valid_oci_digest_uri, ArtifactRef,
+    CapabilityBackendFeatures, CapabilityBackendKind, DataClassification, DataRegion,
+    ExactDeploymentRef, ExactVersionRef, ResourceId, ResourceKind, SecretPurpose, Sha256Digest,
+    MAX_ARTIFACT_BYTES, WORKER_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error::Error, fmt, str::FromStr};
@@ -437,16 +437,17 @@ impl McpToolCapabilityContract {
 #[serde(deny_unknown_fields)]
 pub struct SandboxCapabilityContract {
     pub package_contract_digest: Sha256Digest,
-    pub entrypoint_kind: SandboxEntrypointKind,
-    pub entrypoint: String,
+    pub image_uri: String,
+    pub package_argv: Vec<String>,
     pub dependency_lock_digest: Sha256Digest,
+    pub runtime_contract_digest: Sha256Digest,
     pub input_mapping_digest: Sha256Digest,
     pub output_mapping_digest: Sha256Digest,
 }
 
 impl SandboxCapabilityContract {
     fn validate(&self) -> Result<(), CapabilityContractError> {
-        if !valid_relative_entrypoint(&self.entrypoint) {
+        if !valid_oci_digest_uri(&self.image_uri) || !valid_absolute_argv(&self.package_argv) {
             return Err(CapabilityContractError::InvalidBackend);
         }
         Ok(())
@@ -576,11 +577,6 @@ pub enum CapabilityBackendBinding {
         runtime: ExactVersionRef,
         package: ExactVersionRef,
         profile: crate::ExactSandboxProfileBinding,
-        isolation: SandboxIsolationClass,
-        network_policy: ExactVersionRef,
-        resource_policy: ExactVersionRef,
-        artifact_io_policy: ExactVersionRef,
-        secret_policy: Option<ExactVersionRef>,
     },
 }
 
@@ -671,11 +667,6 @@ impl CapabilityBackendBinding {
                 runtime,
                 package,
                 profile,
-                network_policy,
-                resource_policy,
-                artifact_io_policy,
-                secret_policy,
-                ..
             } => {
                 for (reference, kind) in [
                     (runtime, ResourceKind::SandboxRuntimeRevision),
@@ -691,9 +682,7 @@ impl CapabilityBackendBinding {
                 profile
                     .validate()
                     .map_err(|_| CapabilityContractError::InvalidBinding)?;
-                let mut policies = vec![network_policy, resource_policy, artifact_io_policy];
-                policies.extend(secret_policy.iter());
-                validate_distinct_policy_refs(&policies)
+                Ok(())
             }
         }
     }
@@ -748,23 +737,7 @@ impl CapabilityBackendBinding {
                 runtime,
                 package,
                 profile,
-                network_policy,
-                resource_policy,
-                artifact_io_policy,
-                secret_policy,
-                ..
-            } => {
-                let mut values = vec![
-                    runtime,
-                    package,
-                    &profile.revision,
-                    network_policy,
-                    resource_policy,
-                    artifact_io_policy,
-                ];
-                values.extend(secret_policy.iter());
-                values
-            }
+            } => vec![runtime, package, &profile.revision],
         }
     }
 
@@ -938,19 +911,6 @@ fn valid_grpc_metadata_key(value: &str) -> bool {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
         })
         && !value.ends_with("-bin")
-}
-
-fn valid_relative_entrypoint(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_CAPABILITY_ENTRYPOINT_BYTES
-        && !value.starts_with('/')
-        && !value.starts_with("./")
-        && !value.ends_with('/')
-        && !value.contains('\\')
-        && !value.chars().any(char::is_control)
-        && value
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1283,9 +1243,10 @@ mod tests {
     fn sandbox_and_mcp_feature_claims_are_checked_by_their_exact_contract() {
         let sandbox = CapabilityBackendContract::Sandbox(SandboxCapabilityContract {
             package_contract_digest: digest('1'),
-            entrypoint_kind: SandboxEntrypointKind::WasmExport,
-            entrypoint: "bin/render.wasm".to_owned(),
+            image_uri: format!("registry.invalid/render@sha256:{}", "a".repeat(64)),
+            package_argv: vec!["/opt/insight/render".to_owned()],
             dependency_lock_digest: digest('2'),
+            runtime_contract_digest: digest('3'),
             input_mapping_digest: digest('3'),
             output_mapping_digest: digest('4'),
         });

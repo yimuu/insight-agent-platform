@@ -42,9 +42,7 @@ use insight_platform_invocations::{
     CAPABILITY_QUOTA_LINES,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
-use insight_platform_sandbox::{
-    SandboxCommandLimits, SandboxExecutionJobPayload, SandboxExecutionSource, SandboxJobPayload,
-};
+use insight_platform_sandbox::opensandbox::SandboxDispatcherJobPayloadV1;
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
     TaskState,
@@ -470,7 +468,6 @@ enum CapabilityOwnerJobLock {
 fn classify_capability_owner_job(
     invocation: &insight_platform_invocations::CapabilityInvocationRecord,
     job: &JobRecord,
-    sandbox_limits: SandboxCommandLimits,
 ) -> Result<CapabilityOwnerJobKind, RepositoryError> {
     let invocation_id = invocation.invocation_id.to_string();
     if job.tenant_id != invocation.tenant_id.to_string()
@@ -503,74 +500,25 @@ fn classify_capability_owner_job(
         }
         WorkClass::Sandbox => {
             let projection = job_projection(job)?;
-            let payload: SandboxExecutionJobPayload =
-                decode_versioned_payload::<SandboxJobPayload>(&job.payload, "Sandbox Job")?
-                    .into_capability_execution()
-                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            let payload: SandboxDispatcherJobPayloadV1 =
+                decode_versioned_payload(&job.payload, "OpenSandbox Job")?;
             payload
-                .validate_for(&projection, sandbox_limits)
+                .validate_for(&projection)
                 .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
             if job.owner_kind != ResourceKind::Job.descriptor().name
-                || job.owner_id != payload.request.sandbox_job_id.to_string()
-                || payload.request.invocation_id != invocation.invocation_id
-                || payload.request.job_id != projection.job_id
-                || payload.request.capability_deployment != invocation.payload.admission.deployment
-                || payload.request.execution_source.capability_binding().kind()
-                    != invocation.payload.admission.backend_kind
+                || job.owner_id != payload.plan.job_id.to_string()
+                || payload.plan.invocation_id != invocation.invocation_id
+                || payload.plan.job_id != projection.job_id
+                || invocation.payload.admission.backend_kind != CapabilityBackendKind::Sandbox
+                || invocation.payload.admission.mcp_runtime.is_some()
             {
                 return Err(RepositoryError::CorruptRow(
                     "detached Sandbox Job owner binding is invalid".to_owned(),
                 ));
             }
-            let source_kind = match &payload.request.execution_source {
-                SandboxExecutionSource::SandboxCapability { .. } => {
-                    if invocation.payload.admission.backend_kind != CapabilityBackendKind::Sandbox
-                        || invocation.payload.admission.mcp_runtime.is_some()
-                    {
-                        return Err(RepositoryError::CorruptRow(
-                            "Sandbox Capability Job has the wrong logical backend".to_owned(),
-                        ));
-                    }
-                    DetachedSandboxSourceKind::SandboxCapability
-                }
-                #[cfg(any())]
-                SandboxExecutionSource::ManagedMcp {
-                    mcp_contract,
-                    operation,
-                    ..
-                } => {
-                    let runtime = invocation
-                        .payload
-                        .admission
-                        .mcp_runtime
-                        .as_ref()
-                        .ok_or_else(|| {
-                            RepositoryError::CorruptRow(
-                                "Managed MCP Sandbox Job lost its logical runtime binding"
-                                    .to_owned(),
-                            )
-                        })?;
-                    if invocation.payload.admission.backend_kind != CapabilityBackendKind::Mcp
-                        || runtime.mcp_operation_id != operation.mcp_operation_id
-                        || runtime.mcp_deployment != mcp_contract.deployment
-                        || runtime.discovery_snapshot_id != mcp_contract.discovery.snapshot_id
-                        || runtime.discovery_snapshot_digest
-                            != mcp_contract.discovery.canonical_digest
-                        || runtime.authorization_binding_id
-                            != mcp_contract.authorization.authorization_binding_id
-                        || runtime.authorization_generation != mcp_contract.authorization.generation
-                        || runtime.authorization_context_digest
-                            != mcp_contract.authorization.canonical_digest
-                        || runtime.principal_id != mcp_contract.authorization.principal_id
-                    {
-                        return Err(RepositoryError::CorruptRow(
-                            "Managed MCP Sandbox Job runtime binding is invalid".to_owned(),
-                        ));
-                    }
-                    DetachedSandboxSourceKind::ManagedMcp
-                }
-            };
-            Ok(CapabilityOwnerJobKind::DetachedSandbox(source_kind))
+            Ok(CapabilityOwnerJobKind::DetachedSandbox(
+                DetachedSandboxSourceKind::SandboxCapability,
+            ))
         }
         _ => Err(RepositoryError::CorruptRow(
             "Invocation current Job is not a Capability execution owner".to_owned(),
@@ -583,7 +531,6 @@ async fn load_capability_owner_job(
     invocation: &insight_platform_invocations::CapabilityInvocationRecord,
     job_id: &ResourceId,
     lock: CapabilityOwnerJobLock,
-    sandbox_limits: SandboxCommandLimits,
 ) -> Result<(JobRecord, CapabilityOwnerJobKind), RepositoryError> {
     let query = match lock {
         CapabilityOwnerJobLock::None => {
@@ -603,7 +550,7 @@ async fn load_capability_owner_job(
         .await?
         .ok_or(RepositoryError::NotFound("Capability owner Job"))?;
     let job = job_from_row(row)?;
-    let kind = classify_capability_owner_job(invocation, &job, sandbox_limits)?;
+    let kind = classify_capability_owner_job(invocation, &job)?;
     Ok((job, kind))
 }
 
@@ -1501,7 +1448,6 @@ impl PgInvocationTransaction {
                 &invocation,
                 &command.job_id,
                 CapabilityOwnerJobLock::None,
-                self.sandbox_limits,
             )
             .await?
             .0;
@@ -1535,7 +1481,6 @@ impl PgInvocationTransaction {
             &current_invocation,
             &command.job_id,
             CapabilityOwnerJobLock::Update,
-            self.sandbox_limits,
         )
         .await?;
         if u64::try_from(current_job.version).ok() != Some(command.expected_job_version) {
@@ -1875,7 +1820,6 @@ impl PgInvocationTransaction {
                         &invocation,
                         job_id,
                         CapabilityOwnerJobLock::None,
-                        self.sandbox_limits,
                     )
                     .await?
                     .0,
@@ -1903,7 +1847,6 @@ impl PgInvocationTransaction {
                         &observed_invocation,
                         job_id,
                         CapabilityOwnerJobLock::None,
-                        self.sandbox_limits,
                     )
                     .await?;
                     (Some(job), Some(kind))
@@ -1945,7 +1888,6 @@ impl PgInvocationTransaction {
                 &current_invocation,
                 job_id,
                 CapabilityOwnerJobLock::Share,
-                self.sandbox_limits,
             )
             .await?;
             if current_kind != CapabilityOwnerJobKind::DetachedSandbox(source_kind)
@@ -2014,7 +1956,6 @@ impl PgInvocationTransaction {
                     &current_invocation,
                     job_id,
                     CapabilityOwnerJobLock::Update,
-                    self.sandbox_limits,
                 )
                 .await?;
                 if kind != CapabilityOwnerJobKind::Capability {

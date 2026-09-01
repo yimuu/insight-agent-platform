@@ -12,7 +12,6 @@ use crate::{
 use insight_platform_artifact_rpc::ArtifactSchedulerGrpcClient;
 use insight_platform_orchestrator::ExpressionLimits;
 use insight_platform_postgres::repository::PgRepository;
-pub use insight_platform_sandbox::SandboxResourceEnvelope;
 use insight_platform_worker::LocalWorkerPools;
 use std::{error::Error, fmt, sync::Arc, time::Duration};
 
@@ -25,15 +24,6 @@ pub struct ProductionOrchestrationConfig {
     pub executor: OrchestrationExecutorConfig,
     pub coordinator: OrchestrationCoordinatorConfig,
     pub safety: OrchestrationSafetyConfig,
-    pub sandbox: Option<ProductionSandboxCapabilityConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProductionSandboxCapabilityConfig {
-    pub executor_worker_manifest_digest: insight_platform_contracts::Sha256Digest,
-    pub isolation_backend_contract_digest: insight_platform_contracts::Sha256Digest,
-    pub callback_audience_identity_digest: insight_platform_contracts::Sha256Digest,
-    pub resources: SandboxResourceEnvelope,
 }
 
 impl ProductionOrchestrationConfig {
@@ -105,15 +95,6 @@ pub fn start_production_orchestration(
     );
     let capability_admission = Arc::new(PostgresControllerCapabilityAdmissionProvider::new(
         critical_control_repository.clone(),
-        config
-            .sandbox
-            .clone()
-            .map(|sandbox| crate::ControllerSandboxCapabilityAdmission {
-                executor_worker_manifest_digest: sandbox.executor_worker_manifest_digest,
-                isolation_backend_contract_digest: sandbox.isolation_backend_contract_digest,
-                callback_audience_identity_digest: sandbox.callback_audience_identity_digest,
-                resources: sandbox.resources,
-            }),
     ));
     let model_admission = Arc::new(PostgresControllerModelAdmissionProvider::new(
         critical_control_repository.clone(),

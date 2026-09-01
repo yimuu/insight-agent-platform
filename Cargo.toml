@@ -43,15 +43,8 @@ members = [
     "crates/platform-runtime",
     "crates/platform-rpc-trace",
     "crates/platform-sandbox",
-    "crates/platform-sandbox-controller",
     "crates/platform-sandbox-runner",
     "crates/platform-opensandbox-client",
-    "crates/platform-sandbox-attestor",
-    "crates/platform-sandbox-executor",
-    "crates/platform-sandbox-guest",
-    "crates/platform-sandbox-rpc",
-    "crates/platform-sandbox-gvisor",
-    "crates/platform-sandbox-wasi",
     "crates/platform-scheduler",
     "crates/platform-secret-broker",
     "crates/platform-security",
@@ -60,9 +53,6 @@ members = [
     "crates/platform-tasks",
     "crates/platform-worker",
     "crates/insight-cli",
-]
-exclude = [
-    "crates/platform-sandbox-microvm",
 ]
 default-members = ["crates/insight-cli"]
 resolver = "2"
@@ -129,8 +119,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 x509-parser = { version = "0.18.1", default-features = false }
 url = "2"
-wasmtime = { version = "=46.0.2", default-features = false, features = ["cranelift", "runtime", "std"] }
-wat = "=1.244.0"
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
 
@@ -172,14 +160,8 @@ insight-platform-registry-validation-worker = { path = "crates/platform-registry
 insight-platform-rpc-trace = { path = "crates/platform-rpc-trace" }
 insight-platform-runtime = { path = "crates/platform-runtime" }
 insight-platform-sandbox = { path = "crates/platform-sandbox" }
-insight-platform-sandbox-controller = { path = "crates/platform-sandbox-controller" }
 insight-platform-sandbox-runner = { path = "crates/platform-sandbox-runner" }
 insight-platform-opensandbox-client = { path = "crates/platform-opensandbox-client" }
-insight-platform-sandbox-attestor = { path = "crates/platform-sandbox-attestor" }
-insight-platform-sandbox-executor = { path = "crates/platform-sandbox-executor" }
-insight-platform-sandbox-rpc = { path = "crates/platform-sandbox-rpc" }
-insight-platform-sandbox-gvisor = { path = "crates/platform-sandbox-gvisor" }
-insight-platform-sandbox-wasi = { path = "crates/platform-sandbox-wasi" }
 insight-platform-scheduler = { path = "crates/platform-scheduler" }
 insight-platform-secret-broker = { path = "crates/platform-secret-broker" }
 insight-platform-security = { path = "crates/platform-security" }
@@ -254,8 +236,6 @@ insight-platform-contracts.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-postgres.workspace = true
 insight-platform-sandbox.workspace = true
-insight-platform-sandbox-wasi.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 tower.workspace = true
-wat.workspace = true
