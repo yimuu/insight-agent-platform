@@ -141,6 +141,26 @@ impl OpenSandboxHttpClient {
         Ok(Self { client, config })
     }
 
+    /// Authenticated, bounded lifecycle readiness probe.
+    ///
+    /// OpenSandbox `/health` only proves that the server process is alive. This probe exercises
+    /// the configured lifecycle credential and Kubernetes-backed list path without creating a
+    /// sandbox or mutating Platform business state.
+    pub async fn readiness_probe(&self) -> Result<(), SandboxProviderError> {
+        let page = self
+            .list_operator_candidates(CandidateCursorV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                opaque: None,
+            })
+            .await?;
+        if page.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+            || page.items.len() > usize::from(self.config.orphan_page_items)
+        {
+            return Err(SandboxProviderError::InvalidResponse);
+        }
+        Ok(())
+    }
+
     fn lifecycle_url(&self, suffix: &str) -> Result<Url, SandboxProviderError> {
         self.config
             .lifecycle_base_url

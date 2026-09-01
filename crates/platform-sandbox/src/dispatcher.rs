@@ -49,9 +49,9 @@ impl<E: fmt::Display> fmt::Display for SandboxDispatchError<E> {
 
 impl<E> Error for SandboxDispatchError<E> where E: Error + 'static {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SandboxCleanupProgressV1 {
-    CandidateAbsent,
+    CandidateAbsent(Box<ClaimedSandboxCleanupV1>),
     Complete,
 }
 
@@ -77,6 +77,23 @@ where
             repository,
             provider,
         }
+    }
+
+    pub async fn heartbeat(
+        &self,
+        leased: &mut LeasedSandboxJobV1,
+        lease_milliseconds: u64,
+    ) -> Result<(), SandboxDispatchError<R::Error>> {
+        leased.validate().map_err(SandboxDispatchError::Contract)?;
+        let decision = self
+            .repository
+            .heartbeat(crate::opensandbox::HeartbeatSandboxJobV1 {
+                identity: leased_identity(leased),
+                lease_milliseconds,
+            })
+            .await
+            .map_err(SandboxDispatchError::Repository)?;
+        apply_decision(leased, decision).map_err(SandboxDispatchError::Contract)
     }
 
     pub async fn drive_job(
@@ -376,7 +393,7 @@ where
             .await
             .map_err(SandboxDispatchError::Repository)?;
         Ok(if next.payload.cleanup.required {
-            SandboxCleanupProgressV1::CandidateAbsent
+            SandboxCleanupProgressV1::CandidateAbsent(Box::new(next))
         } else {
             SandboxCleanupProgressV1::Complete
         })

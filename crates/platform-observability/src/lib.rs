@@ -24,7 +24,7 @@ const OUTCOMES: [&str; 3] = ["success", "rejected", "failure"];
 const BUCKETS_MILLISECONDS: [u64; 10] = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000];
 const MAX_OPERATIONS: usize = 64;
 const MAX_CAPACITY_RESOURCES: usize = 32;
-const MAX_DEPENDENCIES: usize = 6;
+const MAX_DEPENDENCIES: usize = 7;
 pub const PROCESS_OBSERVABILITY_OPERATIONS: &[&str] = &["live", "ready", "metrics", "other"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,16 +35,18 @@ pub enum PlatformDependency {
     Kms,
     Secret,
     Egress,
+    OpenSandbox,
 }
 
 impl PlatformDependency {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Postgresql,
         Self::Nats,
         Self::S3,
         Self::Kms,
         Self::Secret,
         Self::Egress,
+        Self::OpenSandbox,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -55,6 +57,7 @@ impl PlatformDependency {
             Self::Kms => "kms",
             Self::Secret => "secret",
             Self::Egress => "egress",
+            Self::OpenSandbox => "opensandbox",
         }
     }
 }
@@ -289,6 +292,10 @@ impl ProcessHttpMetrics {
 
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
+    }
+
+    pub fn mark_not_ready(&self) {
+        self.ready.store(false, Ordering::Release);
     }
 
     pub fn is_ready(&self) -> bool {
@@ -1238,7 +1245,7 @@ mod tests {
             OperationalCapacitySnapshot::new(5, 2).unwrap(),
         ));
         let metrics = ProcessHttpMetrics::install_with_capacities(
-            "sandbox-controller",
+            "sandbox-dispatcher",
             PROCESS_OBSERVABILITY_OPERATIONS,
             vec![OperationalCapacityMetric::new("artifact_response", source)],
         )
@@ -1271,7 +1278,8 @@ mod tests {
                 PlatformDependency::Kms,
                 PlatformDependency::Secret,
                 PlatformDependency::Egress,
-                PlatformDependency::Egress,
+                PlatformDependency::OpenSandbox,
+                PlatformDependency::Postgresql,
             ])
             .unwrap_err(),
             MetricsInstallError::TooManyDependencies

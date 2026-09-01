@@ -43,6 +43,7 @@ members = [
     "crates/platform-runtime",
     "crates/platform-rpc-trace",
     "crates/platform-sandbox",
+    "crates/platform-sandbox-dispatcher",
     "crates/platform-sandbox-runner",
     "crates/platform-opensandbox-client",
     "crates/platform-scheduler",
@@ -160,6 +161,7 @@ insight-platform-registry-validation-worker = { path = "crates/platform-registry
 insight-platform-rpc-trace = { path = "crates/platform-rpc-trace" }
 insight-platform-runtime = { path = "crates/platform-runtime" }
 insight-platform-sandbox = { path = "crates/platform-sandbox" }
+insight-platform-sandbox-dispatcher = { path = "crates/platform-sandbox-dispatcher" }
 insight-platform-sandbox-runner = { path = "crates/platform-sandbox-runner" }
 insight-platform-opensandbox-client = { path = "crates/platform-opensandbox-client" }
 insight-platform-scheduler = { path = "crates/platform-scheduler" }
