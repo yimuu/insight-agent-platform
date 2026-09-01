@@ -25,8 +25,9 @@ use insight_platform_invocations::{
 };
 use insight_platform_jobs::{
     decide_claim, decide_claim_continuation, decide_expired_continuation, decide_expired_lease,
-    decide_heartbeat, decide_observation_update, decide_reconciliation, decide_start,
-    decide_terminal, decide_terminal_physical_update, JobFence, JobProjection, LeasePolicy,
+    decide_heartbeat, decide_observation_update, decide_reconciliation, decide_resume,
+    decide_start, decide_terminal, decide_terminal_physical_update, JobFence, JobProjection,
+    LeasePolicy,
 };
 use insight_platform_sandbox::opensandbox::{
     AuthorizeSandboxActivationV1, ClaimedSandboxCleanupV1, CommitSandboxTerminalV1,
@@ -118,13 +119,15 @@ impl SandboxJobRepository for PgRepository {
             let claimable = prepare_claimable_job(&current, database_now)?;
             let continuing = current.payload.physical.is_some();
             let next = if continuing {
-                decide_claim_continuation(
+                let leased = decide_claim_continuation(
                     &claimable,
                     database_now,
                     request.worker_process_generation_id.clone(),
                     lease_token_digest.clone(),
                     lease_policy(request.lease_milliseconds),
-                )?
+                )?;
+                let fence = fence_for(&leased)?;
+                decide_resume(&leased, &fence, database_now)?
             } else {
                 decide_claim(
                     &claimable,

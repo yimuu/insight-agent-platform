@@ -377,6 +377,143 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
             .await
             .unwrap();
     assert_eq!(absence_replay.job.version, absent.job.version);
+
+    exercise_lease_rollover_and_stale_result(fixture.pool.clone()).await;
+}
+
+async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
+    let fixture = seed_fixture(pool).await;
+    let first_worker = id(ResourceKind::WorkerProcessGeneration);
+    let mut first_claim = claim(&first_worker, digest('6'));
+    first_claim.lease_milliseconds = 500;
+    let leased = SandboxJobRepository::claim(&fixture.repository, first_claim)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let started = SandboxJobRepository::record_provisioning_intent(
+        &fixture.repository,
+        RecordProvisioningIntentV1 {
+            identity: identity(&leased),
+            activation_token: OpaqueActivationToken::parse("2".repeat(64)).unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    let candidate = candidate(&leased.request, "rollover-candidate");
+    let observed = SandboxJobRepository::record_physical_observation(
+        &fixture.repository,
+        RecordSandboxObservationV1 {
+            identity: decision_identity(&started),
+            observation: SandboxDurableObservationV1::Candidate {
+                candidate: candidate.clone(),
+                limits: provisioning_limits(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let selected = SandboxJobRepository::select_candidate(
+        &fixture.repository,
+        SelectSandboxCandidateV1 {
+            identity: decision_identity(&observed),
+            candidate: candidate.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let boot_id = RunnerBootId::parse("rollover-boot").unwrap();
+    let authorized = SandboxJobRepository::authorize_activation(
+        &fixture.repository,
+        AuthorizeSandboxActivationV1 {
+            identity: decision_identity(&selected),
+            sandbox_id: candidate.sandbox_id,
+            boot_id: boot_id.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    let second_worker = id(ResourceKind::WorkerProcessGeneration);
+    let continued =
+        SandboxJobRepository::claim(&fixture.repository, claim(&second_worker, digest('7')))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+    assert_eq!(continued.job.attempt_count, 1);
+    assert_eq!(continued.job.lease_generation, 2);
+    assert_eq!(continued.request.physical_attempt, 1);
+    assert_eq!(continued.payload.physical, authorized.payload.physical);
+
+    let result = SandboxRunnerResultFrameV1 {
+        magic: String::new(),
+        schema_version: 1,
+        execution_request_digest: continued.request.request_digest.clone(),
+        boot_id,
+        result: SandboxRunnerOutcomeV1::Failed {
+            failure_class: SandboxFailureClassV1::PackageFailed,
+            diagnostic_digest: digest('8'),
+            diagnostic_bytes: 64,
+        },
+        frame_digest: digest('0'),
+    }
+    .seal()
+    .unwrap();
+    let stale_version = continued.job.version;
+    assert!(matches!(
+        SandboxJobRepository::record_physical_observation(
+            &fixture.repository,
+            RecordSandboxObservationV1 {
+                identity: decision_identity(&authorized),
+                observation: SandboxDurableObservationV1::Result {
+                    frame: result.clone(),
+                },
+            },
+        )
+        .await,
+        Err(RepositoryError::StaleFence)
+    ));
+    let after_stale = SandboxJobRepository::recover(
+        &fixture.repository,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_stale.job.version, stale_version);
+
+    let observed_result = SandboxJobRepository::record_physical_observation(
+        &fixture.repository,
+        RecordSandboxObservationV1 {
+            identity: identity(&continued),
+            observation: SandboxDurableObservationV1::Result {
+                frame: result.clone(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let terminal = SandboxJobRepository::commit_terminal(
+        &fixture.repository,
+        CommitSandboxTerminalV1 {
+            identity: decision_identity(&observed_result),
+            outcome: SandboxTerminalOutcomeV1::Failed {
+                failure_class: SandboxFailureClassV1::PackageFailed,
+                result: Some(Box::new(result)),
+                evidence_digest: digest('9'),
+            },
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(terminal.job.state, JobState::Failed);
+    assert_eq!(terminal.job.attempt_count, 1);
+    assert_eq!(terminal.job.lease_generation, 2);
 }
 
 async fn seed_fixture(pool: PgPool) -> Fixture {

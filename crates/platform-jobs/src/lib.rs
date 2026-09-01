@@ -1270,6 +1270,25 @@ mod tests {
         .unwrap();
         assert_eq!(reclaimed.attempt_count, running.attempt_count);
         assert_eq!(reclaimed.lease_generation, running.lease_generation + 1);
+        let resumed = decide_resume(
+            &reclaimed,
+            &JobFence {
+                expected_version: reclaimed.version,
+                worker_process_generation_id: reclaimed
+                    .lease
+                    .as_ref()
+                    .unwrap()
+                    .worker_process_generation_id
+                    .clone(),
+                lease_generation: reclaimed.lease_generation,
+                token_digest: reclaimed.lease.as_ref().unwrap().token_digest.clone(),
+            },
+            expired_at,
+        )
+        .unwrap();
+        assert_eq!(resumed.state, JobState::Running);
+        assert_eq!(resumed.attempt_count, running.attempt_count);
+        assert_eq!(resumed.lease_generation, running.lease_generation + 1);
 
         assert_eq!(
             decide_expired_continuation(
