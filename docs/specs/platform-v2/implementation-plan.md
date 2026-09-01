@@ -37,6 +37,12 @@
 > 2026-09-02 CR-216 revision 9：删除旧 managed-stdio physical session 的 `SandboxManagedMcpSession` JobKind/三元组及
 > dead repository/Host/Egress代码；MCP只保留remote Streamable HTTP，不增加替代JobKind、兼容映射或fallback。
 
+> 2026-09-02 CR-216 L1 evidence：实际运行OpenSandbox domain/client/runner/dispatcher四个target，共20/20测试通过，覆盖closed
+> Runtime/Profile/Request/Candidate/Activation/Result合同、canonical digest、bounded input/output、fixed-path atomic result、one-shot
+> activation/restart uncertainty、create authorization hard limits、非法配置及unknown field fail-closed；同步运行contracts 118/118、四个
+> target的all-target/all-feature strict Clippy、sandbox Helm/static deployment boundary与workspace locked all-target/all-feature check通过。
+> 该证据只关闭仓库L1；未使用真实PostgreSQL或OpenSandbox/Kubernetes，L2、L3与L4～L6仍Pending。
+
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
 > consumer tests；最后由Context golden scenario通过Operation result读取exact generation。禁止数据库查询或active-head scan补ID。
@@ -1269,7 +1275,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 ### 5.1 目标
 
 保留已交付的 Context、remote MCP、Artifact 三 role、Egress/Secret 与真实 Model adapter，并将 Sandbox physical execution
-clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 Sandbox replacement Pending**。
+clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 L1 passed；L2/L3 Pending**。
 
 ### 5.2 实现批次
 
