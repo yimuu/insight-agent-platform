@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-216 revision 2 |
+| 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
 
@@ -11,6 +11,9 @@
 > containerd/runc。restricted WASI、Wasmtime Executor、自建 gVisor Launcher/guest、process attestor、Docker provider、
 > host process 与相关 fallback 不进入目标 composition。shared Job、Invocation、Run、Artifact 与 terminal transaction
 > authority 不变。OpenSandbox 源码不需要修改。
+>
+> revision 2关闭实现前P1：Job JSON不复制input/result body；exact RunValue负责正文，terminal transaction原子写output；业务
+> Job lease清除后，Dispatcher只用同一Job physical evidence中的独立cleanup generation fence继续delete/absence，不新增表或aggregate。
 
 ## 1. 决策摘要
 
@@ -168,6 +171,11 @@ trait SandboxJobRepository {
         command: RecordSandboxObservation,
     ) -> SandboxJobFence;
     async fn commit_terminal(&self, command: CommitSandboxTerminal) -> CommitReceipt;
+    async fn claim_cleanup(&self, request: SandboxCleanupClaim) -> SandboxCleanupFence;
+    async fn record_cleanup_observation(
+        &self,
+        command: RecordSandboxCleanupObservation,
+    ) -> SandboxCleanupFence;
     async fn recover(&self, observation: SandboxRecoveryObservation) -> RecoveryDecision;
 }
 
@@ -215,6 +223,9 @@ struct SandboxExecutionRequestV1 {
     sandbox_profile_deployment_id: DeploymentId,
     runner_argv: BoundedArgv,
     package_argv: BoundedArgv,
+    input_value_id: RunValueId,
+    output_value_id: RunValueId,
+    classification: DataClassification,
     input: InlineCanonicalJson,
     input_schema_digest: Sha256Digest,
     output_schema_digest: Sha256Digest,
@@ -226,12 +237,18 @@ struct SandboxExecutionRequestV1 {
 }
 ```
 
-request 是 closed、canonical、有 size/depth/field-count limit 的 immutable snapshot。`request_digest` 是 semantic execution
+durable Job payload保存的是不含正文的closed `SandboxExecutionPlanV1`：它冻结上述RunValue identity、classification、input/output
+schema/content digest、Package/Runtime/Profile/image/argv/network/limits/deadline与semantic request digest。Dispatcher只在claim/recovery事务
+快照中加载exact immutable input RunValue、复核tenant/run/node/value identity与digest，然后补入current lease generation、worker generation、
+physical attempt和trace，重建本次`SandboxExecutionRequestV1`。OpenSandbox create env/metadata与Job evidence都不保存business input。
+
+request 是 closed、canonical、有 size/depth/field-count limit 的 immutable in-memory dispatch snapshot。`request_digest` 是 semantic execution
 closure 摘要，排除自身、`lease_generation`、`physical_attempt`、`worker_process_generation_id`、lease token/expiry/version 与
 trace correlation；heartbeat、lease 接管或 hop trace 改变不能改变它。
 
-input/output 是 bounded canonical JSON；byte ceiling 复用 18/Q1 `capability_sandbox.input_bytes/output_bytes`，runner frame 额外 header
-不得超过 `runner_header_bytes`。所有边界先检查 declared length，再做 bounded read 和一次 decode；unknown field、duplicate
+CR-216首条Inline input/output的有效hard ceiling分别为`min(frozen Profile ceiling, 1_048_576)` bytes；这与既有RunValue inline
+authority一致，Profile中更大的Sandbox transport额度不能绕过该ceiling。runner frame额外header不得超过`runner_header_bytes`。
+所有边界先检查declared length，再做bounded read和一次decode；unknown field、duplicate
 field、non-canonical number、非法 UTF-8、depth/field/byte 超限都 fail closed。Package argv 是 string array，不接受 shell string。
 首条实现超过 Inline output ceiling 返回 `sandbox_output_too_large`，不截断也不把 stdout 当结果；large Artifact port 保持 inactive。
 
@@ -256,7 +273,7 @@ struct SandboxCandidateMetadataV1 {
 }
 ```
 
-wire token 是 `sha256("insight.sandbox.provision/v1\0" || canonical_cbor(token))` 的 lowercase opaque digest。它不含 lease
+wire token 是 `sha256(canonical_jcs({"domain":"insight.sandbox.provision/v1","token":token}))` 的 lowercase opaque digest。它不含 lease
 generation、worker generation、trace 或 deadline。OpenSandbox metadata 只携带 token/correlation digest 与 operator-controlled
 closed labels，不含 tenant、Job、Invocation、input、Secret 或用户字符串。
 
@@ -354,6 +371,10 @@ contract 冻结。
 code context、file upload/download/list/delete/rename、runtime installer 或任意 OpenSandbox endpoint。result 必须完整校验 magic、version、
 request digest、terminal phase、output schema、output digest、declared/actual size 和 zero trailing bytes。
 
+result frame正文只在runner fixed result与Dispatcher bounded memory中存在。`commit_terminal`先按request/boot/schema/digest/size完整验证，
+再把成功output写入预分配的exact RunValue ID；shared Job payload只保存frame/output digest、declared bytes与safe terminal class，Event、
+Outbox、Receipt、log和metric都不复制正文。
+
 ## 10. Job/physical 状态机
 
 ```text
@@ -369,16 +390,34 @@ Job Ready
   -> Started -> Succeeded | Failed | UnknownOutcome
   -> validate fixed result evidence
   -> owner terminal transaction rechecks current Job fence
-  -> Job + Invocation + RunValue + quota + Event/Outbox terminal
-  -> delete all candidates -> absence proof
+  -> Job + Invocation + RunValue + quota + Event/Outbox terminal + cleanup intent
+  -> claim SandboxCleanupFence
+  -> delete all candidates -> fenced absence proof
 ```
 
 OpenSandbox status、BatchSandbox/Pod phase、runner phase、exit 与 diagnostics 都只是 physical evidence。terminal transaction 必须重新
 加载并 CAS 验证 tenant、Invocation owner、Job ID/state/version、lease generation/token、worker process generation、physical attempt、
 request digest、deadline/cancel intent 与 quota reservation。任一漂移零业务写入；late success 不能覆盖新 generation 或既有 terminal。
 
-terminal business commit 可以先于 physical absence，但必须同时形成 durable cleanup intent。cleanup 失败不撤销业务结果；由 bounded
-recovery 继续并告警。OpenSandbox 不得直接推进 Job、Invocation 或 Run。
+terminal business commit 可以先于 physical absence，但必须同时形成 durable cleanup intent。标准 Job lease 在 terminal 被清除；后续
+cleanup 使用只允许修改同一 Job physical evidence 的独立 generation fence：
+
+```rust
+struct SandboxCleanupFenceV1 {
+    schema_version: ConstU16<1>,
+    tenant_id: TenantId,
+    job_id: JobId,
+    expected_job_version: u64,
+    physical_attempt: u32,
+    cleanup_generation: u64,
+    process_generation_id: ProcessGenerationId,
+    expires_at: Timestamp,
+}
+```
+
+claim/reclaim以PostgreSQL数据库时间和`FOR UPDATE SKIP LOCKED`争用；每次delete/absence observation都用完整fence CAS并递增Job version。
+它不得改变terminal Job state/result/terminal_at、Invocation、RunValue、quota、Event、Outbox或Receipt。cleanup失败不撤销业务结果；由
+bounded recovery继续并告警。OpenSandbox不得直接推进Job、Invocation或Run。
 
 ## 11. 幂等、并发与背压
 
@@ -410,6 +449,8 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 - provider 不可达：保留 Job/reconcile 状态并做 bounded probe，不盲目重发 workload；
 - orphan sweeper 分页读取 operator label，回到 PostgreSQL 重验 tenant/job/token/selected/activation/terminal/cleanup 后才决定 delete；
 - controller TTL 是最后保护，只删除 physical object，不推进业务状态；Dispatcher 必须最终取得 absence proof 或持续告警。
+- terminal后cleanup worker不得伪造或复用已清除的Job lease；它只能claim current cleanup generation，过期generation的late absence写入
+  stable stale-fence，且任何cleanup CAS都不能改写terminal business columns。
 
 只有 create/boot/validation 明确发生在 `ActivationAuthorized` 之前，才属于自动 retry 安全区。Capability Effect 声明不改变这一规则。
 
@@ -449,15 +490,17 @@ socket、Kubernetes token 与 Platform credential。满足这些 minimum 不等�
 
 Platform 在 shared Job 的 bounded binding/evidence 中保存：
 
+- 不含正文的execution plan、exact input/output RunValue ID、schema/content digest与semantic request digest；
 - physical attempt 与 provisioning token digest；
 - selected OpenSandbox ID、candidate discovery count/quiescence decision；
 - runner boot ID、sensitive activation token/its digest 与 activation state；
-- execution request、input、result/output schema 与 content digest；
-- safe failure/unknown-outcome code、cleanup intent、delete observation 与 absence proof digest。
+- result frame/output digest、declared bytes、safe failure/unknown-outcome code；
+- cleanup required/generation/owner/expiry、delete observation 与 absence proof digest。
 
 activation token 只保存在 protected Job physical evidence，不进入任何 projection/observability；不保存 runner bearer、OpenSandbox
-lifecycle snapshot、Pod spec/status、log/stdout/stderr 正文、result body 或 container config。没有独立业务 lifecycle，因此不新增第二
-Job aggregate/table；需要的并发字段由 shared Job 同一 row/version CAS。
+lifecycle snapshot、Pod spec/status、input/result body、log/stdout/stderr 正文或 container config。input唯一正文来自exact immutable
+RunValue，成功output唯一正文由terminal transaction写入预分配RunValue；Job/Event/Outbox/Receipt都只保存digest/evidence。没有独立业务
+lifecycle，因此不新增第二Job aggregate/table；Job lease前的执行与terminal后的cleanup generation都由shared Job同一row/version CAS。
 
 Kubernetes API/BatchSandbox CR 是 restart-safe physical store。OpenSandbox Server 本地 memory/cache 不是恢复authority；developer
 Profile 固定 `informer_enabled=false`，candidate list 直接读取 Kubernetes API。Controller 重建 Pod 会改变 runner boot ID，并触发第 12

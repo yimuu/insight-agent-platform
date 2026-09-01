@@ -2,14 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-216 revision 2 |
+| 日期 | 2026-09-02 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
 
 > CR-216 revision 1 impact：Sandbox dispatch 固定为 `Dispatcher -> OpenSandbox Kubernetes -> BatchSandbox`，但 Invocation 与
 > shared Job authority 不变。平台幂等只覆盖 command Receipt、PostgreSQL candidate selection、fixed runner activation 与 Job terminal
 > commit；workload 第三方 API 调用不进入 Platform idempotency。一旦 Job 持久化 `PotentiallyStarted`，恢复不得创建 replacement。
+
+> CR-216 revision 2 closure：Sandbox Job payload只冻结 input/output RunValue identity、schema/content digest与execution closure，
+> 不复制正文。Dispatcher claim/recovery在事务快照内读取exact immutable input RunValue；terminal first-winner在同一事务写唯一 output
+> RunValue并推进 Job/Invocation/quota/Event/Outbox。首条 Inline input/output各自不超过 `1_048_576` bytes，Artifact port inactive。
 
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
@@ -118,7 +122,7 @@ Capability Worker claim必须证明自身closed Worker manifest digest等于Invo
 解析09 exact codec identity并重算descriptor digest。mapping digest本身不能实例化codec，错镜像/缺codec在任何Egress/MCP调用前失败。
 
 Sandbox调用直接以Invocation为typed owner创建`work_class=Sandbox`的Job。Dispatcher以
-`tenant_id + JobId + physical_attempt + provisioning lease_generation + execution_request_digest`构造14的provisioning identity并调用OpenSandbox；
+`tenant_id + JobId + physical_attempt + execution_request_digest`构造14的stable provisioning identity并调用OpenSandbox；
 OpenSandbox不直接写数据库，Dispatcher只在owner transaction重新验证current Job fence后提交physical outcome。
 
 ## 6. Outcome

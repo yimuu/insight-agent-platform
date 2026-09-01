@@ -2,14 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-216 revision 2 |
+| 日期 | 2026-09-02 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
 
 > CR-216 revision 1 impact：Sandbox create 与 Package activation 拆开。shared Job 保存 stable provisioning token、selected candidate、
 > runner boot/activation 与 cleanup evidence；create 只生成 bounded inert candidates，PostgreSQL current-fence CAS 选唯一 candidate，
 > fixed runner durable latch 最多启动一次 Package。OpenSandbox/Kubernetes state 不复制 Job state，terminal 仍以 current lease fence first-winner。
+
+> CR-216 revision 2 closure：Job JSON 不复制 input/result body；exact immutable input RunValue 在 claim/recovery 时重建 request，terminal
+> transaction 原子写 output RunValue。terminal 后业务 lease 已清除，Dispatcher 只能用 shared Job physical evidence 内独立、可过期、
+> generation-fenced 的 cleanup claim 写 delete/absence evidence；该 CAS 不得改变任何 terminal business fact。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
 > `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
@@ -240,6 +244,12 @@ OpenSandbox cleanup reconcile只能按已持久化 selected sandbox ID或opaque 
 `list(metadata)`只用于发现 inert candidate 和 orphan；唯一 selection 来自 PostgreSQL CAS。orphan sweeper删除physical sandbox前必须确认
 对应 Job 的 selected/activation/terminal/cleanup evidence，
 且它只改变provider physical state，不直接推进Run/Invocation。
+
+业务 terminal transaction 清除标准 Job lease，并在同一 Job payload 原子写入 `cleanup_required + cleanup_generation`。Dispatcher 或
+orphan sweeper必须先以 `FOR UPDATE SKIP LOCKED` 和数据库时间取得 `SandboxCleanupFenceV1(expected_job_version,
+cleanup_generation, process_generation, expires_at)`；每个 delete/absence observation 都重新验证该 fence 并递增 Job version。过期 fence
+只能由一个新 generation 接管；absence 完成后清除 cleanup owner/expiry。cleanup CAS 不可修改 Job state/result/terminal time、Invocation、
+RunValue、quota、Event、Outbox 或 Receipt，因而不是第二业务 authority。
 
 ## 11. Recovery scan
 

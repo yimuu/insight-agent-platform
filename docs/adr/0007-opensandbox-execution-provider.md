@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-216 revision 2 |
+| 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
 
@@ -67,6 +67,14 @@ fallback。OpenSandbox Server 和 Controller 都是 physical provider；它们�
    lease generation/token、worker process generation、physical attempt 与 request digest；
 5. 每个 selected sandbox 只服务一个 Job physical attempt。首版不跨 Job 复用 sandbox，不开放 interactive exec、PTY、code context、
    mutable filesystem API、snapshot、persistent session 或 public endpoint。
+6. shared Job JSON 只保存 bounded execution plan、RunValue identity/digest、physical evidence 与 terminal summary，不复制 input/result
+   body。Dispatcher 在 claim/recovery 时从 exact immutable input RunValue 重建 execution request；terminal first-winner 在同一事务验证
+   result frame并写 output RunValue、Job、Invocation、quota、Event 与 Outbox。
+7. CR-216 Inline input/output 的有效 hard ceiling 固定为既有 RunValue inline ceiling `1_048_576` bytes，并同时受冻结 Profile
+   ceiling约束；大于任一 ceiling 都 fail closed，Artifact port 保持 inactive。Job/Event/Outbox/Receipt 不保存 workload 正文。
+8. terminal commit 清除业务 Job lease并在同一 Job physical evidence 内产生 cleanup intent。之后的 delete/absence 写入使用独立
+   `SandboxCleanupFenceV1` 的 expected Job version、cleanup generation、process generation 与 database-time expiry CAS；它不允许改变
+   Job terminal outcome、Invocation、RunValue、quota、Event 或 Outbox，也不是第二业务 lease/aggregate/table。
 
 ## 两阶段 provisioning 与激活
 
@@ -143,7 +151,8 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
 - `/health` 只证明 Server 进程存活。Dispatcher readiness 必须做 authenticated create/list/delete capability probe 或等价的
   provider contract probe，并核验 CRD、controller、runner、network policy 与 exact digest closure；
 - physical persistence 位于 Kubernetes API/BatchSandbox CR，不引入 OpenSandbox SQLite 或 Platform 业务表作为 provider store；
-- TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof。
+- TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
+  后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
 
 ## 否决方案
 

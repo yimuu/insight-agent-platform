@@ -2,14 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 1 OpenSandbox replacement pending |
-| 日期 | 2026-09-01 |
+| 状态 | In Progress / CR-216 revision 2 OpenSandbox replacement pending |
+| 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
 > 2026-09-01 CR-216 revision 1：Sandbox physical implementation clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox
 > Controller + containerd/runc，不修改 OpenSandbox 源码。按 contract/types -> shared Job candidate/activation evidence -> Armed runner
 > -> provider adapter -> cleanup/recovery -> deployment/profile -> L1～L3 顺序实现；随后删除 WASI/gVisor/attestor runtime composition
 > 与资格入口。shared Job、Invocation 与 public `/v1` 不重建、不兼容双跑。L1～L3 未执行前，旧证据不能推进本批状态。
+
+> 2026-09-02 CR-216 revision 2：先把Job payload收敛为不含正文的execution plan/physical evidence，claim从exact immutable input
+> RunValue重建request，terminal transaction原子写预分配output RunValue与Job/Invocation/quota/Event/Outbox/cleanup intent；再实现terminal
+> 后独立cleanup generation fence与absence CAS。Inline effective ceiling为`min(Profile, 1_048_576)`，不新增表或第二业务lease。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
@@ -1276,11 +1280,13 @@ clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + contai
      schema 与 canonical digest；
    - 固定 OpenSandbox Server `v0.2.3`、Controller `v0.2.0`、execd `v1.0.22`、审核 chart commit、BatchSandbox CRD、
      Kubernetes provider template、runner、CNI 与 containerd/runc manifest digest；不 fork/patch OpenSandbox；
-   - 在 shared Job row/version 中实现 restart-safe provisioning intent、bounded candidate discovery、current-fence candidate CAS、
-     activation authorization/PotentiallyStarted、observation、cleanup 与 absence evidence；不新增第二业务 aggregate/table；
+   - 在 shared Job row/version 中实现不含正文的execution plan、restart-safe provisioning intent、bounded candidate discovery、
+     current-fence candidate CAS、activation authorization/PotentiallyStarted、observation、terminal cleanup intent与terminal后独立
+     cleanup generation/absence CAS；input/output正文只属于exact RunValue，不新增第二业务aggregate/table；
    - 实现 Sandbox Dispatcher：claim/heartbeat、create/list inert candidates、select、runner state/activate/result、完整校验、fenced
      terminal commit、cancel/timeout/delete/absence/orphan reconcile；selected/可能启动后禁止 replacement；
-   - 构建 immutable Armed runner：create 只验证 input 并等待；activation token 以 exclusive+fsync latch 后最多 spawn Package 一次；
+   - 构建 immutable Armed runner：create只验证不含正文的runner config并等待，activate才接收bounded input；activation token以
+     exclusive+fsync latch后最多spawn Package一次；
      container/boot rollover 不自动重跑；result temp+fsync+atomic rename；只暴露 fixed closed state/activate/read-result protocol；
    - 部署 internal ClusterIP Server、BatchSandbox Controller、两套 operator-owned `Direct | Disabled` CNI policy、provider readiness/
      observability/cleanup；无 public ingress、Docker/CRI socket、service-account token、Platform credential；
