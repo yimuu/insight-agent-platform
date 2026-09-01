@@ -1,0 +1,12 @@
+ARG RUST_IMAGE=rust:1.94-bullseye@sha256:f4f82b80e5f2945fed4ba17af177c6d6be85d98cde38ff318fc7666ce4505617
+ARG RUNNER_IMAGE=insight-agent-platform:cr216-l3-runner
+FROM ${RUST_IMAGE} AS package-builder
+COPY tests/fixtures/platform-sandbox-l3-package.rs /src/platform-sandbox-l3-package.rs
+RUN mkdir -p /out \
+    && rustc --edition=2021 -C opt-level=2 -C strip=symbols \
+       -o /out/platform-sandbox-l3-package /src/platform-sandbox-l3-package.rs
+
+FROM ${RUNNER_IMAGE}
+COPY --from=package-builder --chown=65532:65532 \
+  /out/platform-sandbox-l3-package /opt/insight/package
+USER 65532:65532

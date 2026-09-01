@@ -1,12 +1,14 @@
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, CapabilityArtifactContract, CapabilityBackendFeatures, CapabilityBackendKind,
-    CapabilityCancellationKind, CapabilityDataFlowPolicy, CapabilityIdempotencyKind,
-    CapabilityInterfaceLimits, CapabilityProgressContract, CapabilityProgressDurability,
-    CapabilityProgressMode, DataClassification, Effect, ExactDeploymentRef, ExactPolicyBinding,
-    ExactVersionRef, InvocationState, JobState, Permission, PermissionSet,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, QuotaDimension, ResourceId,
-    ResourceKind, Sha256Digest, TenantConfig, TraceIdentityV1,
+    canonical_digest, ArtifactRef, AuthoringPackage, CapabilityArtifactContract,
+    CapabilityBackendFeatures, CapabilityBackendKind, CapabilityCancellationKind,
+    CapabilityDataFlowPolicy, CapabilityIdempotencyKind, CapabilityInterfaceLimits,
+    CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
+    CapabilityProgressMode, ClosedJsonSchema, DataClassification, Effect, ExactDeploymentRef,
+    ExactPolicyBinding, ExactVersionRef, InvocationState, JobState, Permission, PermissionSet,
+    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
+    TenantConfig, TraceIdentityV1, ValidationSummary,
 };
 use insight_platform_invocations::{
     decide_defer_to_sandbox, CapabilityAdmissionSnapshot, CapabilityInvocationPayload,
@@ -42,6 +44,26 @@ struct Fixture {
     invocation: CapabilityInvocationRecord,
     request: SandboxExecutionRequestV1,
     usage_reservation_id: ResourceId,
+}
+
+struct FixtureOptions {
+    input: Value,
+    image_uri: String,
+    runtime_contract_digest: Sha256Digest,
+    package_argv: Vec<String>,
+    network_mode: SandboxNetworkMode,
+}
+
+impl Default for FixtureOptions {
+    fn default() -> Self {
+        Self {
+            input: json!({"question":"answer"}),
+            image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
+            runtime_contract_digest: digest('5'),
+            package_argv: vec!["/opt/insight/package".to_owned()],
+            network_mode: SandboxNetworkMode::Direct,
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -737,7 +759,266 @@ async fn exercise_cancel_timeout_and_quota(pool: PgPool) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opensandbox_kubernetes_l3_dispatcher_kill_reclaims_same_started_runner() {
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_DISPATCHER").as_deref() != Ok("1") {
+        eprintln!(
+            "PLATFORM_OPENSANDBOX_L3_DISPATCHER is unset; real Dispatcher kill/reclaim L3 skipped"
+        );
+        return;
+    }
+    let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+    let image_uri = std::env::var("PLATFORM_OPENSANDBOX_L3_IMAGE").unwrap();
+    let runtime_contract_digest = std::env::var("PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    let expected_output = json!({"l3":"dispatcher-kill-reclaim"});
+    let fixture = seed_fixture_with(
+        pool,
+        FixtureOptions {
+            input: expected_output.clone(),
+            image_uri,
+            runtime_contract_digest,
+            package_argv: vec![
+                "/opt/insight/package".to_owned(),
+                "sleep-echo".to_owned(),
+                "15000".to_owned(),
+            ],
+            network_mode: SandboxNetworkMode::Disabled,
+        },
+    )
+    .await;
+
+    let before = wait_for_job(
+        &fixture.pool,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+        |snapshot| snapshot.physical_phase() == Some("started"),
+        std::time::Duration::from_secs(45),
+    )
+    .await;
+    assert_eq!(before.state, "running");
+    assert_eq!(before.attempt_no, 1);
+    assert_eq!(before.create_authorization_count(), Some(1));
+    assert_eq!(before.candidate_ids().map(Vec::len), Some(1));
+    let old_dispatcher = ready_dispatcher_pod().await;
+    kubectl(&[
+        "delete",
+        "pod",
+        "-n",
+        "platform-sandbox",
+        &old_dispatcher,
+        "--wait=false",
+    ])
+    .await;
+    let replacement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(replacement) = optional_ready_dispatcher_pod().await {
+            if replacement != old_dispatcher {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < replacement_deadline,
+            "replacement Dispatcher did not become ready"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    let terminal = wait_for_job(
+        &fixture.pool,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+        |snapshot| snapshot.state == "succeeded",
+        std::time::Duration::from_secs(100),
+    )
+    .await;
+    assert_eq!(terminal.attempt_no, 1);
+    assert!(terminal.lease_epoch > before.lease_epoch);
+    assert_eq!(terminal.create_authorization_count(), Some(1));
+    assert_eq!(terminal.candidate_ids(), before.candidate_ids());
+    assert_eq!(terminal.selected_sandbox_id(), before.selected_sandbox_id());
+    assert_eq!(terminal.runner_boot_id(), before.runner_boot_id());
+    assert!(
+        terminal.activation_token() == before.activation_token(),
+        "activation token changed across Dispatcher reclaim"
+    );
+
+    let output: Value = sqlx::query_scalar(
+        "SELECT inline_value FROM insight_platform.run_values WHERE tenant_id = $1 AND value_id = $2",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .bind(fixture.request.output_value_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(output, expected_output);
+
+    let absent = wait_for_job(
+        &fixture.pool,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+        |snapshot| snapshot.physical_phase() == Some("absent"),
+        std::time::Duration::from_secs(45),
+    )
+    .await;
+    assert_eq!(absent.state, "succeeded");
+    assert_eq!(absent.attempt_no, 1);
+    let selector = format!("platform.insight.dev/job={}", fixture.request.job_id);
+    let remaining = kubectl_json(&[
+        "get",
+        "batchsandboxes",
+        "-n",
+        "platform-sandbox-workloads",
+        "-l",
+        &selector,
+        "-o",
+        "json",
+    ])
+    .await;
+    assert_eq!(
+        remaining
+            .get("items")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+}
+
+#[derive(Debug)]
+struct LiveSandboxJob {
+    state: String,
+    attempt_no: i32,
+    lease_epoch: i64,
+    payload: Value,
+}
+
+impl LiveSandboxJob {
+    fn physical(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.payload.get("physical")?.as_object()
+    }
+
+    fn physical_phase(&self) -> Option<&str> {
+        self.physical()?.get("phase")?.as_str()
+    }
+
+    fn create_authorization_count(&self) -> Option<u64> {
+        self.physical()?.get("create_authorization_count")?.as_u64()
+    }
+
+    fn candidate_ids(&self) -> Option<&Vec<Value>> {
+        self.physical()?.get("candidate_ids")?.as_array()
+    }
+
+    fn selected_sandbox_id(&self) -> Option<&str> {
+        self.physical()?.get("selected_sandbox_id")?.as_str()
+    }
+
+    fn runner_boot_id(&self) -> Option<&str> {
+        self.physical()?.get("runner_boot_id")?.as_str()
+    }
+
+    fn activation_token(&self) -> Option<&str> {
+        self.physical()?.get("activation_token")?.as_str()
+    }
+}
+
+async fn wait_for_job(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    predicate: impl Fn(&LiveSandboxJob) -> bool,
+    timeout: std::time::Duration,
+) -> LiveSandboxJob {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let row = sqlx::query(
+            "SELECT state, attempt_no, lease_epoch, payload FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let snapshot = LiveSandboxJob {
+            state: row.get("state"),
+            attempt_no: row.get("attempt_no"),
+            lease_epoch: row.get("lease_epoch"),
+            payload: row.get("payload"),
+        };
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "shared Sandbox Job did not reach the expected state"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn ready_dispatcher_pod() -> String {
+    optional_ready_dispatcher_pod()
+        .await
+        .expect("a ready Dispatcher pod")
+}
+
+async fn optional_ready_dispatcher_pod() -> Option<String> {
+    let value = kubectl_json(&[
+        "get",
+        "pods",
+        "-n",
+        "platform-sandbox",
+        "-l",
+        "app.kubernetes.io/component=dispatcher",
+        "-o",
+        "json",
+    ])
+    .await;
+    value
+        .get("items")?
+        .as_array()?
+        .iter()
+        .find(|pod| {
+            pod.pointer("/status/containerStatuses/0/ready")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .and_then(|pod| pod.pointer("/metadata/name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+async fn kubectl_json(arguments: &[&str]) -> Value {
+    serde_json::from_slice(&kubectl(arguments).await).unwrap()
+}
+
+async fn kubectl(arguments: &[&str]) -> Vec<u8> {
+    let output = tokio::process::Command::new("kubectl")
+        .args(arguments)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "kubectl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
 async fn seed_fixture(pool: PgPool) -> Fixture {
+    seed_fixture_with(pool, FixtureOptions::default()).await
+}
+
+async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
     let repository = PgRepository::new(pool.clone());
     let tenant_id = id(ResourceKind::Tenant);
     let principal_id = id(ResourceKind::Principal);
@@ -774,7 +1055,18 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
         .unwrap();
     let deadline = now + Duration::minutes(5);
     let deployment_id = id(ResourceKind::CapabilityDeployment);
-    seed_deployment(&pool, &tenant_id, &principal_id, &deployment_id).await;
+    let interface_exact =
+        ExactVersionRef::new(id(ResourceKind::CapabilityInterfaceRevision), digest('e')).unwrap();
+    let interface_spec = fixture_interface_spec();
+    seed_deployment(
+        &pool,
+        &tenant_id,
+        &principal_id,
+        &deployment_id,
+        &interface_exact,
+        &interface_spec,
+    )
+    .await;
     let run_id = id(ResourceKind::Run);
     let scope_id = id(ResourceKind::ScopeInstance);
     let node_id = id(ResourceKind::NodeExecution);
@@ -841,10 +1133,10 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
     .await
     .unwrap();
 
-    let input_value = json!({"question":"answer"});
+    let input_value = options.input;
     let input_digest = value_digest(&input_value);
-    let input_schema_digest = digest('3');
-    let output_schema_digest = digest('4');
+    let input_schema_digest = interface_spec.input_schema.canonical_digest.clone();
+    let output_schema_digest = interface_spec.output_schema.canonical_digest.clone();
     let input_value_id = id(ResourceKind::RunValue);
     sqlx::query(
         r#"
@@ -875,6 +1167,8 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
         input_schema_digest.clone(),
         input_digest.clone(),
         output_schema_digest.clone(),
+        interface_exact,
+        &interface_spec,
         trace,
         deadline,
         job_id.clone(),
@@ -923,13 +1217,13 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
         physical_attempt: 1,
         worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
         package_version_id: id(ResourceKind::SandboxPackageRevision),
-        image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
+        image_uri: options.image_uri,
         runtime_version_id: id(ResourceKind::SandboxRuntimeRevision),
-        runtime_contract_digest: digest('5'),
+        runtime_contract_digest: options.runtime_contract_digest,
         sandbox_profile_deployment_id: id(ResourceKind::SandboxProfileDeployment),
         profile_deployment_digest: digest('6'),
         runner_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
-        package_argv: vec!["/opt/insight/package".to_owned()],
+        package_argv: options.package_argv,
         input_value_id,
         output_value_id: id(ResourceKind::RunValue),
         classification: DataClassification::Internal,
@@ -937,7 +1231,7 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
         input_schema_digest,
         input_digest: digest('0'),
         output_schema_digest,
-        network_mode: SandboxNetworkMode::Direct,
+        network_mode: options.network_mode,
         limits: resource_limits(),
         provisioning_limits: provisioning_limits(),
         deadline_at: deadline,
@@ -1022,6 +1316,8 @@ fn deferred_invocation(
     input_schema_digest: Sha256Digest,
     input_digest: Sha256Digest,
     output_schema_digest: Sha256Digest,
+    interface_exact: ExactVersionRef,
+    interface_spec: &CapabilityInterfaceResourceSpec,
     trace: TraceIdentityV1,
     deadline: DateTime<Utc>,
     job_id: ResourceId,
@@ -1079,9 +1375,8 @@ fn deferred_invocation(
         )
         .unwrap(),
         deployment: deployment.clone(),
-        interface: ExactVersionRef::new(id(ResourceKind::CapabilityInterfaceRevision), digest('e'))
-            .unwrap(),
-        capability_name: "fixture.sandbox".parse().unwrap(),
+        interface: interface_exact,
+        capability_name: interface_spec.qualified_name.clone(),
         implementation: ExactVersionRef::new(
             id(ResourceKind::CapabilityImplementationRevision),
             digest('f'),
@@ -1092,17 +1387,10 @@ fn deferred_invocation(
         mcp_runtime: None,
         input: input.clone(),
         input_artifact_link_id: None,
-        effect: Effect::Pure,
-        idempotency: CapabilityIdempotencyKind::Intrinsic,
-        cancellation: CapabilityCancellationKind::BestEffort,
-        progress: CapabilityProgressContract {
-            mode: CapabilityProgressMode::Events,
-            schema_digest: Some(digest('2')),
-            max_events: 8,
-            max_bytes_per_event: 4_096,
-            minimum_interval_milliseconds: 1,
-            durability: CapabilityProgressDurability::CoarseDurable,
-        },
+        effect: interface_spec.effect,
+        idempotency: interface_spec.idempotency,
+        cancellation: interface_spec.cancellation,
+        progress: interface_spec.progress.clone(),
         implementation_features: CapabilityBackendFeatures {
             deferred: true,
             input_required: false,
@@ -1115,20 +1403,10 @@ fn deferred_invocation(
         },
         input_schema_digest,
         output_schema_digest,
-        error_schema_digest: digest('3'),
-        artifact_contract: CapabilityArtifactContract { ports: vec![] },
-        data_flow_policy: CapabilityDataFlowPolicy {
-            maximum_input_classification: DataClassification::Restricted,
-            maximum_output_classification: DataClassification::Restricted,
-            allowed_regions: vec!["global".parse().unwrap()],
-            declassification_policy: None,
-        },
-        interface_limits: CapabilityInterfaceLimits {
-            maximum_input_bytes: 1_048_576,
-            maximum_output_bytes: 1_048_576,
-            maximum_artifacts: 0,
-            maximum_execution_milliseconds: 60_000,
-        },
+        error_schema_digest: interface_spec.error_schema.canonical_digest.clone(),
+        artifact_contract: interface_spec.artifacts.clone(),
+        data_flow_policy: interface_spec.data_policy.clone(),
+        interface_limits: interface_spec.execution_limits,
         policies,
         principal,
         effect_key_digest: digest('4'),
@@ -1185,14 +1463,105 @@ fn deferred_invocation(
     .unwrap()
 }
 
+fn fixture_interface_spec() -> CapabilityInterfaceResourceSpec {
+    let value_schema = ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "l3": {
+                "description": "Bounded L3 fixture marker.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "x-platform-max-bytes": 512
+            },
+            "question": {
+                "description": "Bounded L2 fixture input.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "x-platform-max-bytes": 512
+            }
+        },
+        "required": [],
+        "additionalProperties": false
+    }))
+    .unwrap();
+    let error_schema = ClosedJsonSchema::build(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "error": {
+                "description": "Bounded fixture error.",
+                "x-platform-classification": "internal",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "x-platform-max-bytes": 512
+            }
+        },
+        "required": ["error"],
+        "additionalProperties": false
+    }))
+    .unwrap();
+    CapabilityInterfaceResourceSpec {
+        authoring_package: AuthoringPackage {
+            artifact: ArtifactRef::new(
+                id(ResourceKind::Artifact),
+                digest('7'),
+                1,
+                "application/json",
+                DataClassification::Internal,
+                Some("opensandbox-l3-fixture.json".to_owned()),
+            )
+            .unwrap(),
+            manifest_digest: digest('8'),
+        },
+        contract_digest: digest('9'),
+        dependency_versions: vec![],
+        policy_versions: vec![],
+        qualified_name: "fixture.sandbox".parse().unwrap(),
+        input_schema: value_schema.clone(),
+        output_schema: value_schema,
+        error_schema,
+        artifacts: CapabilityArtifactContract { ports: vec![] },
+        data_policy: CapabilityDataFlowPolicy {
+            maximum_input_classification: DataClassification::Restricted,
+            maximum_output_classification: DataClassification::Restricted,
+            allowed_regions: vec!["global".parse().unwrap()],
+            declassification_policy: None,
+        },
+        execution_limits: CapabilityInterfaceLimits {
+            maximum_input_bytes: 1_048_576,
+            maximum_output_bytes: 1_048_576,
+            maximum_artifacts: 0,
+            maximum_execution_milliseconds: 60_000,
+        },
+        effect: Effect::Pure,
+        idempotency: CapabilityIdempotencyKind::Intrinsic,
+        cancellation: CapabilityCancellationKind::BestEffort,
+        progress: CapabilityProgressContract {
+            mode: CapabilityProgressMode::Events,
+            schema_digest: Some(digest('2')),
+            max_events: 8,
+            max_bytes_per_event: 4_096,
+            minimum_interval_milliseconds: 1,
+            durability: CapabilityProgressDurability::CoarseDurable,
+        },
+    }
+}
+
 async fn seed_deployment(
     pool: &PgPool,
     tenant_id: &ResourceId,
     principal_id: &ResourceId,
     deployment_id: &ResourceId,
+    interface_exact: &ExactVersionRef,
+    interface_spec: &CapabilityInterfaceResourceSpec,
 ) {
     let resource_id = id(ResourceKind::CapabilityInterface);
-    let version_id = id(ResourceKind::CapabilityInterfaceRevision);
     let empty = TypedPayload::new(1, &json!({})).unwrap();
     sqlx::query(
         "INSERT INTO insight_platform.resources (tenant_id, resource_id, resource_kind, lifecycle_state, gate_state, payload_schema_version, payload, payload_digest) VALUES ($1, $2, 'capability_interface', 'active', 'enabled', $3, $4, $5)",
@@ -1205,16 +1574,34 @@ async fn seed_deployment(
     .execute(pool)
     .await
     .unwrap();
+    let published = PublishedVersionPayload {
+        document: ResourceDocument::CapabilityInterface(interface_spec.clone()),
+        validation: ValidationSummary {
+            validator_digest: digest('a'),
+            validated_draft_digest: digest('b'),
+            dependency_closure_digest: digest('c'),
+            security_evidence_digest: digest('d'),
+            warnings: vec![],
+        },
+    };
+    published
+        .validate_for(
+            RegistryResourceKind::CapabilityInterface,
+            &interface_exact.revision_id,
+        )
+        .unwrap();
+    let version_payload = TypedPayload::new(1, &published).unwrap();
     sqlx::query(
-        "INSERT INTO insight_platform.resource_versions (tenant_id, resource_version_id, resource_id, resource_version_kind, revision_no, content_digest, payload_schema_version, payload, payload_digest, created_by) VALUES ($1, $2, $3, 'capability_interface', 1, $4, $5, $6, $7, $8)",
+        "INSERT INTO insight_platform.resource_versions (tenant_id, resource_version_id, resource_id, resource_version_kind, revision_no, content_digest, payload_schema_version, payload, payload_digest, created_by) VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9)",
     )
     .bind(tenant_id.to_string())
-    .bind(version_id.to_string())
+    .bind(interface_exact.revision_id.to_string())
     .bind(resource_id.to_string())
-    .bind(digest('6').to_string())
-    .bind(empty.schema_version)
-    .bind(&empty.value)
-    .bind(&empty.digest)
+    .bind(interface_exact.resource_kind.descriptor().name)
+    .bind(interface_exact.semantic_digest.to_string())
+    .bind(version_payload.schema_version)
+    .bind(&version_payload.value)
+    .bind(&version_payload.digest)
     .bind(principal_id.to_string())
     .execute(pool)
     .await
@@ -1225,7 +1612,7 @@ async fn seed_deployment(
     .bind(tenant_id.to_string())
     .bind(deployment_id.to_string())
     .bind(resource_id.to_string())
-    .bind(version_id.to_string())
+    .bind(interface_exact.revision_id.to_string())
     .bind(digest('7').to_string())
     .bind(empty.schema_version)
     .bind(&empty.value)
