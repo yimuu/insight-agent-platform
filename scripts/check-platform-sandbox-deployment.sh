@@ -253,6 +253,7 @@ server_config = find.call("ConfigMap", "opensandbox-server-config", control)
 toml = server_config&.dig("data", "config.toml") || ""
 required_toml = [
   'type = "kubernetes"', 'execd_run_as_init = true', 'allowed_host_paths = []',
+  '[store]', 'type = "sqlite"', 'path = "/tmp/opensandbox.db"',
   'mode = "direct"', 'informer_enabled = false', 'workload_provider = "batchsandbox"',
   'batchsandbox_template_file = "/etc/opensandbox/batchsandbox-template.yaml"',
 ]

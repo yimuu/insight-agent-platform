@@ -93,6 +93,10 @@ data:
     [storage]
     allowed_host_paths = []
 
+    [store]
+    type = "sqlite"
+    path = "/tmp/opensandbox.db"
+
     [ingress]
     mode = "direct"
 
