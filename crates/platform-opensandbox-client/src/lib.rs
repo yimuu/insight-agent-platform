@@ -36,7 +36,9 @@ const METADATA_REQUEST: &str = "platform.insight.dev/request";
 const METADATA_RUNTIME: &str = "platform.insight.dev/runtime";
 const METADATA_PROFILE: &str = "platform.insight.dev/profile";
 const METADATA_NETWORK: &str = "platform.insight.dev/network";
+const METADATA_TEMPLATE: &str = "insight.platform/sandbox-template";
 const METADATA_SCHEMA_VALUE: &str = "v1";
+const METADATA_TEMPLATE_VALUE: &str = "armed-runner-v1";
 const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 262_144;
 const MAX_API_KEY_BYTES: usize = 256;
 const MIN_API_KEY_BYTES: usize = 32;
@@ -608,6 +610,10 @@ fn encode_metadata(
         .map_err(|_| SandboxProviderError::InvalidResponse)?;
     Ok(BTreeMap::from([
         (METADATA_SCHEMA.to_owned(), METADATA_SCHEMA_VALUE.to_owned()),
+        (
+            METADATA_TEMPLATE.to_owned(),
+            METADATA_TEMPLATE_VALUE.to_owned(),
+        ),
         (METADATA_TENANT.to_owned(), metadata.tenant_id.to_string()),
         (METADATA_JOB.to_owned(), metadata.job_id.to_string()),
         (
@@ -648,8 +654,9 @@ fn encode_metadata(
 fn decode_metadata(
     metadata: &BTreeMap<String, String>,
 ) -> Result<SandboxCandidateMetadataV1, SandboxProviderError> {
-    if metadata.len() != 10
+    if metadata.len() != 11
         || metadata.get(METADATA_SCHEMA).map(String::as_str) != Some(METADATA_SCHEMA_VALUE)
+        || metadata.get(METADATA_TEMPLATE).map(String::as_str) != Some(METADATA_TEMPLATE_VALUE)
     {
         return Err(SandboxProviderError::InvalidResponse);
     }
@@ -1364,6 +1371,10 @@ mod tests {
             .unwrap()
             .values()
             .all(|value| value.as_str().unwrap().len() <= 63));
+        assert_eq!(
+            body["metadata"][METADATA_TEMPLATE],
+            Value::String(METADATA_TEMPLATE_VALUE.to_owned())
+        );
         let list_record = records
             .iter()
             .find(|record| {
