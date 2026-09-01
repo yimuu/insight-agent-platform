@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 4 OpenSandbox replacement pending |
+| 状态 | In Progress / CR-216 revision 5 OpenSandbox replacement pending |
 | 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -20,6 +20,9 @@
 
 > 2026-09-02 CR-216 revision 4：在L2前把Runtime contract/Profile Deployment digest加入Plan/Request semantic closure，
 > candidate observation逐字段验证两者；补wrong-runtime/wrong-profile零mutation L1/L2。
+
+> 2026-09-02 CR-216 revision 5：orphan page metadata增加operator-only tenant/job/physical attempt，repository point-read shared Job并
+> 返回只读closed retain/delete decision；Provisioning/selected/corrupt/ambiguous/unavailable retain，禁止JSON payload全表扫描或猜测删除。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 4 |
+| 状态 | Accepted / CR-216 revision 5 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
@@ -20,6 +20,10 @@
 >
 > revision 4关闭candidate binding P1：Plan/Request显式携带冻结的Runtime contract与Profile Deployment digest；candidate
 > metadata除token/request/network外必须精确匹配这两个digest，错误或漂移candidate不可进入Job evidence。
+>
+> revision 5关闭orphan lookup P1：operator-owned candidate metadata显式携带`tenant_id + job_id + physical_attempt`，使bounded
+> orphan page可point-read唯一shared Job并重验current token/selection/activation/terminal/cleanup。Dispatcher repository只返回closed、
+> read-only retain/delete裁决；provider delete仍在事务外，且裁决不得推进任何业务状态。
 
 ## 1. 决策摘要
 
@@ -182,6 +186,10 @@ trait SandboxJobRepository {
         &self,
         command: RecordSandboxCleanupObservation,
     ) -> SandboxCleanupFence;
+    async fn decide_orphan(
+        &self,
+        candidate: SandboxCandidateV1,
+    ) -> SandboxOrphanDecisionV1;
     async fn recover(&self, observation: SandboxRecoveryObservation) -> RecoveryDecision;
 }
 
@@ -273,6 +281,9 @@ struct SandboxProvisioningTokenV1 {
 
 struct SandboxCandidateMetadataV1 {
     schema_version: ConstU16<1>,
+    tenant_id: TenantId,
+    job_id: JobId,
+    physical_attempt: NonZeroU32,
     provisioning_token_digest: Sha256Digest,
     execution_request_digest: Sha256Digest,
     runtime_contract_digest: Sha256Digest,
@@ -282,8 +293,9 @@ struct SandboxCandidateMetadataV1 {
 ```
 
 wire token 是 `sha256(canonical_jcs({"domain":"insight.sandbox.provision/v1","token":token}))` 的 lowercase opaque digest。它不含 lease
-generation、worker generation、trace 或 deadline。OpenSandbox metadata 只携带 token/correlation digest 与 operator-controlled
-closed labels，不含 tenant、Job、Invocation、input、Secret 或用户字符串。
+generation、worker generation、trace 或 deadline。OpenSandbox metadata携带只供内部point lookup的`tenant_id + job_id +
+physical_attempt`、token/correlation digest与operator-controlled closed labels；不含Invocation、RunValue/input body、Secret、用户字符串或
+任何Platform credential。这些ID只定位shared Job，不让OpenSandbox获得读写该Job的权限。
 
 `record_provisioning_intent` 的 current-fence CAS 同时生成一个 256-bit `OpaqueActivationToken`；CAS loser 读取 winner 的既有 token，
 不得另生成。token 是 runner idempotency identity，不授予 Platform API/DB/Kubernetes 权限；它以 sensitive Job evidence 持久化供 restart
@@ -303,6 +315,16 @@ OpenSandbox create 不是原子唯一性 primitive。合同允许同 token 出�
 6. 只有 Job 尚未 `ActivationAuthorized`、所有已发现候选均可证明 `Armed`/未启动、且 count/time budget 仍有余量时，才允许
    再 create inert candidate；
 7. metadata list 只用于发现与 orphan reconcile，唯一 selected owner 来自 PostgreSQL，不把 list/create 描述为原子幂等。
+
+orphan sweeper 对每个bounded candidate page调用repository point-read裁决。裁决必须先验证metadata身份、current Job kind/owner、Plan、
+physical attempt、provisioning/request/runtime/profile/network digest与candidate membership，再返回closed
+`RetainProvisioning | RetainSelected | DeleteUnselected | DeleteLateCandidate | DeleteStaleAttempt | DeleteMissingOwner`。规则如下：
+
+- current attempt仍为`Provisioning`时，已记录或尚未记录但metadata完整匹配的candidate一律retain，避免与candidate CAS竞态；
+- selected candidate在cleanup generation完成前retain并只由cleanup claim删除；
+- selection/activation之后出现的未记录late candidate与已知unselected candidate可delete，因为它们永远不能获得activation token；
+- 明确不存在owner Job或已被新physical attempt取代的candidate可delete；corrupt/ambiguous/数据库不可用返回错误并retain，禁止猜测删除；
+- repository裁决是只读证据，不写Job/Invocation/Run；provider delete和absence observation在事务外，不能借orphan sweep推进terminal。
 
 Platform 只承诺 “selected physical attempt 的 Package 最多激活一次”，不承诺 “一个 token 只产生一个 Kubernetes object”。
 
@@ -460,7 +482,8 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
   `UnknownOutcome`；
 - cancel/timeout：先写 durable intent，再 terminate/delete；physical kill 是 best effort，不能把已发生外部副作用改写为未发生；
 - provider 不可达：保留 Job/reconcile 状态并做 bounded probe，不盲目重发 workload；
-- orphan sweeper 分页读取 operator label，回到 PostgreSQL 重验 tenant/job/token/selected/activation/terminal/cleanup 后才决定 delete；
+- orphan sweeper分页读取operator label，以metadata中的tenant/job point-read PostgreSQL并重验physical attempt、token、request、
+  runtime/profile/network、selected/activation/terminal/cleanup后才决定delete；corrupt/ambiguous/unavailable一律retain；
 - controller TTL 是最后保护，只删除 physical object，不推进业务状态；Dispatcher 必须最终取得 absence proof 或持续告警。
 - terminal后cleanup worker不得伪造或复用已清除的Job lease；它只能claim current cleanup generation，过期generation的late absence写入
   stable stale-fence，且任何cleanup CAS都不能改写terminal business columns。

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 4 |
+| 状态 | Accepted / CR-216 revision 5 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -18,6 +18,10 @@ revision 3明确：physical attempt已持久化后，Dispatcher lease recovery�
 
 revision 4明确：冻结Runtime contract/Profile Deployment digest属于Execution Plan/Request semantic identity，并由Dispatcher逐字段
 校验candidate metadata；provider object或mutable resource head不能替代该绑定。
+
+revision 5明确：orphan page必须能以operator metadata中的`tenant_id + job_id + physical_attempt` point-read唯一shared Job，再重验
+current token与全部frozen candidate binding。该metadata不含正文、Secret或credential；OpenSandbox仍无Platform repository权限。
+orphan repository裁决只读，corrupt/ambiguous/unavailable fail closed为retain，不能以全表payload扫描或猜测删除替代。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -157,6 +161,8 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
 - `/health` 只证明 Server 进程存活。Dispatcher readiness 必须做 authenticated create/list/delete capability probe 或等价的
   provider contract probe，并核验 CRD、controller、runner、network policy 与 exact digest closure；
 - physical persistence 位于 Kubernetes API/BatchSandbox CR，不引入 OpenSandbox SQLite 或 Platform 业务表作为 provider store；
+- BatchSandbox operator metadata固定携带内部`tenant_id/job_id/physical_attempt`及token/request/runtime/profile/network digest；只用于
+  bounded recovery/orphan point lookup，不公开、不授予Platform authority；
 - TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
   后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
 
