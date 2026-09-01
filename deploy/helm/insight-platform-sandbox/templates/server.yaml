@@ -63,60 +63,6 @@ subjects:
     name: {{ .Values.server.serviceAccountName }}
     namespace: {{ .Values.namespaces.control }}
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: opensandbox-server-config
-  namespace: {{ .Values.namespaces.control }}
-  labels:
-    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
-    app.kubernetes.io/component: opensandbox-server
-  annotations:
-    insight.platform/upstream-commit: {{ .Values.global.sourceCommit | quote }}
-    insight.platform/provider-template-digest: {{ .Values.runtimeContract.kubernetesProviderTemplateDigest | quote }}
-data:
-  config.toml: |
-    [server]
-    host = "0.0.0.0"
-    port = {{ .Values.server.port }}
-    api_key = ""
-    max_sandbox_timeout_seconds = {{ .Values.server.maximumSandboxTimeoutSeconds }}
-
-    [log]
-    level = "INFO"
-
-    [runtime]
-    type = "kubernetes"
-    execd_image = "{{ include "insight-platform-sandbox.image" .Values.images.execd }}"
-    execd_run_as_init = true
-
-    [storage]
-    allowed_host_paths = []
-
-    [store]
-    type = "sqlite"
-    path = "/tmp/opensandbox.db"
-
-    [ingress]
-    mode = "direct"
-
-    [kubernetes]
-    kubeconfig_path = ""
-    namespace = "{{ .Values.namespaces.workloads }}"
-    informer_enabled = false
-    read_qps = {{ .Values.server.readQps }}
-    read_burst = {{ .Values.server.readBurst }}
-    write_qps = {{ .Values.server.writeQps }}
-    write_burst = {{ .Values.server.writeBurst }}
-    workload_provider = "batchsandbox"
-    batchsandbox_template_file = "/etc/opensandbox/batchsandbox-template.yaml"
-    sandbox_create_timeout_seconds = {{ .Values.server.sandboxCreateTimeoutSeconds }}
-    sandbox_create_poll_interval_seconds = {{ .Values.server.sandboxCreatePollIntervalSeconds }}
-    image_pull_policy = "IfNotPresent"
-    execd_init_resources = { requests = { cpu = "{{ .Values.server.execdInitResources.requests.cpu }}", memory = "{{ .Values.server.execdInitResources.requests.memory }}", ephemeral-storage = "{{ index .Values.server.execdInitResources.requests "ephemeral-storage" }}" }, limits = { cpu = "{{ .Values.server.execdInitResources.limits.cpu }}", memory = "{{ .Values.server.execdInitResources.limits.memory }}", ephemeral-storage = "{{ index .Values.server.execdInitResources.limits "ephemeral-storage" }}" } }
-  batchsandbox-template.yaml: |
-{{ .Files.Get "files/batchsandbox-template.yaml" | indent 4 }}
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -141,7 +87,7 @@ spec:
         app.kubernetes.io/component: opensandbox-server
         insight.platform/component-role: opensandbox_server
       annotations:
-        checksum/config: {{ printf "%s%s%s" (toJson .Values.server) (include "insight-platform-sandbox.image" .Values.images.execd) (.Files.Get "files/batchsandbox-template.yaml") | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/server-config.yaml") . | sha256sum }}
         insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}
         insight.platform/image-digest: {{ .Values.images.server.digest | quote }}
     spec:
