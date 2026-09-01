@@ -833,7 +833,11 @@ mod tests {
         assert!(invalid_database.validate().is_err());
 
         let mut invalid_read = valid.clone();
-        invalid_read.broker.maximum_read_bytes = 1024;
+        invalid_read.broker.maximum_read_bytes = usize::try_from(
+            invalid_read.artifact_provider_catalog.s3_storage_bindings[0].maximum_object_bytes,
+        )
+        .unwrap()
+        .saturating_add(1);
         assert!(invalid_read.validate().is_err());
 
         let mut invalid_chunk = valid;
