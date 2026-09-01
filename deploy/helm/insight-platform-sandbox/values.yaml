@@ -31,7 +31,7 @@ runtimeContract:
   kubernetesProviderTemplateDigest: sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a
   runnerProtocolDigest: sha256:4a8df3b9f4469e1e4781ff6831a23c5c60b139a8cabc128121a0832d203b4bf7
   containerRuntimeDigest: sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e
-  networkPolicyDigest: sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0
+  networkPolicyDigest: sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e
 
 dispatcher:
   replicas: 1
@@ -112,6 +112,7 @@ networkPolicy:
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   kubernetesApiCidrs: [10.96.0.1/32]
+  kubernetesApiPorts: [443]
   postgresCidrs: [10.0.0.0/8]
   postgresPort: 5432
   directExternalCidr: 0.0.0.0/0

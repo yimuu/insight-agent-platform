@@ -77,7 +77,9 @@ spec:
         - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
       ports:
-        - {protocol: TCP, port: 443}
+        {{- range .Values.networkPolicy.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
     - to:
         - namespaceSelector:
             matchLabels: {insight.platform/sandbox-workload-namespace: "true"}
@@ -123,7 +125,9 @@ spec:
         - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
       ports:
-        - {protocol: TCP, port: 443}
+        {{- range .Values.networkPolicy.kubernetesApiPorts }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
     - to:
         - namespaceSelector:
             matchLabels:

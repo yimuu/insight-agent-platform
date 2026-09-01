@@ -24,8 +24,13 @@
 {{- if not .Values.networkPolicy.enabled -}}
   {{- fail "sandbox NetworkPolicy closure cannot be disabled" -}}
 {{- end -}}
-{{- if or (empty .Values.networkPolicy.kubernetesApiCidrs) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.directDeniedCidrs) -}}
-  {{- fail "Kubernetes API, PostgreSQL, and Direct deny CIDRs must be explicit" -}}
+{{- if or (empty .Values.networkPolicy.kubernetesApiCidrs) (empty .Values.networkPolicy.kubernetesApiPorts) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.directDeniedCidrs) -}}
+  {{- fail "Kubernetes API CIDRs/ports, PostgreSQL CIDRs, and Direct deny CIDRs must be explicit" -}}
+{{- end -}}
+{{- range .Values.networkPolicy.kubernetesApiPorts -}}
+  {{- if or (lt (int .) 1) (gt (int .) 65535) -}}
+    {{- fail "Kubernetes API ports must be in 1..65535" -}}
+  {{- end -}}
 {{- end -}}
 {{- if or (lt (int .Values.dispatcher.worker.maximumConcurrency) 1) (lt (int .Values.dispatcher.worker.criticalControlReservedSlots) 1) -}}
   {{- fail "Dispatcher business and critical-control capacity must be positive" -}}

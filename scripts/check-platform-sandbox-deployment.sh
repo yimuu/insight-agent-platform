@@ -44,6 +44,8 @@ reject_values --set networkPolicy.enabled=false
 reject_values --set-json networkPolicy.kubernetesApiCidrs=[]
 reject_values --set-json networkPolicy.postgresCidrs=[]
 reject_values --set-json networkPolicy.directDeniedCidrs=[]
+reject_values --set-json networkPolicy.kubernetesApiPorts=[]
+reject_values --set-json networkPolicy.kubernetesApiPorts='[0]'
 reject_values --set dispatcher.worker.maximumConcurrency=0
 reject_values --set dispatcher.worker.criticalControlReservedSlots=0
 reject_values --set dispatcher.opensandbox.requestTimeoutMilliseconds=5000
@@ -222,6 +224,13 @@ expected_policy_names = [
   [workloads_namespace, "armed-runner-ingress"], [workloads_namespace, "default-deny"],
 ].sort
 failures << "NetworkPolicy closure drifted: #{policy_names.inspect}" unless policy_names == expected_policy_names
+expected_api_ports = values.dig("networkPolicy", "kubernetesApiPorts").map do |port|
+  {"protocol" => "TCP", "port" => port}
+end
+%w[opensandbox-server opensandbox-controller].each do |name|
+  policy = find.call("NetworkPolicy", name, control)
+  failures << "#{name} Kubernetes API ports drifted" unless policy&.dig("spec", "egress", 0, "ports") == expected_api_ports
+end
 disabled_policy = find.call("NetworkPolicy", "armed-runner-disabled", workloads_namespace)
 failures << "Disabled runner has egress" unless disabled_policy&.dig("spec", "egress") == []
 direct_policy = find.call("NetworkPolicy", "armed-runner-direct", workloads_namespace)
