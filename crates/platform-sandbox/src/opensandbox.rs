@@ -198,6 +198,7 @@ pub struct SandboxExecutionRequestV1 {
     pub output_schema_digest: Sha256Digest,
     pub network_mode: SandboxNetworkMode,
     pub limits: SandboxResourceLimitsV1,
+    pub provisioning_limits: SandboxProvisioningLimitsV1,
     pub deadline_at: DateTime<Utc>,
     pub trace: TraceIdentityV1,
     pub request_digest: Sha256Digest,
@@ -213,6 +214,7 @@ impl SandboxExecutionRequestV1 {
 
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         self.limits.validate()?;
+        self.provisioning_limits.validate()?;
         self.trace
             .validate()
             .map_err(|_| SandboxContractError::InvalidRequest)?;
@@ -281,6 +283,7 @@ pub struct SandboxExecutionPlanV1 {
     pub output_schema_digest: Sha256Digest,
     pub network_mode: SandboxNetworkMode,
     pub limits: SandboxResourceLimitsV1,
+    pub provisioning_limits: SandboxProvisioningLimitsV1,
     pub deadline_at: DateTime<Utc>,
     pub request_digest: Sha256Digest,
 }
@@ -309,6 +312,7 @@ impl SandboxExecutionPlanV1 {
             output_schema_digest: request.output_schema_digest.clone(),
             network_mode: request.network_mode,
             limits: request.limits.clone(),
+            provisioning_limits: request.provisioning_limits.clone(),
             deadline_at: request.deadline_at,
             request_digest: request.request_digest.clone(),
         };
@@ -318,6 +322,7 @@ impl SandboxExecutionPlanV1 {
 
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         self.limits.validate()?;
+        self.provisioning_limits.validate()?;
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || self.tenant_id.kind() != ResourceKind::Tenant
             || self.invocation_id.kind() != ResourceKind::CapabilityInvocation
@@ -377,6 +382,7 @@ impl SandboxExecutionPlanV1 {
             output_schema_digest: self.output_schema_digest.clone(),
             network_mode: self.network_mode,
             limits: self.limits.clone(),
+            provisioning_limits: self.provisioning_limits.clone(),
             deadline_at: self.deadline_at,
             trace,
             request_digest: self.request_digest.clone(),
@@ -459,6 +465,7 @@ pub struct SandboxCandidateMetadataV1 {
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
     pub physical_attempt: u32,
+    pub create_ordinal: u8,
     pub provisioning_token_digest: Sha256Digest,
     pub execution_request_digest: Sha256Digest,
     pub runtime_contract_digest: Sha256Digest,
@@ -472,6 +479,7 @@ impl SandboxCandidateMetadataV1 {
             || self.tenant_id.kind() != ResourceKind::Tenant
             || self.job_id.kind() != ResourceKind::Job
             || self.physical_attempt == 0
+            || !(1..=MAX_SANDBOX_CANDIDATES).contains(&self.create_ordinal)
         {
             return Err(SandboxContractError::InvalidCandidate);
         }
@@ -725,6 +733,9 @@ pub struct SandboxPhysicalEvidenceV1 {
     pub provisioning_token_digest: Sha256Digest,
     pub activation_token: OpaqueActivationToken,
     pub activation_token_digest: Sha256Digest,
+    pub provisioning_started_at: DateTime<Utc>,
+    pub create_authorization_count: u8,
+    pub last_create_authorized_at: Option<DateTime<Utc>>,
     pub candidate_count: u8,
     pub candidate_ids: Vec<OpenSandboxId>,
     pub selected_sandbox_id: Option<OpenSandboxId>,
@@ -740,8 +751,12 @@ impl SandboxPhysicalEvidenceV1 {
     pub fn begin(
         request: &SandboxExecutionRequestV1,
         activation_token: OpaqueActivationToken,
+        database_now: DateTime<Utc>,
     ) -> Result<Self, SandboxContractError> {
         request.validate()?;
+        if database_now >= request.deadline_at {
+            return Err(SandboxContractError::CandidateCreateConflict);
+        }
         let provisioning_token = SandboxProvisioningTokenV1::from_request(request);
         let provisioning_token_digest = provisioning_token.digest()?;
         let activation_token_digest = activation_token.digest()?;
@@ -751,6 +766,9 @@ impl SandboxPhysicalEvidenceV1 {
             provisioning_token_digest,
             activation_token,
             activation_token_digest,
+            provisioning_started_at: database_now,
+            create_authorization_count: 0,
+            last_create_authorized_at: None,
             candidate_count: 0,
             candidate_ids: Vec::new(),
             selected_sandbox_id: None,
@@ -763,6 +781,48 @@ impl SandboxPhysicalEvidenceV1 {
         })
     }
 
+    pub fn authorize_candidate_create(
+        &self,
+        request: &SandboxExecutionRequestV1,
+        limits: &SandboxProvisioningLimitsV1,
+        database_now: DateTime<Utc>,
+        create_ordinal: u8,
+    ) -> Result<PhysicalDecision<Self>, SandboxContractError> {
+        request.validate()?;
+        limits.validate()?;
+        if limits != &request.provisioning_limits
+            || self.phase != SandboxPhysicalPhaseV1::Provisioning
+            || create_ordinal == 0
+            || create_ordinal > limits.maximum_candidates
+        {
+            return Err(SandboxContractError::CandidateCreateConflict);
+        }
+        if create_ordinal == self.create_authorization_count {
+            return Ok(PhysicalDecision::Replayed(self.clone()));
+        }
+        if create_ordinal != self.create_authorization_count.saturating_add(1)
+            || self.create_authorization_count >= limits.maximum_candidates
+        {
+            return Err(SandboxContractError::CandidateCreateConflict);
+        }
+        let elapsed = database_now
+            .signed_duration_since(self.provisioning_started_at)
+            .num_milliseconds();
+        if elapsed < 0 || elapsed > i64::from(limits.provisioning_timeout_milliseconds) {
+            return Err(SandboxContractError::CandidateLimitOrLateCandidate);
+        }
+        if self.last_create_authorized_at.is_some_and(|last| {
+            database_now.signed_duration_since(last).num_milliseconds()
+                < i64::from(limits.candidate_quiescence_milliseconds)
+        }) {
+            return Err(SandboxContractError::CandidateLimitOrLateCandidate);
+        }
+        let mut next = self.clone();
+        next.create_authorization_count = create_ordinal;
+        next.last_create_authorized_at = Some(database_now);
+        Ok(PhysicalDecision::Applied(next))
+    }
+
     pub fn observe_candidate(
         &self,
         request: &SandboxExecutionRequestV1,
@@ -770,9 +830,15 @@ impl SandboxPhysicalEvidenceV1 {
         limits: &SandboxProvisioningLimitsV1,
     ) -> Result<Self, SandboxContractError> {
         limits.validate()?;
+        if limits != &request.provisioning_limits {
+            return Err(SandboxContractError::InvalidLimits);
+        }
         candidate
             .metadata
             .validate_for(request, &self.provisioning_token)?;
+        if candidate.metadata.create_ordinal > self.create_authorization_count {
+            return Err(SandboxContractError::InvalidCandidate);
+        }
         if self.candidate_ids.contains(&candidate.sandbox_id) {
             return Ok(self.clone());
         }
@@ -797,7 +863,9 @@ impl SandboxPhysicalEvidenceV1 {
         candidate
             .metadata
             .validate_for(request, &self.provisioning_token)?;
-        if !self.candidate_ids.contains(&candidate.sandbox_id) {
+        if candidate.metadata.create_ordinal > self.create_authorization_count
+            || !self.candidate_ids.contains(&candidate.sandbox_id)
+        {
             return Err(SandboxContractError::InvalidCandidate);
         }
         match &self.selected_sandbox_id {
@@ -984,7 +1052,19 @@ impl SandboxPhysicalEvidenceV1 {
                 )
             || self.provisioning_token_digest != self.provisioning_token.digest()?
             || self.activation_token_digest != self.activation_token.digest()?
+            || self.provisioning_started_at >= plan.deadline_at
+            || self.create_authorization_count > plan.provisioning_limits.maximum_candidates
+            || (self.create_authorization_count == 0) != self.last_create_authorized_at.is_none()
+            || self
+                .last_create_authorized_at
+                .is_some_and(|last| last < self.provisioning_started_at)
+            || self.last_create_authorized_at.is_some_and(|last| {
+                last.signed_duration_since(self.provisioning_started_at)
+                    .num_milliseconds()
+                    > i64::from(plan.provisioning_limits.provisioning_timeout_milliseconds)
+            })
             || usize::from(self.candidate_count) != self.candidate_ids.len()
+            || self.candidate_count > self.create_authorization_count
             || self.candidate_ids.len() > usize::from(MAX_SANDBOX_CANDIDATES)
             || unique_candidates.len() != self.candidate_ids.len()
             || unique_absent.len() != self.absent_candidate_ids.len()
@@ -1512,6 +1592,7 @@ impl SandboxDispatcherJobPayloadV1 {
         &self,
         request: &SandboxExecutionRequestV1,
         activation_token: OpaqueActivationToken,
+        database_now: DateTime<Utc>,
     ) -> Result<Self, SandboxContractError> {
         self.plan.validate_request(request)?;
         if self.physical.is_some() || self.terminal.is_some() {
@@ -1521,8 +1602,31 @@ impl SandboxDispatcherJobPayloadV1 {
         next.physical = Some(Box::new(SandboxPhysicalEvidenceV1::begin(
             request,
             activation_token,
+            database_now,
         )?));
         next.seal()
+    }
+
+    pub fn authorize_candidate_create(
+        &self,
+        request: &SandboxExecutionRequestV1,
+        limits: &SandboxProvisioningLimitsV1,
+        database_now: DateTime<Utc>,
+        create_ordinal: u8,
+    ) -> Result<PhysicalDecision<Self>, SandboxContractError> {
+        self.plan.validate_request(request)?;
+        let physical = self
+            .physical
+            .as_deref()
+            .ok_or(SandboxContractError::InvalidPhysicalTransition)?;
+        match physical.authorize_candidate_create(request, limits, database_now, create_ordinal)? {
+            PhysicalDecision::Applied(authorized) => {
+                let mut next = self.clone();
+                next.physical = Some(Box::new(authorized));
+                Ok(PhysicalDecision::Applied(next.seal()?))
+            }
+            PhysicalDecision::Replayed(_) => Ok(PhysicalDecision::Replayed(self.clone())),
+        }
     }
 
     pub fn record_observation(
@@ -1951,6 +2055,32 @@ impl SandboxRepositoryDecisionV1 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCreateAuthorizationV1 {
+    pub decision: SandboxRepositoryDecisionV1,
+    pub create_ordinal: u8,
+}
+
+impl CandidateCreateAuthorizationV1 {
+    pub fn validate(&self) -> Result<(), SandboxContractError> {
+        self.decision.validate()?;
+        let physical = self
+            .decision
+            .payload
+            .physical
+            .as_deref()
+            .ok_or(SandboxContractError::CandidateCreateConflict)?;
+        if self.create_ordinal == 0
+            || self.create_ordinal != physical.create_authorization_count
+            || physical.phase != SandboxPhysicalPhaseV1::Provisioning
+        {
+            return Err(SandboxContractError::CandidateCreateConflict);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxFencedIdentityV1 {
@@ -1979,6 +2109,14 @@ impl SandboxFencedIdentityV1 {
 pub struct RecordProvisioningIntentV1 {
     pub identity: SandboxFencedIdentityV1,
     pub activation_token: OpaqueActivationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizeCandidateCreateV1 {
+    pub identity: SandboxFencedIdentityV1,
+    pub create_ordinal: u8,
+    pub limits: SandboxProvisioningLimitsV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2127,6 +2265,11 @@ pub trait SandboxJobRepository: Send + Sync {
         &self,
         command: RecordProvisioningIntentV1,
     ) -> Result<SandboxRepositoryDecisionV1, Self::Error>;
+
+    async fn authorize_candidate_create(
+        &self,
+        command: AuthorizeCandidateCreateV1,
+    ) -> Result<PhysicalDecision<CandidateCreateAuthorizationV1>, Self::Error>;
 
     async fn select_candidate(
         &self,
@@ -2594,6 +2737,11 @@ pub trait OpenSandboxProvider: Send + Sync {
         cursor: CandidateCursorV1,
     ) -> Result<BoundedCandidatePageV1, SandboxProviderError>;
 
+    async fn list_operator_candidates(
+        &self,
+        cursor: CandidateCursorV1,
+    ) -> Result<BoundedCandidatePageV1, SandboxProviderError>;
+
     async fn observe(
         &self,
         sandbox_id: &OpenSandboxId,
@@ -2663,6 +2811,7 @@ pub enum SandboxContractError {
     InvalidRequest,
     InvalidProvisioningToken,
     InvalidCandidate,
+    CandidateCreateConflict,
     CandidateLimitOrLateCandidate,
     CandidateSelectionConflict,
     InvalidActivation,
@@ -2686,6 +2835,7 @@ impl fmt::Display for SandboxContractError {
             Self::InvalidRequest => "sandbox execution request is invalid",
             Self::InvalidProvisioningToken => "sandbox provisioning token is invalid",
             Self::InvalidCandidate => "sandbox candidate evidence is invalid",
+            Self::CandidateCreateConflict => "sandbox candidate create authorization conflicted",
             Self::CandidateLimitOrLateCandidate => "sandbox candidate is late or over limit",
             Self::CandidateSelectionConflict => "another sandbox candidate already won",
             Self::InvalidActivation => "sandbox activation frame is invalid",
@@ -2861,6 +3011,7 @@ mod tests {
             output_schema_digest: digest('c'),
             network_mode: SandboxNetworkMode::Direct,
             limits: limits(),
+            provisioning_limits: provisioning_limits(),
             deadline_at: Utc.timestamp_opt(2_000_000_000, 0).unwrap(),
             trace: insight_platform_contracts::TraceIdentityV1::generate(),
             request_digest: digest('0'),
@@ -2879,6 +3030,7 @@ mod tests {
                 tenant_id: request.tenant_id.clone(),
                 job_id: request.job_id.clone(),
                 physical_attempt: request.physical_attempt,
+                create_ordinal: 1,
                 provisioning_token_digest: token.digest().unwrap(),
                 execution_request_digest: request.request_digest.clone(),
                 runtime_contract_digest: request.runtime_contract_digest.clone(),
@@ -2958,10 +3110,89 @@ mod tests {
     }
 
     #[test]
+    fn candidate_create_authorization_is_one_shot_ordered_and_time_bounded() {
+        let request = request(1);
+        let limits = provisioning_limits();
+        let now = request.deadline_at - Duration::minutes(4);
+        let evidence = SandboxPhysicalEvidenceV1::begin(
+            &request,
+            OpaqueActivationToken::parse("1".repeat(64)).unwrap(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.authorize_candidate_create(&request, &limits, now, 2),
+            Err(SandboxContractError::CandidateCreateConflict)
+        );
+        let first = evidence
+            .authorize_candidate_create(&request, &limits, now, 1)
+            .unwrap()
+            .into_inner();
+        assert!(matches!(
+            first
+                .authorize_candidate_create(&request, &limits, now, 1)
+                .unwrap(),
+            PhysicalDecision::Replayed(_)
+        ));
+        assert_eq!(
+            first.authorize_candidate_create(
+                &request,
+                &limits,
+                now + Duration::milliseconds(499),
+                2,
+            ),
+            Err(SandboxContractError::CandidateLimitOrLateCandidate)
+        );
+        let second = first
+            .authorize_candidate_create(&request, &limits, now + Duration::milliseconds(500), 2)
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.create_authorization_count, 2);
+        assert_eq!(
+            second.authorize_candidate_create(
+                &request,
+                &limits,
+                now + Duration::milliseconds(1_000),
+                3,
+            ),
+            Err(SandboxContractError::CandidateCreateConflict)
+        );
+
+        let timed_out = SandboxPhysicalEvidenceV1::begin(
+            &request,
+            OpaqueActivationToken::parse("2".repeat(64)).unwrap(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            timed_out.authorize_candidate_create(
+                &request,
+                &limits,
+                now + Duration::milliseconds(10_001),
+                1,
+            ),
+            Err(SandboxContractError::CandidateLimitOrLateCandidate)
+        );
+    }
+
+    #[test]
     fn candidate_selection_is_first_winner_and_activation_closes_create() {
         let request = request(1);
         let token = OpaqueActivationToken::parse("1".repeat(64)).unwrap();
-        let evidence = SandboxPhysicalEvidenceV1::begin(&request, token).unwrap();
+        let now = request.deadline_at - Duration::minutes(4);
+        let evidence = SandboxPhysicalEvidenceV1::begin(&request, token, now)
+            .unwrap()
+            .authorize_candidate_create(&request, &provisioning_limits(), now, 1)
+            .unwrap()
+            .into_inner()
+            .authorize_candidate_create(
+                &request,
+                &provisioning_limits(),
+                now + Duration::milliseconds(500),
+                2,
+            )
+            .unwrap()
+            .into_inner();
         let first = candidate(&request, "sandbox-one");
         let second = candidate(&request, "sandbox-two");
         let third = candidate(&request, "sandbox-three");
@@ -2993,6 +3224,12 @@ mod tests {
         wrong_attempt.metadata.physical_attempt += 1;
         assert_eq!(
             evidence.observe_candidate(&request, &wrong_attempt, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
+        let mut unauthorized_ordinal = first.clone();
+        unauthorized_ordinal.metadata.create_ordinal = 3;
+        assert_eq!(
+            evidence.observe_candidate(&request, &unauthorized_ordinal, &provisioning_limits()),
             Err(SandboxContractError::InvalidCandidate)
         );
         let retained = SandboxOrphanDecisionV1::new(
@@ -3052,8 +3289,12 @@ mod tests {
         let activation_token = OpaqueActivationToken::parse("2".repeat(64)).unwrap();
         let candidate = candidate(&request, "sandbox-one");
         let boot_id = RunnerBootId::parse("boot-one").unwrap();
-        let evidence = SandboxPhysicalEvidenceV1::begin(&request, activation_token.clone())
+        let now = request.deadline_at - Duration::minutes(4);
+        let evidence = SandboxPhysicalEvidenceV1::begin(&request, activation_token.clone(), now)
             .unwrap()
+            .authorize_candidate_create(&request, &provisioning_limits(), now, 1)
+            .unwrap()
+            .into_inner()
             .observe_candidate(&request, &candidate, &provisioning_limits())
             .unwrap()
             .select_candidate(&request, &candidate)
@@ -3168,7 +3409,7 @@ mod tests {
                 request.input.clone(),
             )
             .unwrap();
-        let payload = payload.begin(&request, activation_token).unwrap();
+        let payload = payload.begin(&request, activation_token, now).unwrap();
         payload.validate_for(&running).unwrap();
         assert_eq!(
             decide_recovery(&payload).unwrap(),
@@ -3177,6 +3418,9 @@ mod tests {
 
         let candidate = candidate(&request, "sandbox-one");
         let payload = payload
+            .authorize_candidate_create(&request, &provisioning_limits(), now, 1)
+            .unwrap()
+            .into_inner()
             .record_observation(
                 &request,
                 SandboxDurableObservationV1::Candidate {
@@ -3335,9 +3579,9 @@ mod tests {
     #[test]
     fn cancellation_before_candidate_creation_is_a_valid_terminal() {
         let request = request(1);
+        let now = request.deadline_at - Duration::minutes(4);
         let running = {
             let ready = ready_job(&request);
-            let now = request.deadline_at - Duration::minutes(4);
             let worker = id(ResourceKind::WorkerProcessGeneration, 21);
             let leased = decide_claim(
                 &ready,
@@ -3365,6 +3609,7 @@ mod tests {
             .begin(
                 &request,
                 OpaqueActivationToken::parse("5".repeat(64)).unwrap(),
+                now + Duration::seconds(1),
             )
             .unwrap()
             .terminal(

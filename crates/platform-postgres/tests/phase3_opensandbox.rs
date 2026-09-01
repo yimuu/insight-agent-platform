@@ -20,13 +20,13 @@ use insight_platform_postgres::{
     verify_schema,
 };
 use insight_platform_sandbox::opensandbox::{
-    AuthorizeSandboxActivationV1, CommitSandboxTerminalV1, OpaqueActivationToken, OpenSandboxId,
-    PhysicalDecision, RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1,
-    RecordSandboxObservationV1, RunnerBootId, SandboxCandidateMetadataV1, SandboxCandidateV1,
-    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
-    SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1, SandboxExecutionPlanV1,
-    SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
-    SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1,
+    AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CommitSandboxTerminalV1,
+    OpaqueActivationToken, OpenSandboxId, PhysicalDecision, RecordProvisioningIntentV1,
+    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, RunnerBootId,
+    SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxClaimV1, SandboxCleanupClaimV1,
+    SandboxCleanupObservationV1, SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1,
+    SandboxExecutionPlanV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
+    SandboxFencedIdentityV1, SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1,
     SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1, SandboxResourceLimitsV1,
     SandboxRunnerOutcomeV1, SandboxRunnerResultFrameV1, SandboxTerminalOutcomeV1,
     SelectSandboxCandidateV1,
@@ -102,6 +102,59 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     .unwrap();
     assert_eq!(replayed_start.job.version, started.job.version);
 
+    let create_authorization = AuthorizeCandidateCreateV1 {
+        identity: decision_identity(&started),
+        create_ordinal: 1,
+        limits: provisioning_limits(),
+    };
+    let (authorization_one, authorization_two) = tokio::join!(
+        SandboxJobRepository::authorize_candidate_create(
+            &fixture.repository,
+            create_authorization.clone(),
+        ),
+        SandboxJobRepository::authorize_candidate_create(
+            &fixture.repository,
+            create_authorization.clone(),
+        ),
+    );
+    let authorizations = [authorization_one.unwrap(), authorization_two.unwrap()];
+    assert_eq!(
+        authorizations
+            .iter()
+            .filter(|decision| matches!(decision, PhysicalDecision::Applied(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        authorizations
+            .iter()
+            .filter(|decision| matches!(decision, PhysicalDecision::Replayed(_)))
+            .count(),
+        1
+    );
+    let authorized = authorizations[0].clone().into_inner().decision;
+    assert_eq!(
+        authorized
+            .payload
+            .physical
+            .as_deref()
+            .unwrap()
+            .create_authorization_count,
+        1
+    );
+    assert!(matches!(
+        SandboxJobRepository::authorize_candidate_create(
+            &fixture.repository,
+            AuthorizeCandidateCreateV1 {
+                identity: decision_identity(&authorized),
+                create_ordinal: 3,
+                limits: provisioning_limits(),
+            },
+        )
+        .await,
+        Err(RepositoryError::Conflict(_))
+    ));
+
     let candidate = candidate(&leased.request, "candidate-one");
     let retain_provisioning =
         SandboxJobRepository::decide_orphan(&fixture.repository, candidate.clone())
@@ -118,7 +171,7 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
         SandboxJobRepository::record_physical_observation(
             &fixture.repository,
             RecordSandboxObservationV1 {
-                identity: decision_identity(&started),
+                identity: decision_identity(&authorized),
                 observation: SandboxDurableObservationV1::Candidate {
                     candidate: wrong_runtime.clone(),
                     limits: provisioning_limits(),
@@ -132,6 +185,26 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
         SandboxJobRepository::decide_orphan(&fixture.repository, wrong_runtime).await,
         Err(RepositoryError::InvalidInput(_))
     ));
+    let mut unauthorized_ordinal = candidate.clone();
+    unauthorized_ordinal.metadata.create_ordinal = 2;
+    assert!(matches!(
+        SandboxJobRepository::record_physical_observation(
+            &fixture.repository,
+            RecordSandboxObservationV1 {
+                identity: decision_identity(&authorized),
+                observation: SandboxDurableObservationV1::Candidate {
+                    candidate: unauthorized_ordinal.clone(),
+                    limits: provisioning_limits(),
+                },
+            },
+        )
+        .await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        SandboxJobRepository::decide_orphan(&fixture.repository, unauthorized_ordinal).await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
     let after_wrong = SandboxJobRepository::recover(
         &fixture.repository,
         &fixture.request.tenant_id,
@@ -139,7 +212,7 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     )
     .await
     .unwrap();
-    assert_eq!(after_wrong.job.version, started.job.version);
+    assert_eq!(after_wrong.job.version, authorized.job.version);
     assert_eq!(
         after_wrong
             .payload
@@ -151,7 +224,7 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     );
 
     let observed_command = RecordSandboxObservationV1 {
-        identity: decision_identity(&started),
+        identity: decision_identity(&authorized),
         observation: SandboxDurableObservationV1::Candidate {
             candidate: candidate.clone(),
             limits: provisioning_limits(),
@@ -400,11 +473,23 @@ async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
     )
     .await
     .unwrap();
+    let create_authorized = SandboxJobRepository::authorize_candidate_create(
+        &fixture.repository,
+        AuthorizeCandidateCreateV1 {
+            identity: decision_identity(&started),
+            create_ordinal: 1,
+            limits: provisioning_limits(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .decision;
     let candidate = candidate(&leased.request, "rollover-candidate");
     let observed = SandboxJobRepository::record_physical_observation(
         &fixture.repository,
         RecordSandboxObservationV1 {
-            identity: decision_identity(&started),
+            identity: decision_identity(&create_authorized),
             observation: SandboxDurableObservationV1::Candidate {
                 candidate: candidate.clone(),
                 limits: provisioning_limits(),
@@ -428,7 +513,7 @@ async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
         &fixture.repository,
         AuthorizeSandboxActivationV1 {
             identity: decision_identity(&selected),
-            sandbox_id: candidate.sandbox_id,
+            sandbox_id: candidate.sandbox_id.clone(),
             boot_id: boot_id.clone(),
         },
     )
@@ -514,6 +599,33 @@ async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
     assert_eq!(terminal.job.state, JobState::Failed);
     assert_eq!(terminal.job.attempt_count, 1);
     assert_eq!(terminal.job.lease_generation, 2);
+
+    let cleanup = SandboxJobRepository::claim_cleanup(
+        &fixture.repository,
+        SandboxCleanupClaimV1 {
+            process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            limit: 1,
+            lease_milliseconds: 30_000,
+        },
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(cleanup.job.job_id, fixture.request.job_id);
+    let absent = SandboxJobRepository::record_cleanup_observation(
+        &fixture.repository,
+        RecordSandboxCleanupObservationV1 {
+            fence: cleanup.fence,
+            observation: SandboxCleanupObservationV1::Absent {
+                sandbox_id: candidate.sandbox_id,
+                evidence_digest: digest('a'),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!absent.payload.cleanup.required);
 }
 
 async fn seed_fixture(pool: PgPool) -> Fixture {
@@ -718,6 +830,7 @@ async fn seed_fixture(pool: PgPool) -> Fixture {
         output_schema_digest,
         network_mode: SandboxNetworkMode::Direct,
         limits: resource_limits(),
+        provisioning_limits: provisioning_limits(),
         deadline_at: deadline,
         trace,
         request_digest: digest('0'),
@@ -1088,6 +1201,7 @@ fn candidate(request: &SandboxExecutionRequestV1, sandbox_id: &str) -> SandboxCa
             tenant_id: request.tenant_id.clone(),
             job_id: request.job_id.clone(),
             physical_attempt: request.physical_attempt,
+            create_ordinal: 1,
             provisioning_token_digest: token.digest().unwrap(),
             execution_request_digest: request.request_digest.clone(),
             runtime_contract_digest: request.runtime_contract_digest.clone(),

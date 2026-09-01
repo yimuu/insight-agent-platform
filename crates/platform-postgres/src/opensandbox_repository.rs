@@ -30,15 +30,16 @@ use insight_platform_jobs::{
     LeasePolicy,
 };
 use insight_platform_sandbox::opensandbox::{
-    AuthorizeSandboxActivationV1, ClaimedSandboxCleanupV1, CommitSandboxTerminalV1,
-    HeartbeatSandboxJobV1, LeasedSandboxJobV1, PhysicalDecision, RecordProvisioningIntentV1,
-    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxCandidateV1,
-    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
-    SandboxContractError as OpenSandboxContractError, SandboxDispatcherJobPayloadV1,
-    SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
-    SandboxJobRepository, SandboxOrphanDecisionV1, SandboxOrphanDispositionV1,
-    SandboxPhysicalPhaseV1, SandboxRepositoryDecisionV1, SandboxRunnerOutcomeV1,
-    SandboxTerminalOutcomeV1, SelectSandboxCandidateV1, MAX_SANDBOX_JOB_PAYLOAD_BYTES,
+    AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CandidateCreateAuthorizationV1,
+    ClaimedSandboxCleanupV1, CommitSandboxTerminalV1, HeartbeatSandboxJobV1, LeasedSandboxJobV1,
+    PhysicalDecision, RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1,
+    RecordSandboxObservationV1, SandboxCandidateV1, SandboxClaimV1, SandboxCleanupClaimV1,
+    SandboxCleanupObservationV1, SandboxContractError as OpenSandboxContractError,
+    SandboxDispatcherJobPayloadV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
+    SandboxFencedIdentityV1, SandboxJobRepository, SandboxOrphanDecisionV1,
+    SandboxOrphanDispositionV1, SandboxPhysicalPhaseV1, SandboxRepositoryDecisionV1,
+    SandboxRunnerOutcomeV1, SandboxTerminalOutcomeV1, SelectSandboxCandidateV1,
+    MAX_SANDBOX_JOB_PAYLOAD_BYTES,
 };
 use serde_json::Value;
 use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
@@ -52,6 +53,7 @@ impl From<OpenSandboxContractError> for RepositoryError {
     fn from(failure: OpenSandboxContractError) -> Self {
         match failure {
             OpenSandboxContractError::CandidateSelectionConflict
+            | OpenSandboxContractError::CandidateCreateConflict
             | OpenSandboxContractError::TerminalConflict
             | OpenSandboxContractError::RunnerBootChanged => {
                 Self::Conflict("OpenSandbox first-winner")
@@ -266,7 +268,10 @@ impl SandboxJobRepository for PgRepository {
         require_fenced_identity(&current, &command.identity)?;
         let request = hydrate_current_request(&mut transaction, &current, false).await?;
         let next_job = decide_start(&current.job, &command.identity.fence, database_now)?;
-        let next_payload = current.payload.begin(&request, command.activation_token)?;
+        let next_payload =
+            current
+                .payload
+                .begin(&request, command.activation_token, database_now)?;
         next_payload.validate_for(&next_job)?;
         let updated = update_job(
             &mut transaction,
@@ -287,6 +292,77 @@ impl SandboxJobRepository for PgRepository {
         .await?;
         transaction.commit().await?;
         decision_from(updated, next_payload)
+    }
+
+    async fn authorize_candidate_create(
+        &self,
+        command: AuthorizeCandidateCreateV1,
+    ) -> Result<PhysicalDecision<CandidateCreateAuthorizationV1>, Self::Error> {
+        command.identity.validate()?;
+        command.limits.validate()?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let current = load_job(
+            &mut transaction,
+            &command.identity.tenant_id,
+            &command.identity.job_id,
+            true,
+        )
+        .await?;
+        require_same_lease_identity(&current, &command.identity, database_now)?;
+        let request = hydrate_current_request(&mut transaction, &current, false).await?;
+        let decision = match current.payload.authorize_candidate_create(
+            &request,
+            &command.limits,
+            database_now,
+            command.create_ordinal,
+        )? {
+            PhysicalDecision::Replayed(payload) => {
+                transaction.commit().await?;
+                PhysicalDecision::Replayed(CandidateCreateAuthorizationV1 {
+                    decision: decision_from(current.record, payload)?,
+                    create_ordinal: command.create_ordinal,
+                })
+            }
+            PhysicalDecision::Applied(payload) => {
+                require_fenced_identity(&current, &command.identity)?;
+                let next_job =
+                    decide_observation_update(&current.job, &command.identity.fence, database_now)?;
+                let updated = update_job(
+                    &mut transaction,
+                    &current.record,
+                    &next_job,
+                    &payload,
+                    database_now,
+                    current.record.result_digest.as_deref(),
+                    current.record.quota_reservation_id.as_deref(),
+                )
+                .await?;
+                append_job_event(
+                    &mut transaction,
+                    &updated,
+                    "sandbox.candidate_create.authorized",
+                    serde_json::json!({
+                        "job_id": updated.job_id,
+                        "physical_attempt": request.physical_attempt,
+                        "create_ordinal": command.create_ordinal,
+                    }),
+                )
+                .await?;
+                let authorization = CandidateCreateAuthorizationV1 {
+                    decision: decision_from(updated, payload)?,
+                    create_ordinal: command.create_ordinal,
+                };
+                authorization.validate()?;
+                transaction.commit().await?;
+                PhysicalDecision::Applied(authorization)
+            }
+        };
+        match &decision {
+            PhysicalDecision::Applied(authorization)
+            | PhysicalDecision::Replayed(authorization) => authorization.validate()?,
+        }
+        Ok(decision)
     }
 
     async fn select_candidate(
@@ -845,6 +921,11 @@ impl SandboxJobRepository for PgRepository {
         candidate
             .metadata
             .validate_for_plan(&current.payload.plan, &physical.provisioning_token)?;
+        if candidate.metadata.create_ordinal > physical.create_authorization_count {
+            return Err(RepositoryError::InvalidInput(
+                "OpenSandbox candidate create ordinal was not authorized".to_owned(),
+            ));
+        }
         let disposition = if physical.phase == SandboxPhysicalPhaseV1::Provisioning {
             SandboxOrphanDispositionV1::RetainProvisioning
         } else if physical.selected_sandbox_id.as_ref() == Some(&candidate.sandbox_id) {

@@ -10,13 +10,15 @@ use futures::StreamExt as _;
 use insight_platform_contracts::{
     canonical_json, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
 };
+#[cfg(test)]
+use insight_platform_sandbox::opensandbox::SandboxProvisioningLimitsV1;
 use insight_platform_sandbox::opensandbox::{
     BoundedCandidatePageV1, CandidateCursorV1, OpenSandboxCreateV1, OpenSandboxId,
     OpenSandboxObservationV1, OpenSandboxProvider, SandboxActivationFrameV1,
     SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxNetworkMode, SandboxProviderError,
     SandboxRunnerPhaseV1, SandboxRunnerStateFrameV1, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS,
-    MAX_SANDBOX_INPUT_BYTES, SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_RUNNER_CONFIG_DIGEST_ENV,
-    SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PORT,
+    MAX_SANDBOX_INPUT_BYTES, MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    SANDBOX_RUNNER_CONFIG_DIGEST_ENV, SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PORT,
 };
 use reqwest::{header, Client, Method, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -28,6 +30,7 @@ const METADATA_SCHEMA: &str = "platform.insight.dev/schema";
 const METADATA_TENANT: &str = "platform.insight.dev/tenant";
 const METADATA_JOB: &str = "platform.insight.dev/job";
 const METADATA_ATTEMPT: &str = "platform.insight.dev/attempt";
+const METADATA_CREATE_ORDINAL: &str = "platform.insight.dev/create";
 const METADATA_PROVISIONING: &str = "platform.insight.dev/provision";
 const METADATA_REQUEST: &str = "platform.insight.dev/request";
 const METADATA_RUNTIME: &str = "platform.insight.dev/runtime";
@@ -72,6 +75,7 @@ pub struct OpenSandboxHttpClientConfig {
     pub request_timeout_milliseconds: u32,
     pub connect_timeout_milliseconds: u32,
     pub candidate_page_items: u8,
+    pub orphan_page_items: u16,
 }
 
 impl OpenSandboxHttpClientConfig {
@@ -88,6 +92,7 @@ impl OpenSandboxHttpClientConfig {
             || !(100..=10_000).contains(&self.connect_timeout_milliseconds)
             || self.connect_timeout_milliseconds > self.request_timeout_milliseconds
             || !(1..=MAX_SANDBOX_CANDIDATE_PAGE_ITEMS).contains(&self.candidate_page_items)
+            || !(1..=MAX_SANDBOX_ORPHAN_PAGE_ITEMS).contains(&self.orphan_page_items)
         {
             return Err(OpenSandboxClientConfigError::InvalidConfiguration);
         }
@@ -250,6 +255,62 @@ impl OpenSandboxHttpClient {
         .seal()
         .map_err(|_| SandboxProviderError::InvalidResponse)
     }
+
+    async fn list_candidate_page(
+        &self,
+        cursor: CandidateCursorV1,
+        metadata_filter: String,
+        expected_token_digest: Option<&Sha256Digest>,
+        page_items: u16,
+    ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+        if cursor.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION {
+            return Err(SandboxProviderError::InvalidResponse);
+        }
+        let page = decode_cursor(&cursor)?;
+        let mut url = self.lifecycle_url("sandboxes")?;
+        url.query_pairs_mut()
+            .append_pair("metadata", &metadata_filter)
+            .append_pair("page", &page.to_string())
+            .append_pair("pageSize", &page_items.to_string());
+        let response: VendorListResponse = self
+            .json_exchange(
+                self.request(Method::GET, url),
+                StatusCode::OK,
+                MAX_LIFECYCLE_RESPONSE_BYTES,
+            )
+            .await?;
+        response
+            .pagination
+            .validate(page, page_items, response.items.len())?;
+        let mut items = Vec::with_capacity(response.items.len());
+        for sandbox in response.items {
+            let metadata = decode_metadata(&sandbox.metadata)?;
+            if expected_token_digest
+                .is_some_and(|expected| &metadata.provisioning_token_digest != expected)
+            {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+            items.push(SandboxCandidateV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                sandbox_id: OpenSandboxId::parse(sandbox.id)
+                    .map_err(|_| SandboxProviderError::InvalidResponse)?,
+                metadata,
+                observed_at: Utc::now(),
+            });
+        }
+        let next = response
+            .pagination
+            .has_next_page
+            .then(|| CandidateCursorV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                opaque: Some((page + 1).to_string()),
+            });
+        Ok(BoundedCandidatePageV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            items,
+            next,
+        })
+    }
 }
 
 #[async_trait]
@@ -321,54 +382,27 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
         token_digest: Sha256Digest,
         cursor: CandidateCursorV1,
     ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
-        if cursor.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION {
-            return Err(SandboxProviderError::InvalidResponse);
-        }
-        let page = decode_cursor(&cursor)?;
         let metadata_filter = format!("{METADATA_PROVISIONING}={}", encode_digest(&token_digest)?);
-        let mut url = self.lifecycle_url("sandboxes")?;
-        url.query_pairs_mut()
-            .append_pair("metadata", &metadata_filter)
-            .append_pair("page", &page.to_string())
-            .append_pair("pageSize", &self.config.candidate_page_items.to_string());
-        let response: VendorListResponse = self
-            .json_exchange(
-                self.request(Method::GET, url),
-                StatusCode::OK,
-                MAX_LIFECYCLE_RESPONSE_BYTES,
-            )
-            .await?;
-        response.pagination.validate(
-            page,
-            self.config.candidate_page_items,
-            response.items.len(),
-        )?;
-        let mut items = Vec::with_capacity(response.items.len());
-        for sandbox in response.items {
-            let metadata = decode_metadata(&sandbox.metadata)?;
-            if metadata.provisioning_token_digest != token_digest {
-                return Err(SandboxProviderError::InvalidResponse);
-            }
-            items.push(SandboxCandidateV1 {
-                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-                sandbox_id: OpenSandboxId::parse(sandbox.id)
-                    .map_err(|_| SandboxProviderError::InvalidResponse)?,
-                metadata,
-                observed_at: Utc::now(),
-            });
-        }
-        let next = response
-            .pagination
-            .has_next_page
-            .then(|| CandidateCursorV1 {
-                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-                opaque: Some((page + 1).to_string()),
-            });
-        Ok(BoundedCandidatePageV1 {
-            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-            items,
-            next,
-        })
+        self.list_candidate_page(
+            cursor,
+            metadata_filter,
+            Some(&token_digest),
+            u16::from(self.config.candidate_page_items),
+        )
+        .await
+    }
+
+    async fn list_operator_candidates(
+        &self,
+        cursor: CandidateCursorV1,
+    ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+        self.list_candidate_page(
+            cursor,
+            format!("{METADATA_SCHEMA}={METADATA_SCHEMA_VALUE}"),
+            None,
+            self.config.orphan_page_items,
+        )
+        .await
     }
 
     async fn observe(
@@ -561,6 +595,10 @@ fn encode_metadata(
             metadata.physical_attempt.to_string(),
         ),
         (
+            METADATA_CREATE_ORDINAL.to_owned(),
+            metadata.create_ordinal.to_string(),
+        ),
+        (
             METADATA_PROVISIONING.to_owned(),
             encode_digest(&metadata.provisioning_token_digest)?,
         ),
@@ -590,7 +628,7 @@ fn encode_metadata(
 fn decode_metadata(
     metadata: &BTreeMap<String, String>,
 ) -> Result<SandboxCandidateMetadataV1, SandboxProviderError> {
-    if metadata.len() != 9
+    if metadata.len() != 10
         || metadata.get(METADATA_SCHEMA).map(String::as_str) != Some(METADATA_SCHEMA_VALUE)
     {
         return Err(SandboxProviderError::InvalidResponse);
@@ -616,6 +654,9 @@ fn decode_metadata(
             .map_err(|_| SandboxProviderError::InvalidResponse)?,
         physical_attempt: get(METADATA_ATTEMPT)?
             .parse::<u32>()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?,
+        create_ordinal: get(METADATA_CREATE_ORDINAL)?
+            .parse::<u8>()
             .map_err(|_| SandboxProviderError::InvalidResponse)?,
         provisioning_token_digest: decode_digest(get(METADATA_PROVISIONING)?)?,
         execution_request_digest: decode_digest(get(METADATA_REQUEST)?)?,
@@ -759,7 +800,7 @@ struct VendorListResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VendorPagination {
     page: u32,
-    page_size: u8,
+    page_size: u16,
     total_items: u64,
     total_pages: u32,
     has_next_page: bool,
@@ -769,7 +810,7 @@ impl VendorPagination {
     fn validate(
         &self,
         expected_page: u32,
-        expected_page_size: u8,
+        expected_page_size: u16,
         actual_items: usize,
     ) -> Result<(), SandboxProviderError> {
         let pages_consistent = if self.total_items == 0 {
@@ -1104,6 +1145,18 @@ mod tests {
         }
     }
 
+    fn provisioning_limits() -> SandboxProvisioningLimitsV1 {
+        SandboxProvisioningLimitsV1 {
+            maximum_candidates: 2,
+            candidate_page_items: 4,
+            candidate_quiescence_milliseconds: 500,
+            provisioning_timeout_milliseconds: 10_000,
+            orphan_page_items: 20,
+            runner_header_bytes: 8_192,
+            diagnostic_bytes: 8_192,
+        }
+    }
+
     fn execution_request() -> SandboxExecutionRequestV1 {
         SandboxExecutionRequestV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
@@ -1130,6 +1183,7 @@ mod tests {
             output_schema_digest: digest('c'),
             network_mode: SandboxNetworkMode::Direct,
             limits: limits(),
+            provisioning_limits: provisioning_limits(),
             deadline_at: Utc.timestamp_opt(2_000_000_000, 0).unwrap(),
             trace: insight_platform_contracts::TraceIdentityV1::generate(),
             request_digest: zero_digest(),
@@ -1143,6 +1197,7 @@ mod tests {
         let evidence = SandboxPhysicalEvidenceV1::begin(
             &request,
             OpaqueActivationToken::parse("1".repeat(64)).unwrap(),
+            Utc.timestamp_opt(1_999_999_000, 0).unwrap(),
         )
         .unwrap();
         let metadata = SandboxCandidateMetadataV1 {
@@ -1150,6 +1205,7 @@ mod tests {
             tenant_id: request.tenant_id.clone(),
             job_id: request.job_id.clone(),
             physical_attempt: request.physical_attempt,
+            create_ordinal: 1,
             provisioning_token_digest: SandboxProvisioningTokenV1::from_request(&request)
                 .digest()
                 .unwrap(),
@@ -1234,6 +1290,7 @@ mod tests {
             request_timeout_milliseconds: 5_000,
             connect_timeout_milliseconds: 1_000,
             candidate_page_items: 4,
+            orphan_page_items: 4,
         })
         .unwrap();
         (client, state)
@@ -1259,6 +1316,16 @@ mod tests {
             .unwrap();
         assert_eq!(page.items.len(), 1);
         assert!(page.next.is_none());
+        let operator_page = client
+            .list_operator_candidates(CandidateCursorV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                opaque: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(operator_page.items.len(), 1);
+        assert_eq!(operator_page.items[0].sandbox_id, page.items[0].sandbox_id);
+        assert_eq!(operator_page.items[0].metadata, page.items[0].metadata);
 
         let records = state.records.lock().await;
         let create_record = records
@@ -1279,11 +1346,26 @@ mod tests {
             .all(|value| value.as_str().unwrap().len() <= 63));
         let list_record = records
             .iter()
-            .find(|record| record.method == Method::GET && record.path == "/v1/sandboxes")
+            .find(|record| {
+                record.method == Method::GET
+                    && record.path == "/v1/sandboxes"
+                    && record
+                        .query
+                        .as_deref()
+                        .is_some_and(|query| query.contains("provision"))
+            })
             .unwrap();
         let query = list_record.query.as_deref().unwrap();
         assert!(query.contains("page=1"));
         assert!(query.contains("pageSize=4"));
+        assert!(records.iter().any(|record| {
+            record.method == Method::GET
+                && record.path == "/v1/sandboxes"
+                && record
+                    .query
+                    .as_deref()
+                    .is_some_and(|query| query.contains("schema"))
+        }));
     }
 
     #[tokio::test]
@@ -1369,6 +1451,7 @@ mod tests {
             request_timeout_milliseconds: 5_000,
             connect_timeout_milliseconds: 1_000,
             candidate_page_items: 4,
+            orphan_page_items: 4,
         })
         .unwrap();
         assert_eq!(
@@ -1378,6 +1461,9 @@ mod tests {
         assert!(OpenSandboxApiKey::parse("short").is_err());
         let mut invalid = client.config.clone();
         invalid.lifecycle_base_url = Url::parse("https://public.example/v1/").unwrap();
+        assert!(OpenSandboxHttpClient::new(invalid).is_err());
+        let mut invalid = client.config.clone();
+        invalid.orphan_page_items = 0;
         assert!(OpenSandboxHttpClient::new(invalid).is_err());
         assert!(decode_cursor(&CandidateCursorV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
