@@ -110,11 +110,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           livenessProbe:
-            httpGet: {path: /healthz, port: observability}
+            httpGet: {path: /livez, port: observability}
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
           readinessProbe:
             httpGet: {path: /readyz, port: observability}
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.dispatcher.resources | nindent 12 }}
           volumeMounts:

@@ -170,6 +170,9 @@ dispatcher = find.call("Deployment", "sandbox-dispatcher", control)
 server = find.call("Deployment", "opensandbox-server", control)
 controller = find.call("Deployment", "opensandbox-controller", control)
 failures << "Dispatcher command drifted" unless dispatcher&.dig("spec", "template", "spec", "containers", 0, "command") == ["/usr/local/bin/platform-sandbox-dispatcher"]
+dispatcher_container = dispatcher&.dig("spec", "template", "spec", "containers", 0)
+failures << "Dispatcher liveness endpoint drifted" unless dispatcher_container&.dig("livenessProbe", "httpGet", "path") == "/livez"
+failures << "Dispatcher readiness endpoint drifted" unless dispatcher_container&.dig("readinessProbe", "httpGet", "path") == "/readyz"
 server_image = "#{values.dig('images', 'server', 'repository')}@#{values.dig('images', 'server', 'digest')}"
 controller_image = "#{values.dig('images', 'controller', 'repository')}@#{values.dig('images', 'controller', 'digest')}"
 failures << "Server image drifted from official digest" unless server&.dig("spec", "template", "spec", "containers", 0, "image") == server_image
