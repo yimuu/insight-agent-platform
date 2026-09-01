@@ -184,7 +184,9 @@ pub struct SandboxExecutionRequestV1 {
     pub package_version_id: ResourceId,
     pub image_uri: String,
     pub runtime_version_id: ResourceId,
+    pub runtime_contract_digest: Sha256Digest,
     pub sandbox_profile_deployment_id: ResourceId,
+    pub profile_deployment_digest: Sha256Digest,
     pub runner_argv: Vec<String>,
     pub package_argv: Vec<String>,
     pub input_value_id: ResourceId,
@@ -266,7 +268,9 @@ pub struct SandboxExecutionPlanV1 {
     pub package_version_id: ResourceId,
     pub image_uri: String,
     pub runtime_version_id: ResourceId,
+    pub runtime_contract_digest: Sha256Digest,
     pub sandbox_profile_deployment_id: ResourceId,
+    pub profile_deployment_digest: Sha256Digest,
     pub runner_argv: Vec<String>,
     pub package_argv: Vec<String>,
     pub input_value_id: ResourceId,
@@ -292,7 +296,9 @@ impl SandboxExecutionPlanV1 {
             package_version_id: request.package_version_id.clone(),
             image_uri: request.image_uri.clone(),
             runtime_version_id: request.runtime_version_id.clone(),
+            runtime_contract_digest: request.runtime_contract_digest.clone(),
             sandbox_profile_deployment_id: request.sandbox_profile_deployment_id.clone(),
+            profile_deployment_digest: request.profile_deployment_digest.clone(),
             runner_argv: request.runner_argv.clone(),
             package_argv: request.package_argv.clone(),
             input_value_id: request.input_value_id.clone(),
@@ -357,7 +363,9 @@ impl SandboxExecutionPlanV1 {
             package_version_id: self.package_version_id.clone(),
             image_uri: self.image_uri.clone(),
             runtime_version_id: self.runtime_version_id.clone(),
+            runtime_contract_digest: self.runtime_contract_digest.clone(),
             sandbox_profile_deployment_id: self.sandbox_profile_deployment_id.clone(),
+            profile_deployment_digest: self.profile_deployment_digest.clone(),
             runner_argv: self.runner_argv.clone(),
             package_argv: self.package_argv.clone(),
             input_value_id: self.input_value_id.clone(),
@@ -464,6 +472,8 @@ impl SandboxCandidateMetadataV1 {
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || self.provisioning_token_digest != token.digest()?
             || self.execution_request_digest != request.request_digest
+            || self.runtime_contract_digest != request.runtime_contract_digest
+            || self.profile_deployment_digest != request.profile_deployment_digest
             || self.network_mode != request.network_mode
         {
             return Err(SandboxContractError::InvalidCandidate);
@@ -1559,6 +1569,23 @@ impl SandboxDispatcherJobPayloadV1 {
         next.seal()
     }
 
+    pub fn terminal_replays(
+        &self,
+        request: &SandboxExecutionRequestV1,
+        outcome: &SandboxTerminalOutcomeV1,
+    ) -> Result<bool, SandboxContractError> {
+        self.plan.validate_request(request)?;
+        let physical = self
+            .physical
+            .as_deref()
+            .ok_or(SandboxContractError::InvalidTerminal)?;
+        let expected = SandboxTerminalSummaryV1::from_outcome(outcome, request, physical)?;
+        Ok(self
+            .terminal
+            .as_deref()
+            .is_some_and(|terminal| terminal.summary == expected))
+    }
+
     pub fn claim_cleanup(
         &self,
         job: &JobProjection,
@@ -1824,16 +1851,23 @@ impl ClaimedSandboxCleanupV1 {
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         self.payload.validate_for(&self.job)?;
         self.fence.validate()?;
-        if self.job.version != self.fence.expected_job_version
+        let common_invalid = self.job.version != self.fence.expected_job_version
             || self.job.tenant_id != self.fence.tenant_id
             || self.job.job_id != self.fence.job_id
-            || self.job.lease.is_some()
-            || !self.payload.cleanup.required
-            || self.payload.cleanup.generation != self.fence.cleanup_generation
-            || self.payload.cleanup.owner_process_generation_id.as_ref()
-                != Some(&self.fence.process_generation_id)
-            || self.payload.cleanup.expires_at != Some(self.fence.expires_at)
-        {
+            || self.job.lease.is_some();
+        let active_invalid = self.payload.cleanup.required
+            && (self.payload.cleanup.generation != self.fence.cleanup_generation
+                || self.payload.cleanup.owner_process_generation_id.as_ref()
+                    != Some(&self.fence.process_generation_id)
+                || self.payload.cleanup.expires_at != Some(self.fence.expires_at));
+        let complete_invalid = !self.payload.cleanup.required
+            && (self.payload.cleanup.generation != self.fence.cleanup_generation
+                || self.payload.cleanup.owner_process_generation_id.is_some()
+                || self.payload.cleanup.expires_at.is_some()
+                || self.payload.physical.as_deref().is_none_or(|physical| {
+                    physical.phase != SandboxPhysicalPhaseV1::Absent || physical.cleanup_required
+                }));
+        if common_invalid || active_invalid || complete_invalid {
             return Err(SandboxContractError::InvalidCleanup);
         }
         Ok(())
@@ -1860,7 +1894,11 @@ impl SandboxRepositoryDecisionV1 {
             {
                 Ok(())
             }
-            (None, None) if self.payload.terminal.is_some() => Ok(()),
+            (None, None)
+                if self.payload.terminal.is_some() || self.job.state == JobState::Ready =>
+            {
+                Ok(())
+            }
             _ => Err(SandboxContractError::InvalidJob),
         }
     }
@@ -2702,7 +2740,9 @@ mod tests {
             package_version_id: id(ResourceKind::SandboxPackageRevision, 4),
             image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
             runtime_version_id: id(ResourceKind::SandboxRuntimeRevision, 5),
+            runtime_contract_digest: digest('d'),
             sandbox_profile_deployment_id: id(ResourceKind::SandboxProfileDeployment, 6),
+            profile_deployment_digest: digest('e'),
             runner_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
             package_argv: vec!["/opt/insight/package".to_owned()],
             input_value_id: id(ResourceKind::RunValue, 8),
@@ -2731,8 +2771,8 @@ mod tests {
                 schema_version: 1,
                 provisioning_token_digest: token.digest().unwrap(),
                 execution_request_digest: request.request_digest.clone(),
-                runtime_contract_digest: digest('d'),
-                profile_deployment_digest: digest('e'),
+                runtime_contract_digest: request.runtime_contract_digest.clone(),
+                profile_deployment_digest: request.profile_deployment_digest.clone(),
                 network_mode: request.network_mode,
             },
             observed_at: request.deadline_at - Duration::seconds(1),
@@ -2815,6 +2855,18 @@ mod tests {
         let first = candidate(&request, "sandbox-one");
         let second = candidate(&request, "sandbox-two");
         let third = candidate(&request, "sandbox-three");
+        let mut wrong_runtime = first.clone();
+        wrong_runtime.metadata.runtime_contract_digest = digest('f');
+        assert_eq!(
+            evidence.observe_candidate(&request, &wrong_runtime, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
+        let mut wrong_profile = first.clone();
+        wrong_profile.metadata.profile_deployment_digest = digest('9');
+        assert_eq!(
+            evidence.observe_candidate(&request, &wrong_profile, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
         let evidence = evidence
             .observe_candidate(&request, &first, &provisioning_limits())
             .unwrap()

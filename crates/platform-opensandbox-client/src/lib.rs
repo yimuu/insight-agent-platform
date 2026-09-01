@@ -1092,7 +1092,9 @@ mod tests {
             package_version_id: id(ResourceKind::SandboxPackageRevision, 4),
             image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
             runtime_version_id: id(ResourceKind::SandboxRuntimeRevision, 5),
+            runtime_contract_digest: digest('d'),
             sandbox_profile_deployment_id: id(ResourceKind::SandboxProfileDeployment, 6),
+            profile_deployment_digest: digest('e'),
             runner_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
             package_argv: vec!["/opt/insight/package".to_owned()],
             input_value_id: id(ResourceKind::RunValue, 8),
@@ -1125,8 +1127,8 @@ mod tests {
                 .digest()
                 .unwrap(),
             execution_request_digest: request.request_digest.clone(),
-            runtime_contract_digest: digest('d'),
-            profile_deployment_digest: digest('e'),
+            runtime_contract_digest: request.runtime_contract_digest.clone(),
+            profile_deployment_digest: request.profile_deployment_digest.clone(),
             network_mode: request.network_mode,
         };
         let runner_config = SandboxRunnerConfigV1::from_request(
