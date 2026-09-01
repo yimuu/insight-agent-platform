@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
-use insight_platform_contracts::{canonical_json, parse_strict_json, JsonLimits, Sha256Digest};
+use insight_platform_contracts::{
+    canonical_json, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
+};
 use insight_platform_sandbox::opensandbox::{
     BoundedCandidatePageV1, CandidateCursorV1, OpenSandboxCreateV1, OpenSandboxId,
     OpenSandboxObservationV1, OpenSandboxProvider, SandboxActivationFrameV1,
@@ -23,6 +25,9 @@ use url::Url;
 
 const API_KEY_HEADER: &str = "OPEN-SANDBOX-API-KEY";
 const METADATA_SCHEMA: &str = "platform.insight.dev/schema";
+const METADATA_TENANT: &str = "platform.insight.dev/tenant";
+const METADATA_JOB: &str = "platform.insight.dev/job";
+const METADATA_ATTEMPT: &str = "platform.insight.dev/attempt";
 const METADATA_PROVISIONING: &str = "platform.insight.dev/provision";
 const METADATA_REQUEST: &str = "platform.insight.dev/request";
 const METADATA_RUNTIME: &str = "platform.insight.dev/runtime";
@@ -544,11 +549,17 @@ fn parse_json<T: DeserializeOwned>(
 fn encode_metadata(
     metadata: &SandboxCandidateMetadataV1,
 ) -> Result<BTreeMap<String, String>, SandboxProviderError> {
-    if metadata.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION {
-        return Err(SandboxProviderError::InvalidResponse);
-    }
+    metadata
+        .validate_shape()
+        .map_err(|_| SandboxProviderError::InvalidResponse)?;
     Ok(BTreeMap::from([
         (METADATA_SCHEMA.to_owned(), METADATA_SCHEMA_VALUE.to_owned()),
+        (METADATA_TENANT.to_owned(), metadata.tenant_id.to_string()),
+        (METADATA_JOB.to_owned(), metadata.job_id.to_string()),
+        (
+            METADATA_ATTEMPT.to_owned(),
+            metadata.physical_attempt.to_string(),
+        ),
         (
             METADATA_PROVISIONING.to_owned(),
             encode_digest(&metadata.provisioning_token_digest)?,
@@ -579,7 +590,7 @@ fn encode_metadata(
 fn decode_metadata(
     metadata: &BTreeMap<String, String>,
 ) -> Result<SandboxCandidateMetadataV1, SandboxProviderError> {
-    if metadata.len() != 6
+    if metadata.len() != 9
         || metadata.get(METADATA_SCHEMA).map(String::as_str) != Some(METADATA_SCHEMA_VALUE)
     {
         return Err(SandboxProviderError::InvalidResponse);
@@ -595,14 +606,27 @@ fn decode_metadata(
         "direct" => SandboxNetworkMode::Direct,
         _ => return Err(SandboxProviderError::InvalidResponse),
     };
-    Ok(SandboxCandidateMetadataV1 {
+    let decoded = SandboxCandidateMetadataV1 {
         schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        tenant_id: get(METADATA_TENANT)?
+            .parse::<ResourceId>()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?,
+        job_id: get(METADATA_JOB)?
+            .parse::<ResourceId>()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?,
+        physical_attempt: get(METADATA_ATTEMPT)?
+            .parse::<u32>()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?,
         provisioning_token_digest: decode_digest(get(METADATA_PROVISIONING)?)?,
         execution_request_digest: decode_digest(get(METADATA_REQUEST)?)?,
         runtime_contract_digest: decode_digest(get(METADATA_RUNTIME)?)?,
         profile_deployment_digest: decode_digest(get(METADATA_PROFILE)?)?,
         network_mode,
-    })
+    };
+    decoded
+        .validate_shape()
+        .map_err(|_| SandboxProviderError::InvalidResponse)?;
+    Ok(decoded)
 }
 
 fn encode_digest(digest: &Sha256Digest) -> Result<String, SandboxProviderError> {
@@ -1123,6 +1147,9 @@ mod tests {
         .unwrap();
         let metadata = SandboxCandidateMetadataV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            tenant_id: request.tenant_id.clone(),
+            job_id: request.job_id.clone(),
+            physical_attempt: request.physical_attempt,
             provisioning_token_digest: SandboxProvisioningTokenV1::from_request(&request)
                 .digest()
                 .unwrap(),

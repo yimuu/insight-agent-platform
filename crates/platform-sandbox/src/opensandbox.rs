@@ -456,6 +456,9 @@ impl SandboxProvisioningTokenV1 {
 #[serde(deny_unknown_fields)]
 pub struct SandboxCandidateMetadataV1 {
     pub schema_version: u16,
+    pub tenant_id: ResourceId,
+    pub job_id: ResourceId,
+    pub physical_attempt: u32,
     pub provisioning_token_digest: Sha256Digest,
     pub execution_request_digest: Sha256Digest,
     pub runtime_contract_digest: Sha256Digest,
@@ -464,17 +467,51 @@ pub struct SandboxCandidateMetadataV1 {
 }
 
 impl SandboxCandidateMetadataV1 {
+    pub fn validate_shape(&self) -> Result<(), SandboxContractError> {
+        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+            || self.tenant_id.kind() != ResourceKind::Tenant
+            || self.job_id.kind() != ResourceKind::Job
+            || self.physical_attempt == 0
+        {
+            return Err(SandboxContractError::InvalidCandidate);
+        }
+        Ok(())
+    }
+
     pub fn validate_for(
         &self,
         request: &SandboxExecutionRequestV1,
         token: &SandboxProvisioningTokenV1,
     ) -> Result<(), SandboxContractError> {
-        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+        self.validate_shape()?;
+        if self.tenant_id != request.tenant_id
+            || self.job_id != request.job_id
+            || self.physical_attempt != request.physical_attempt
             || self.provisioning_token_digest != token.digest()?
             || self.execution_request_digest != request.request_digest
             || self.runtime_contract_digest != request.runtime_contract_digest
             || self.profile_deployment_digest != request.profile_deployment_digest
             || self.network_mode != request.network_mode
+        {
+            return Err(SandboxContractError::InvalidCandidate);
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_plan(
+        &self,
+        plan: &SandboxExecutionPlanV1,
+        token: &SandboxProvisioningTokenV1,
+    ) -> Result<(), SandboxContractError> {
+        self.validate_shape()?;
+        if self.tenant_id != plan.tenant_id
+            || self.job_id != plan.job_id
+            || self.physical_attempt != token.physical_attempt
+            || self.provisioning_token_digest != token.digest()?
+            || self.execution_request_digest != plan.request_digest
+            || self.runtime_contract_digest != plan.runtime_contract_digest
+            || self.profile_deployment_digest != plan.profile_deployment_digest
+            || self.network_mode != plan.network_mode
         {
             return Err(SandboxContractError::InvalidCandidate);
         }
@@ -648,6 +685,16 @@ pub struct SandboxCandidateV1 {
     pub sandbox_id: OpenSandboxId,
     pub metadata: SandboxCandidateMetadataV1,
     pub observed_at: DateTime<Utc>,
+}
+
+impl SandboxCandidateV1 {
+    pub fn validate_shape(&self) -> Result<(), SandboxContractError> {
+        self.metadata.validate_shape()?;
+        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION {
+            return Err(SandboxContractError::InvalidCandidate);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1970,6 +2017,60 @@ pub struct HeartbeatSandboxJobV1 {
     pub lease_milliseconds: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxOrphanDispositionV1 {
+    RetainProvisioning,
+    RetainSelected,
+    DeleteUnselected,
+    DeleteLateCandidate,
+    DeleteStaleAttempt,
+    DeleteMissingOwner,
+}
+
+impl SandboxOrphanDispositionV1 {
+    pub fn may_delete(self) -> bool {
+        matches!(
+            self,
+            Self::DeleteUnselected
+                | Self::DeleteLateCandidate
+                | Self::DeleteStaleAttempt
+                | Self::DeleteMissingOwner
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxOrphanDecisionV1 {
+    pub schema_version: u16,
+    pub candidate: SandboxCandidateV1,
+    pub disposition: SandboxOrphanDispositionV1,
+}
+
+impl SandboxOrphanDecisionV1 {
+    pub fn new(
+        candidate: SandboxCandidateV1,
+        disposition: SandboxOrphanDispositionV1,
+    ) -> Result<Self, SandboxContractError> {
+        let decision = Self {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            candidate,
+            disposition,
+        };
+        decision.validate()?;
+        Ok(decision)
+    }
+
+    pub fn validate(&self) -> Result<(), SandboxContractError> {
+        self.candidate.validate_shape()?;
+        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION {
+            return Err(SandboxContractError::InvalidCandidate);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRecoveryDecisionV1 {
     ProvisionOrDiscover,
@@ -2056,6 +2157,11 @@ pub trait SandboxJobRepository: Send + Sync {
         &self,
         command: RecordSandboxCleanupObservationV1,
     ) -> Result<ClaimedSandboxCleanupV1, Self::Error>;
+
+    async fn decide_orphan(
+        &self,
+        candidate: SandboxCandidateV1,
+    ) -> Result<SandboxOrphanDecisionV1, Self::Error>;
 
     async fn recover(
         &self,
@@ -2415,6 +2521,7 @@ impl OpenSandboxCreateV1 {
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         self.runner_config.validate()?;
         self.resource_limits.validate()?;
+        self.metadata.validate_shape()?;
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || !valid_oci_digest_uri(&self.image_uri)
             || !valid_absolute_argv(&self.entrypoint)
@@ -2769,6 +2876,9 @@ mod tests {
             sandbox_id: OpenSandboxId::parse(sandbox_id).unwrap(),
             metadata: SandboxCandidateMetadataV1 {
                 schema_version: 1,
+                tenant_id: request.tenant_id.clone(),
+                job_id: request.job_id.clone(),
+                physical_attempt: request.physical_attempt,
                 provisioning_token_digest: token.digest().unwrap(),
                 execution_request_digest: request.request_digest.clone(),
                 runtime_contract_digest: request.runtime_contract_digest.clone(),
@@ -2867,6 +2977,36 @@ mod tests {
             evidence.observe_candidate(&request, &wrong_profile, &provisioning_limits()),
             Err(SandboxContractError::InvalidCandidate)
         );
+        let mut wrong_tenant = first.clone();
+        wrong_tenant.metadata.tenant_id = id(ResourceKind::Tenant, 81);
+        assert_eq!(
+            evidence.observe_candidate(&request, &wrong_tenant, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
+        let mut wrong_job = first.clone();
+        wrong_job.metadata.job_id = id(ResourceKind::Job, 82);
+        assert_eq!(
+            evidence.observe_candidate(&request, &wrong_job, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
+        let mut wrong_attempt = first.clone();
+        wrong_attempt.metadata.physical_attempt += 1;
+        assert_eq!(
+            evidence.observe_candidate(&request, &wrong_attempt, &provisioning_limits()),
+            Err(SandboxContractError::InvalidCandidate)
+        );
+        let retained = SandboxOrphanDecisionV1::new(
+            first.clone(),
+            SandboxOrphanDispositionV1::RetainProvisioning,
+        )
+        .unwrap();
+        assert!(!retained.disposition.may_delete());
+        let deleted = SandboxOrphanDecisionV1::new(
+            second.clone(),
+            SandboxOrphanDispositionV1::DeleteLateCandidate,
+        )
+        .unwrap();
+        assert!(deleted.disposition.may_delete());
         let evidence = evidence
             .observe_candidate(&request, &first, &provisioning_limits())
             .unwrap()

@@ -31,11 +31,12 @@ use insight_platform_jobs::{
 use insight_platform_sandbox::opensandbox::{
     AuthorizeSandboxActivationV1, ClaimedSandboxCleanupV1, CommitSandboxTerminalV1,
     HeartbeatSandboxJobV1, LeasedSandboxJobV1, PhysicalDecision, RecordProvisioningIntentV1,
-    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxClaimV1,
-    SandboxCleanupClaimV1, SandboxCleanupObservationV1,
+    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxCandidateV1,
+    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
     SandboxContractError as OpenSandboxContractError, SandboxDispatcherJobPayloadV1,
     SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
-    SandboxJobRepository, SandboxRepositoryDecisionV1, SandboxRunnerOutcomeV1,
+    SandboxJobRepository, SandboxOrphanDecisionV1, SandboxOrphanDispositionV1,
+    SandboxPhysicalPhaseV1, SandboxRepositoryDecisionV1, SandboxRunnerOutcomeV1,
     SandboxTerminalOutcomeV1, SelectSandboxCandidateV1, MAX_SANDBOX_JOB_PAYLOAD_BYTES,
 };
 use serde_json::Value;
@@ -802,6 +803,56 @@ impl SandboxJobRepository for PgRepository {
         result.validate()?;
         transaction.commit().await?;
         Ok(result)
+    }
+
+    async fn decide_orphan(
+        &self,
+        candidate: SandboxCandidateV1,
+    ) -> Result<SandboxOrphanDecisionV1, Self::Error> {
+        candidate.validate_shape()?;
+        let mut transaction = self.pool().begin().await?;
+        let row =
+            sqlx::query("SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
+                .bind(candidate.metadata.tenant_id.to_string())
+                .bind(candidate.metadata.job_id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(SandboxOrphanDecisionV1::new(
+                candidate,
+                SandboxOrphanDispositionV1::DeleteMissingOwner,
+            )?);
+        };
+        let current = locked_from_row(row)?;
+        let Some(physical) = current.payload.physical.as_deref() else {
+            transaction.commit().await?;
+            return Ok(SandboxOrphanDecisionV1::new(
+                candidate,
+                SandboxOrphanDispositionV1::DeleteStaleAttempt,
+            )?);
+        };
+        if candidate.metadata.physical_attempt != physical.provisioning_token.physical_attempt {
+            transaction.commit().await?;
+            return Ok(SandboxOrphanDecisionV1::new(
+                candidate,
+                SandboxOrphanDispositionV1::DeleteStaleAttempt,
+            )?);
+        }
+        candidate
+            .metadata
+            .validate_for_plan(&current.payload.plan, &physical.provisioning_token)?;
+        let disposition = if physical.phase == SandboxPhysicalPhaseV1::Provisioning {
+            SandboxOrphanDispositionV1::RetainProvisioning
+        } else if physical.selected_sandbox_id.as_ref() == Some(&candidate.sandbox_id) {
+            SandboxOrphanDispositionV1::RetainSelected
+        } else if physical.candidate_ids.contains(&candidate.sandbox_id) {
+            SandboxOrphanDispositionV1::DeleteUnselected
+        } else {
+            SandboxOrphanDispositionV1::DeleteLateCandidate
+        };
+        transaction.commit().await?;
+        Ok(SandboxOrphanDecisionV1::new(candidate, disposition)?)
     }
 
     async fn recover(

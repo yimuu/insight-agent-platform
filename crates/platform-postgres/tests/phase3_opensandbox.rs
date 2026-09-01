@@ -26,9 +26,10 @@ use insight_platform_sandbox::opensandbox::{
     SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
     SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1, SandboxExecutionPlanV1,
     SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
-    SandboxJobRepository, SandboxNetworkMode, SandboxProvisioningLimitsV1,
-    SandboxProvisioningTokenV1, SandboxResourceLimitsV1, SandboxRunnerOutcomeV1,
-    SandboxRunnerResultFrameV1, SandboxTerminalOutcomeV1, SelectSandboxCandidateV1,
+    SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1,
+    SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1, SandboxResourceLimitsV1,
+    SandboxRunnerOutcomeV1, SandboxRunnerResultFrameV1, SandboxTerminalOutcomeV1,
+    SelectSandboxCandidateV1,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -102,6 +103,15 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     assert_eq!(replayed_start.job.version, started.job.version);
 
     let candidate = candidate(&leased.request, "candidate-one");
+    let retain_provisioning =
+        SandboxJobRepository::decide_orphan(&fixture.repository, candidate.clone())
+            .await
+            .unwrap();
+    assert_eq!(
+        retain_provisioning.disposition,
+        SandboxOrphanDispositionV1::RetainProvisioning
+    );
+    assert!(!retain_provisioning.disposition.may_delete());
     let mut wrong_runtime = candidate.clone();
     wrong_runtime.metadata.runtime_contract_digest = digest('f');
     assert!(matches!(
@@ -110,12 +120,16 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
             RecordSandboxObservationV1 {
                 identity: decision_identity(&started),
                 observation: SandboxDurableObservationV1::Candidate {
-                    candidate: wrong_runtime,
+                    candidate: wrong_runtime.clone(),
                     limits: provisioning_limits(),
                 },
             },
         )
         .await,
+        Err(RepositoryError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        SandboxJobRepository::decide_orphan(&fixture.repository, wrong_runtime).await,
         Err(RepositoryError::InvalidInput(_))
     ));
     let after_wrong = SandboxJobRepository::recover(
@@ -170,6 +184,52 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
             .unwrap(),
         PhysicalDecision::Replayed(_)
     ));
+
+    let retained_selected =
+        SandboxJobRepository::decide_orphan(&fixture.repository, candidate.clone())
+            .await
+            .unwrap();
+    assert_eq!(
+        retained_selected.disposition,
+        SandboxOrphanDispositionV1::RetainSelected
+    );
+    let mut late_candidate = candidate.clone();
+    late_candidate.sandbox_id = OpenSandboxId::parse("candidate-late").unwrap();
+    let delete_late = SandboxJobRepository::decide_orphan(&fixture.repository, late_candidate)
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_late.disposition,
+        SandboxOrphanDispositionV1::DeleteLateCandidate
+    );
+    assert!(delete_late.disposition.may_delete());
+    let mut stale_attempt = candidate.clone();
+    stale_attempt.metadata.physical_attempt += 1;
+    let delete_stale = SandboxJobRepository::decide_orphan(&fixture.repository, stale_attempt)
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_stale.disposition,
+        SandboxOrphanDispositionV1::DeleteStaleAttempt
+    );
+    let mut missing_owner = candidate.clone();
+    missing_owner.metadata.tenant_id = id(ResourceKind::Tenant);
+    missing_owner.metadata.job_id = id(ResourceKind::Job);
+    let delete_missing = SandboxJobRepository::decide_orphan(&fixture.repository, missing_owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_missing.disposition,
+        SandboxOrphanDispositionV1::DeleteMissingOwner
+    );
+    let after_orphan_decisions = SandboxJobRepository::recover(
+        &fixture.repository,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(after_orphan_decisions.job.version, selected.job.version);
 
     let boot_id = RunnerBootId::parse("boot-one").unwrap();
     let authorized = SandboxJobRepository::authorize_activation(
@@ -888,6 +948,9 @@ fn candidate(request: &SandboxExecutionRequestV1, sandbox_id: &str) -> SandboxCa
         sandbox_id: OpenSandboxId::parse(sandbox_id).unwrap(),
         metadata: SandboxCandidateMetadataV1 {
             schema_version: 1,
+            tenant_id: request.tenant_id.clone(),
+            job_id: request.job_id.clone(),
+            physical_attempt: request.physical_attempt,
             provisioning_token_digest: token.digest().unwrap(),
             execution_request_digest: request.request_digest.clone(),
             runtime_contract_digest: request.runtime_contract_digest.clone(),
