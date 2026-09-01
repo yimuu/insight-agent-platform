@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 7 |
+| 状态 | Accepted / CR-216 revision 8 |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
@@ -39,13 +39,17 @@ revision 7关闭Dispatcher create loop设计发现的response-loss P1：进程�
 provisioning start、authorization count与last authorization time；相同ordinal重放，下一ordinal受durable count/quiescence/total-time
 hard limit约束。provider I/O仍在事务外，OpenSandbox不改源码且不成为业务authority。
 
+revision 8关闭authorization replay P1：若旧version重放authorization后仍调用provider，同ordinal仍可产生无界调用。裁决是repository
+返回`Applied | Replayed`，只有`Applied`唯一caller恰好调用一次provider；`Replayed`不调用。授权后、调用前崩溃会burn ordinal，恢复只可
+在durable quiescence后申请下一ordinal。因此每个ordinal至多发起一次create，全部调用数由Profile count hard limit约束。
+
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
 | IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID 和 activation token 都是 physical evidence；public Operation 仍等于 JobId |
 | schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CreateAuthorization/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；CandidateMetadata以operator-only tenant/job/physical attempt/create ordinal支持point lookup与authorization校验，Plan/Request逐字节冻结Runtime contract/Profile Deployment digest并绑定其余metadata；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
-| idempotency | Platform保证command Receipt、PostgreSQL exact-ordinal create authorization/candidate-selection first-winner、runner activation replay-safe/最多一次Package start、Job terminal first-winner；不保证一个token历史上只有一个inert object，也不拥有workload外部副作用幂等 |
-| transactions | current fence先持久化provisioning intent/database-time start；每次provider create前CAS exact ordinal/count/last time，provider I/O在事务外；candidate selection与activation authorization分别CAS；`PotentiallyStarted`先于外部activate；terminal重验latest Job fence并原子写Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；之后cleanup只用独立generation fence CAS physical evidence |
+| idempotency | Platform保证command Receipt、PostgreSQL exact-ordinal create authorization/candidate-selection first-winner、每个Applied ordinal至多发起一次provider create、runner activation replay-safe/最多一次Package start、Job terminal first-winner；不保证一个token历史上只有一个inert object，也不拥有workload外部副作用幂等 |
+| transactions | current fence先持久化provisioning intent/database-time start；每次provider create前CAS exact ordinal/count/last time，仅`Applied` caller在事务外调用一次provider，`Replayed`不调用且crash可burn ordinal；candidate selection与activation authorization分别CAS；`PotentiallyStarted`先于外部activate；terminal重验latest Job fence并原子写Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；之后cleanup只用独立generation fence CAS physical evidence |
 | errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
 | permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；官方 execd init 只监督 fixed runner 且 Platform 不调用 general exec/file API；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
 | network/Secret | Profile 只允许 `Disabled | Direct` operator policy；默认 deny ingress，无 public exposure；Direct 拒绝 internal/metadata CIDR，Disabled 零 egress；Secret injection disabled |
@@ -830,7 +834,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 7 impact-reviewed | OpenSandbox Kubernetes-only provider、durable create authorization、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、atomic continuation reclaim、Job/cleanup fence、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
+| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 8 impact-reviewed | OpenSandbox Kubernetes-only provider、one-shot create authorization、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、atomic continuation reclaim、Job/cleanup fence、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
 | 12～13 | Accepted / CR-193（CR-216影响复核） | Context/MCP authority与remote-only协议不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08 | Accepted / CR-182（CR-216影响复核） | Subagent不创建persistent Sandbox session |
@@ -838,7 +842,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Superseded | 保留gVisor历史决策，不再作为实现输入 |
-| ADR-0007 | Accepted / CR-216 revision 7 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；durable create authorization、Runtime/Profile-bound candidate、point-read orphan decision、atomic continuation/terminal/cleanup fencing 与 Armed runner activation |
+| ADR-0007 | Accepted / CR-216 revision 8 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；one-shot create authorization、Runtime/Profile-bound candidate、point-read orphan decision、atomic continuation/terminal/cleanup fencing 与 Armed runner activation |
 | implementation-plan | In Progress / CR-216 | OpenSandbox合同实现与L1～L3 Pending；L4～L6仍Not run |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
@@ -1257,10 +1261,13 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     provisioning start、authorization count与last authorization time；同一lease/attempt的相同ordinal可重放，旧ordinal、跳号、limits漂移
     或stale lease零写入。下一ordinal必须满足durable count/quiescence/total-time hard limit，Dispatcher restart不能重置预算；candidate
     metadata ordinal未经授权时不得记录、选择或激活。
+42. Acceptance 49：create authorization response必须是closed `Applied | Replayed`；只有本次CAS为`Applied`的唯一caller可恰好调用
+    一次provider create，`Replayed`不得调用。authorization commit后、provider call前崩溃会burn该ordinal，恢复只能在durable
+    quiescence后授权下一ordinal；每个ordinal至多一次外部create调用，全部调用数不超过Profile maximum candidates。
 
 ## 16. 未决项
 
-CR-216 revision 7 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
+CR-216 revision 8 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
 product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
 [`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

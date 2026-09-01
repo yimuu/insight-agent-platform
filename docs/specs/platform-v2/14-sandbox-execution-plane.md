@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 7 |
+| 状态 | Accepted / CR-216 revision 8 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
@@ -32,6 +32,9 @@
 > revision 7关闭create response-loss P1：shared Job physical evidence持久化database-time provisioning start、create authorization count与
 > last authorization time；每次外部create前必须以current fence CAS授权exact ordinal。相同ordinal/旧version可重放，下一ordinal必须满足
 > quiescence/count/total-time hard limit。这样不修改OpenSandbox，也不会把list冒充幂等原语，同时使实际create调用次数restart-safe有界。
+>
+> revision 8关闭authorization replay P1：repository必须区分`Applied | Replayed`；只有本次CAS为`Applied`的唯一caller可恰好调用一次
+> provider create，`Replayed`绝不调用provider。授权后、create前崩溃会burn该ordinal；quiescence后只能授权下一ordinal，禁止复用或重发。
 
 ## 1. 决策摘要
 
@@ -179,7 +182,7 @@ trait SandboxJobRepository {
     async fn authorize_candidate_create(
         &self,
         command: AuthorizeCandidateCreateV1,
-    ) -> CandidateCreateAuthorizationV1;
+    ) -> PhysicalDecision<CandidateCreateAuthorizationV1>;
     async fn select_candidate(
         &self,
         command: SelectSandboxCandidate,
@@ -351,8 +354,9 @@ OpenSandbox create 不是原子唯一性 primitive。合同允许同 token 出�
 2. provisioning intent持久化数据库时间的start。每次外部create前先执行Kubernetes-backed bounded list；若仍需create，Dispatcher必须用
    current Job fence在PostgreSQL CAS授权exact next ordinal，同时持久化create count与last authorization database time，然后才在事务外
    调用provider；
-3. 同一lease identity对相同ordinal和旧expected version的重放返回既有authorization；更旧ordinal、跳号、不同lease/attempt/token或
-   profile limits漂移均为stable conflict且零写入；
+3. repository返回`Applied | Replayed`。只有收到`Applied`的唯一caller可恰好调用一次provider create；同一lease identity对相同ordinal和
+   旧expected version只返回`Replayed`且绝不调用provider。授权后、外部调用前崩溃会burn该ordinal；更旧ordinal、跳号、不同lease/attempt/
+   token或profile limits漂移均为stable conflict且零写入；
 4. create后及response-loss/recovery时再次bounded list；`informer_enabled=false`，恢复不依赖进程内cache；
 5. durable create authorization count与observed candidate count分别不得超过Profile `maximum_candidates`；下一ordinal必须同时满足
    database-time total provisioning timeout和自last authorization起的quiescence hard limit，进程重启不能重置预算；
@@ -520,8 +524,9 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 
 ## 12. 超时、重试、取消与恢复
 
-- create response 丢失：先按同token bounded list；同一已授权ordinal只重放既有authorization。只有durable quiescence/count/total-time
-  budget允许时才CAS授权下一ordinal；已有候选保持inert，candidate CAS只选一个，不得把metadata list称为原子唯一性；
+- create response 丢失：先按同token bounded list；同一已授权ordinal只返回`Replayed`且不得再次调用provider。授权后create前崩溃同样
+  burn ordinal；只有durable quiescence/count/total-time budget允许时才CAS授权下一ordinal；已有候选保持inert，candidate CAS只选一个，
+  不得把metadata list称为原子唯一性；
 - Dispatcher crash/reclaim：先读取 Job physical evidence，再 list/observe；旧 lease 不能写业务状态，新 lease 不重算 token；
 - expired `Running` reclaim必须先验证payload中的exact physical attempt，再在同一transaction内完成逻辑
   `Running -> Ready -> Leased -> Running`并只提交最终Running；只增加lease generation，不增加attempt count，不创建新

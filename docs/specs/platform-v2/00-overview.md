@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 7 |
+| 状态 | In Progress / CR-216 revision 8 |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -37,6 +37,9 @@
 > 2026-09-02 provisioning closure（CR-216 revision 7）：每次外部candidate create前必须由current shared Job fence在PostgreSQL
 > CAS授权exact ordinal，并以database time持久化provisioning start、authorization count与last authorization time。response-loss与
 > Dispatcher重启不能重置count/quiescence/total-time预算；OpenSandbox仍无需源码修改，metadata list仍只是发现而非原子幂等authority。
+
+> 2026-09-02 dispatch closure（CR-216 revision 8）：create authorization repository返回`Applied | Replayed`；只有`Applied` caller
+> 可调用一次provider，`Replayed`绝不调用。授权后、provider调用前崩溃会burn ordinal，静默窗口后只可申请下一ordinal。
 
 > 2026-08-30 implementation feedback（CR-206）：Context Dataset build的Operation target会公开预留的`dset`，但成功
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
@@ -297,7 +300,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-209 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-206 | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203（CR-204 reviewed） | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 7 | OpenSandbox Kubernetes、durable create authorization、Armed runner activation、atomic continuation、point-read orphan decision和清理 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 8 | OpenSandbox Kubernetes、one-shot create authorization、Armed runner activation、atomic continuation、point-read orphan decision和清理 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 revision 1 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 revision 1 | 管理 API、Run API、事件流和错误模型 |

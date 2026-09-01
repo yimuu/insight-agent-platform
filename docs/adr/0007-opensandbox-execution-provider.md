@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 7 |
+| 状态 | Accepted / CR-216 revision 8 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -29,6 +29,9 @@ revision 6明确：expired Running continuation reclaim在同一数据库claim�
 revision 7明确：metadata list不能证明一次create调用是否已生效。每次外部create前必须由current shared Job fence在PostgreSQL
 CAS授权exact ordinal，并持久化database-time provisioning start、authorization count与last authorization time；同ordinal可重放，
 下一ordinal必须满足durable count/quiescence/total-time hard limit，进程重启不能重新获得预算。
+
+revision 8明确：authorization replay不是外部side effect replay。repository返回`Applied | Replayed`，只有`Applied` caller可调用一次
+provider create；`Replayed`不调用provider。授权提交后、provider调用前崩溃会消耗该ordinal，之后只能在静默窗口后授权下一ordinal。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -111,7 +114,8 @@ create/boot 时启动 Package。并发 create 或 response-loss 可能产生有�
 “一个 key 历史上只能出现一个 physical object”的保证。
 
 Dispatcher 对同 token 的候选执行有界发现与静默窗口。每次实际create之前，它先list，再在PostgreSQL current Job fence下CAS
-授权exact next ordinal并记录database time，随后才在事务外调用provider；相同ordinal重放只返回已存authorization。Dispatcher再CAS
+授权exact next ordinal并记录database time；只有返回`Applied`的唯一caller才在事务外恰好调用一次provider，`Replayed`不调用。
+授权后、调用前崩溃会burn ordinal；Dispatcher之后再CAS
 选择唯一candidate，并把
 OpenSandbox ID、runner boot identity 与 request digest 持久化为 physical evidence。未选候选只允许 cleanup，永不激活。
 只有在激活前、并证明现有候选均未启动Package且durable authorization count、quiescence与total-time仍在Profile hard limit内时，
