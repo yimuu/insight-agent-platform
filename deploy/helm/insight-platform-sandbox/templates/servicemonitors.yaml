@@ -2,58 +2,38 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "insight-platform-sandbox.controllerName" . }}
-  namespace: {{ .Values.namespaces.controller }}
+  name: sandbox-dispatcher
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatcher
 spec:
-  namespaceSelector: {matchNames: [{{ .Values.namespaces.controller }}]}
   selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: controller
-  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: {{ include "insight-platform-sandbox.executorName" . }}
-  namespace: {{ .Values.namespaces.executor }}
-spec:
-  namespaceSelector: {matchNames: [{{ .Values.namespaces.executor }}]}
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: executor-wasi
-  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: {{ include "insight-platform-sandbox.gvisorName" . }}
-  namespace: {{ .Values.namespaces.executor }}
-spec:
-  namespaceSelector: {matchNames: [{{ .Values.namespaces.executor }}]}
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: executor-gvisor
+    matchLabels: {app.kubernetes.io/component: dispatcher}
+  namespaceSelector:
+    matchNames: [{{ .Values.namespaces.control }}]
   endpoints:
-    - {port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}
-    - {port: attestor-metrics, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}
+    - port: observability
+      path: /metrics
+      interval: {{ .Values.monitoring.interval }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "insight-platform-sandbox.attestorName" . }}
-  namespace: {{ .Values.namespaces.executor }}
+  name: opensandbox-controller
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-controller
 spec:
-  namespaceSelector: {matchNames: [{{ .Values.namespaces.executor }}]}
   selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: attestor
-  endpoints: [{port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}]
+    matchLabels: {app.kubernetes.io/component: opensandbox-controller}
+  namespaceSelector:
+    matchNames: [{{ .Values.namespaces.control }}]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.interval }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}
 {{- end }}

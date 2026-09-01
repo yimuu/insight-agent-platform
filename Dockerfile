@@ -8,6 +8,7 @@ COPY crates ./crates
 COPY src ./src
 COPY catalog ./catalog
 COPY contracts ./contracts
+COPY deploy ./deploy
 COPY release ./release
 COPY proto ./proto
 COPY database ./database
@@ -43,16 +44,15 @@ RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin platform-artifact-maintenance \
     --bin platform-egress-broker \
     --bin platform-security-authority \
-    --bin platform-sandbox-controller \
-    --bin platform-sandbox-attestor \
-    --bin platform-sandbox-executor \
-    --bin platform-sandbox-guest
+    --bin platform-sandbox-dispatcher \
+    --bin platform-sandbox-runner
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY src ./src
 COPY catalog ./catalog
 COPY contracts ./contracts
+COPY deploy ./deploy
 COPY release ./release
 COPY database ./database
 
@@ -81,10 +81,8 @@ RUN cargo build --locked --release --workspace \
     --bin platform-artifact-maintenance \
     --bin platform-egress-broker \
     --bin platform-security-authority \
-    --bin platform-sandbox-controller \
-    --bin platform-sandbox-attestor \
-    --bin platform-sandbox-executor \
-    --bin platform-sandbox-guest
+    --bin platform-sandbox-dispatcher \
+    --bin platform-sandbox-runner
 
 FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
@@ -122,9 +120,7 @@ COPY --from=builder /workspace/target/release/platform-artifact-gateway /usr/loc
 COPY --from=builder /workspace/target/release/platform-artifact-maintenance /usr/local/bin/platform-artifact-maintenance
 COPY --from=builder /workspace/target/release/platform-egress-broker /usr/local/bin/platform-egress-broker
 COPY --from=builder /workspace/target/release/platform-security-authority /usr/local/bin/platform-security-authority
-COPY --from=builder /workspace/target/release/platform-sandbox-controller /usr/local/bin/platform-sandbox-controller
-COPY --from=builder /workspace/target/release/platform-sandbox-attestor /usr/local/bin/platform-sandbox-attestor
-COPY --from=builder /workspace/target/release/platform-sandbox-executor /usr/local/bin/platform-sandbox-executor
+COPY --from=builder /workspace/target/release/platform-sandbox-dispatcher /usr/local/bin/platform-sandbox-dispatcher
 COPY database /app/database
 
 RUN mkdir -p /data/artifacts \
@@ -136,18 +132,12 @@ EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/platform-gateway"]
 
-# The gVisor RuntimeClass isolates this single-Job image. Runtime dependencies are resolved only
-# while publishing this immutable image; the guest never invokes a package manager.
-FROM runtime-base AS sandbox-guest
+# Published Sandbox Package images derive from this target, add only their immutable package
+# payload/runtime, and retain this exact entrypoint. OpenSandbox execd supervises the runner as
+# PID 1; the runner remains inert until the Dispatcher sends its one-shot activation frame.
+FROM runtime-base AS sandbox-runner
 
-USER root
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends python3=3.9.2-3 nodejs=12.22.12~dfsg-1~deb11u8 \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /workspace/target/release/platform-sandbox-guest /usr/local/bin/platform-sandbox-guest
-RUN mkdir -p /scratch \
-    && chown 65532:65532 /scratch \
-    && chmod 0700 /scratch
-
+COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/platform-sandbox-guest"]
+EXPOSE 18080
+ENTRYPOINT ["/usr/local/bin/platform-sandbox-runner"]

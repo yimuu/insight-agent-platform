@@ -1,123 +1,172 @@
-{{- $config := include "insight-platform-sandbox.controllerConfig" . -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: opensandbox-controller-leader-election
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-controller
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: opensandbox-controller-leader-election
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: opensandbox-controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.controller.serviceAccountName }}
+    namespace: {{ .Values.namespaces.control }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-opensandbox-controller
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-controller
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [delete, get, list, patch, update, watch]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get, patch, update]
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [batchsandboxes]
+    verbs: [delete, get, list, patch, update, watch]
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [pools, sandboxsnapshots]
+    verbs: [delete, get, list, patch, update, watch]
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [batchsandboxes/finalizers, pools/finalizers, sandboxsnapshots/finalizers]
+    verbs: [update]
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [batchsandboxes/status, pools/status, sandboxsnapshots/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-opensandbox-controller
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-opensandbox-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.controller.serviceAccountName }}
+    namespace: {{ .Values.namespaces.control }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "insight-platform-sandbox.controllerName" . }}
-  namespace: {{ .Values.namespaces.controller }}
+  name: opensandbox-controller
+  namespace: {{ .Values.namespaces.control }}
   labels:
     {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: opensandbox-controller
+    app.kubernetes.io/version: "0.2.0"
 spec:
-  replicas: {{ int .Values.controller.replicas }}
-  strategy:
-    type: RollingUpdate
-    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+  replicas: {{ .Values.controller.replicas }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/name: insight-platform-sandbox
       app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: controller
+      app.kubernetes.io/component: opensandbox-controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/name: insight-platform-sandbox
         app.kubernetes.io/instance: {{ .Release.Name }}
-        app.kubernetes.io/component: controller
-        insight.platform/workload-role: sandbox-controller
-        insight.platform/component-role: sandbox_controller
+        app.kubernetes.io/component: opensandbox-controller
       annotations:
-        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
-        checksum/config: {{ $config | sha256sum }}
+        insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}
+        insight.platform/upstream-commit: {{ .Values.global.sourceCommit | quote }}
+        insight.platform/image-digest: {{ .Values.images.controller.digest | quote }}
     spec:
-      serviceAccountName: {{ include "insight-platform-sandbox.controllerName" . }}
-      automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 40
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      serviceAccountName: {{ .Values.controller.serviceAccountName }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
       {{- with .Values.imagePullSecrets }}
-      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
       containers:
-        - name: controller
-          image: {{ include "insight-platform-sandbox.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/usr/local/bin/platform-sandbox-controller"]
-          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
-          env:
-            - {name: PLATFORM_SANDBOX_CONTROLLER_CONFIG, value: /etc/insight/config/controller.json}
-            - {name: PLATFORM_SANDBOX_CONTROLLER_CONFIG_DIGEST, value: {{ printf "sha256:%s" ($config | sha256sum) | quote }}}
-            - name: PLATFORM_DATABASE_URL
-              valueFrom: {secretKeyRef: {name: {{ .Values.controller.database.existingSecret }}, key: {{ .Values.controller.database.urlKey }}}}
-            - {name: PLATFORM_SANDBOX_GRPC_CLIENT_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.executorClientCa }}}
-            - {name: PLATFORM_SANDBOX_GRPC_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerServerCertificate }}}
-            - {name: PLATFORM_SANDBOX_GRPC_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerServerPrivateKey }}}
-            - {name: PLATFORM_SANDBOX_ATTESTOR_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.attestorServerCa }}}
-            - {name: PLATFORM_SANDBOX_ATTESTOR_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientCertificate }}}
-            - {name: PLATFORM_SANDBOX_ATTESTOR_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.controllerClientPrivateKey }}}
-            - {name: PLATFORM_SANDBOX_ARTIFACT_CA_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerServerCa }}}
-            - {name: PLATFORM_SANDBOX_ARTIFACT_CERT_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientCertificate }}}
-            - {name: PLATFORM_SANDBOX_ARTIFACT_KEY_PATH, value: /etc/insight/controller-tls/{{ .Values.tls.keys.artifactBrokerClientPrivateKey }}}
+        - name: manager
+          image: {{ include "insight-platform-sandbox.image" .Values.images.controller }}
+          imagePullPolicy: {{ .Values.images.controller.pullPolicy }}
+          command: [/workspace/server]
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
+            - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
+            - --metrics-secure=false
+            - --zap-log-level=info
+            - --kube-client-qps=100
+            - --kube-client-burst=200
+            - --concurrency=batchsandbox=4;pool=1
           ports:
-            - {name: grpc, containerPort: {{ int .Values.controller.port }}}
-            - {name: observability, containerPort: {{ int .Values.controller.observabilityPort }}}
-          startupProbe: {httpGet: {path: /livez, port: observability}, failureThreshold: 30, periodSeconds: 2}
-          readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2}
-          livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2}
-          resources: {{ toYaml .Values.controller.resources | nindent 12 }}
-          volumeMounts:
-            - {name: config, mountPath: /etc/insight/config, readOnly: true}
-            - {name: tls, mountPath: /etc/insight/controller-tls, readOnly: true}
-      volumes:
-        - {name: config, configMap: {name: {{ include "insight-platform-sandbox.controllerName" . }}}}
-        - {name: tls, secret: {secretName: {{ .Values.tls.controllerSecret }}, defaultMode: 0440}}
+            - {name: metrics, containerPort: {{ .Values.controller.metricsPort }}, protocol: TCP}
+            - {name: health, containerPort: {{ .Values.controller.healthPort }}, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "insight-platform-sandbox.controllerName" . }}
-  namespace: {{ .Values.namespaces.controller }}
+  name: opensandbox-controller-metrics
+  namespace: {{ .Values.namespaces.control }}
   labels:
     {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: opensandbox-controller
 spec:
+  type: ClusterIP
   selector:
-    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/name: insight-platform-sandbox
     app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: controller
+    app.kubernetes.io/component: opensandbox-controller
   ports:
-    - {name: grpc, port: {{ int .Values.controller.port }}, targetPort: grpc}
-    - {name: observability, port: {{ int .Values.controller.observabilityPort }}, targetPort: observability}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "insight-platform-sandbox.controllerName" . }}
-  namespace: {{ .Values.namespaces.controller }}
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: controller
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: {{ include "insight-platform-sandbox.controllerName" . }}
-  namespace: {{ .Values.namespaces.controller }}
-spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-sandbox.controllerName" . }}}
-  minReplicas: {{ int .Values.controller.autoscaling.minReplicas }}
-  maxReplicas: {{ int .Values.controller.autoscaling.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ int .Values.controller.autoscaling.targetCPUUtilizationPercentage }}}}
+    - {name: metrics, port: {{ .Values.controller.metricsPort }}, targetPort: metrics, protocol: TCP}

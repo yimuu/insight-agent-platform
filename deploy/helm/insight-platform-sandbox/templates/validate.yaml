@@ -1,123 +1,47 @@
-{{- if eq .Values.namespaces.controller .Values.namespaces.executor }}
-{{- fail "controller and executor namespaces must be different" }}
-{{- end }}
-{{- if or (eq .Values.namespaces.guest .Values.namespaces.controller) (eq .Values.namespaces.guest .Values.namespaces.executor) }}
-{{- fail "gVisor guest namespace must be isolated from Controller and Executor namespaces" }}
-{{- end }}
-{{- if lt (int .Values.controller.replicas) 2 }}
-{{- fail "controller.replicas must be at least 2" }}
-{{- end }}
-{{- if or (lt (int .Values.controller.observabilityPort) 1) (gt (int .Values.controller.observabilityPort) 65535) (eq (int .Values.controller.observabilityPort) (int .Values.controller.port)) }}
-{{- fail "controller observability port must be distinct and in 1..65535" }}
-{{- end }}
-{{- $controllerDatabaseConnections := add (int .Values.controller.database.businessMaxConnections) (int .Values.controller.database.criticalControlMaxConnections) }}
-{{- if or (lt (int .Values.controller.database.businessMaxConnections) 2) (lt (int .Values.controller.database.criticalControlMaxConnections) 2) (gt $controllerDatabaseConnections 64) }}
-{{- fail "Controller business and critical-control PostgreSQL pools must be independently bounded" }}
-{{- end }}
-{{- if or (lt (int .Values.controller.outcomeConvergence.maximumInFlight) 1) (gt (int .Values.controller.outcomeConvergence.maximumInFlight) 16) (lt (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds) 1) (ge (int .Values.controller.outcomeConvergence.scanJitterMilliseconds) (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds)) (lt (int .Values.controller.outcomeConvergence.failureBackoffMilliseconds) 1) (gt (int .Values.controller.outcomeConvergence.failureBackoffMilliseconds) (int .Values.controller.outcomeConvergence.scanIntervalMilliseconds)) (lt (int .Values.controller.outcomeConvergence.receiptTtlSeconds) 1) }}
-{{- fail "Controller Sandbox outcome convergence bounds are invalid" }}
-{{- end }}
-{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}
-{{- fail "monitoring requires exact namespace and Pod selectors" }}
-{{- end }}
-{{- if or (lt (int .Values.executor.observabilityPort) 1) (gt (int .Values.executor.observabilityPort) 65535) (has (int .Values.executor.observabilityPort) (list (int .Values.controller.port) (int .Values.attestor.controllerPort))) }}
-{{- fail "WASI Executor observability port must be distinct and in 1..65535" }}
-{{- end }}
-{{- if or (lt (int .Values.gvisor.observabilityPort) 1) (gt (int .Values.gvisor.observabilityPort) 65535) (has (int .Values.gvisor.observabilityPort) (list (int .Values.controller.port) (int .Values.attestor.controllerPort))) }}
-{{- fail "gVisor Executor observability port must be distinct and in 1..65535" }}
-{{- end }}
-{{- if or (lt (int .Values.attestor.observabilityPort) 1) (gt (int .Values.attestor.observabilityPort) 65535) (eq (int .Values.attestor.observabilityPort) (int .Values.attestor.controllerPort)) }}
-{{- fail "node attestor observability port must be distinct and in 1..65535" }}
-{{- end }}
-{{- if or (lt (int .Values.gvisor.attestor.observabilityPort) 1) (gt (int .Values.gvisor.attestor.observabilityPort) 65535) (has (int .Values.gvisor.attestor.observabilityPort) (list (int .Values.attestor.controllerPort) (int .Values.gvisor.observabilityPort))) }}
-{{- fail "Pod-local attestor observability port must be distinct and in 1..65535" }}
-{{- end }}
-{{- if not (empty .Values.controller.serviceAccount) }}
-{{- fail "Controller ServiceAccount customization is forbidden" }}
-{{- end }}
-{{- if or (ne .Values.admission.schedulerName "default-scheduler") (empty .Values.admission.schedulerUsername) (eq .Values.admission.schedulerUsername "system:anonymous") }}
-{{- fail "admission requires the default scheduler and one exact authenticated scheduler username" }}
-{{- end }}
-{{- if or (empty .Values.admission.daemonSetControllerUsername) (eq .Values.admission.daemonSetControllerUsername "system:anonymous") (eq .Values.admission.daemonSetControllerUsername .Values.admission.schedulerUsername) }}
-{{- fail "admission requires a distinct exact authenticated DaemonSet controller username" }}
-{{- end }}
-{{- if or (empty .Values.admission.replicaSetControllerUsername) (eq .Values.admission.replicaSetControllerUsername "system:anonymous") (has .Values.admission.replicaSetControllerUsername (list .Values.admission.schedulerUsername .Values.admission.daemonSetControllerUsername)) }}
-{{- fail "admission requires a distinct exact authenticated ReplicaSet controller username" }}
-{{- end }}
-{{- if or (empty .Values.executor.nodeSelector) (empty .Values.attestor.nodeSelector) }}
-{{- fail "WASI Executor and attestor require exact node selectors" }}
-{{- end }}
-{{- $executionArch := get .Values.executor.nodeSelector "kubernetes.io/arch" }}
-{{- if or (ne (len .Values.executor.nodeSelector) 3) (ne (get .Values.executor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-wasi") "true") (ne (get .Values.executor.nodeSelector "kubernetes.io/os") "linux") (not (has $executionArch (list "amd64" "arm64"))) }}
-{{- fail "WASI Executor requires an exact NodeRestriction-protected Linux node architecture" }}
-{{- end }}
-{{- if or (ne (len .Values.attestor.nodeSelector) 3) (ne (get .Values.attestor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-attestor") "true") (ne (get .Values.attestor.nodeSelector "kubernetes.io/os") "linux") (ne (get .Values.attestor.nodeSelector "kubernetes.io/arch") $executionArch) }}
-{{- fail "attestor requires its exact NodeRestriction-protected execution-node selector" }}
-{{- end }}
-{{- if or (not (empty .Values.executor.tolerations)) (not (empty .Values.attestor.tolerations)) }}
-{{- fail "first-release WASI and attestor workloads must not declare broad tolerations" }}
-{{- end }}
-{{- if or (lt (int .Values.gvisor.replicas) 2) (not (empty .Values.gvisor.tolerations)) (ne .Values.gvisor.runtimeClassName "runsc") (ne .Values.gvisor.runtimeHandler "runsc") }}
-{{- fail "gVisor requires two Launchers, no broad tolerations, and the exact runsc RuntimeClass" }}
-{{- end }}
-{{- $gvisorArch := get .Values.gvisor.nodeSelector "kubernetes.io/arch" }}
-{{- if or (ne (len .Values.gvisor.nodeSelector) 3) (ne (get .Values.gvisor.nodeSelector "insight.platform.node-restriction.kubernetes.io/sandbox-gvisor") "true") (ne (get .Values.gvisor.nodeSelector "kubernetes.io/os") "linux") (not (has $gvisorArch (list "amd64" "arm64"))) }}
-{{- fail "gVisor requires an exact NodeRestriction-protected Linux node architecture" }}
-{{- end }}
-{{- if or (empty .Values.gvisor.guestServiceAccount) (empty .Values.gvisor.guestImageRepository) (contains "@" .Values.gvisor.guestImageRepository) (contains ":latest" .Values.gvisor.guestImageRepository) (ne .Values.gvisor.guestCommand "/usr/local/bin/platform-sandbox-guest") }}
-{{- fail "gVisor guest identity, immutable image repository, and entrypoint are required" }}
-{{- end }}
-{{- if or (not (hasPrefix "/" .Values.gvisor.bootstrapCaPath)) (contains ".." .Values.gvisor.bootstrapCaPath) }}
-{{- fail "gVisor guest must use the immutable image-baked Artifact Data Worker CA path" }}
-{{- end }}
-{{- if or (lt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 60) (gt (int .Values.gvisor.bootstrapTokenExpirationSeconds) 3600) (lt (int .Values.gvisor.observationPollMilliseconds) 10) (gt (int .Values.gvisor.observationPollMilliseconds) 10000) }}
-{{- fail "gVisor bootstrap token and observation bounds are invalid" }}
-{{- end }}
-{{- $roleSecrets := list .Values.tls.controllerSecret .Values.tls.wasiExecutorSecret .Values.tls.gvisorExecutorSecret .Values.tls.attestorSecret .Values.natsTls.existingSecret }}
-{{- if ne (len (uniq $roleSecrets)) (len $roleSecrets) }}
-{{- fail "Controller, WASI Executor, gVisor Launcher, attestor, and NATS roles require distinct Secret names" }}
-{{- end }}
-{{- if or (lt (int .Values.attestor.controllerPort) 1) (gt (int .Values.attestor.controllerPort) 65535) (lt (int .Values.attestor.absentRetentionSeconds) 3900) }}
-{{- fail "attestor port and absence retention are outside the reviewed bounds" }}
-{{- end }}
-{{- $attestorHostPaths := dict "proc" "/proc" "nodeUid" "/var/lib/insight/node-uid" "registryDirectory" "/var/lib/insight-sandbox-attestor" "socketDirectory" "/var/run/insight-sandbox-attestor" }}
-{{- if not (deepEqual .Values.attestor.hostPaths $attestorHostPaths) }}
-{{- fail "attestor host paths differ from the reviewed authority" }}
-{{- end }}
-{{- if or (empty .Values.controller.attestor.allowedNodeCidrs) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.natsCidrs) (empty .Values.networkPolicy.kubernetesApiCidrs) }}
-{{- fail "controller attestor, PostgreSQL, NATS, and Kubernetes API CIDR closures are required" }}
-{{- end }}
-{{- if or (not (deepEqual .Values.networkPolicy.artifactDataWorkerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactDataWorkerPodSelector (dict "insight.platform/workload-role" "artifact-data-worker"))) }}
-{{- fail "gVisor guests must target only the isolated Artifact Data Worker" }}
-{{- end }}
-{{- if or (lt (int .Values.networkPolicy.kubernetesApiPort) 1) (gt (int .Values.networkPolicy.kubernetesApiPort) 65535) (lt (int .Values.networkPolicy.artifactDataWorkerPort) 1) (gt (int .Values.networkPolicy.artifactDataWorkerPort) 65535) }}
-{{- fail "Kubernetes API and Artifact Data Worker ports must be fixed valid ports" }}
-{{- end }}
-{{- if or (not (deepEqual .Values.networkPolicy.artifactBrokerNamespaceSelector (dict "insight.platform/artifact-namespace" "true"))) (not (deepEqual .Values.networkPolicy.artifactBrokerPodSelector (dict "insight.platform/workload-role" "artifact-data-worker"))) }}
-{{- fail "Controller must target only the isolated Sandbox Artifact Broker" }}
-{{- end }}
-{{- if or (lt (int .Values.networkPolicy.artifactBrokerPort) 1) (gt (int .Values.networkPolicy.artifactBrokerPort) 65535) }}
-{{- fail "networkPolicy.artifactBrokerPort must be a valid fixed port" }}
-{{- end }}
-{{- if or (empty .Values.controller.artifactBroker.endpoint) (empty .Values.controller.artifactBroker.tlsServerName) }}
-{{- fail "Controller requires an exact Artifact Broker mTLS endpoint" }}
-{{- end }}
-{{- $expectedArtifactBrokerEndpoint := printf "https://%s:%d" .Values.controller.artifactBroker.tlsServerName (int .Values.networkPolicy.artifactBrokerPort) }}
-{{- if ne .Values.controller.artifactBroker.endpoint $expectedArtifactBrokerEndpoint }}
-{{- fail "Controller Artifact Broker endpoint must match TLS identity and NetworkPolicy port" }}
-{{- end }}
-{{- if or (lt (int .Values.controller.artifactBroker.maximumRequestBytes) 1) (gt (int .Values.controller.artifactBroker.maximumRequestBytes) 1048576) (lt (int .Values.controller.artifactBroker.maximumChunkBytes) 1) (gt (int .Values.controller.artifactBroker.maximumChunkBytes) 262144) (lt (int .Values.controller.artifactBroker.maximumInFlightResponses) 1) (gt (int .Values.controller.artifactBroker.maximumInFlightResponses) 4) }}
-{{- fail "Controller Artifact Broker RPC bounds exceed the closed hard caps" }}
-{{- end }}
-{{- if or (empty .Values.tls.keys.artifactBrokerServerCa) (empty .Values.tls.keys.artifactBrokerClientCertificate) (empty .Values.tls.keys.artifactBrokerClientPrivateKey) }}
-{{- fail "Controller Artifact Broker mTLS Secret keys are required" }}
-{{- end }}
-{{- if not .Values.networkPolicy.enabled }}
-{{- fail "networkPolicy.enabled must remain true" }}
-{{- end }}
-{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
-{{- fail "image.digest must be an immutable lowercase sha256 digest" }}
-{{- end }}
-{{- if or (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.gvisor.backendContractDigest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.gvisor.workerManifest.adapter_runtime_digest)) }}
-{{- fail "gVisor backend and worker manifest digests must be immutable lowercase sha256 values" }}
-{{- end }}
+{{- $digestPattern := "^sha256:[0-9a-f]{64}$" -}}
+{{- range $name, $image := .Values.images -}}
+  {{- if not (regexMatch $digestPattern $image.digest) -}}
+    {{- fail (printf "%s image must use an exact sha256 digest" $name) -}}
+  {{- end -}}
+  {{- if or (contains "@" $image.repository) (contains ":latest" $image.repository) -}}
+    {{- fail (printf "%s image repository must not contain a tag or digest" $name) -}}
+  {{- end -}}
+{{- end -}}
+{{- range $name, $digest := .Values.runtimeContract -}}
+  {{- if not (regexMatch $digestPattern $digest) -}}
+    {{- fail (printf "runtimeContract.%s must be an exact sha256 digest" $name) -}}
+  {{- end -}}
+{{- end -}}
+{{- if not (regexMatch $digestPattern .Values.global.deploymentConfigDigest) -}}
+  {{- fail "global.deploymentConfigDigest must be an exact sha256 digest" -}}
+{{- end -}}
+{{- if ne .Values.global.sourceCommit "c39b814f36ded4c61d5ac6f9332ee4dfbab86c00" -}}
+  {{- fail "OpenSandbox source commit is a closed CR-216 value" -}}
+{{- end -}}
+{{- if or (ne (int .Values.dispatcher.replicas) 1) (ne (int .Values.server.replicas) 1) (ne (int .Values.controller.replicas) 1) -}}
+  {{- fail "the single-node developer Profile requires exactly one Dispatcher, Server, and Controller replica" -}}
+{{- end -}}
+{{- if not .Values.networkPolicy.enabled -}}
+  {{- fail "sandbox NetworkPolicy closure cannot be disabled" -}}
+{{- end -}}
+{{- if or (empty .Values.networkPolicy.kubernetesApiCidrs) (empty .Values.networkPolicy.postgresCidrs) (empty .Values.networkPolicy.directDeniedCidrs) -}}
+  {{- fail "Kubernetes API, PostgreSQL, and Direct deny CIDRs must be explicit" -}}
+{{- end -}}
+{{- if or (lt (int .Values.dispatcher.worker.maximumConcurrency) 1) (lt (int .Values.dispatcher.worker.criticalControlReservedSlots) 1) -}}
+  {{- fail "Dispatcher business and critical-control capacity must be positive" -}}
+{{- end -}}
+{{- if or (lt (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds) 100) (gt (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds) 4999) -}}
+  {{- fail "OpenSandbox request timeout must fit below the Job lease safety budget" -}}
+{{- end -}}
+{{- if or (empty .Values.dispatcher.database.existingSecret) (empty .Values.dispatcher.opensandbox.apiKeySecret) (empty .Values.server.apiKeySecret) -}}
+  {{- fail "database and OpenSandbox credentials must be existing Secret references" -}}
+{{- end -}}
+{{- if ne .Values.sandbox.serviceAccountName "sandbox-workload" -}}
+  {{- fail "sandbox.serviceAccountName is closed by the Armed runner admission contract" -}}
+{{- end -}}
+{{- if ne (int .Values.sandbox.runnerPort) 18080 -}}
+  {{- fail "sandbox.runnerPort is closed by runner protocol v1" -}}
+{{- end -}}
+{{- if or (ne (int .Values.sandbox.runAsUser) 65532) (ne (int .Values.sandbox.runAsGroup) 65532) -}}
+  {{- fail "the Armed runner UID and GID are closed values" -}}
+{{- end -}}

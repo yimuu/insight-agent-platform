@@ -1,0 +1,192 @@
+{{- $serverUser := printf "system:serviceaccount:%s:%s" .Values.namespaces.control .Values.server.serviceAccountName -}}
+{{- $controllerUser := printf "system:serviceaccount:%s:%s" .Values.namespaces.control .Values.controller.serviceAccountName -}}
+{{- $execdImage := include "insight-platform-sandbox.image" .Values.images.execd -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-opensandbox-inactive-surfaces
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sandbox.opensandbox.io]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [pools, sandboxsnapshots]
+      - apiGroups: [batch]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [jobs]
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [services, persistentvolumeclaims, secrets]
+      - apiGroups: [networking.k8s.io]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [ingresses]
+  validations:
+    - expression: "false"
+      message: Pool, snapshot, Job, Service, PVC, Secret, and Ingress surfaces are closed in the CR-216 workload namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-opensandbox-inactive-surfaces
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-opensandbox-inactive-surfaces
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {insight.platform/sandbox-workload-namespace: "true"}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-opensandbox-batchsandbox
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [sandbox.opensandbox.io]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [batchsandboxes]
+  validations:
+    - expression: >-
+        (request.operation == 'CREATE' && request.userInfo.username == {{ $serverUser | quote }}) ||
+        (request.operation == 'UPDATE' && request.userInfo.username == {{ $controllerUser | quote }})
+      message: only the OpenSandbox Server may create and only the source-pinned Controller may reconcile BatchSandbox
+    - expression: >-
+        object.spec.replicas == 1 && !has(object.spec.poolRef) && !has(object.spec.taskTemplate) &&
+        (!has(object.spec.pause) || object.spec.pause == false) && has(object.spec.expireTime)
+      message: BatchSandbox must be one non-pooled, expiring, non-task, non-snapshot candidate
+    - expression: >-
+        has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
+        object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
+        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
+      message: BatchSandbox must carry the closed Platform operator labels
+    - expression: >-
+        has(object.spec.template) && has(object.spec.template.spec) &&
+        object.spec.template.spec.serviceAccountName == 'sandbox-workload' &&
+        object.spec.template.spec.automountServiceAccountToken == false &&
+        object.spec.template.spec.restartPolicy == 'Never' &&
+        object.spec.template.spec.enableServiceLinks == false &&
+        (!has(object.spec.template.spec.hostNetwork) || object.spec.template.spec.hostNetwork == false) &&
+        (!has(object.spec.template.spec.hostPID) || object.spec.template.spec.hostPID == false) &&
+        (!has(object.spec.template.spec.hostIPC) || object.spec.template.spec.hostIPC == false) &&
+        !has(object.spec.template.spec.runtimeClassName) && !has(object.spec.template.spec.nodeName)
+      message: BatchSandbox Pod authority escaped the fixed runc workload closure
+    - expression: >-
+        object.spec.template.spec.initContainers.size() == 1 &&
+        object.spec.template.spec.initContainers[0].name == 'execd-installer' &&
+        object.spec.template.spec.initContainers[0].image == {{ $execdImage | quote }} &&
+        object.spec.template.spec.initContainers[0].command == ['/bin/sh', '-c'] &&
+        object.spec.template.spec.initContainers[0].volumeMounts.size() == 1 &&
+        object.spec.template.spec.initContainers[0].volumeMounts[0].name == 'opensandbox-bin'
+      message: execd init must be the exact source-reviewed digest and mount
+    - expression: >-
+        object.spec.template.spec.containers.size() == 1 &&
+        object.spec.template.spec.containers[0].name == 'sandbox' &&
+        object.spec.template.spec.containers[0].image.matches('^.+@sha256:[0-9a-f]{64}$') &&
+        object.spec.template.spec.containers[0].command == ['/opt/opensandbox/bootstrap.sh', '/usr/local/bin/platform-sandbox-runner'] &&
+        !has(object.spec.template.spec.containers[0].args) && !has(object.spec.template.spec.containers[0].envFrom)
+      message: sandbox image and command must be the immutable fixed Armed runner
+    - expression: >-
+        object.spec.template.spec.containers[0].env.size() == 5 &&
+        object.spec.template.spec.containers[0].env.all(e,
+          e.name in ['INSIGHT_SANDBOX_RUNNER_CONFIG', 'INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST', 'OPENSANDBOX_ID', 'EXECD_INIT', 'EXECD'] &&
+          has(e.value) && !has(e.valueFrom))
+      message: sandbox environment is not the closed credential-free runner frame
+    - expression: >-
+        object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        object.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL']
+      message: Armed runner container security context drifted
+    - expression: >-
+        object.spec.template.spec.volumes.size() == 3 &&
+        object.spec.template.spec.volumes.all(v, v.name in ['opensandbox-bin', 'runner-state', 'sandbox-tmp'] && has(v.emptyDir)) &&
+        object.spec.template.spec.containers[0].volumeMounts.size() == 3 &&
+        object.spec.template.spec.containers[0].volumeMounts.all(m, m.name in ['opensandbox-bin', 'runner-state', 'sandbox-tmp']) &&
+        !has(object.spec.template.spec.imagePullSecrets)
+      message: sandbox volumes or image credentials escaped the fixed emptyDir-only closure
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-opensandbox-batchsandbox
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-opensandbox-batchsandbox
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {insight.platform/sandbox-workload-namespace: "true"}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-opensandbox-pods
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  validations:
+    - expression: request.userInfo.username == {{ $controllerUser | quote }}
+      message: only the source-pinned BatchSandbox Controller may create workload Pods
+    - expression: >-
+        has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
+        object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
+        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
+      message: workload Pod lacks the closed Platform labels
+    - expression: >-
+        object.spec.serviceAccountName == 'sandbox-workload' && object.spec.automountServiceAccountToken == false &&
+        object.spec.restartPolicy == 'Never' && object.spec.enableServiceLinks == false &&
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        !has(object.spec.runtimeClassName) && !has(object.spec.nodeName) &&
+        object.spec.securityContext.runAsNonRoot == true &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault'
+      message: workload Pod escaped the fixed service-account, namespace, scheduler, or runc closure
+    - expression: >-
+        object.spec.initContainers.size() == 1 && object.spec.initContainers[0].name == 'execd-installer' &&
+        object.spec.initContainers[0].image == {{ $execdImage | quote }} &&
+        object.spec.containers.size() == 1 && object.spec.containers[0].name == 'sandbox' &&
+        object.spec.containers[0].image.matches('^.+@sha256:[0-9a-f]{64}$') &&
+        object.spec.containers[0].command == ['/opt/opensandbox/bootstrap.sh', '/usr/local/bin/platform-sandbox-runner']
+      message: workload Pod image or command is not the exact execd plus Armed runner closure
+    - expression: >-
+        object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        object.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        object.spec.volumes.all(v, !has(v.hostPath) && !has(v.projected) && !has(v.secret) && !has(v.persistentVolumeClaim))
+      message: workload Pod gained privilege, writable root, host/runtime socket, token, Secret, or persistent storage
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-opensandbox-pods
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-opensandbox-pods
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {insight.platform/sandbox-workload-namespace: "true"}

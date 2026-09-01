@@ -1,239 +1,213 @@
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: default-deny, namespace: {{ .Values.namespaces.controller }}}
-spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+metadata:
+  name: default-deny
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: controller, namespace: {{ .Values.namespaces.controller }}}
+metadata:
+  name: sandbox-dispatcher
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: controller
+    matchLabels: {app.kubernetes.io/component: dispatcher}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}}
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 14 }}
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: executor-wasi
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
-    {{- if .Values.monitoring.enabled }}
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.controller.observabilityPort }}}]
-    {{- end }}
-    - from:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: executor-gvisor
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
+              {{- toYaml .Values.networkPolicy.monitoringPodSelector | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.dispatcher.observabilityPort }}}
   egress:
     - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
-      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+        - podSelector:
+            matchLabels: {app.kubernetes.io/component: opensandbox-server}
+      ports:
+        - {protocol: TCP, port: {{ .Values.server.port }}}
     - to:
         {{- range .Values.networkPolicy.postgresCidrs }}
-        - ipBlock: {cidr: {{ . }}}
+        - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
-      ports: [{protocol: TCP, port: 5432}]
-    - to:
-        {{- range .Values.controller.attestor.allowedNodeCidrs }}
-        - ipBlock: {cidr: {{ . }}}
-        {{- end }}
-      ports: [{protocol: TCP, port: {{ int .Values.attestor.controllerPort }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.executor }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: executor-gvisor
-      ports: [{protocol: TCP, port: {{ int .Values.attestor.controllerPort }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.artifactBrokerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.artifactBrokerPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.artifactBrokerPort }}}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: default-deny, namespace: {{ .Values.namespaces.executor }}}
-spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: executor-wasi, namespace: {{ .Values.namespaces.executor }}}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: executor-wasi
-  policyTypes: [Ingress, Egress]
-  ingress:
-    {{- if .Values.monitoring.enabled }}
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.executor.observabilityPort }}}]
-    {{- end }}
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.controller }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
-      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-    - to:
-        {{- range .Values.networkPolicy.natsCidrs }}
-        - ipBlock: {cidr: {{ . }}}
-        {{- end }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.natsPort }}}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: attestor, namespace: {{ .Values.namespaces.executor }}}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: attestor
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.controller }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
-      ports: [{protocol: TCP, port: {{ int .Values.attestor.controllerPort }}}]
-    {{- if .Values.monitoring.enabled }}
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.attestor.observabilityPort }}}]
-    {{- end }}
-  egress: []
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: {name: executor-gvisor, namespace: {{ .Values.namespaces.executor }}}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: executor-gvisor
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.controller }}}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
-      ports: [{protocol: TCP, port: {{ int .Values.attestor.controllerPort }}}]
-    {{- if .Values.monitoring.enabled }}
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.monitoringPodSelector | nindent 16 }}
       ports:
-        - {protocol: TCP, port: {{ int .Values.gvisor.observabilityPort }}}
-        - {protocol: TCP, port: {{ int .Values.gvisor.attestor.observabilityPort }}}
-    {{- end }}
-  egress:
+        - {protocol: TCP, port: {{ .Values.networkPolicy.postgresPort }}}
     - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: {{ .Values.namespaces.controller }}}
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ .Chart.Name }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
-              app.kubernetes.io/component: controller
-      ports: [{protocol: TCP, port: {{ int .Values.controller.port }}}]
-    - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
-      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-    - to:
-        {{- range .Values.networkPolicy.natsCidrs }}
-        - ipBlock: {cidr: {{ . }}}
-        {{- end }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.natsPort }}}]
+              {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensandbox-server
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: opensandbox-server}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/component: dispatcher}
+      ports:
+        - {protocol: TCP, port: {{ .Values.server.port }}}
+  egress:
     - to:
         {{- range .Values.networkPolicy.kubernetesApiCidrs }}
-        - ipBlock: {cidr: {{ . }}}
+        - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.kubernetesApiPort }}}]
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - namespaceSelector:
+            matchLabels: {insight.platform/sandbox-workload-namespace: "true"}
+          podSelector:
+            matchLabels: {platform.insight.dev/schema: v1}
+      ports:
+        - {protocol: TCP, port: {{ .Values.sandbox.runnerPort }}}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: default-deny, namespace: {{ .Values.namespaces.guest }}}
-spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+metadata:
+  name: opensandbox-controller
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: opensandbox-controller}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringPodSelector | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.controller.metricsPort }}}
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.kubernetesApiCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: gvisor-single-job, namespace: {{ .Values.namespaces.guest }}}
+metadata:
+  name: default-deny
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: armed-runner-ingress
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {platform.insight.dev/schema: v1}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {insight.platform/sandbox-control-namespace: "true"}
+          podSelector:
+            matchLabels: {app.kubernetes.io/component: opensandbox-server}
+      ports:
+        - {protocol: TCP, port: {{ .Values.sandbox.runnerPort }}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: armed-runner-direct
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: insight-platform-sandbox-guest
-      app.kubernetes.io/component: gvisor-single-job
-      app.kubernetes.io/managed-by: insight-platform-gvisor-launcher
-  policyTypes: [Ingress, Egress]
-  ingress: []
+      platform.insight.dev/schema: v1
+      platform.insight.dev/network: direct
+  policyTypes: [Egress]
   egress:
     - to:
         - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 16 }}
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 14 }}
           podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.dnsPodSelector | nindent 16 }}
-      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
     - to:
-        - namespaceSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.artifactDataWorkerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml .Values.networkPolicy.artifactDataWorkerPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.artifactDataWorkerPort }}}]
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.directExternalCidr }}
+            except:
+              {{- toYaml .Values.networkPolicy.directDeniedCidrs | nindent 14 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: armed-runner-disabled
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      platform.insight.dev/schema: v1
+      platform.insight.dev/network: disabled
+  policyTypes: [Egress]
+  egress: []
 {{- end }}

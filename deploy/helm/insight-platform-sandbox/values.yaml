@@ -1,211 +1,131 @@
-image:
-  repository: insight-agent-platform
-  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-  pullPolicy: IfNotPresent
-imagePullSecrets: []
-candidate:
+global:
+  sourceCommit: c39b814f36ded4c61d5ac6f9332ee4dfbab86c00
   deploymentConfigDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 
 namespaces:
-  controller: platform-sandbox
-  executor: platform-sandbox-exec
-  guest: platform-sandbox-guests
+  control: platform-sandbox
+  workloads: platform-sandbox-workloads
 
-admission:
-  schedulerName: default-scheduler
-  schedulerUsername: system:kube-scheduler
-  daemonSetControllerUsername: system:serviceaccount:kube-system:daemon-set-controller
-  replicaSetControllerUsername: system:serviceaccount:kube-system:replicaset-controller
+images:
+  platform:
+    repository: insight-agent-platform
+    digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    pullPolicy: IfNotPresent
+  server:
+    repository: docker.io/opensandbox/server
+    digest: sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778
+    pullPolicy: IfNotPresent
+  controller:
+    repository: docker.io/opensandbox/controller
+    digest: sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a
+    pullPolicy: IfNotPresent
+  execd:
+    repository: docker.io/opensandbox/execd
+    digest: sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684
 
-controller:
-  replicas: 2
-  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
-  port: 7443
+imagePullSecrets: []
+
+runtimeContract:
+  lifecycleSchemaDigest: sha256:97dbdff2dbbf571c8e3ac77acd24454bc774275478decc1990918cbf7c518351
+  batchSandboxCrdDigest: sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4
+  kubernetesProviderTemplateDigest: sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a
+  runnerProtocolDigest: sha256:4a8df3b9f4469e1e4781ff6831a23c5c60b139a8cabc128121a0832d203b4bf7
+  containerRuntimeDigest: sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e
+  networkPolicyDigest: sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0
+
+dispatcher:
+  replicas: 1
   observabilityPort: 9090
+  serviceAccountName: sandbox-dispatcher
   database:
     existingSecret: insight-platform-sandbox-database
     urlKey: database-url
-    businessMaxConnections: 8
-    criticalControlMaxConnections: 2
-  outcomeConvergence:
-    maximumInFlight: 1
-    scanIntervalMilliseconds: 1000
-    scanJitterMilliseconds: 100
-    failureBackoffMilliseconds: 100
-    receiptTtlSeconds: 7200
-  serviceAccount: {}
-  artifactBroker:
-    endpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9443
-    tlsServerName: insight-platform-artifact-data-worker.platform-artifacts.svc
-    maximumRequestBytes: 1048576
-    maximumChunkBytes: 262144
-    maximumInFlightResponses: 1
-  attestor:
-    tlsServerName: sandbox-attestor.insight.internal
-    identityDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-    maximumCachedRoutes: 1024
-    allowedNodeCidrs: [10.0.0.0/8]
-  connectTimeoutMilliseconds: 5000
-  requestTimeoutMilliseconds: 30000
-  shutdownGraceMilliseconds: 30000
+    maximumConnections: 8
+    acquireTimeoutMilliseconds: 5000
+  opensandbox:
+    apiKeySecret: opensandbox-api-key
+    apiKeyKey: api-key
+    requestTimeoutMilliseconds: 2000
+    connectTimeoutMilliseconds: 1000
+    candidatePageItems: 16
+    orphanPageItems: 100
+  worker:
+    maximumConcurrency: 4
+    criticalControlReservedSlots: 1
+  timing:
+    scanIntervalMilliseconds: 100
+    runnerPollIntervalMilliseconds: 100
+    cleanupScanIntervalMilliseconds: 1000
+    orphanScanIntervalMilliseconds: 5000
+    failureBackoffMilliseconds: 25
+    drainGraceMilliseconds: 30000
   resources:
     requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
     limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
-executor:
-  observabilityPort: 9090
-  serviceAccount:
-    annotations: {}
-  nodeSelector:
-    kubernetes.io/os: linux
-    kubernetes.io/arch: amd64
-    insight.platform.node-restriction.kubernetes.io/sandbox-wasi: "true"
-  tolerations: []
-  workerManifest:
-    manifest_version: 1
-    worker_role: sandbox-executor.wasi
-    work_class: sandbox
-    adapter_runtime_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    protocol_version: 1
-    max_concurrency: 4
-    critical_control_reserved_slots: 1
-  runtimeVersion: 42.0.0
-  backendContractDigest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  natsEndpoint: tls://nats.platform-runtime.svc:4222
-  receiptTtlSeconds: 7200
-  claimScanMilliseconds: 100
-  claimFailureBackoffMilliseconds: 25
-  drainGraceMilliseconds: 30000
-  controlRequestTimeoutMilliseconds: 5000
-  connectTimeoutMilliseconds: 5000
-  requestTimeoutMilliseconds: 30000
+server:
+  replicas: 1
+  port: 8080
+  serviceAccountName: opensandbox-server
+  apiKeySecret: opensandbox-api-key
+  apiKeyKey: api-key
+  maximumSandboxTimeoutSeconds: 3600
+  sandboxCreateTimeoutSeconds: 60
+  sandboxCreatePollIntervalSeconds: 0.25
+  readQps: 100
+  readBurst: 200
+  writeQps: 50
+  writeBurst: 100
   resources:
-    requests: {cpu: "1", memory: 512Mi, ephemeral-storage: 128Mi}
-    limits: {cpu: "4", memory: 2Gi, ephemeral-storage: 2Gi}
+    requests: {cpu: 100m, memory: 256Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: "1", memory: 1Gi, ephemeral-storage: 512Mi}
+  execdInitResources:
+    requests: {cpu: 25m, memory: 32Mi, ephemeral-storage: 16Mi}
+    limits: {cpu: 250m, memory: 128Mi, ephemeral-storage: 64Mi}
 
-gvisor:
-  replicas: 2
-  autoscaling: {minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
-  observabilityPort: 9090
-  serviceAccount:
-    annotations: {}
-  guestServiceAccount: sandbox-guest
-  runtimeClassName: runsc
-  runtimeHandler: runsc
-  nodeSelector:
-    kubernetes.io/os: linux
-    kubernetes.io/arch: amd64
-    insight.platform.node-restriction.kubernetes.io/sandbox-gvisor: "true"
-  tolerations: []
-  workerManifest:
-    manifest_version: 1
-    worker_role: sandbox-executor.gvisor
-    work_class: sandbox
-    adapter_runtime_digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-    protocol_version: 1
-    max_concurrency: 4
-    critical_control_reserved_slots: 1
-  backendContractDigest: sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-  guestImageRepository: insight-sandbox-guest
-  guestCommand: /usr/local/bin/platform-sandbox-guest
-  bootstrapEndpoint: https://insight-platform-artifact-data-worker.platform-artifacts.svc:9444
-  bootstrapCaPath: /etc/ssl/certs/ca-certificates.crt
-  bootstrapTokenAudience: insight.platform/sandbox-guest
-  bootstrapTokenExpirationSeconds: 600
-  observationPollMilliseconds: 100
-  receiptTtlSeconds: 7200
-  claimScanMilliseconds: 100
-  claimFailureBackoffMilliseconds: 25
-  drainGraceMilliseconds: 30000
-  controlRequestTimeoutMilliseconds: 5000
-  connectTimeoutMilliseconds: 5000
-  requestTimeoutMilliseconds: 30000
+controller:
+  replicas: 1
+  serviceAccountName: opensandbox-controller
+  metricsPort: 8080
+  healthPort: 8081
   resources:
-    requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 128Mi}
-    limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 1Gi}
-  attestor:
-    observabilityPort: 9091
-    maximumRegistrations: 10000
-    absentRetentionSeconds: 3900
-    tlsHandshakeTimeoutMilliseconds: 5000
-    shutdownGraceMilliseconds: 30000
-    resources:
-      requests: {cpu: 25m, memory: 32Mi, ephemeral-storage: 32Mi}
-      limits: {cpu: 200m, memory: 128Mi, ephemeral-storage: 256Mi}
+    requests: {cpu: 25m, memory: 64Mi, ephemeral-storage: 32Mi}
+    limits: {cpu: 500m, memory: 256Mi, ephemeral-storage: 256Mi}
 
-attestor:
-  observabilityPort: 9090
-  nodeSelector:
-    kubernetes.io/os: linux
-    kubernetes.io/arch: amd64
-    insight.platform.node-restriction.kubernetes.io/sandbox-attestor: "true"
-  tolerations: []
-  controllerPort: 7444
-  maximumRegistrations: 10000
-  absentRetentionSeconds: 3900
-  tlsHandshakeTimeoutMilliseconds: 5000
-  shutdownGraceMilliseconds: 30000
-  hostPaths:
-    proc: /proc
-    nodeUid: /var/lib/insight/node-uid
-    registryDirectory: /var/lib/insight-sandbox-attestor
-    socketDirectory: /var/run/insight-sandbox-attestor
-  resources:
-    requests: {cpu: 50m, memory: 64Mi, ephemeral-storage: 32Mi}
-    limits: {cpu: 250m, memory: 256Mi, ephemeral-storage: 256Mi}
+sandbox:
+  serviceAccountName: sandbox-workload
+  runnerPort: 18080
+  stateVolumeSizeLimit: 2Mi
+  runAsUser: 65532
+  runAsGroup: 65532
+  ttlMaximumSeconds: 3600
 
-tls:
-  controllerSecret: insight-platform-sandbox-controller-tls
-  wasiExecutorSecret: insight-platform-sandbox-executor-wasi-tls
-  attestorSecret: insight-platform-sandbox-attestor-tls
-  gvisorExecutorSecret: insight-platform-sandbox-executor-gvisor-tls
-  keys:
-    controllerServerCa: controller-server-ca.pem
-    executorClientCa: executor-client-ca.pem
-    controllerClientCa: controller-client-ca.pem
-    attestorServerCa: attestor-server-ca.pem
-    controllerServerCertificate: controller-server.pem
-    controllerServerPrivateKey: controller-server-key.pem
-    attestorCa: attestor-ca.pem
-    controllerClientCertificate: controller-client.pem
-    controllerClientPrivateKey: controller-client-key.pem
-    artifactBrokerServerCa: artifact-broker-server-ca.pem
-    artifactBrokerClientCertificate: artifact-broker-client.pem
-    artifactBrokerClientPrivateKey: artifact-broker-client-key.pem
-    executorClientCertificate: executor-client.pem
-    executorClientPrivateKey: executor-client-key.pem
-    attestorServerCertificate: attestor-server.pem
-    attestorServerPrivateKey: attestor-server-key.pem
-
-natsTls:
-  existingSecret: insight-platform-sandbox-nats-tls
-  rootCertificateKey: ca.pem
-  clientCertificateKey: client.pem
-  clientPrivateKeyKey: client-key.pem
+crds:
+  install: true
+  keep: true
+  annotations:
+    insight.platform/upstream-source: https://github.com/opensandbox-group/OpenSandbox
+    insight.platform/upstream-commit: c39b814f36ded4c61d5ac6f9332ee4dfbab86c00
 
 networkPolicy:
   enabled: true
-  monitoringNamespaceSelector:
-    insight.platform/monitoring-namespace: "true"
-  monitoringPodSelector:
-    app.kubernetes.io/name: prometheus
-  dnsNamespaceSelector:
-    kubernetes.io/metadata.name: kube-system
-  dnsPodSelector:
-    k8s-app: kube-dns
-  # Replace these non-routable-safe example ranges with the exact private
-  # endpoint CIDRs recorded in the CandidateManifest.
-  postgresCidrs: [10.10.0.0/24]
-  natsCidrs: [10.20.0.0/24]
-  artifactBrokerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
-  artifactBrokerPodSelector: {insight.platform/workload-role: artifact-data-worker}
-  artifactBrokerPort: 9443
-  natsPort: 4222
-  kubernetesApiCidrs: [10.30.0.0/24]
-  kubernetesApiPort: 443
-  artifactDataWorkerNamespaceSelector: {insight.platform/artifact-namespace: "true"}
-  artifactDataWorkerPodSelector: {insight.platform/workload-role: artifact-data-worker}
-  artifactDataWorkerPort: 9444
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  kubernetesApiCidrs: [10.96.0.1/32]
+  postgresCidrs: [10.0.0.0/8]
+  postgresPort: 5432
+  directExternalCidr: 0.0.0.0/0
+  directDeniedCidrs:
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 224.0.0.0/4
+    - 240.0.0.0/4
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
 
 monitoring:
   enabled: true

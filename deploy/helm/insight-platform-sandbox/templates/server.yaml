@@ -1,0 +1,209 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: opensandbox-server
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+rules:
+  - apiGroups: [sandbox.opensandbox.io]
+    resources: [batchsandboxes]
+    verbs: [create, delete, get, list]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: opensandbox-server
+  namespace: {{ .Values.namespaces.workloads }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: opensandbox-server
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.server.serviceAccountName }}
+    namespace: {{ .Values.namespaces.control }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-opensandbox-server-namespace
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [{{ .Values.namespaces.workloads | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-opensandbox-server-namespace
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-opensandbox-server-namespace
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.server.serviceAccountName }}
+    namespace: {{ .Values.namespaces.control }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-server-config
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+  annotations:
+    insight.platform/upstream-commit: {{ .Values.global.sourceCommit | quote }}
+    insight.platform/provider-template-digest: {{ .Values.runtimeContract.kubernetesProviderTemplateDigest | quote }}
+data:
+  config.toml: |
+    [server]
+    host = "0.0.0.0"
+    port = {{ .Values.server.port }}
+    api_key = ""
+    max_sandbox_timeout_seconds = {{ .Values.server.maximumSandboxTimeoutSeconds }}
+
+    [log]
+    level = "INFO"
+
+    [runtime]
+    type = "kubernetes"
+    execd_image = "{{ include "insight-platform-sandbox.image" .Values.images.execd }}"
+    execd_run_as_init = true
+
+    [storage]
+    allowed_host_paths = []
+
+    [ingress]
+    mode = "direct"
+
+    [kubernetes]
+    kubeconfig_path = ""
+    namespace = "{{ .Values.namespaces.workloads }}"
+    informer_enabled = false
+    read_qps = {{ .Values.server.readQps }}
+    read_burst = {{ .Values.server.readBurst }}
+    write_qps = {{ .Values.server.writeQps }}
+    write_burst = {{ .Values.server.writeBurst }}
+    workload_provider = "batchsandbox"
+    batchsandbox_template_file = "/etc/opensandbox/batchsandbox-template.yaml"
+    sandbox_create_timeout_seconds = {{ .Values.server.sandboxCreateTimeoutSeconds }}
+    sandbox_create_poll_interval_seconds = {{ .Values.server.sandboxCreatePollIntervalSeconds }}
+    image_pull_policy = "IfNotPresent"
+    execd_init_resources = { requests = { cpu = "{{ .Values.server.execdInitResources.requests.cpu }}", memory = "{{ .Values.server.execdInitResources.requests.memory }}", ephemeral-storage = "{{ index .Values.server.execdInitResources.requests "ephemeral-storage" }}" }, limits = { cpu = "{{ .Values.server.execdInitResources.limits.cpu }}", memory = "{{ .Values.server.execdInitResources.limits.memory }}", ephemeral-storage = "{{ index .Values.server.execdInitResources.limits "ephemeral-storage" }}" } }
+  batchsandbox-template.yaml: |
+{{ .Files.Get "files/batchsandbox-template.yaml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-server
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+    app.kubernetes.io/version: "0.2.3"
+spec:
+  replicas: {{ .Values.server.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: insight-platform-sandbox
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: opensandbox-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: insight-platform-sandbox
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: opensandbox-server
+      annotations:
+        checksum/config: {{ printf "%s%s%s" (toJson .Values.server) (include "insight-platform-sandbox.image" .Values.images.execd) (.Files.Get "files/batchsandbox-template.yaml") | sha256sum }}
+        insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}
+        insight.platform/image-digest: {{ .Values.images.server.digest | quote }}
+    spec:
+      serviceAccountName: {{ .Values.server.serviceAccountName }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: {{ include "insight-platform-sandbox.image" .Values.images.server }}
+          imagePullPolicy: {{ .Values.images.server.pullPolicy }}
+          args: [--config, /etc/opensandbox/config.toml]
+          env:
+            - name: SANDBOX_CONFIG_PATH
+              value: /etc/opensandbox/config.toml
+            - name: OPENSANDBOX_SERVER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.apiKeySecret }}
+                  key: {{ .Values.server.apiKeyKey }}
+          ports:
+            - {name: http, containerPort: {{ .Values.server.port }}, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/opensandbox/config.toml, subPath: config.toml, readOnly: true}
+            - {name: config, mountPath: /etc/opensandbox/batchsandbox-template.yaml, subPath: batchsandbox-template.yaml, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: opensandbox-server-config}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-server
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: insight-platform-sandbox
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: opensandbox-server
+  ports:
+    - {name: http, port: {{ .Values.server.port }}, targetPort: http, protocol: TCP}

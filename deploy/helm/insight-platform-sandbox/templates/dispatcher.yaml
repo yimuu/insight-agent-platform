@@ -1,0 +1,143 @@
+{{- $runtimeJson := include "insight-platform-sandbox.runtimeContract" . -}}
+{{- $runtime := $runtimeJson | fromJson -}}
+{{- $runtimeDigest := include "insight-platform-sandbox.runtimeContractDigest" . -}}
+{{- $worker := dict
+  "manifest_version" 1
+  "worker_role" "sandbox-dispatcher"
+  "work_class" "sandbox"
+  "adapter_runtime_digest" $runtimeDigest
+  "protocol_version" 1
+  "max_concurrency" (int .Values.dispatcher.worker.maximumConcurrency)
+  "critical_control_reserved_slots" (int .Values.dispatcher.worker.criticalControlReservedSlots) -}}
+{{- $opensandbox := dict
+  "lifecycle_base_url" (printf "http://opensandbox-server.%s.svc.cluster.local:%v/v1/" .Values.namespaces.control .Values.server.port)
+  "request_timeout_milliseconds" (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds)
+  "connect_timeout_milliseconds" (int .Values.dispatcher.opensandbox.connectTimeoutMilliseconds)
+  "candidate_page_items" (int .Values.dispatcher.opensandbox.candidatePageItems)
+  "orphan_page_items" (int .Values.dispatcher.opensandbox.orphanPageItems) -}}
+{{- $config := dict
+  "schema_version" 1
+  "observability_listen_address" (printf "0.0.0.0:%v" .Values.dispatcher.observabilityPort)
+  "worker_manifest" $worker
+  "runtime_contract" $runtime
+  "runtime_contract_digest" $runtimeDigest
+  "opensandbox" $opensandbox
+  "database_max_connections" (int .Values.dispatcher.database.maximumConnections)
+  "database_acquire_timeout_milliseconds" (int .Values.dispatcher.database.acquireTimeoutMilliseconds)
+  "scan_interval_milliseconds" (int .Values.dispatcher.timing.scanIntervalMilliseconds)
+  "runner_poll_interval_milliseconds" (int .Values.dispatcher.timing.runnerPollIntervalMilliseconds)
+  "cleanup_scan_interval_milliseconds" (int .Values.dispatcher.timing.cleanupScanIntervalMilliseconds)
+  "orphan_scan_interval_milliseconds" (int .Values.dispatcher.timing.orphanScanIntervalMilliseconds)
+  "failure_backoff_milliseconds" (int .Values.dispatcher.timing.failureBackoffMilliseconds)
+  "drain_grace_milliseconds" (int .Values.dispatcher.timing.drainGraceMilliseconds) -}}
+{{- $configJson := $config | toJson -}}
+{{- $configDigest := printf "sha256:%s" ($configJson | sha256sum) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-dispatcher-config
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatcher
+  annotations:
+    insight.platform/config-digest: {{ $configDigest | quote }}
+    insight.platform/runtime-contract-digest: {{ $runtimeDigest | quote }}
+data:
+  config.json: {{ $configJson | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-dispatcher
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatcher
+spec:
+  replicas: {{ .Values.dispatcher.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: insight-platform-sandbox
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: dispatcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: insight-platform-sandbox
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: dispatcher
+      annotations:
+        insight.platform/config-digest: {{ $configDigest | quote }}
+        insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}
+        insight.platform/runtime-contract-digest: {{ $runtimeDigest | quote }}
+    spec:
+      serviceAccountName: {{ .Values.dispatcher.serviceAccountName }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dispatcher
+          image: {{ include "insight-platform-sandbox.image" .Values.images.platform }}
+          imagePullPolicy: {{ .Values.images.platform.pullPolicy }}
+          command: [/usr/local/bin/platform-sandbox-dispatcher]
+          env:
+            - {name: PLATFORM_SANDBOX_DISPATCHER_CONFIG, value: /etc/insight/config.json}
+            - {name: PLATFORM_SANDBOX_DISPATCHER_CONFIG_DIGEST, value: {{ $configDigest | quote }}}
+            - name: PLATFORM_SANDBOX_DISPATCHER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dispatcher.database.existingSecret }}
+                  key: {{ .Values.dispatcher.database.urlKey }}
+            - name: PLATFORM_SANDBOX_DISPATCHER_OPENSANDBOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dispatcher.opensandbox.apiKeySecret }}
+                  key: {{ .Values.dispatcher.opensandbox.apiKeyKey }}
+          ports:
+            - {name: observability, containerPort: {{ .Values.dispatcher.observabilityPort }}, protocol: TCP}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          livenessProbe:
+            httpGet: {path: /healthz, port: observability}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: observability}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.dispatcher.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/insight/config.json, subPath: config.json, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: sandbox-dispatcher-config}
+        - name: tmp
+          emptyDir: {sizeLimit: 32Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-dispatcher
+  namespace: {{ .Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatcher
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: insight-platform-sandbox
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: dispatcher
+  ports:
+    - {name: observability, port: {{ .Values.dispatcher.observabilityPort }}, targetPort: observability, protocol: TCP}
