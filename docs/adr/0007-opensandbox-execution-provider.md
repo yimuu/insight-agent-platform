@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 6 |
+| 状态 | Accepted / CR-216 revision 7 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -25,6 +25,10 @@ orphan repository裁决只读，corrupt/ambiguous/unavailable fail closed为reta
 
 revision 6明确：expired Running continuation reclaim在同一数据库claim事务中逻辑完成`Running -> Ready -> Leased -> Running`，
 只持久化最终Running，防止带physical evidence的中间Leased在Dispatcher再次故障后无法接管；attempt和全部physical identity保持不变。
+
+revision 7明确：metadata list不能证明一次create调用是否已生效。每次外部create前必须由current shared Job fence在PostgreSQL
+CAS授权exact ordinal，并持久化database-time provisioning start、authorization count与last authorization time；同ordinal可重放，
+下一ordinal必须满足durable count/quiescence/total-time hard limit，进程重启不能重新获得预算。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -98,6 +102,7 @@ canonical digest 产生。它不含 lease generation、worker generation、trace
 
 Dispatcher 用该 token 的 digest 作为 OpenSandbox metadata。Kubernetes provider 把 metadata 转换成 operator-owned label，
 因此 Dispatcher 在 create response 丢失或进程重启后，可以直接通过 Kubernetes-backed list 找回候选。
+每个candidate还携带已由PostgreSQL授权的`create_ordinal`；该ordinal是有界外部调用证据，不是业务attempt或provider idempotency key。
 
 ### 2. 惰性候选
 
@@ -105,9 +110,12 @@ OpenSandbox create 只启动 immutable fixed runner。runner 进入 `Armed`，�
 create/boot 时启动 Package。并发 create 或 response-loss 可能产生有限个、没有 workload 副作用的 inert candidates；这不是
 “一个 key 历史上只能出现一个 physical object”的保证。
 
-Dispatcher 对同 token 的候选执行有界发现与静默窗口，在 PostgreSQL current Job fence 下 CAS 选择唯一 candidate，并把
+Dispatcher 对同 token 的候选执行有界发现与静默窗口。每次实际create之前，它先list，再在PostgreSQL current Job fence下CAS
+授权exact next ordinal并记录database time，随后才在事务外调用provider；相同ordinal重放只返回已存authorization。Dispatcher再CAS
+选择唯一candidate，并把
 OpenSandbox ID、runner boot identity 与 request digest 持久化为 physical evidence。未选候选只允许 cleanup，永不激活。
-只有在激活前、并证明现有候选均未启动 Package 时，才允许按 Profile 的 candidate count/time limit 再次 create。
+只有在激活前、并证明现有候选均未启动Package且durable authorization count、quiescence与total-time仍在Profile hard limit内时，
+才允许授权下一ordinal并再次create。create response丢失或Dispatcher重启都不能重置这些预算。
 
 ### 3. 一次性激活
 
@@ -163,8 +171,9 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
   list 直接读取 Kubernetes API；
 - `/health` 只证明 Server 进程存活。Dispatcher readiness 必须做 authenticated create/list/delete capability probe 或等价的
   provider contract probe，并核验 CRD、controller、runner、network policy 与 exact digest closure；
-- physical persistence 位于 Kubernetes API/BatchSandbox CR，不引入 OpenSandbox SQLite 或 Platform 业务表作为 provider store；
-- BatchSandbox operator metadata固定携带内部`tenant_id/job_id/physical_attempt`及token/request/runtime/profile/network digest；只用于
+- physical persistence 位于 Kubernetes API/BatchSandbox CR；create authorization、candidate selection与activation evidence位于既有shared
+  Job row/version，不引入OpenSandbox SQLite、新Platform业务表或第二aggregate作为provider store；
+- BatchSandbox operator metadata固定携带内部`tenant_id/job_id/physical_attempt/create_ordinal`及token/request/runtime/profile/network digest；只用于
   bounded recovery/orphan point lookup，不公开、不授予Platform authority；
 - TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
   后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
@@ -184,7 +193,7 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
 目标实现删除 active composition 中的 Wasmtime、gVisor launcher/guest、attestor、RuntimeClass/runsc、相关 RBAC/admission/
 manifests/preflight、host-process execution、backend selector 与 fallback。实现完成前当前行为仍以 `docs/current` 为准。
 
-最低资格覆盖：候选并发与 response-loss、provider/controller 重启、Dispatcher kill/reclaim、PostgreSQL candidate CAS、runner activation
+最低资格覆盖：候选并发与response-loss、durable create ordinal/count/quiescence/timeout、provider/controller重启、Dispatcher kill/reclaim、PostgreSQL candidate CAS、runner activation
 重放/conflict、runner-start uncertainty、lease rollover、stale result、cancel/timeout、TTL/delete/absence、orphan cleanup、Direct/Disabled
 网络、固定 result frame、wrong credential/audience 与 OpenSandbox 零 Platform 权限。L4～L6 未运行时必须标记 `Not run`；CR-216
 不构成 production-ready、strong isolation 或 HA 声明。

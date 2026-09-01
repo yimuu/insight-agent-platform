@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 6 OpenSandbox replacement pending |
+| 状态 | In Progress / CR-216 revision 7 OpenSandbox replacement pending |
 | 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -26,6 +26,10 @@
 
 > 2026-09-02 CR-216 revision 6：continuation claim在单一PostgreSQL transaction内逻辑执行
 > `Running -> Ready -> Leased -> Running`并只提交最终Running；补attempt不变、lease generation rollover、old-fence stale result零写入L2。
+
+> 2026-09-02 CR-216 revision 7：每次provider create前由current Job fence CAS授权exact ordinal，持久化database-time
+> provisioning start、authorization count与last authorization time；response-loss/restart不重置count/quiescence/total-time预算。
+> provider I/O仍在事务外，OpenSandbox不改源码，candidate metadata携带已授权ordinal供恢复校验。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
@@ -1292,7 +1296,8 @@ clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + contai
      schema 与 canonical digest；
    - 固定 OpenSandbox Server `v0.2.3`、Controller `v0.2.0`、execd `v1.0.22`、审核 chart commit、BatchSandbox CRD、
      Kubernetes provider template、runner、CNI 与 containerd/runc manifest digest；不 fork/patch OpenSandbox；
-   - 在 shared Job row/version 中实现不含正文的execution plan、restart-safe provisioning intent、bounded candidate discovery、
+   - 在 shared Job row/version 中实现不含正文的execution plan、restart-safe provisioning intent、database-time exact-ordinal create
+     authorization、bounded candidate discovery、
      current-fence candidate CAS、activation authorization/PotentiallyStarted、observation、terminal cleanup intent与terminal后独立
      cleanup generation/absence CAS；input/output正文只属于exact RunValue，不新增第二业务aggregate/table；
    - 实现 Sandbox Dispatcher：claim/heartbeat、create/list inert candidates、select、runner state/activate/result、完整校验、fenced
@@ -1318,7 +1323,8 @@ clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + contai
 - real PostgreSQL + NATS + S3/KMS-compatible + fake/real protocol endpoints的端到端fixture通过；
 - Artifact三role权限矩阵、wrong tenant/owner/fence/digest/storage generation全部fail closed；
 - MCP protocol/OAuth/subscription 与 Model adapter 既有 tests 保持通过；OpenSandbox candidate/runner/fence/cleanup/network L1～L3 通过；
-- concurrent/response-loss create 只产生 bounded inert candidates，PostgreSQL 只选择一个，Package 最多 activation 一次；
+- concurrent/response-loss create由PostgreSQL exact ordinal和durable count/quiescence/timeout有界授权，只产生bounded inert candidates，
+  PostgreSQL只选择一个，Package最多activation一次；
   `PotentiallyStarted` 后不创建新 token/candidate/sandbox 或自动重跑；
 - OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation mutation，所有 role 都无 Docker/CRI socket；
 - Sandbox/Artifact/MCP/Model单lane饱和时其他lane与critical-control可用；

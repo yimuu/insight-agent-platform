@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 6 |
+| 状态 | Accepted / CR-216 revision 7 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
@@ -28,6 +28,10 @@
 > revision 6关闭continuation reclaim P1：expired Running的claim必须在同一PostgreSQL事务内完成逻辑
 > `Running -> Ready -> Leased -> Running`，只提交最终Running projection。中间Leased不可对其他事务可见；lease generation增加一次，
 > attempt count、provisioning token、candidate、activation与runner identity全部保持，旧fence observation零写入。
+>
+> revision 7关闭create response-loss P1：shared Job physical evidence持久化database-time provisioning start、create authorization count与
+> last authorization time；每次外部create前必须以current fence CAS授权exact ordinal。相同ordinal/旧version可重放，下一ordinal必须满足
+> quiescence/count/total-time hard limit。这样不修改OpenSandbox，也不会把list冒充幂等原语，同时使实际create调用次数restart-safe有界。
 
 ## 1. 决策摘要
 
@@ -172,6 +176,10 @@ trait SandboxJobRepository {
         &self,
         command: RecordProvisioningIntent,
     ) -> SandboxJobFence;
+    async fn authorize_candidate_create(
+        &self,
+        command: AuthorizeCandidateCreateV1,
+    ) -> CandidateCreateAuthorizationV1;
     async fn select_candidate(
         &self,
         command: SelectSandboxCandidate,
@@ -202,6 +210,10 @@ trait OpenSandboxProvider {
     async fn list_candidates(
         &self,
         token_digest: SandboxProvisioningTokenDigest,
+        cursor: CandidateCursor,
+    ) -> BoundedPage<OpenSandboxCandidate>;
+    async fn list_operator_candidates(
+        &self,
         cursor: CandidateCursor,
     ) -> BoundedPage<OpenSandboxCandidate>;
     async fn observe(&self, sandbox_id: OpenSandboxId) -> OpenSandboxObservation;
@@ -283,11 +295,35 @@ struct SandboxProvisioningTokenV1 {
     execution_request_digest: Sha256Digest,
 }
 
+struct SandboxPhysicalEvidenceV1 {
+    schema_version: ConstU16<1>,
+    physical_attempt: NonZeroU32,
+    provisioning_token_digest: Sha256Digest,
+    provisioning_started_at: Timestamp,
+    create_authorization_count: BoundedU8<0, 4>,
+    last_create_authorized_at: Option<Timestamp>,
+    // selected candidate, activation, result and cleanup evidence follow
+}
+
+struct AuthorizeCandidateCreateV1 {
+    schema_version: ConstU16<1>,
+    identity: SandboxFencedIdentityV1,
+    create_ordinal: BoundedNonZeroU8<1, 4>,
+    limits: SandboxProvisioningLimitsV1,
+}
+
+struct CandidateCreateAuthorizationV1 {
+    schema_version: ConstU16<1>,
+    fence: SandboxJobFenceV1,
+    create_ordinal: BoundedNonZeroU8<1, 4>,
+}
+
 struct SandboxCandidateMetadataV1 {
     schema_version: ConstU16<1>,
     tenant_id: TenantId,
     job_id: JobId,
     physical_attempt: NonZeroU32,
+    create_ordinal: BoundedNonZeroU8<1, 4>,
     provisioning_token_digest: Sha256Digest,
     execution_request_digest: Sha256Digest,
     runtime_contract_digest: Sha256Digest,
@@ -298,27 +334,36 @@ struct SandboxCandidateMetadataV1 {
 
 wire token 是 `sha256(canonical_jcs({"domain":"insight.sandbox.provision/v1","token":token}))` 的 lowercase opaque digest。它不含 lease
 generation、worker generation、trace 或 deadline。OpenSandbox metadata携带只供内部point lookup的`tenant_id + job_id +
-physical_attempt`、token/correlation digest与operator-controlled closed labels；不含Invocation、RunValue/input body、Secret、用户字符串或
+physical_attempt + create_ordinal`、token/correlation digest与operator-controlled closed labels；不含Invocation、RunValue/input body、Secret、用户字符串或
 任何Platform credential。这些ID只定位shared Job，不让OpenSandbox获得读写该Job的权限。
 
-`record_provisioning_intent` 的 current-fence CAS 同时生成一个 256-bit `OpaqueActivationToken`；CAS loser 读取 winner 的既有 token，
+`record_provisioning_intent` 的 current-fence CAS 同时记录数据库时间的provisioning start并生成一个 256-bit
+`OpaqueActivationToken`；CAS loser 读取 winner 的既有 token，
 不得另生成。token 是 runner idempotency identity，不授予 Platform API/DB/Kubernetes 权限；它以 sensitive Job evidence 持久化供 restart
 后重放，禁止进入 metadata、Event、Outbox、log、trace 或 metric。create frame 只包含 `sha256(token)`，runner 在 activate 时用 constant-time
-
-Dispatcher接收candidate时必须将metadata的`runtime_contract_digest`与`profile_deployment_digest`逐字段对照Plan/Request frozen值；
-仅验证digest语法、重新读取mutable head或相信provider返回值都不构成绑定证明。
-comparison 验证；未选 candidate 永远收不到 token。
+comparison 验证；未选 candidate 永远收不到 token。Dispatcher接收candidate时必须将metadata的
+`runtime_contract_digest`与`profile_deployment_digest`逐字段对照Plan/Request frozen值；仅验证digest语法、重新读取mutable head或
+相信provider返回值都不构成绑定证明。
 
 OpenSandbox create 不是原子唯一性 primitive。合同允许同 token 出现多个 candidate，但必须满足：
 
 1. create 只启动 `Armed` runner，绝不启动 Package；
-2. 每次 create 前后都执行 Kubernetes-backed bounded list；`informer_enabled=false`，恢复不依赖进程内 cache；
-3. candidate discovery 有 Profile 固定的 page、count、quiescence 与 total-time hard limit；超限进入 reconcile，不无限 create；
-4. Dispatcher 在 current Job fence 下通过 PostgreSQL CAS 选择唯一 OpenSandbox ID；CAS loser 只能 observe/cleanup；
-5. selected candidate 之外的候选永不 activate；response-loss 后先发现，不能先 create；
-6. 只有 Job 尚未 `ActivationAuthorized`、所有已发现候选均可证明 `Armed`/未启动、且 count/time budget 仍有余量时，才允许
-   再 create inert candidate；
-7. metadata list 只用于发现与 orphan reconcile，唯一 selected owner 来自 PostgreSQL，不把 list/create 描述为原子幂等。
+2. provisioning intent持久化数据库时间的start。每次外部create前先执行Kubernetes-backed bounded list；若仍需create，Dispatcher必须用
+   current Job fence在PostgreSQL CAS授权exact next ordinal，同时持久化create count与last authorization database time，然后才在事务外
+   调用provider；
+3. 同一lease identity对相同ordinal和旧expected version的重放返回既有authorization；更旧ordinal、跳号、不同lease/attempt/token或
+   profile limits漂移均为stable conflict且零写入；
+4. create后及response-loss/recovery时再次bounded list；`informer_enabled=false`，恢复不依赖进程内cache；
+5. durable create authorization count与observed candidate count分别不得超过Profile `maximum_candidates`；下一ordinal必须同时满足
+   database-time total provisioning timeout和自last authorization起的quiescence hard limit，进程重启不能重置预算；
+6. candidate metadata的`create_ordinal`必须已由current physical attempt授权，并与token/request/runtime/profile/network完整匹配，
+   否则不得记录、选择或激活；
+7. Dispatcher 在 current Job fence 下通过 PostgreSQL CAS 选择唯一 OpenSandbox ID；CAS loser只能observe/cleanup；
+8. selected candidate之外的候选永不activate；response-loss后先发现，不能先create；
+9. 只有Job尚未`ActivationAuthorized`、所有已发现候选均可证明`Armed`/未启动且durable count/time budget仍有余量时，才允许
+   授权下一ordinal并create inert candidate；
+10. metadata list只用于发现与orphan reconcile；PostgreSQL create authorization与candidate selection拥有相应唯一裁决，不把
+    list/create描述为原子幂等。
 
 orphan sweeper 对每个bounded candidate page调用repository point-read裁决。裁决必须先验证metadata身份、current Job kind/owner、Plan、
 physical attempt、provisioning/request/runtime/profile/network digest与candidate membership，再返回closed
@@ -475,7 +520,8 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 
 ## 12. 超时、重试、取消与恢复
 
-- create response 丢失：先按同 token bounded list；已有候选保持 inert，CAS 只选一个；不得把 metadata list 称为原子唯一性；
+- create response 丢失：先按同token bounded list；同一已授权ordinal只重放既有authorization。只有durable quiescence/count/total-time
+  budget允许时才CAS授权下一ordinal；已有候选保持inert，candidate CAS只选一个，不得把metadata list称为原子唯一性；
 - Dispatcher crash/reclaim：先读取 Job physical evidence，再 list/observe；旧 lease 不能写业务状态，新 lease 不重算 token；
 - expired `Running` reclaim必须先验证payload中的exact physical attempt，再在同一transaction内完成逻辑
   `Running -> Ready -> Leased -> Running`并只提交最终Running；只增加lease generation，不增加attempt count，不创建新
@@ -533,7 +579,7 @@ Platform 在 shared Job 的 bounded binding/evidence 中保存：
 
 - 不含正文的execution plan、exact input/output RunValue ID、schema/content digest与semantic request digest；
 - physical attempt 与 provisioning token digest；
-- selected OpenSandbox ID、candidate discovery count/quiescence decision；
+- database-time provisioning start、create authorization count/last time、selected OpenSandbox ID与candidate discovery evidence；
 - runner boot ID、sensitive activation token/its digest 与 activation state；
 - result frame/output digest、declared bytes、safe failure/unknown-outcome code；
 - cleanup required/generation/owner/expiry、delete observation 与 absence proof digest。
@@ -602,13 +648,13 @@ activation boundary 决定，不能只根据 HTTP status 或 error class 推断�
 | 层级 | 必须证明 |
 |---|---|
 | L1 contract/unit | closed schemas、canonical digest、fixed argv/runner/result frame、size/depth/count limits、illegal config/provider/network rejection |
-| L2 real PostgreSQL | concurrent claim/candidate CAS、lease rollover、stale result、terminal first-winner、cancel/timeout、quota settlement、orphan decision |
-| L3 real provider | OpenSandbox+Kubernetes+containerd/runc concurrent create、response loss、Server/Controller restart、Dispatcher kill/reclaim |
+| L2 real PostgreSQL | concurrent claim/create authorization/candidate CAS、lease rollover、stale result、terminal first-winner、cancel/timeout、quota settlement、orphan decision |
+| L3 real provider | OpenSandbox+Kubernetes+containerd/runc concurrent create、response loss、durable create budget、Server/Controller restart、Dispatcher kill/reclaim |
 | L3 runner/recovery | activation replay/conflict、runner-start uncertainty、boot rollover、fixed result validation、TTL/delete/absence/orphan cleanup |
 | L3 network/security | Direct external access、Disabled zero egress、internal CIDR deny、no public ingress/socket/credential、wrong API credential/source |
 | L4～L6 release | production topology、strong isolation、capacity/chaos/soak/restore/promotion；CR-216 未实际运行时均为 `Not run` |
 
-负向 fixture 必须包括：candidate list race、late duplicate candidate、mutable tag、wrong image/runner/schema/policy digest、shell override、
+负向 fixture 必须包括：candidate list race、create ordinal replay/skip/exhaustion、late duplicate candidate、mutable tag、wrong image/runner/schema/policy digest、shell override、
 privileged/host mount/socket、oversized input/result/diagnostic、duplicate/trailing terminal frame、activation token conflict、boot identity rollover、
 OpenSandbox late observation、old lease cleanup、orphan误删保护与 provider 直接业务写入尝试。
 
@@ -617,7 +663,8 @@ OpenSandbox late observation、old lease cleanup、orphan误删保护与 provide
 - active composition、配置、测试与非历史文档只剩 OpenSandbox Kubernetes physical provider；
 - WASI/Wasmtime、自建 gVisor launcher/guest、attestor、RuntimeClass/runsc、相关 RBAC/admission/manifests/preflight、host execution、
   backend selector/fallback 均被删除；
-- concurrent/response-loss create 只产生 bounded inert candidates，PostgreSQL 只选择一个，Package 最多 activation 一次；
+- concurrent/response-loss create 由PostgreSQL按exact ordinal、database time和current fence有界授权，只产生bounded inert candidates；
+  PostgreSQL只选择一个，Package最多activation一次；
 - `ActivationAuthorized/PotentiallyStarted` 后没有新 token/candidate/sandbox/automatic retry；
 - terminal commit 重新验证 current Job fence，旧 generation/错 owner/错 request digest 零业务写入；
 - runner 只执行 published fixed argv，result 只从 fixed read-only operation 获取并完整校验；
