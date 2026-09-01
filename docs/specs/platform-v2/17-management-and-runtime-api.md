@@ -2,14 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | 02～16 |
 | 直接下游 | 18 |
 
 > CR-216 impact：不新增public Sandbox/OpenSandbox route。OpenSandbox lifecycle API是只允许Sandbox Dispatcher访问的内部provider边界，
-> 不是Platform `/v1`资源或Operation authority。public Operation继续只投影shared Job；OpenSandbox ID、provisioning key、container status、
-> diagnostics与network endpoint不进入public response。
+> 不是Platform `/v1`资源或Operation authority。public Operation继续只投影shared Job；provisioning token、candidate/OpenSandbox ID、
+> runner boot/activation、Pod status、diagnostics与network endpoint不进入public response。
 
 > CR-206 impact：`SafeJobResult`升级为closed tagged union。`digest`保持普通成功Operation的安全摘要；
 > `context_dataset_generation`只允许`ContextDatasetBuild + ContextDataset target + succeeded`，并携带exact `generation_id`
@@ -460,8 +460,9 @@ internal service只有跨物理信任边界时才存在，不为每个domain tra
 | Service | 职责 | 关键限制 |
 |---|---|---|
 | EgressBroker | catalog-bound HTTP/provider/MCP egress与last-hop Secret resolution | 不接受自由URL/header/Secret |
-| SandboxDispatcher | claim/observe/cancel OpenSandbox physical attempt并提交fenced Job outcome | 只拥有Sandbox Job repository port，不在本进程执行代码 |
-| OpenSandboxLifecycle | idempotent create、observe、diagnostics、terminate、absence与orphan page | 内部HTTP；无Platform DB/Run/Invocation mutation/public exposure |
+| SandboxDispatcher | claim、candidate select、runner activate/observe/cancel 并提交 fenced Job outcome | 只拥有 Sandbox Job repository port，不在本进程执行代码 |
+| OpenSandboxLifecycle | create/list inert candidates、observe、terminate、absence 与 orphan page | internal HTTP；create 非业务幂等原语；无 Platform DB/Run/Invocation mutation/public exposure |
+| SandboxRunner | fixed state、replay-safe activate、read-only result | internal closed protocol；无任意 command/path、Platform credential 或跨 Job reuse |
 | ArtifactGateway | 经Public Gateway转发的public upload/download HTTP语义 | exact public-gateway mTLS audience + current principal rebinding |
 | ArtifactDataWorker | internal stage/read/verify/derive | exact workload capability + owner/Job fence |
 | ArtifactMaintenance | delete/GC/quarantine/reconcile | closed maintenance transition |

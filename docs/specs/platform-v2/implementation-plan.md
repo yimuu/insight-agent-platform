@@ -2,14 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 OpenSandbox replacement pending |
+| 状态 | In Progress / CR-216 revision 1 OpenSandbox replacement pending |
 | 日期 | 2026-09-01 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
-> 2026-09-01 CR-216：Sandbox physical implementation clean-cut为OpenSandbox-only + Docker/runc。按
-> contract/types -> OpenSandbox atomic provisioning extension -> Sandbox Dispatcher -> fixed runner -> cleanup/recovery -> deployment/profile
-> 顺序实现；随后删除WASI/gVisor/attestor runtime composition与资格入口。shared Job、Invocation与public `/v1`不重建、不兼容双跑。
-> OpenSandbox L1～L3未执行前，旧WASI/gVisor历史证据不能推进本批状态。
+> 2026-09-01 CR-216 revision 1：Sandbox physical implementation clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox
+> Controller + containerd/runc，不修改 OpenSandbox 源码。按 contract/types -> shared Job candidate/activation evidence -> Armed runner
+> -> provider adapter -> cleanup/recovery -> deployment/profile -> L1～L3 顺序实现；随后删除 WASI/gVisor/attestor runtime composition
+> 与资格入口。shared Job、Invocation 与 public `/v1` 不重建、不兼容双跑。L1～L3 未执行前，旧证据不能推进本批状态。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
@@ -1242,8 +1242,8 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 
 ### 5.1 目标
 
-保留已交付的Context、remote MCP、Artifact三role、Egress/Secret与真实Model adapter，并将Sandbox physical execution
-clean-cut为OpenSandbox Server + Docker/runc。状态：**CR-216 Sandbox replacement Pending**。
+保留已交付的 Context、remote MCP、Artifact 三 role、Egress/Secret 与真实 Model adapter，并将 Sandbox physical execution
+clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 Sandbox replacement Pending**。
 
 ### 5.2 实现批次
 
@@ -1272,16 +1272,22 @@ clean-cut为OpenSandbox Server + Docker/runc。状态：**CR-216 Sandbox replace
 
 4. **OpenSandbox-only Sandbox**
 
-   - 生成OpenSandbox-only Runtime/Profile/ExecutionRequest/ProvisioningKey/RunnerFrame closed contract与schema digest；
-   - 固定OpenSandbox commit/image、Lifecycle schema、execd read-only result schema、Docker runtime和Platform provisioning extension digest；
-   - 在OpenSandbox Server内部实现atomic same-key/same-digest reuse与same-key/different-digest conflict，持久化restart-safe receipt；
-   - 实现Sandbox Dispatcher：Sandbox Job claim/heartbeat、provisioning intent/evidence CAS、observe、output validation、fenced terminal commit、
-     cancel/timeout/delete/absence/orphan reconcile；
-   - 构建immutable Sandbox runner image，create array entrypoint只运行published package argv一次，将typed result frame原子写入固定路径并等待delete；
-     Dispatcher只允许execd exact fixed-path bounded read，禁止execd command、任意filesystem mutation、PTY、snapshot、public endpoint、runtime installer与mutable tag；
-   - `Disabled | Direct` Docker bridge network正负；默认Secret injection disabled，Sandbox Artifact port不可activate；
-   - 删除/退出首版composition的Wasmtime/WASI Executor、gVisor Launcher/guest、attestor、RuntimeClass/RBAC/admission及其fallback/checker；
-   - Dispatcher/OpenSandbox强杀、create response loss、provider restart、runner-start unknown、late result、TTL/delete/orphan cleanup。
+   - 生成 closed Runtime/Profile/ExecutionRequest/ProvisioningToken/CandidateMetadata/Activation/RunnerState/ResultFrame contract、
+     schema 与 canonical digest；
+   - 固定 OpenSandbox Server `v0.2.3`、Controller `v0.2.0`、execd `v1.0.22`、审核 chart commit、BatchSandbox CRD、
+     Kubernetes provider template、runner、CNI 与 containerd/runc manifest digest；不 fork/patch OpenSandbox；
+   - 在 shared Job row/version 中实现 restart-safe provisioning intent、bounded candidate discovery、current-fence candidate CAS、
+     activation authorization/PotentiallyStarted、observation、cleanup 与 absence evidence；不新增第二业务 aggregate/table；
+   - 实现 Sandbox Dispatcher：claim/heartbeat、create/list inert candidates、select、runner state/activate/result、完整校验、fenced
+     terminal commit、cancel/timeout/delete/absence/orphan reconcile；selected/可能启动后禁止 replacement；
+   - 构建 immutable Armed runner：create 只验证 input 并等待；activation token 以 exclusive+fsync latch 后最多 spawn Package 一次；
+     container/boot rollover 不自动重跑；result temp+fsync+atomic rename；只暴露 fixed closed state/activate/read-result protocol；
+   - 部署 internal ClusterIP Server、BatchSandbox Controller、两套 operator-owned `Direct | Disabled` CNI policy、provider readiness/
+     observability/cleanup；无 public ingress、Docker/CRI socket、service-account token、Platform credential；
+   - 删除 active composition 中 Wasmtime/WASI Executor、gVisor Launcher/guest、attestor、RuntimeClass/runsc、相关 RBAC/admission/
+     manifests/preflight、host execution、backend selector/fallback；
+   - L1 后独立提交；L2 使用真实 PostgreSQL；L3 使用真实 OpenSandbox+Kubernetes+containerd/runc 覆盖 create race/response loss、
+     Server/Controller restart、Dispatcher kill/reclaim、activation replay/boot uncertainty、Direct/Disabled、TTL/delete/absence/orphan cleanup。
 
 5. **Real Model/provider path**
 
@@ -1293,9 +1299,10 @@ clean-cut为OpenSandbox Server + Docker/runc。状态：**CR-216 Sandbox replace
 
 - real PostgreSQL + NATS + S3/KMS-compatible + fake/real protocol endpoints的端到端fixture通过；
 - Artifact三role权限矩阵、wrong tenant/owner/fence/digest/storage generation全部fail closed；
-- MCP protocol/OAuth/subscription与Model adapter既有tests保持通过；OpenSandbox provisioning/runner/fence/cleanup/network L1～L3通过；
-- same provisioning key并发/response loss/restart只有一个sandbox与一次runner start，可能已开始的workload不自动重跑；
-- OpenSandbox无Platform DB/Run/Invocation mutation，Docker socket只属于OpenSandbox Server；
+- MCP protocol/OAuth/subscription 与 Model adapter 既有 tests 保持通过；OpenSandbox candidate/runner/fence/cleanup/network L1～L3 通过；
+- concurrent/response-loss create 只产生 bounded inert candidates，PostgreSQL 只选择一个，Package 最多 activation 一次；
+  `PotentiallyStarted` 后不创建新 token/candidate/sandbox 或自动重跑；
+- OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation mutation，所有 role 都无 Docker/CRI socket；
 - Sandbox/Artifact/MCP/Model单lane饱和时其他lane与critical-control可用；
 - default artifact/image/runtime不包含microVM、Managed stdio、Model Artifact或dynamic installer。
 
@@ -1317,7 +1324,7 @@ clean-cut为OpenSandbox Server + Docker/runc。状态：**CR-216 Sandbox replace
 2. **Production topology**
 
    - 按18部署隔舱创建ServiceAccount、DB role/pool、NetworkPolicy、PDB/HPA、startup manifest和digest门禁；
-   - Sandbox Dispatcher/OpenSandbox Server/Docker socket、Artifact三role和Egress/Secret隔离；
+   - Sandbox Dispatcher/OpenSandbox Server/BatchSandbox Controller/sandbox Pod、Artifact 三 role和Egress/Secret隔离；
    - PostgreSQL/NATS/S3/KMS/Secret的backup、restore、rotation和failure runbook。
 
 3. **Observability 与qualification**

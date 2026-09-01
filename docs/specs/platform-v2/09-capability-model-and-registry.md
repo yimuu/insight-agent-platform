@@ -2,13 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md)、[`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md)、[`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) |
 | 直接下游 | 10、11、13、14、15、17、18 |
 
-> CR-216 impact：Sandbox backend的唯一physical provider是OpenSandbox。Implementation/Deployment冻结OCI image digest、
-> fixed argv entrypoint、OpenSandbox lifecycle schema digest、Docker resource/network profile与provisioning extension digest；
+> CR-216 revision 1 impact：Sandbox backend 的唯一 physical provider 是 OpenSandbox Kubernetes。Implementation/Deployment 冻结 OCI image digest、
+> fixed argv entrypoint、OpenSandbox lifecycle/BatchSandbox/runner protocol schema、Kubernetes template/CNI/container runtime digest；
 > 不再冻结或选择WASI/gVisor isolation variant。
 
 > CR-205 impact：Capability Implementation不是可由Worker进程配置替代的隐式对象。closed
@@ -339,9 +339,9 @@ Sandbox Implementation Revision固定：
 - fixed argv entrypoint；
 - dependency lock digest；
 - input/output mapping；
-- required OpenSandbox lifecycle、provisioning extension及execd read-only result contract digest。
+- required OpenSandbox lifecycle、BatchSandbox CRD/controller、Armed runner state/activate/read-result contract digest。
 
-Capability Deployment再固定Sandbox Package/Runtime/Profile Revision、OpenSandbox provider binding、`Disabled | Direct` network mode、
+Capability Deployment再固定Sandbox Package/Runtime/Profile Revision、OpenSandbox Kubernetes provider binding、`Disabled | Direct` network mode、
 resource limits与部署证据。首版没有backend selector：任何WASI/gVisor/microVM/host variant或provider fallback均fail closed。
 
 Shell 只能是 ReviewedPublished implementation 的固定 entrypoint。参数作为结构化 argv/JSON 传递，不拼接

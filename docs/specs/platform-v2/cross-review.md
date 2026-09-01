@@ -2,29 +2,31 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
 ### CR-216 OpenSandbox-only execution cross-review
 
-CR-216将首版Sandbox physical implementation从restricted WASI + per-Job gVisor clean-cut为OpenSandbox Server + Docker/runc。
-复核确认“完全替换”只适用于physical runtime：Capability Invocation与shared Job仍是业务authority，Sandbox Dispatcher是唯一provider caller
-与terminal commit入口，OpenSandbox只拥有sandbox/container/runner/log lifecycle。ADR-0007取代ADR-0002；实现完成前`docs/current`不变。
+CR-216 revision 1 将首版 Sandbox physical implementation 从 restricted WASI + per-Job gVisor clean-cut 为 OpenSandbox
+Kubernetes provider + BatchSandbox Controller + containerd/runc，并以 inert candidate + Armed runner activation 取代对 OpenSandbox
+源码 atomic provisioning extension 的要求。复核确认“完全替换”只适用于 physical runtime：Capability Invocation 与 shared Job
+仍是业务 authority，Sandbox Dispatcher 是唯一 provider caller、candidate selector 与 terminal commit 入口；OpenSandbox 只拥有
+BatchSandbox/Pod/runner physical lifecycle。ADR-0007 取代 ADR-0002；实现完成前 `docs/current` 不变。
 
 | 维度 | Cross-review ruling |
 |---|---|
-| state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal，OpenSandbox只拥有physical lifecycle；Job只保存bounded external handle/evidence，不复制provider state |
-| IDs | 不新增SandboxJob/Operation/business ID；OpenSandbox ID只在Job evidence与内部协议出现，public Operation仍等于JobId |
-| schemas | `SandboxProviderKind`首版只有OpenSandbox；Runtime/Profile/Request/ProvisioningKey/RunnerFrame均closed v1、canonical、bounded并有digest；unknown backend或fallback拒绝 |
-| idempotency | Platform只保证command Receipt、atomic OpenSandbox provisioning、Job terminal first-winner；workload第三方API副作用不进入Platform幂等或exactly-once合同 |
-| transactions | provisioning intent先以current Job fence持久化；provider I/O在事务外；evidence与terminal分别回到owner CAS事务重验latest fence；OpenSandbox不加入业务事务 |
-| errors/events | provider conflict/unavailable/unknown/output-too-large映射为safe Job failure/Event，不公开OpenSandbox ID、API body、diagnostics、URL或workload正文 |
-| permissions | Dispatcher只有Sandbox Job repository与OpenSandbox client；OpenSandbox无Platform DB/NATS/Artifact/Run/Invocation权限；只有OpenSandbox可访问Docker socket |
-| network/Secret | Profile显式`Disabled | Direct`；Direct允许普通出网且不经过Egress Broker。默认Secret injection disabled，不能以env/input绕过；无public ingress |
-| capacity | `WorkClass::Sandbox`不变；Dispatcher DB/permit与OpenSandbox API/container budget独立，饱和不得消耗API/Orchestration/Model/MCP/Artifact/critical-control |
-| recovery | same-key create重放返回同一sandbox；可能已启动时不创建新key重跑；reclaim先observe，unknown保持UnknownOutcome；delete/TTL/orphan sweep不推进业务state |
-| fixtures | L1 closed contract，L2 fresh PostgreSQL fence/CAS，L3真实OpenSandbox+Docker并发/restart/kill/network/cleanup；L4～L6强隔离、HA、capacity/soak/restore/promotion Not run |
+| state ownership | Invocation 拥有业务调用，shared Job 拥有 attempt/lease/fence/cancel/terminal 与 selected candidate；OpenSandbox/Kubernetes 只拥有 physical lifecycle；Job 只保存 bounded evidence，不复制 provider state |
+| IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID 和 activation token 都是 physical evidence；public Operation 仍等于 JobId |
+| schemas | provider 是 closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Request/ProvisioningToken/CandidateMetadata/Activation/RunnerResult 均为 canonical、bounded v1 并有 digest；unknown backend/fallback 拒绝 |
+| idempotency | Platform 保证 command Receipt、PostgreSQL candidate-selection first-winner、runner activation replay-safe/最多一次 Package start、Job terminal first-winner；不保证一个 token 历史上只有一个 inert object，也不拥有 workload 外部副作用幂等 |
+| transactions | current fence 先持久化 provisioning intent；provider I/O 在事务外；candidate selection 与 activation authorization 分别 CAS；`PotentiallyStarted` 先于外部 activate；terminal 再重验 latest fence；OpenSandbox 不加入业务事务 |
+| errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
+| permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
+| network/Secret | Profile 只允许 `Disabled | Direct` operator policy；默认 deny ingress，无 public exposure；Direct 拒绝 internal/metadata CIDR，Disabled 零 egress；Secret injection disabled |
+| capacity | `WorkClass::Sandbox` 不变；candidate count/quiescence/time、Dispatcher permits、OpenSandbox API、BatchSandbox/Pod、result bytes 与 cleanup backlog 独立有界，饱和不得消耗其他 lane |
+| recovery | create response loss 先 list inert candidates；PostgreSQL 只选一个；`ActivationAuthorized/PotentiallyStarted` 后只查询/重放同 runner/token，boot 变化则 UnknownOutcome；delete/TTL/orphan sweep 不推进业务 state |
+| fixtures | L1 closed contract/digest/runner/result/limits；L2 real PostgreSQL claim/CAS/fence/terminal/cancel/quota/orphan；L3 real OpenSandbox+Kubernetes/containerd-runc create/restart/kill/activation/network/cleanup；L4～L6 `Not run` |
 
 完整00～18影响复核结论：01/02收敛plane与ComponentRole；03收敛provisioning/terminal幂等及recovery；04收敛Direct network和Secret边界；
 07保留WorkClass并替换worker pools；09/10收敛Capability Deployment/Invocation；14重写physical protocol；15将Sandbox Artifact port推迟；
@@ -32,9 +34,10 @@ CR-216将首版Sandbox physical implementation从restricted WASI + per-Job gViso
 的Plan、Run、Subagent、Skill、Context、MCP和Model authority不变。
 
 该修订不增加业务表、aggregate、ResourceKind、JobKind、WorkClass、public route、Task/Event/Receipt kind或compatibility layer。
-OpenSandbox physical store不是Platform business database。00～18在修订期间退回Architecture Revision；上述state/ID/schema/error/
-transaction/event/permission/capacity/recovery/fixture复核无P0/P1后，受影响规范与ADR-0007恢复Accepted。Implementation Authorization只覆盖
-implementation-plan中新的CR-216 Sandbox批次；旧WASI/gVisor完成证据不能抵扣OpenSandbox门禁。
+Kubernetes physical store 不是 Platform business database。该 revision 不新增业务表、aggregate、ResourceKind、JobKind、WorkClass、
+public route、Task/Event/Receipt kind 或 compatibility layer；candidate selection/activation evidence 使用 shared Job 同一 row/version CAS。
+上述 state/ID/schema/error/transaction/event/permission/capacity/recovery/fixture 复核无 P0/P1，受影响规范与 ADR-0007 为 Accepted。
+Implementation Authorization 只覆盖 implementation-plan 中新的 CR-216 Sandbox 批次；旧 WASI/gVisor 证据不能抵扣新门禁。
 
 ### CR-215 browser authoring profile authority cross-review
 
@@ -802,7 +805,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 | OpenSandbox-only physical provider、Job authority、provisioning幂等、Direct network与资格闭合 |
+| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 1 | OpenSandbox Kubernetes-only provider、Job authority、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
 | 12～13 | Accepted / CR-193（CR-216影响复核） | Context/MCP authority与remote-only协议不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08 | Accepted / CR-182（CR-216影响复核） | Subagent不创建persistent Sandbox session |
@@ -810,7 +813,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Superseded | 保留gVisor历史决策，不再作为实现输入 |
-| ADR-0007 | Accepted / CR-216 | OpenSandbox-only + Docker/runc；shared Job authority与atomic provisioning extension |
+| ADR-0007 | Accepted / CR-216 revision 1 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；shared Job candidate selection 与 Armed runner activation |
 | implementation-plan | In Progress / CR-216 | OpenSandbox合同实现与L1～L3 Pending；L4～L6仍Not run |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
@@ -1042,8 +1045,8 @@ Receipt replay必须从stored typed result重建原status/body/ETag/Location，�
 | Runtime API | Run/Task/Artifact public command | Scheduler decision、Secret resolution |
 | Scheduler/Worker | exact WorkClass claim/commit | arbitrary owner/table、active head mutation |
 | MCP Host | remote Streamable HTTP protocol | stdio spawn、raw token、Sandbox execution |
-| Sandbox Dispatcher | Sandbox Job claim、OpenSandbox调用、physical evidence校验、fenced terminal commit与cleanup | 在本进程执行用户代码、绕过Job fence、解释workload第三方API语义 |
-| OpenSandbox Server | atomic provisioning、Docker/runc sandbox/runner lifecycle、diagnostics与absence | Platform DB/Run/Invocation mutation、public API、业务retry/terminal决策 |
+| Sandbox Dispatcher | Sandbox Job claim、OpenSandbox 调用、candidate CAS、runner activation、physical evidence校验、fenced terminal commit与cleanup | 在本进程执行用户代码、绕过 Job fence、candidate selected 后另选 sandbox、解释 workload 第三方 API 语义 |
+| OpenSandbox Server/Controller | Kubernetes provider、BatchSandbox/Pod/runner lifecycle、TTL/delete 与 physical observation | Platform DB/Run/Invocation mutation、public API、业务 retry/terminal/candidate selection 决策 |
 | Artifact Gateway | principal upload/download | internal workload authority、maintenance |
 | Artifact Data Worker | closed workload stage/read/verify/derive | public principal API、Ready owner commit |
 | Artifact Maintenance | closed retention/delete/GC transition | 新business reference、public upload |
@@ -1055,7 +1058,7 @@ Secret value和任意JSON owner不是可信请求输入。
 ## 10. 容量与拓扑
 
 最低隔舱：API、Orchestration/Recovery、Model、Native/Remote Capability、Context、MCP、Sandbox Dispatcher、
-OpenSandbox Server/Docker sandbox pool、Artifact Gateway、Artifact Data Worker、Artifact Maintenance、Egress/Secret Broker。
+OpenSandbox Server/BatchSandbox Controller/sandbox Pod pool、Artifact Gateway、Artifact Data Worker、Artifact Maintenance、Egress/Secret Broker。
 
 隔舱意味独立queue、permit、DB/storage/client pool、ServiceAccount与autoscaling signal，不意味每个domain都拆成服务。
 Sandbox或Artifact饱和时API、Scheduler、Model和critical-control仍必须准入。Model没有output materialization专用池；
@@ -1072,7 +1075,7 @@ MCP没有stdio/microVM session pool。
 | NATS loss/duplicate | safety scan/outbox replay + idempotent consumer |
 | external timeout | Effect-aware retry/reconcile/UnknownOutcome |
 | MCP disconnect | durable cursor/task/wake contract恢复或stable failure |
-| Sandbox Dispatcher/OpenSandbox kill | same provisioning key/physical ID observe；可能已开始时不重跑；current Job fence提交或UnknownOutcome + cleanup |
+| Sandbox Dispatcher/OpenSandbox/Controller kill | 先按 Job evidence 与 provisioning token 发现 inert candidates；只恢复 selected runner；`PotentiallyStarted` 后不创建 replacement；current Job fence 提交或 UnknownOutcome + cleanup |
 | S3/KMS uncertainty | exact object generation reconcile，不伪造Ready/Delete success |
 | rollout | drain、handoff、lease expiry和compatible worker pool |
 | backup restore | PITR + Artifact consistency + fence invalidation + outbox/recovery scan |
@@ -1126,9 +1129,9 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 | Installation Release把GitOps事实复制到DB | GitOps/Kubernetes是release authority，DB不新增state/API/table |
 | Model output导致Producer/Broker/容量/Artifact状态爆炸 | 首版Inline-only，文件由Capability/Sandbox Artifact port产生 |
 | Artifact八role权限与容量矩阵过度分裂 | 收敛为Gateway/Data Worker/Maintenance三role，内部用closed caller capability区分 |
-| 多Sandbox backend与强隔离资格阻塞首条流程 | ADR-0007：首版OpenSandbox-only + explicit Docker/runc；WASI/gVisor/microVM均推迟，shared Job authority不变 |
-| OpenSandbox标准create缺少可依赖client幂等 | 固定OpenSandbox发行物内部实现atomic provisioning extension；禁止Dispatcher内存去重与metadata list/create |
-| workload外部写幂等被误归平台 | Platform只保证provisioning与Job terminal；workload第三方API副作用由Package/目标服务拥有，可能已开始时不自动重跑 |
+| 多Sandbox backend与强隔离资格阻塞首条流程 | ADR-0007：首版 OpenSandbox Kubernetes-only + explicit containerd/runc；WASI/gVisor/Docker provider/microVM 均推迟，shared Job authority 不变 |
+| OpenSandbox标准create缺少可依赖client幂等 | create 只产生 inert Armed candidate；metadata list 只发现，PostgreSQL CAS 选唯一 candidate，durable activation latch 最多启动一次 Package；不修改上游 |
+| workload外部写幂等被误归平台 | Platform 只保证 candidate selection、runner activation 与 Job terminal；workload 第三方 API 副作用由 Package/目标服务拥有，可能已开始时不自动重跑 |
 | 02把Draft写成mutable ResourceVersion、17又要求Version validate/publish route | Draft由Resource aggregate唯一拥有；17使用`/draft` update/validate/publish，publication后才有immutable Version GET identity |
 | 02给Deployment可变state/version却又要求immutable，17的`suspend`未指定authority | Deployment是immutable closure；activate/suspend以Resource ETag做CAS，只改Resource active binding/gate |
 | public Run未选择Agent且admission entry无durable authority | request显式携带`agent_id`；Agent Deployment冻结validated entry ID/kind，admission不接受内部入口或临时读Artifact |
@@ -1147,8 +1150,9 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 3. `git diff --check`通过；
 4. implementation-plan的每个phase都只从Reviewed合同引用可观测行为和分层证据；
 5. 批准前不对外声明target API、topology、capacity、schema v8或runtime已经上线。
-6. CR-216 topology复核确认Docker socket只授予OpenSandbox Server；Dispatcher及其他Platform role均不可达。OpenSandbox status不成为第二Job
-   authority，Direct network不授予host network/socket/Platform credential，developer-preview不得冒充gVisor/microVM隔离。
+6. CR-216 revision 1 topology 复核确认所有 role 都没有 Docker/CRI socket；Dispatcher 只调用 internal OpenSandbox lifecycle 与
+   fixed runner protocol。OpenSandbox/Kubernetes status 不成为第二 Job authority，Direct network 不授予 host network/socket/Platform
+   credential，developer-preview 不得冒充 gVisor/microVM 隔离。
 7. 逐份复核03～16对ResourceVersion的引用只指published immutable revision；05与11已有“current Draft + validation + atomic publish”语义，
    12的Dataset Generation仍由owner Job原子创建immutable version，均不需要mutable Version row或新表。
 8. 逐份复核03～16的Run admission和exact deployment reference只读immutable closure + Resource current binding/gate，无下游需要
@@ -1194,21 +1198,27 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 30. Acceptance 37：ArtifactIo Policy v3在一个closed canonical document中冻结scanner contract digest、verification evidence TTL/retry、
     write storage binding digest、encryption domain与既有media/file rules；所有Artifact admission从TenantConfig exact slot复制，v1/v2/缺失/
     超限/unsupported scanner或binding在object I/O与Job claim前fail closed，已存Job不随policy或rollout变化，且无新增PolicyKind、表、role或public字段。
-31. Acceptance 38：CR-216 shared Job是唯一Sandbox业务authority；OpenSandbox Server没有Platform DB/Run/Invocation mutation权限，Dispatcher
-    terminal transaction重验latest Job lease fence，OpenSandbox ID只作为bounded internal evidence且不进入public Operation。
-32. Acceptance 39：`SandboxProvisioningKeyV1`、same-key/same-digest reuse、same-key/different-digest conflict及restart persistence由
-    OpenSandbox内部atomic extension拥有；metadata list/create与Dispatcher内存map不算幂等实现。
-33. Acceptance 40：Profile只允许`Disabled | Direct`；Direct workload外部副作用明确不在Platform idempotency/exactly-once边界，可能已开始的
-    runner不自动重跑。默认Secret injection disabled，Artifact port在首条Profile不可activate。
-34. Acceptance 41：ComponentRole、capacity、API、Artifact、deployment与qualification全部改为Dispatcher/OpenSandbox/Docker closure；
-    不新增表、JobKind、WorkClass、public route、Receipt/Event kind或compatibility fallback，旧WASI/gVisor evidence只保留历史意义。
+31. Acceptance 38：CR-216 shared Job 是唯一 Sandbox 业务 authority；OpenSandbox Server/Controller/runner 没有 Platform DB、NATS、
+    Run/Invocation mutation 权限，Dispatcher terminal transaction 重验 latest Job lease fence；physical ID 只作 bounded internal evidence。
+32. Acceptance 39：`SandboxProvisioningTokenV1` 不含 lease generation；create 可产生 bounded inert candidates，metadata list 只发现，
+    current Job row CAS 选择唯一 candidate。fixed runner 在 `PotentiallyStarted` 先持久化后用同 activation token replay-safe，Package
+    最多启动一次；不修改 OpenSandbox 源码，也不声称一个 token 历史上只有一个 object。
+33. Acceptance 40：Profile 只允许 `Disabled | Direct` operator NetworkPolicy；Direct workload 外部副作用不在 Platform idempotency/
+    exactly-once 边界，可能已开始后不创建 replacement。默认 Secret injection disabled，Artifact port 不可 activate。
+34. Acceptance 41：ComponentRole、capacity、API、Artifact、deployment 与 qualification 全部改为 Dispatcher/OpenSandbox Kubernetes/
+    BatchSandbox closure；不新增业务表、JobKind、WorkClass、public route、Receipt/Event kind 或 compatibility fallback，旧 WASI/gVisor/
+    Docker evidence 只保留历史意义。
+35. Acceptance 42：deployment source-pin OpenSandbox Server `v0.2.3`、Controller `v0.2.0`、execd `v1.0.22` 与审核 chart commit；
+    Server/Controller developer Profile 单副本，`informer_enabled=false`，readiness 不能只信 `/health`；L3 必须用真实 CNI 证明
+    Direct/Disabled/internal-deny/no-public-ingress，并覆盖 runner boot rollover、TTL/delete/absence 与 orphan cleanup。
 
 ## 16. 未决项
 
-CR-216 cross-review没有未关闭P0/P1合同冲突；00保持In Progress，受影响01～04、07、09、10、14、15、17、18与
-product-experience 00/06恢复Accepted，但OpenSandbox实现与L1～L3均Pending，不得标记Implemented或Verified。具体任务以
+CR-216 revision 1 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
+product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
 [`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 
-真实OpenSandbox/Docker provider流程、atomic provisioning extension、L4强隔离拓扑、L5容量/持续soak与首个CapacityProfile、L6
-backup-restore/rollout-rollback以及人工GitOps clean cut均未执行。它们保留为实现/environment门禁，不回退其他domain已关闭的证据；
-实际通过前禁止声称OpenSandbox已替换current runtime、production capacity、SLO、HA、强隔离/restore或environment已完成clean cut。
+真实 OpenSandbox Kubernetes/BatchSandbox/Armed runner 流程与 L1～L3 尚未执行；L4 强隔离拓扑、L5 容量/持续 soak 与首个
+CapacityProfile、L6 backup-restore/rollout-rollback 以及人工 GitOps clean cut 均未执行。它们保留为 implementation/environment
+门禁，不回退其他 domain 已关闭证据；实际通过前禁止声称 OpenSandbox 已替换 current runtime、production capacity、SLO、HA、
+强隔离/restore 或 environment 已完成 clean cut。

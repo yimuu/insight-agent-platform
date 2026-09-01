@@ -2,16 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 |
+| 状态 | In Progress / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
 
-> 2026-09-01 architecture revision（CR-216）：首版Sandbox物理实现clean-cut为OpenSandbox-only，显式使用
-> Docker/runc provider并允许published Profile选择direct outbound network。shared Job仍是唯一业务work authority；只有Sandbox Dispatcher
-> 可调用内部OpenSandbox并在terminal transaction前复核Job lease fence，OpenSandbox不获得Platform数据库或Run/Invocation mutation权限。
-> 首版只保证sandbox provisioning与Job terminal commit幂等；workload调用第三方API产生的读写/副作用与目标API幂等由Package及目标服务负责。
+> 2026-09-01 architecture revision（CR-216 revision 1）：首版 Sandbox 物理实现 clean-cut 为 OpenSandbox Kubernetes provider、
+> BatchSandbox Controller 与 containerd/runc。create 只产生 inert Armed candidates，PostgreSQL 选择唯一 candidate，fixed runner
+> 最多激活一次 Package；不修改 OpenSandbox 源码。shared Job 仍是唯一业务 work authority；只有 Sandbox Dispatcher 可调用内部
+> OpenSandbox、激活 runner，并在 terminal transaction 前复核 current Job lease fence。OpenSandbox 不获得 Platform 业务权限。
+> workload 调用第三方 API 产生的读写/副作用与目标 API 幂等仍由 Package 及目标服务负责。
 > ADR-0007取代ADR-0002，受影响01～04、07、09、10、14、15、17、18及产品开发profile完成全量cross-review；实现与资格尚未开始，
 > `docs/current`继续描述现行WASI/gVisor行为。
 
@@ -261,24 +262,24 @@ Platform v2 采用以下不可逆的架构决定：
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
 | 00 | `00-overview.md` | In Progress / CR-216 | 总体路线、规范模板、依赖和完成定义 |
-| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 | 系统架构、领域对象和所有权边界 |
-| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 | PostgreSQL、事务、Outbox、Lease、恢复 |
-| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-216 | 多租户、授权、Secret、Effect、Quota、Approval |
+| 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 revision 1 | 系统架构、领域对象和所有权边界 |
+| 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 revision 1 | ID、Resource、Version、Deployment、Binding |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 revision 1 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-216 revision 1 | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-214 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-203（CR-204 reviewed） | Run、NodeExecution、暂停、重试、取消 |
-| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-216 | Scheduler、Worker、Lease、背压和隔舱并发 |
+| 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-216 revision 1 | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-203（CR-204 reviewed） | Child Run、父子通信、取消传播和循环限制 |
-| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-216 | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-216 | 调用协议、幂等、同步快路径、异步恢复 |
+| 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-216 revision 1 | Capability Interface、Implementation、Registry |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-216 revision 1 | 调用协议、幂等、同步快路径、异步恢复 |
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-209 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-206 | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203（CR-204 reviewed） | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 | OpenSandbox、Docker/runc、provisioning幂等、执行和清理 |
-| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 | S3、内容寻址、上传、生命周期和内容安全 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 1 | OpenSandbox Kubernetes、Armed runner activation、执行和清理 |
+| 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 revision 1 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
-| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 | 管理 API、Run API、事件流和错误模型 |
-| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-216 | 部署、指标、Tracing、压测、故障注入和验收 |
+| 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 revision 1 | 管理 API、Run API、事件流和错误模型 |
+| 18 | [`18-deployment-observability-and-qualification.md`](18-deployment-observability-and-qualification.md) | Accepted / CR-216 revision 1 | 部署、指标、Tracing、压测、故障注入和验收 |
 
 Planned文件不得被实现或其他规范作为已确定合同引用。一个文件进入Draft并给出完整状态机、不变量和验收条款后，只能进入
 cross-review；至少达到Reviewed，且破坏性目标合同通常达到Accepted后，才能成为实现输入。任何Architecture Revision期间新增的合同都不得
@@ -398,8 +399,8 @@ Draft
 - 发布、promotion和rollback由Kubernetes/GitOps拥有；Candidate和qualification报告是CI/CD内容寻址产物，不是数据库或公共API状态；
 - 数据库不新增`InstallationReleaseState`，目标仍为23张总表/22张业务表；clean-cut ID/owner约束完成后schema contract从当前v6升级为v7；
 - root Run在tenant事务中解析并冻结exact ResourceVersion/Deployment binding；后续部署变化不修改既有Run；
-- CR-216将首版Sandbox physical provider clean-cut为OpenSandbox-only，显式Docker/runc、per-attempt ephemeral sandbox；
-  restricted WASI、自建gVisor、microVM、Firecracker与KVM均不在首版目标composition；
+- CR-216 revision 1 将首版 Sandbox physical provider clean-cut 为 OpenSandbox Kubernetes/BatchSandbox、containerd/runc 与
+  per-attempt ephemeral sandbox；Docker provider、restricted WASI、自建 gVisor、microVM、Firecracker 与 KVM 均不在目标 composition；
 - 首版MCP只支持远程Streamable HTTP；Managed stdio及其持久Sandbox session、parent/child Job例外和Provider recovery全部推迟；
 - Model output保持Inline-only；文件和大输出由Capability/Sandbox调用共享Artifact Data Worker生成，不建设Model Artifact Producer；
 - Artifact物理角色收敛为Gateway、Data Worker、Maintenance三类；不同调用方使用closed method、identity和capacity lane，但共享一套staging、
@@ -771,11 +772,13 @@ storage与audit closure全部由服务端拥有；upload target是唯一显式Se
 CR-171把public Artifact使用的Retention与ArtifactIo default revision加入tenant current config exact slot；多条active Policy不再通过排序或
 隐式安装默认选择，绑定更新沿用Tenant CAS/Receipt/Event/Outbox且保留其他slot。
 
-CR-216目标要求继续删除或退出首版composition中的restricted WASI、自建gVisor、microVM/Firecracker、Managed stdio session和
-Model Artifact Producer；首版闭包变为OpenSandbox Docker/runc、三角色Artifact和最小`/v1`。OpenSandbox provider state不得成为
+CR-216 目标要求继续删除或退出首版 composition 中的 restricted WASI、自建 gVisor、Docker provider、microVM/Firecracker、
+Managed stdio session 和 Model Artifact Producer；首版闭包变为 OpenSandbox Kubernetes/BatchSandbox/containerd-runc、三角色
+Artifact 和最小 `/v1`。OpenSandbox/Kubernetes provider state 不得成为
 第二业务持久状态权威，host process仍禁止。
 
 [implementation-plan.md](implementation-plan.md)保留CR-216之前的仓库范围记录并重新打开OpenSandbox批次；当前00为In Progress，
-受影响01～04、07、09、10、14、15、17、18为Accepted目标合同，均不得标作Implemented/Verified。OpenSandbox atomic provisioning、
-Dispatcher/runner/cleanup、profile与L1～L3尚未实现；该状态不声明production拓扑、容量/SLO、强隔离、restore、promotion或clean cut通过。
+受影响01～04、07、09、10、14、15、17、18为Accepted目标合同，均不得标作Implemented/Verified。OpenSandbox candidate discovery、
+Dispatcher/Armed runner activation/cleanup、Kubernetes profile 与 L1～L3 尚未实现；该状态不声明 production 拓扑、容量/SLO、强隔离、
+restore、promotion 或 clean cut 通过。
 cutover前current behavior继续以[docs/current](../../current/README.md)为准。

@@ -2,13 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216；OpenSandbox profile batch pending |
+| 状态 | In Progress / CR-216 revision 1；OpenSandbox profile batch pending |
 | 日期 | 2026-09-01 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
 
-> CR-216重新打开Phase 6/7中的Sandbox切片：`wasi` feature clean-cut为`sandbox`，组合Sandbox Dispatcher、OpenSandbox Server与
-> Docker/runc。其他产品体验实现证据保留；旧WASI/gVisor或静态Docker evidence不能抵扣新OpenSandbox provisioning/fence/cleanup门禁。
+> CR-216 revision 1 重新打开 Phase 6/7 中的 Sandbox 切片：`wasi` feature clean-cut 为 `sandbox`，组合 Sandbox Dispatcher、
+> OpenSandbox Server、BatchSandbox Controller 与 single-node Kubernetes/containerd-runc。其他产品体验证据保留；旧 WASI/gVisor/
+> Docker evidence 不能抵扣 candidate/activation/fence/network/cleanup 门禁。
 
 本计划只把Accepted合同拆成可验证、单一职责的实现批次。每批通过相称门禁后独立提交；失败或发现P0/P1合同冲突时，
 先修上游spec与cross-review，不用兼容层、fallback或测试fixture伪造完成。
@@ -112,9 +113,9 @@ high-contrast/ARIA，以及既有Task/Artifact安全回归。
 
 - `insight dev [--features ...] [--offline|--from-source]`及closed canonical feature registry；
 - starter与model/remote-capability/context/mcp/sandbox/all exact role/image/config/identity/readiness closure；
-- `sandbox`追加Sandbox Dispatcher、OpenSandbox Server、persistent physical store、Docker provider/bridge、默认`Direct` exact Profile与
-  atomic provisioning extension；
-- feature启动前固定OpenSandbox release/image、lifecycle/extension/runner/Docker config digest，unknown/drift零create；
+- `sandbox` 追加 Sandbox Dispatcher、internal OpenSandbox Server、BatchSandbox Controller、Kubernetes API physical store、
+  Armed runner、containerd/runc、默认 `Direct` 与显式 `Disabled` exact Profile；
+- feature 启动前固定 OpenSandbox/Controller/execd/chart/CRD/runner/Kubernetes/CNI/container runtime digest，unknown/drift 零 create；
 - `start/stop/reset`语义、drift/preflight/doctor、feature_not_enabled零I/O；
 - cold/warm/idle machine report与single-node/non-production/L4～L6 Not run声明。
 

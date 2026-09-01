@@ -2,14 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | 00、01 |
 | 直接下游 | 03～18 |
 
-> CR-216 impact：Sandbox execution role闭包从Controller/WASI/gVisor收敛为Sandbox Dispatcher与OpenSandbox Server。
-> Sandbox Runtime Version冻结OpenSandbox lifecycle schema、provisioning extension及provider/runtime digest，Sandbox Package冻结OCI image digest；
-> Sandbox Profile Deployment不再选择多个backend，只固定OpenSandbox/Docker execution closure。
+> CR-216 revision 1 impact：Sandbox execution role 闭包从自建 Controller/WASI/gVisor 收敛为 Sandbox Dispatcher、OpenSandbox Server
+> 与 BatchSandbox Controller。Sandbox Runtime Version 冻结 lifecycle、CRD/controller、Kubernetes provider template、Armed runner protocol、
+> CNI/container runtime digest；Sandbox Package 冻结 OCI image digest。Profile 不再选择 backend，只固定 OpenSandbox Kubernetes closure。
 
 > CR-205 impact：shared lifecycle的closed management noun覆盖全部可author的业务定义kind。Capability/Context
 > Implementation与Sandbox Runtime/Package是definition-only：publish后以enabled exact Version被依赖，不伪造Deployment；Model Provider
@@ -84,7 +84,8 @@ ContextDataset是唯一例外：它不是可调用definition，root的`active_ve
 `CanonicalRegion`长度1～63，只允许小写ASCII字母、数字和单中划线，首尾必须字母数字。空值、
 大写、下划线、Unicode、连续/首尾中划线和超长值fail closed。
 
-`ComponentRole`是closed enum。CR-216目标闭包把Sandbox角色固定为`SandboxDispatcher`与`OpenSandboxServer`；删除
+`ComponentRole`是closed enum。CR-216 revision 1目标闭包把Sandbox角色固定为`SandboxDispatcher`、`OpenSandboxServer`与
+`OpenSandboxController`；删除
 `SandboxController/WasiExecutor/GvisorExecutor`首版角色。其他既有Management/Runtime API、Scheduler/Recovery、Model、
 Native/Remote Capability、Context、MCP、Artifact Gateway/DataWorker/Maintenance、Egress/Secret Broker与
 `RegistryValidationWorker`保持不变。无MicroVM、ManagedStdio或ModelArtifact role。

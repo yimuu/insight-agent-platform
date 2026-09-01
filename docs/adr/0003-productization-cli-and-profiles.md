@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 影响阶段 | Productization、Agent Product Experience |
 
@@ -23,9 +23,11 @@ gRPC 或生成特权身份 header。
   HTTPS S3/KMS-compatible local dependency；这是实际 process closure，不是把 Artifact 语义塞进 Gateway 的例外；
 - `model | remote-capability | context | mcp | sandbox`分别追加已存在的exact role、identity、config、dependency与image；
 - `all`是上述feature的规范排序并集，不是单独的宽松profile；
-- `sandbox`固定Sandbox Dispatcher、OpenSandbox Server、persistent physical store、Docker/runc provider、bridge network与
-  atomic provisioning extension；只有OpenSandbox可访问Docker socket，CLI不获得OpenSandbox API key；
-- `qualification`运行OpenSandbox/Docker/fence/cleanup preflight，不能把单节点runc声明为强多租户或production隔离。
+- `sandbox` 固定 Sandbox Dispatcher、internal OpenSandbox Server、BatchSandbox Controller、Kubernetes API physical store、
+  containerd/runc、Armed runner 与 `Direct | Disabled` CNI policy；不修改 OpenSandbox，CLI 不获得 OpenSandbox API key；
+- 本地 profile 可以用 Docker 管理 pinned single-node Kubernetes dependency，但 OpenSandbox 不使用 Docker provider，sandbox Pod 与
+  Platform role 都不挂载 Docker/CRI socket；用户不需要另装 Kubernetes client；
+- `qualification` 运行 OpenSandbox/Kubernetes/candidate/activation/fence/network/cleanup preflight，不能把单节点 runc 声明为强多租户或 production 隔离。
 
 不保留`base/full`别名。unknown、duplicate或不满足依赖的feature必须在pull、build、provision和进程启动前失败。
 `insight dev`默认消费同一release的签名`ReleaseBundle`和exact image digest；贡献者必须显式使用`--from-source`才从

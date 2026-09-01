@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216；OpenSandbox profile implementation pending |
+| 状态 | Accepted / CR-216 revision 1；OpenSandbox profile implementation pending |
 | 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | CR-216尚未实现；现行使用说明仍以 [`docs/current`](../../current/README.md) 为准 |
@@ -11,7 +11,8 @@
 本阶段把已经通过资格场景的平台内核收敛为普通开发者可使用的 Agent 产品。成功标准不是再增加
 ResourceKind、Job、Worker、表或资格证据，而是让默认用户只需要理解 Agent、发布、Run 和结果。
 
-> CR-216 impact：开发profile把`wasi` feature clean-cut为`sandbox`，启动Sandbox Dispatcher、OpenSandbox Server与Docker/runc。
+> CR-216 revision 1 impact：开发 profile 把 `wasi` feature clean-cut 为 `sandbox`，启动 Sandbox Dispatcher、internal OpenSandbox
+> Server、BatchSandbox Controller 与 single-node Kubernetes/containerd-runc；不修改 OpenSandbox 源码，也不启用其 Docker provider。
 > CLI/Console不直接访问OpenSandbox，Run/Operation体验与shared Job authority不变。既有WASI profile证据只保留为历史，不能宣称
 > 新`sandbox` feature已实现或通过L1～L3。
 

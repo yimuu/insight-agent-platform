@@ -2,14 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
 
-> CR-216 impact：Sandbox dispatch固定为`Sandbox Dispatcher -> OpenSandbox`，但Invocation与shared Job authority不变。
-> 首版平台幂等只覆盖Invocation command Receipt、OpenSandbox provisioning和Job terminal commit；workload内部第三方API调用不进入
-> Platform idempotency contract。一旦OpenSandbox create可能已启动fixed runner，恢复不得创建新sandbox重新执行。
+> CR-216 revision 1 impact：Sandbox dispatch 固定为 `Dispatcher -> OpenSandbox Kubernetes -> BatchSandbox`，但 Invocation 与
+> shared Job authority 不变。平台幂等只覆盖 command Receipt、PostgreSQL candidate selection、fixed runner activation 与 Job terminal
+> commit；workload 第三方 API 调用不进入 Platform idempotency。一旦 Job 持久化 `PotentiallyStarted`，恢复不得创建 replacement。
 
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
@@ -161,9 +161,10 @@ Worker在提交Deferred后释放execution permit和lease。callback、poll、can
 - 非幂等或返回不确定的backend进入`Reconciling`或`UnknownOutcome`；
 - recovery只在验证current owner/Job fence后创建新generation。
 
-Sandbox physical create只允许用同一provisioning key重放并取得同一sandbox。一旦create可能已启动fixed runner，response loss、Dispatcher crash、
-lease expiry或OpenSandbox暂时不可观察均不得创建新key/sandbox重跑；有sandbox ID或key时只observe/terminate，无可关联physical evidence且
-不能证明未启动时进入`UnknownOutcome`并执行absence reconcile。
+Sandbox create 只产生 bounded inert candidates；response loss 后按同一 stable provisioning token 发现，current Job CAS 只选择一个。
+Dispatcher 在外部 activate 前持久化 selected sandbox、runner boot identity、activation token digest 与
+`ActivationAuthorized/PotentiallyStarted`。此后 response loss、crash、lease expiry 或 provider 暂不可观察，都只能查询或重放相同
+sandbox/boot/token；不得创建新 token/candidate/sandbox/physical attempt。boot 变化且无完整 result 时进入 `UnknownOutcome` 与 cleanup。
 Invocation Receipt防止同一Platform command重复创建逻辑Invocation，但不把Sandbox workload内部外部副作用变成幂等。
 
 ## 9. Model loop 集成

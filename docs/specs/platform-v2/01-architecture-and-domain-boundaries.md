@@ -2,13 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | [`00-overview.md`](00-overview.md) |
 | 直接下游 | 02、03、04、05、18 |
 
-> CR-216 impact：Sandbox物理边界clean-cut为`Sandbox Dispatcher -> OpenSandbox Server -> Docker/runc`。
-> shared Job仍是唯一业务work authority；Dispatcher拥有claim/fence/terminal提交，OpenSandbox只拥有container/runner/file physical lifecycle，
+> CR-216 revision 1 impact：Sandbox 物理边界 clean-cut 为
+> `Sandbox Dispatcher -> OpenSandbox Server -> Kubernetes/BatchSandbox -> containerd/runc`。
+> shared Job 仍是唯一业务 work authority；Dispatcher 拥有 claim/candidate selection/activation/fence/terminal，OpenSandbox 与
+> Controller 只拥有 BatchSandbox/Pod/runner physical lifecycle，
 > 不获得Platform PostgreSQL或Run/Invocation mutation权限。ADR-0007取代ADR-0002。
 
 > CR-197 impact：跨plane correlation由03的durable `TraceIdentityV1`和每hop ephemeral span组成。Gateway、Scheduler、Worker、MCP、
@@ -165,7 +167,7 @@ Execution Plane 分为以下 bulkhead：
 | Model Executor | Provider adapter、stream、tool-call response | 是 |
 | Capability Dispatcher | Native/HTTP/gRPC 调用与结果归一化 | 是 |
 | MCP Host | MCP session、OAuth、remote Task、subscription | 是 |
-| Sandbox Dispatcher / OpenSandbox | Dispatcher拥有Job claim/fence/commit；OpenSandbox拥有Docker sandbox/runner physical lifecycle | 是且必须与API/普通Worker物理分离 |
+| Sandbox Dispatcher / OpenSandbox | Dispatcher拥有 Job claim/candidate CAS/activation/fence/commit；OpenSandbox/Controller 拥有 BatchSandbox/Pod/runner physical lifecycle | 是且必须与API/普通Worker物理分离 |
 | Context Worker | 检索、重排、citation assembly | 是 |
 | Artifact Gateway | public upload/download、授权与流控 | 是 |
 | Artifact Data Worker | Context、MCP、Capability与Sandbox的受信读写、验证与派生 | 是 |
@@ -199,8 +201,9 @@ session或Secret value。调用与结果都必须是有界、credential-free机�
 | `capability-worker` | Capability Invocation dispatch | Script process |
 | `context-worker` | Context Query、授权过滤、检索、citation assembly及subscription refresh Job terminal | MCP wire/session/Secret、Capability 副作用与 Agent Plan |
 | `mcp-host` | MCP 协议、连接状态及fenced Resource Refresh adapter | Context Job/Result current authority与 Agent Plan |
-| `sandbox-dispatcher` | Sandbox Job claim、OpenSandbox request、physical evidence校验、fenced terminal commit与cleanup reconcile | 在自身进程执行用户代码、绕过Job fence、自由第三方API语义 |
-| `opensandbox-server` | Docker/runc sandbox/runner、diagnostics、TTL/delete和physical metadata | Platform PostgreSQL、Run/Invocation/Job mutation、public API与业务重试决策 |
+| `sandbox-dispatcher` | Sandbox Job claim、OpenSandbox request、candidate CAS、runner activation、physical evidence校验、fenced terminal commit与cleanup | 在自身进程执行用户代码、绕过Job fence、selected后另选sandbox、自由第三方API语义 |
+| `opensandbox-server` | internal lifecycle API、Kubernetes provider、BatchSandbox physical metadata | Platform PostgreSQL、Run/Invocation/Job mutation、public API与业务重试/selection决策 |
+| `opensandbox-controller` | BatchSandbox/Pod reconciliation、TTL/delete | Platform业务状态、Dispatcher credential、Package activation与terminal决策 |
 | `artifact-gateway` | public upload/download、grant与边界限流 | 业务owner状态推进、内部Worker凭据 |
 | `artifact-data-worker` | exact owner绑定的stage/read/verify/derive | public API、Run/Invocation current state |
 | `artifact-maintenance` | scan、retention、quarantine、delete和GC | 新业务引用、public upload/download |
@@ -210,7 +213,7 @@ session或Secret value。调用与结果都必须是有界、credential-free机�
 | `artifact-store` | blob I/O、integrity、GC | Run 状态机 |
 
 物理部署可以复用同一个 Rust workspace，但不同 Worker role 必须使用独立 Deployment、连接池、并发
-配置和readiness。Sandbox Dispatcher消费固定OpenSandbox lifecycle、provisioning-extension与execd read-only result schema；OpenSandbox可以独立发布，但只能通过
+配置和readiness。Sandbox Dispatcher消费固定OpenSandbox lifecycle与Armed runner state/activate/read-result schema；OpenSandbox可以独立发布，但只能通过
 ADR-0007版本化internal protocol接入，不能获得Platform repository port。
 Artifact 首版只有Gateway、Data Worker和Maintenance三个物理role，分别使用独立
 Deployment、ServiceAccount、数据库连接池、storage identity与permit。业务owner通过同一事务形成Ready引用，
@@ -223,9 +226,11 @@ KMS/AEAD reference unsealer和进程安装的外部Secret Provider client。普�
 projection。需要Secret的Sandbox Deployment只有在OpenSandbox安装并通过独立secret-injection合同后才能activate；首条CR-216
 无Secret流程不得通过明文environment或调用方input绕过该边界。
 
-OpenSandbox物理实现由[ADR-0007](../../adr/0007-opensandbox-execution-provider.md)固定：首版显式使用Docker/runc与bridge network，
-每个physical attempt创建ephemeral sandbox。OpenSandbox lifecycle/command status只是外部evidence；Dispatcher terminal transaction仍重验
-current Job lease fence。OpenSandbox没有Platform DB、Artifact store、Docker host以外的编排权限，也不能直接调用Run/Invocation mutation接口。
+OpenSandbox物理实现由[ADR-0007](../../adr/0007-opensandbox-execution-provider.md)固定：首版显式使用 Kubernetes provider、BatchSandbox
+Controller 与 containerd/runc，每个 physical attempt 只有一个 selected ephemeral sandbox。create 可产生 bounded inert candidates，
+PostgreSQL CAS 选择唯一 candidate，fixed runner activation 最多启动一次 Package。OpenSandbox/Pod/runner status 只是外部 evidence；
+Dispatcher terminal transaction 仍重验 current Job lease fence。OpenSandbox 没有 Platform DB、Artifact store、Kubernetes write authority
+以外的编排权限，也不能直接调用 Run/Invocation mutation 接口。
 
 ## 6. 依赖规则
 

@@ -2,14 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | 01、02、03 |
 | 直接下游 | 05～18 |
 
-> CR-216 impact：首版Sandbox允许published Profile选择`Disabled | Direct` outbound network。`Direct`不经过Platform Egress Broker，
+> CR-216 revision 1 impact：首版 Sandbox 允许 published Profile 选择 `Disabled | Direct` operator-owned CNI policy。`Direct` 不经过 Platform Egress Broker，
 > 平台不解析workload HTTP method、不分类其读写、不注入第三方幂等key，也不保证外部副作用exactly-once。OpenSandbox API本身仍只对
-> Sandbox Dispatcher开放；direct network不授予Platform credential、Docker socket、host network或public ingress。
+> Sandbox Dispatcher开放；direct network不授予Platform credential、runtime socket、host network或public ingress。
 
 > CR-200 impact：`ArtifactIo` Policy document v3新增`write_storage_binding_digest: Sha256Digest`与
 > `encryption_domain_id: ResourceId<EncryptionDomain>`。前者必须命中Data Worker installed catalog，后者进入Blob security domain与KMS
@@ -278,9 +278,11 @@ proxy或redirect target。
 Egress Broker复核exact Deployment/Job/tenant/policy/auth binding并做DNS pinning、private/metadata/address deny、TLS hostname/pin、
 redirect重验、request/response限制和sanitized error mapping。普通Worker不获得raw credential或直出网路。
 
-Sandbox是CR-216明确例外：`SandboxNetworkMode::Disabled`不连接外网；`SandboxNetworkMode::Direct`通过OpenSandbox Docker bridge
-允许普通outbound DNS/IP/URL访问，不经过Platform Egress Broker，也不获得其Secret resolution或endpoint catalog语义。调用方不能在单次
-Invocation中覆盖mode；它由exact Sandbox Profile Deployment冻结。首版不开放OpenSandbox ingress/endpoint projection。
+Sandbox 是 CR-216 明确例外：`SandboxNetworkMode::Disabled` 由 static CNI NetworkPolicy 拒绝全部 egress；
+`SandboxNetworkMode::Direct` 允许 DNS 与外部目标，但拒绝 Platform namespace、Pod/Service/Node CIDR、Kubernetes API、cloud
+metadata 与管理网段。它不经过 Platform Egress Broker，也不获得 Secret resolution 或 endpoint catalog 语义。调用方不能在单次
+Invocation 覆盖 mode；它由 exact Sandbox Profile Deployment 冻结。两种 mode 都默认 deny ingress，只允许 Dispatcher 到 fixed runner
+protocol，不开放 public Ingress/LoadBalancer/NodePort/host port；CNI/policy digest 漂移时 fail closed。
 
 首版remote HTTPS adapter不得读取操作系统默认CA集合来补全缺失Trust Policy。process-installed entry中的显式trust bundle是唯一证书根输入，
 受bounded parse、startup config digest和exact Deployment/Policy匹配保护；运行时request/protobuf不携带PEM正文。
@@ -292,8 +294,8 @@ installed binding中分别exact冻结。
 Skill是不受信任方法包，不是可执行主体。脚本只有在publication pipeline中成为immutable Sandbox Package，
 并由exact Capability Deployment绑定后才能执行。Python/Node/WASM/trusted Shell都只在Sandbox Plane运行。
 
-首版所有Python、Node、WASM与published trusted Shell均进入OpenSandbox Docker/runc ephemeral container。Docker/runc是explicit
-first-release provider，不是fallback；host process、privileged、host PID/network/path、device、Docker/runtime socket与Platform credential
+首版所有Python、Node、WASM与published trusted Shell均进入OpenSandbox Kubernetes/BatchSandbox/containerd-runc ephemeral Pod。
+它是 explicit first-release provider，不是 fallback；Docker provider、host process、privileged、host PID/network/path、device、runtime socket与Platform credential
 仍禁止。调用方不能选择其他backend或在运行时安装依赖；package manager、mutable image tag和Skill目录任意文件执行仍禁止。
 
 需要Secret的Sandbox Deployment只有在OpenSandbox发行物安装并通过独立secret-injection合同后才能activate。无该能力时必须在admission
@@ -385,7 +387,7 @@ metric label只使用low-cardinality role/operation/outcome/reason class，tenan
 - raw Secret/OAuth token/code/verifier不进DB/Event/log/trace/problem/Artifact；
 - Egress SSRF/DNS rebinding/redirect/private/metadata/proxy/header注入负向fixture通过；
 - Skill script不能被直接执行，API/Model/MCP/Capability Worker无spawn runtime；
-- OpenSandbox是唯一Sandbox provider且不能由调用方替换；Docker/runc显式进入首版，host process与microVM不在composition；
+- OpenSandbox Kubernetes 是唯一 Sandbox provider 且不能由调用方替换；containerd/runc 显式进入首版，Docker provider、host process与microVM不在composition；
 - quota concurrent reserve/settle/recovery不超卖、不泄漏、不重复consume；
 - Artifact static binding在新旧object上可读/删，公开API无dynamic binding；
 - single/multiple candidate selection均从exact frozen Policy确定；伪造route、乱序candidate、集合外结果和旧policy digest全部拒绝；

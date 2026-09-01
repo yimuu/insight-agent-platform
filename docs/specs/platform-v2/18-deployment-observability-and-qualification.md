@@ -2,14 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 |
+| 状态 | Accepted / CR-216 revision 1 |
 | 日期 | 2026-09-01 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
-> CR-216 impact：首版Sandbox deployment/qualification clean-cut为Sandbox Dispatcher、OpenSandbox Server和Docker/runc。
-> 删除WASI/gVisor/attestor target topology；增加OpenSandbox atomic provisioning、provider restart、Dispatcher reclaim、runner-start
-> uncertainty、Direct/Disabled network、TTL/delete/orphan cleanup及零Platform DB权限门禁。该目标是developer preview，L4强隔离、
+> CR-216 revision 1 impact：首版 Sandbox deployment/qualification clean-cut 为 Sandbox Dispatcher、OpenSandbox Kubernetes Server、
+> BatchSandbox Controller 与 containerd/runc；不修改 OpenSandbox 源码。删除 WASI/gVisor/attestor/Docker-provider target topology；增加
+> inert candidate discovery/selection、Armed runner activation、provider/controller restart、Dispatcher reclaim、runner-start uncertainty、
+> Direct/Disabled CNI、TTL/delete/orphan cleanup 及零 Platform 业务权限门禁。该目标是 developer preview，L4 强隔离、
 > production HA、capacity/soak/restore/promotion均Not run。
 
 > CR-205 impact：P1 management matrix必须逐一覆盖十三个closed noun，并证明四个definition-only noun可publish exact
@@ -95,7 +96,8 @@
 CI产生不可变的build/provenance/SBOM/test/qualification artifacts，GitOps存储环境期望image/config/schema/profile digest，
 Kubernetes执行rollout/rollback。应用启动时对照同一typed startup manifest，漂移时readiness fail closed。
 
-首版Sandbox只部署Sandbox Dispatcher与OpenSandbox Server，OpenSandbox显式使用Docker/runc。Artifact只部署Gateway、Data Worker和Maintenance三个role。
+首版 Sandbox 部署 Sandbox Dispatcher、internal OpenSandbox Server、BatchSandbox Controller 与 sandbox Pod；OpenSandbox 显式使用
+Kubernetes provider 和 containerd/runc。Artifact 只部署 Gateway、Data Worker 和 Maintenance 三个 role。
 MCP只是remote Streamable HTTP。Model只支持Inline request/response。
 
 ## 2. 环境与发布单元
@@ -122,7 +124,8 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 | Context Worker | queue、DB pool、index/client permit |
 | MCP Host | queue、DB pool、Egress client、session/subscription budget |
 | Sandbox Dispatcher | Sandbox Job queue、restricted DB pool、OpenSandbox client、permit与cleanup reconcile |
-| OpenSandbox Server | internal lifecycle API、persistent physical store、Docker socket、API/container/resource budget |
+| OpenSandbox Server | internal lifecycle API、Kubernetes provider client、API/candidate/resource budget |
+| OpenSandbox Controller | BatchSandbox/Pod reconciliation、TTL/delete、独立 ServiceAccount/RBAC/leader election |
 | Artifact Gateway | public ingress、DB/storage pool、stream budget |
 | Artifact Data Worker | internal identity、DB/storage pool、stage/read/verify budget |
 | Artifact Maintenance | queue、DB/storage pool、scan/delete/GC budget |
@@ -132,7 +135,7 @@ Draft规范和未通过资格的代码不是current behavior。CI报告只表示
 一个role饱和不得使其他role的readiness失败或占用critical-control reserve。
 
 `registry_validation_worker`是candidate manifest、CapacityProfile、startup manifest、Helm/GitOps与workload
-preflight共同承认的第16个`ComponentRole`。其image可以与其他trusted Rust role共享同一runtime image digest，但必须使用独立
+preflight共同承认的closed `ComponentRole`。其image可以与其他trusted Rust role共享同一runtime image digest，但必须使用独立
 Deployment、ServiceAccount、NetworkPolicy、DB pool和WorkerManifest（唯一`WorkClass=RegistryValidation`）。L1覆盖
 payload/validator/profile/draft/dependency闭包与summary canonicalization；L2覆盖tenant permission、CAS、stale fence、
 Job/Resource/Event/Outbox/Receipt原子回滚与replay；L3覆盖独立进程claim/start/kill/reclaim及Draft update race。L4～L6的
@@ -153,13 +156,14 @@ RunValue读取budget，不获得Provider、MCP、Context、Secret或Sandbox egre
 - topology spread、PodDisruptionBudget、graceful drain和bounded startup/readiness/liveness probe；
 - 从同一startup manifest对照component role、region、image、protocol、profile和policy digest。
 
-OpenSandbox Server是唯一允许访问Docker socket的role；Dispatcher、Gateway、Scheduler、Model、MCP和普通Worker都必须在静态manifest与
-live preflight中证明socket不可达。Sandbox container显式使用Docker/runc bridge network，禁止privileged、host PID/network/path、device、
-Docker/containerd socket、Platform/Kubernetes credential与capability追加；固定non-root runner、no-new-privileges、default seccomp/capability
-drop、pids/CPU/memory/filesystem/deadline limits。OpenSandbox API只允许Dispatcher source/audience且不公开ingress。
+任何 role 都不得挂载 Docker/containerd/CRI socket；Dispatcher、OpenSandbox、Controller、sandbox Pod、Gateway、Scheduler、Model、MCP
+与普通 Worker 必须由 static manifest 和 live preflight 证明。sandbox Pod 显式使用 containerd/runc，禁止 privileged、host PID/IPC/network/
+path、device、runtime socket、service-account token、Platform/Kubernetes credential 与 capability 追加；固定 non-root、read-only root、
+`allowPrivilegeEscalation=false`、qualified seccomp、capability drop、pids/CPU/memory/ephemeral-storage/deadline limits。
 
-这些minimum是developer-preview基线，不得生成gVisor/microVM等价或强多租户证据。OpenSandbox Server的persistent physical store只保存
-lifecycle/provisioning evidence，不使用Platform业务表；单节点SQLite profile必须用persistent volume并通过restart测试，但不能声称HA。
+OpenSandbox API 只允许 Dispatcher source/audience 且不公开 ingress；runner fixed port 只允许 Dispatcher。physical store 是 Kubernetes API/
+BatchSandbox CR，不使用 OpenSandbox SQLite 或 Platform 业务表。Server `informer_enabled=false`，developer Profile 的 Server/Controller
+均单副本，Controller 开 leader election；这些 minimum 不得生成 gVisor/microVM 等价、HA 或强多租户证据。
 
 ## 5. Network 与依赖拓扑
 
@@ -169,8 +173,9 @@ API/Workers -> PostgreSQL
 Components -> NATS (wake/outbox delivery only)
 Artifact roles -> S3/KMS
 Workers/Hosts -> Egress Broker -> catalog-approved external endpoints
-Sandbox Dispatcher -> OpenSandbox Server -> Docker/runc bridge
-Sandbox workload (Direct profile only) -> arbitrary outbound network
+Sandbox Dispatcher -> OpenSandbox Server -> Kubernetes API -> BatchSandbox Controller -> Pod/containerd-runc
+Sandbox Dispatcher -> private fixed runner protocol
+Sandbox workload (Direct profile only) -> DNS/external network; internal/metadata CIDR denied
 ```
 
 PostgreSQL、NATS、S3/KMS、Secret Manager和Egress的凭据按role分离。外部Provider/MCP失败不使整个API readiness
@@ -222,8 +227,9 @@ queue、lease/heartbeat、scan batch、HPA和SLO target。两者是versioned typ
 - deadline/attempt/retry/queue/stream/body均有hard max；
 - business与critical-control pool不能别名；
 - Sandbox Dispatcher/OpenSandbox、Model、MCP、Artifact各role不能共用被禁的DB/storage/semaphore；
-- OpenSandbox是唯一Sandbox provider，Docker/runc是显式runtime且无WASI/gVisor/host fallback；
-- provisioning receipt TTL >= sandbox absence/reconcile window，OpenSandbox physical store必须持久；
+- OpenSandbox Kubernetes是唯一Sandbox provider，containerd/runc是显式runtime且无Docker/WASI/gVisor/host fallback；
+- candidate count/quiescence/time均有hard max，`ActivationAuthorized/PotentiallyStarted`后禁止replacement；
+- controller TTL >= sandbox absence/reconcile window，Kubernetes API/BatchSandbox physical store必须可恢复；
 - Model input/output hard limit不超过Inline RunValue上限。
 
 规范不把未资格容量数字声明为current behavior。具体profile只在其CI/load/soak证据通过后才可用于production。
@@ -295,15 +301,16 @@ CR-201将“spec qualification”和“environment qualification”分开：L1�
 
 CR-216 Sandbox target矩阵：
 
-- L1：OpenSandbox-only closed provider、runtime/profile/request/provisioning key/result frame schema与canonical digest；unknown provider、
-  mutable image tag、wrong lifecycle/extension/runner digest、shell-string entrypoint、oversized input/result/log和Artifact/Secret unsupported均fail closed；
-- L2：fresh PostgreSQL覆盖Sandbox Job concurrent claim、provisioning intent/evidence CAS、lease rollover、late physical result、terminal first-winner、
-  cancel/timeout、quota settlement与orphan delete decision；OpenSandbox evidence不能直接推进Run/Invocation；
-- L3：真实OpenSandbox Server + Docker provider覆盖same-key concurrent create、response loss replay、same-key/different-digest conflict、
-  persistent-store restart、Dispatcher在create前/response后/result前/commit前强杀、runner-start uncertainty不重发、TTL/delete/absence和orphan sweep；
-- L3 network/security：Direct profile可出网、Disabled profile零出网；两者均无public ingress、host network/path/socket/device/Platform credential，
-  wrong Dispatcher API key/source为零create，OpenSandbox进程无法连接Platform PostgreSQL/Run/Invocation RPC；
-- L4～L6：强隔离、OpenSandbox HA、production capacity/chaos/soak/restore/promotion全部Not run。不得用Docker本机流程、静态manifest或
+- L1：closed provider/runtime/profile/request/provisioning token/candidate/activation/runner/result schema 与 canonical digest；unknown provider、
+  mutable image tag、wrong lifecycle/CRD/controller/template/runner/CNI digest、shell entrypoint、oversized input/result/diagnostic 与非法 config fail closed；
+- L2：real PostgreSQL 覆盖 concurrent claim、provisioning intent、candidate selection CAS、activation authorization、lease rollover、stale result、
+  terminal first-winner、cancel/timeout、quota settlement与orphan decision；OpenSandbox evidence不能直接推进Run/Invocation；
+- L3：真实 OpenSandbox Server + Kubernetes provider + BatchSandbox Controller + containerd/runc 覆盖 concurrent create、response loss、
+  Server/Controller restart、Dispatcher 在 create/select/activate/result/commit 窗口强杀、activation replay/conflict、boot rollover/runner-start
+  uncertainty 不重发、TTL/delete/absence 与 orphan cleanup；
+- L3 network/security：Direct 只可达 DNS/external 且 internal/metadata deny，Disabled 零 egress；二者均无 public ingress、host network/path/
+  socket/device/Platform credential，wrong Dispatcher API key/source 零 create，OpenSandbox/Controller/runner 无 Platform DB/NATS/业务 RPC；
+- L4～L6：强隔离、OpenSandbox HA、production capacity/chaos/soak/restore/promotion 全部 Not run。不得用 Docker provider/本机流程、静态 manifest 或
   既有WASI/gVisor历史fixture冒充通过。
 
 下文既有跨领域矩阵继续适用；其中任何WASI、gVisor、runsc、Launcher、attestor或旧Sandbox Controller/Executor记录只说明
@@ -878,8 +885,8 @@ r246将Management与Runtime API拆为两个startup role及独立Kubernetes ident
 - MCP subscription notification→Context admission以真实PostgreSQL和独立Host/Context进程覆盖accept commit前后kill、Receipt replay、唯一
   Context Job、stale session/fence零Job以及MCP/Context pool互不占用；
 - 同一`McpOperation` owner下`Mcp`与`Context`两种Job的claim负向矩阵必须证明wrong WorkClass、wrong invocation kind或wrong typed payload零claim；
-- OpenSandbox provisioning/runner/cleanup门禁必须使用固定真实Server与Docker provider，覆盖并发create、restart、kill/reclaim、
-  late result、Direct/Disabled network与零Platform DB权限；
+- OpenSandbox candidate/activation/runner/cleanup 门禁必须使用固定真实 Server、Kubernetes provider、BatchSandbox Controller 与
+  containerd/runc，覆盖并发 create、response loss、restart、kill/reclaim、boot rollover、late result、Direct/Disabled network 与零 Platform 权限；
 - Artifact Gateway/Data Worker/Maintenance三role权限矩阵、S3/KMS fault、retention/GC和饱和测试；
 - Model Inline hard limit、tool loop、budget、provider fault和无Artifact fallback测试；
 - Capability HTTP/gRPC/MCP exact installed codec、required Worker manifest、长调用heartbeat、process kill与外部I/O前fail-closed矩阵；
@@ -933,6 +940,7 @@ spec/implementation phase在以下仓库条件成立时可以标记完成：
 
 ## 17. 未决问题
 
-CR-216没有阻塞合同review的问题；atomic provisioning extension是实现硬前置。真实OpenSandbox实现与L1～L3尚未执行，L4～L6也未执行；
+CR-216 revision 1 没有阻塞合同 review 的问题，也没有修改 OpenSandbox 源码的硬前置。真实 OpenSandbox Kubernetes/BatchSandbox/
+Armed runner 实现与 L1～L3 尚未执行，L4～L6 也未执行；
 它们只在相应实现或部署方声明production-ready时成为门禁。首个production CapacityProfile只能由目标环境实测冻结；当前仓库没有
 OpenSandbox production capacity、SLO、HA、强隔离或restore声明。
