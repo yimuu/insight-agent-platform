@@ -7,6 +7,7 @@
 mod backend;
 mod broker;
 mod control;
+pub mod dispatcher;
 mod gvisor_guest;
 pub mod opensandbox;
 mod state;

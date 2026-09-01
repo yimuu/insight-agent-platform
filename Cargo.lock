@@ -3221,6 +3221,7 @@ dependencies = [
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",

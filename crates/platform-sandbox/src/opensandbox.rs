@@ -586,6 +586,22 @@ impl fmt::Debug for OpaqueActivationToken {
 }
 
 impl OpaqueActivationToken {
+    pub fn generate() -> Result<Self, SandboxContractError> {
+        use ring::rand::{SecureRandom, SystemRandom};
+        use std::fmt::Write as _;
+
+        let mut bytes = [0_u8; 32];
+        SystemRandom::new()
+            .fill(&mut bytes)
+            .map_err(|_| SandboxContractError::InvalidActivation)?;
+        let mut encoded = String::with_capacity(64);
+        for byte in bytes {
+            write!(&mut encoded, "{byte:02x}")
+                .map_err(|_| SandboxContractError::InvalidActivation)?;
+        }
+        Self::parse(encoded)
+    }
+
     pub fn parse(value: impl Into<String>) -> Result<Self, SandboxContractError> {
         let value = value.into();
         if value.len() != 64
@@ -2371,6 +2387,32 @@ pub struct SandboxActivationFrameV1 {
 }
 
 impl SandboxActivationFrameV1 {
+    pub fn from_authorized(
+        request: &SandboxExecutionRequestV1,
+        evidence: &SandboxPhysicalEvidenceV1,
+    ) -> Result<Self, SandboxContractError> {
+        request.validate()?;
+        let boot_id = evidence
+            .runner_boot_id
+            .clone()
+            .ok_or(SandboxContractError::InvalidActivation)?;
+        let frame = Self {
+            magic: String::new(),
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            activation_token: evidence.activation_token.clone(),
+            boot_id,
+            execution_request_digest: request.request_digest.clone(),
+            input_schema_digest: request.input_schema_digest.clone(),
+            input_digest: request.input_digest.clone(),
+            declared_input_bytes: 0,
+            input: request.input.clone(),
+            frame_digest: zero_digest(),
+        }
+        .seal()?;
+        frame.validate_for(request, evidence)?;
+        Ok(frame)
+    }
+
     pub fn seal(mut self) -> Result<Self, SandboxContractError> {
         self.magic = SANDBOX_RUNNER_FRAME_MAGIC.to_owned();
         self.declared_input_bytes = u64::try_from(
@@ -2661,6 +2703,49 @@ pub struct OpenSandboxCreateV1 {
 }
 
 impl OpenSandboxCreateV1 {
+    pub fn from_authorization(
+        request: &SandboxExecutionRequestV1,
+        evidence: &SandboxPhysicalEvidenceV1,
+        create_ordinal: u8,
+        ttl_seconds: u32,
+    ) -> Result<Self, SandboxContractError> {
+        request.validate()?;
+        evidence.validate_for(&SandboxExecutionPlanV1::from_request(request)?)?;
+        if evidence.phase != SandboxPhysicalPhaseV1::Provisioning
+            || create_ordinal == 0
+            || create_ordinal != evidence.create_authorization_count
+        {
+            return Err(SandboxContractError::CandidateCreateConflict);
+        }
+        let metadata = SandboxCandidateMetadataV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            tenant_id: request.tenant_id.clone(),
+            job_id: request.job_id.clone(),
+            physical_attempt: request.physical_attempt,
+            create_ordinal,
+            provisioning_token_digest: evidence.provisioning_token_digest.clone(),
+            execution_request_digest: request.request_digest.clone(),
+            runtime_contract_digest: request.runtime_contract_digest.clone(),
+            profile_deployment_digest: request.profile_deployment_digest.clone(),
+            network_mode: request.network_mode,
+        };
+        let request = Self {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            image_uri: request.image_uri.clone(),
+            entrypoint: request.runner_argv.clone(),
+            metadata,
+            runner_config: SandboxRunnerConfigV1::from_request(
+                request,
+                evidence.activation_token_digest.clone(),
+                request.provisioning_limits.diagnostic_bytes,
+            )?,
+            resource_limits: request.limits.clone(),
+            ttl_seconds,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         self.runner_config.validate()?;
         self.resource_limits.validate()?;
@@ -3128,6 +3213,14 @@ mod tests {
             .authorize_candidate_create(&request, &limits, now, 1)
             .unwrap()
             .into_inner();
+        let create = OpenSandboxCreateV1::from_authorization(&request, &first, 1, 60).unwrap();
+        assert_eq!(create.metadata.create_ordinal, 1);
+        assert_eq!(create.metadata.network_mode, SandboxNetworkMode::Direct);
+        assert_eq!(create.entrypoint, request.runner_argv);
+        assert_eq!(
+            create.runner_config.activation_token_digest,
+            first.activation_token_digest
+        );
         assert!(matches!(
             first
                 .authorize_candidate_create(&request, &limits, now, 1)
@@ -3634,6 +3727,9 @@ mod tests {
     fn activation_tokens_are_redacted_and_strict() {
         let token = OpaqueActivationToken::parse("a".repeat(64)).unwrap();
         assert!(!format!("{token:?}").contains(&"a".repeat(64)));
+        let generated = OpaqueActivationToken::generate().unwrap();
+        assert_eq!(generated.expose_for_protocol().len(), 64);
+        assert_ne!(generated, token);
         assert!(OpaqueActivationToken::parse("A".repeat(64)).is_err());
         assert!(OpaqueActivationToken::parse("a".repeat(63)).is_err());
     }
