@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 3 |
+| 状态 | Accepted / CR-216 revision 4 |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
@@ -23,11 +23,14 @@ revision 3关闭实现测试发现的reclaim状态机P1：shared Job原状态图
 Dispatcher lease接管可能已启动的physical attempt。裁决是仅当owner payload证明durable external continuation时允许该窄转换；
 continuation claim只增加lease generation，保持attempt count，禁止新token/candidate/sandbox/activation。普通Job状态语义不变。
 
+revision 4关闭L2夹具发现的candidate binding P1：metadata已有Runtime/Profile digest，但Plan/Request没有可比较字段会使其形同未绑定。
+裁决是把两者纳入semantic request closure并逐字段验证；错误digest candidate零Job mutation，不从mutable head补值。
+
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
 | IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID 和 activation token 都是 physical evidence；public Operation 仍等于 JobId |
-| schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
+| schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；Plan/Request逐字节冻结Runtime contract/Profile Deployment digest并绑定candidate metadata；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
 | idempotency | Platform 保证 command Receipt、PostgreSQL candidate-selection first-winner、runner activation replay-safe/最多一次 Package start、Job terminal first-winner；不保证一个 token 历史上只有一个 inert object，也不拥有 workload 外部副作用幂等 |
 | transactions | current fence先持久化provisioning intent；provider I/O在事务外；candidate selection与activation authorization分别CAS；`PotentiallyStarted`先于外部activate；terminal重验latest Job fence并原子写Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；之后cleanup只用独立generation fence CAS physical evidence |
 | errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
@@ -814,7 +817,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 3 impact-reviewed | OpenSandbox Kubernetes-only provider、RunValue正文authority、Job/cleanup fence、owner-proven continuation reclaim、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
+| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 4 impact-reviewed | OpenSandbox Kubernetes-only provider、RunValue正文authority、Runtime/Profile candidate binding、Job/cleanup fence、owner-proven continuation reclaim、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
 | 12～13 | Accepted / CR-193（CR-216影响复核） | Context/MCP authority与remote-only协议不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08 | Accepted / CR-182（CR-216影响复核） | Subagent不创建persistent Sandbox session |
@@ -822,7 +825,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Superseded | 保留gVisor历史决策，不再作为实现输入 |
-| ADR-0007 | Accepted / CR-216 revision 3 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；shared Job candidate/continuation/terminal/cleanup fencing 与 Armed runner activation |
+| ADR-0007 | Accepted / CR-216 revision 4 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；Runtime/Profile-bound candidate、shared Job continuation/terminal/cleanup fencing 与 Armed runner activation |
 | implementation-plan | In Progress / CR-216 | OpenSandbox合同实现与L1～L3 Pending；L4～L6仍Not run |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
@@ -1228,10 +1231,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 37. Acceptance 44：只有Sandbox owner payload已持久化exact physical attempt并证明recovery只observe/replay同一effect时，expired
     `Running` Job才允许`Running -> Ready`；continuation claim增加lease generation但保持attempt count。无physical evidence、普通Job、
     新provisioning token/candidate/sandbox或Package activation一律不能复用该转换。
+38. Acceptance 45：Execution Plan/Request semantic digest必须包含冻结的Runtime contract与Profile Deployment digest；candidate
+    metadata任一digest不匹配时零Job mutation，不能从mutable head、provider默认值或仅格式校验补齐。
 
 ## 16. 未决项
 
-CR-216 revision 3 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
+CR-216 revision 4 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
 product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
 [`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

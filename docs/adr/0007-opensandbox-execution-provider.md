@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 3 |
+| 状态 | Accepted / CR-216 revision 4 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -15,6 +15,9 @@
 
 revision 3明确：physical attempt已持久化后，Dispatcher lease recovery是同一effect的durable continuation。shared Job允许
 `Running -> Ready` 后由新lease接管，但保持attempt count，并禁止创建或激活replacement sandbox；无physical evidence时不适用。
+
+revision 4明确：冻结Runtime contract/Profile Deployment digest属于Execution Plan/Request semantic identity，并由Dispatcher逐字段
+校验candidate metadata；provider object或mutable resource head不能替代该绑定。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：

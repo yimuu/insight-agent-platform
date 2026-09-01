@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 3 |
+| 状态 | In Progress / CR-216 revision 4 |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -23,6 +23,9 @@
 > 2026-09-02 recovery closure（CR-216 revision 3）：当 external continuation 已持久化 physical evidence 后，expired
 > `Running` lease 允许窄化为 `Ready` 并重新 claim 同一 physical attempt；该转换不增加 `attempt_count`，不得重算 provisioning token、
 > 创建 candidate/sandbox 或重新激活 Package。没有 durable continuation evidence 的普通 Running Job 不适用此转换。
+
+> 2026-09-02 binding closure（CR-216 revision 4）：Execution Plan/Request semantic closure显式冻结
+> `runtime_contract_digest + profile_deployment_digest`；candidate metadata必须逐字段匹配，不能只校验其格式或仅依赖可变ID解析。
 
 > 2026-08-30 implementation feedback（CR-206）：Context Dataset build的Operation target会公开预留的`dset`，但成功
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
@@ -283,7 +286,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-209 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-206 | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203（CR-204 reviewed） | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 3 | OpenSandbox Kubernetes、Armed runner activation、执行和清理 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 4 | OpenSandbox Kubernetes、Armed runner activation、执行和清理 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 revision 1 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 revision 1 | 管理 API、Run API、事件流和错误模型 |

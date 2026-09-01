@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 3 |
+| 状态 | Accepted / CR-216 revision 4 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
@@ -17,6 +17,9 @@
 >
 > revision 3关闭reclaim状态机P1：一旦Job持久化physical attempt，expired `Running` lease只能以不增加attempt count的
 > `Running -> Ready -> Leased` continuation接管相同token/candidate/activation；没有physical evidence时禁止使用该转换。
+>
+> revision 4关闭candidate binding P1：Plan/Request显式携带冻结的Runtime contract与Profile Deployment digest；candidate
+> metadata除token/request/network外必须精确匹配这两个digest，错误或漂移candidate不可进入Job evidence。
 
 ## 1. 决策摘要
 
@@ -223,7 +226,9 @@ struct SandboxExecutionRequestV1 {
     package_version_id: ResourceVersionId,
     image_digest: OciImageDigest,
     runtime_version_id: ResourceVersionId,
+    runtime_contract_digest: Sha256Digest,
     sandbox_profile_deployment_id: DeploymentId,
+    profile_deployment_digest: Sha256Digest,
     runner_argv: BoundedArgv,
     package_argv: BoundedArgv,
     input_value_id: RunValueId,
@@ -241,7 +246,7 @@ struct SandboxExecutionRequestV1 {
 ```
 
 durable Job payload保存的是不含正文的closed `SandboxExecutionPlanV1`：它冻结上述RunValue identity、classification、input/output
-schema/content digest、Package/Runtime/Profile/image/argv/network/limits/deadline与semantic request digest。Dispatcher只在claim/recovery事务
+schema/content digest、Package/Runtime/Profile identity与digest、image/argv/network/limits/deadline与semantic request digest。Dispatcher只在claim/recovery事务
 快照中加载exact immutable input RunValue、复核tenant/run/node/value identity与digest，然后补入current lease generation、worker generation、
 physical attempt和trace，重建本次`SandboxExecutionRequestV1`。OpenSandbox create env/metadata与Job evidence都不保存business input。
 
@@ -283,6 +288,9 @@ closed labels，不含 tenant、Job、Invocation、input、Secret 或用户字�
 `record_provisioning_intent` 的 current-fence CAS 同时生成一个 256-bit `OpaqueActivationToken`；CAS loser 读取 winner 的既有 token，
 不得另生成。token 是 runner idempotency identity，不授予 Platform API/DB/Kubernetes 权限；它以 sensitive Job evidence 持久化供 restart
 后重放，禁止进入 metadata、Event、Outbox、log、trace 或 metric。create frame 只包含 `sha256(token)`，runner 在 activate 时用 constant-time
+
+Dispatcher接收candidate时必须将metadata的`runtime_contract_digest`与`profile_deployment_digest`逐字段对照Plan/Request frozen值；
+仅验证digest语法、重新读取mutable head或相信provider返回值都不构成绑定证明。
 comparison 验证；未选 candidate 永远收不到 token。
 
 OpenSandbox create 不是原子唯一性 primitive。合同允许同 token 出现多个 candidate，但必须满足：
