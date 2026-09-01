@@ -2254,11 +2254,6 @@ pub const JOB_KIND_WORK_OWNER_TRIPLES: &[(JobKind, WorkClass, ResourceKind)] = &
         ResourceKind::Job,
     ),
     (
-        JobKind::SandboxManagedMcpSession,
-        WorkClass::Sandbox,
-        ResourceKind::Job,
-    ),
-    (
         JobKind::Interaction,
         WorkClass::Interaction,
         ResourceKind::Interaction,
@@ -3007,7 +3002,7 @@ fn capability_backend_binding_schema() -> Value {
                     "revision": version.clone()
                 }
             },
-            "isolation": {"type": "string", "enum": ["wasm", "sandboxed_container"]},
+            "isolation": {"type": "string", "enum": ["container_runtime"]},
             "network_policy": version.clone(),
             "resource_policy": version.clone(),
             "artifact_io_policy": version.clone(),
@@ -3351,6 +3346,7 @@ fn candidate_manifest_schema() -> Value {
             "contract_digest",
             "database_schema_version",
             "component_images",
+            "sandbox_runner_image_digest",
             "worker_manifests",
             "deployment_config_digest",
             "hard_limit_profile_digest",
@@ -3378,6 +3374,7 @@ fn candidate_manifest_schema() -> Value {
                 },
                 "additionalProperties": digest.clone()
             },
+            "sandbox_runner_image_digest": digest.clone(),
             "worker_manifests": {
                 "type": "array",
                 "minItems": 1,
@@ -3543,7 +3540,7 @@ fn qualification_profile_schema() -> Value {
             "environment_class",
             "required_gates",
             "minimum_soak_seconds",
-            "requires_runsc",
+            "requires_opensandbox_kubernetes",
             "requires_multi_node",
             "requires_signed_supply_chain"
         ],
@@ -3572,7 +3569,7 @@ fn qualification_profile_schema() -> Value {
                 "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure."
             },
             "minimum_soak_seconds": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
-            "requires_runsc": {"type": "boolean"},
+            "requires_opensandbox_kubernetes": {"type": "boolean"},
             "requires_multi_node": {"type": "boolean"},
             "requires_signed_supply_chain": {"type": "boolean"}
         }
@@ -3586,7 +3583,7 @@ fn production_qualification_profile() -> Value {
         environment_class: crate::QualificationEnvironmentClass::Production,
         required_gates: crate::QualificationGate::ALL.to_vec(),
         minimum_soak_seconds: 86_400,
-        requires_runsc: true,
+        requires_opensandbox_kubernetes: true,
         requires_multi_node: true,
         requires_signed_supply_chain: true,
     })

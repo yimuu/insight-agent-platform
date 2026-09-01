@@ -173,7 +173,7 @@ mod tests {
             "kind": APPLY_MANIFEST_KIND,
             "resource_noun": "sandbox-runtimes",
             "create": {
-                "display_name": "qualified WASI runtime",
+                "display_name": "qualified OpenSandbox Kubernetes runtime",
                 "document": document
             },
             "publish": {

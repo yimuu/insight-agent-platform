@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 8 OpenSandbox replacement pending |
+| 状态 | In Progress / CR-216 revision 9 OpenSandbox replacement pending |
 | 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -33,6 +33,9 @@
 
 > 2026-09-02 CR-216 revision 8：authorization返回`Applied | Replayed`；仅`Applied` caller调用一次provider，`Replayed`不调用。
 > authorization后、provider前崩溃会burn ordinal，下一次只可在durable quiescence后申请新ordinal；补并发与response-loss L1/L2/L3。
+
+> 2026-09-02 CR-216 revision 9：删除旧 managed-stdio physical session 的 `SandboxManagedMcpSession` JobKind/三元组及
+> dead repository/Host/Egress代码；MCP只保留remote Streamable HTTP，不增加替代JobKind、兼容映射或fallback。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI

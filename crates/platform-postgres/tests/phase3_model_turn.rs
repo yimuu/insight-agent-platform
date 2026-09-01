@@ -185,26 +185,13 @@ impl ProductionArtifactFixture {
     fn process_config(
         &self,
         controller_address: &str,
-        guest_address: &str,
         observability_address: &str,
     ) -> serde_json::Value {
         json!({
             "schema_version": 1,
             "audience": "data_worker",
             "controller_listen_address": controller_address,
-            "guest_listen_address": guest_address,
             "observability_listen_address": observability_address,
-            "guest_identity": {
-                "issuer": "https://kubernetes.default.svc.cluster.local",
-                "audience": "insight-platform-gvisor-guest",
-                "namespace": "insight-platform-sandbox-guests",
-                "service_account_name": "insight-platform-gvisor-guest",
-                "jwks": {"keys": [{
-                    "kty": "RSA", "kid": "guest-key-1", "use": "sig", "alg": "RS256",
-                    "n": "sXch4-7u-lQpR0lJHJj3-JpGcC7dCqHj8P5mW52w8GQ", "e": "AQAB"
-                }]},
-                "jwks_digest": "sha256:ed90fd7173d7d068236917e3cf1f9f58a55977a88a6355375591ee694347ad49"
-            },
             "read_database_max_connections": 4,
             "work_database_max_connections": 4,
             "database_acquire_timeout_milliseconds": 5000,
@@ -3893,7 +3880,6 @@ fn production_workers_complete_model_tool_result_return_chain() {
         );
         install_production_typed_plan_object(&pool, &fixture, &production_artifact).await;
         let artifact_address = reserve_loopback_address();
-        let artifact_guest_address = reserve_loopback_address();
         let artifact_observability_address = reserve_loopback_address();
         let prefix = PathBuf::from(format!(
             "/tmp/platform-model-tool-orchestration-{}",
@@ -3911,7 +3897,6 @@ fn production_workers_complete_model_tool_result_return_chain() {
         std::fs::write(&model_key_path, &tls.client_key).unwrap();
         let artifact_config = production_artifact.process_config(
             &artifact_address,
-            &artifact_guest_address,
             &artifact_observability_address,
         );
         let (artifact_config_path, artifact_config_digest) =

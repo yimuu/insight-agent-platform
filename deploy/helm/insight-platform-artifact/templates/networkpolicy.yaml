@@ -27,12 +27,6 @@ spec:
     {{- else if eq $role "data-worker" }}
     - from:
         - namespaceSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxControllerPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: 9443}]
-    - from:
-        - namespaceSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.schedulerNamespaceSelector | nindent 16 }}
           podSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.schedulerPodSelector | nindent 16 }}
@@ -43,12 +37,6 @@ spec:
           podSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.mcpDiscoveryPodSelector | nindent 16 }}
       ports: [{protocol: TCP, port: 9443}]
-    - from:
-        - namespaceSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxGuestNamespaceSelector | nindent 16 }}
-          podSelector:
-            matchLabels: {{ toYaml $root.Values.networkPolicy.sandboxGuestPodSelector | nindent 16 }}
-      ports: [{protocol: TCP, port: 9444}]
     {{- else }}
     {{- if not (and $root.Values.monitoring.enabled (hasKey $component "observabilityPort")) }}
     []

@@ -298,4 +298,4 @@ unless failures.empty?
 end
 RUBY
 
-echo "Sandbox deployment contract passed (Dispatcher -> OpenSandbox Server -> BatchSandbox Controller -> Docker/runc)."
+echo "Sandbox deployment contract passed (Dispatcher -> OpenSandbox Server -> BatchSandbox Controller -> containerd/runc)."

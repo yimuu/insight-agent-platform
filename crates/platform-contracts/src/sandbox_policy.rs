@@ -66,8 +66,6 @@ pub struct SandboxResourcePolicyDocument {
     pub maximum_idle_milliseconds: u64,
     pub maximum_wall_milliseconds: u64,
     pub maximum_cleanup_milliseconds: u64,
-    pub maximum_wasm_fuel: Option<u64>,
-    pub maximum_wasm_memory_pages: Option<u32>,
     pub swap_disabled: bool,
 }
 
@@ -84,11 +82,6 @@ impl SandboxResourcePolicyDocument {
             || self.maximum_idle_milliseconds == 0
             || self.maximum_wall_milliseconds == 0
             || self.maximum_cleanup_milliseconds == 0
-            || self.maximum_wasm_fuel.is_some_and(|value| value == 0)
-            || self
-                .maximum_wasm_memory_pages
-                .is_some_and(|value| value == 0)
-            || self.maximum_wasm_fuel.is_some() != self.maximum_wasm_memory_pages.is_some()
             || self.maximum_startup_milliseconds > self.maximum_wall_milliseconds
             || self.maximum_idle_milliseconds > self.maximum_wall_milliseconds
             || !self.swap_disabled

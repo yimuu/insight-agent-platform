@@ -21,7 +21,7 @@ cargo run --locked -p insight-cli -- dev \
 ```
 
 The default `starter` closure provides deterministic Agent publication and Run execution. Optional
-roles are additive and user-selected with `--features model,remote-capability,context,mcp,wasi` or
+roles are additive and user-selected with `--features model,remote-capability,context,mcp,sandbox` or
 `--features all`; there are no legacy profile aliases. Feature enablement appends only its exact
 configuration, identities, certificates, binaries, and readiness checks. It never rebuilds existing
 authority or silently enables external access.
@@ -38,4 +38,5 @@ and Secret authority can be restarted. Removing those project-scoped containers 
 explicit reset, not an automatic failure-recovery action.
 
 This is a single-node, non-production development environment. It does not qualify multi-node
-Kubernetes, gVisor, capacity, chaos, restore, soak, or GitOps promotion; L4 through L6 remain Not run.
+Kubernetes, strong tenant isolation, capacity, chaos, restore, soak, or GitOps promotion; L4 through
+L6 remain Not run.

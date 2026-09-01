@@ -26,7 +26,7 @@ roles:
   data-worker:
     command: /usr/local/bin/platform-artifact-data-worker
     replicas: 2
-    ports: [{name: controller-grpc, port: 9443}, {name: guest-grpc, port: 9444}]
+    ports: [{name: controller-grpc, port: 9443}]
     observabilityPort: 9090
     config: {existingConfigMap: insight-platform-artifact-data-worker-config, fileKey: artifact-data-worker.json, digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
     database:
@@ -63,14 +63,10 @@ networkPolicy:
   monitoringPodSelector: {app.kubernetes.io/name: prometheus}
   publicGatewayNamespaceSelector: {insight.platform/public-gateway-namespace: "true"}
   publicGatewayPodSelector: {insight.platform/workload-role: public-gateway}
-  sandboxControllerNamespaceSelector: {insight.platform/sandbox-controller-namespace: "true"}
-  sandboxControllerPodSelector: {insight.platform/workload-role: sandbox-controller}
   schedulerNamespaceSelector: {insight.platform/workload-namespace: scheduler}
   schedulerPodSelector: {insight.platform/workload-role: scheduler}
   mcpDiscoveryNamespaceSelector: {insight.platform/workload-namespace: mcp-host}
   mcpDiscoveryPodSelector: {insight.platform/workload-role: mcp-discovery-worker}
-  sandboxGuestNamespaceSelector: {insight.platform/sandbox-guest-namespace: "true"}
-  sandboxGuestPodSelector: {insight.platform/workload-role: gvisor-guest}
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]

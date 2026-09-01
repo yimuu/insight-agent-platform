@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 3 |
+| 状态 | Accepted / CR-216 revision 4 |
 | 日期 | 2026-09-02 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -17,6 +17,10 @@
 
 > CR-216 revision 3 closure：只有 owner payload 已证明同一 external physical attempt 可安全 observe/replay 时，expired
 > `Running` Job 才可 `Running -> Ready` 并由新 lease continuation claim；转换保持 `attempt_count`，且不能 dispatch 新 effect。
+
+> CR-216 revision 4 consistency repair：首版 MCP 只有 remote Streamable HTTP，不再创建 managed-stdio physical session child；
+> 因而从 closed machine registry 删除 `SandboxManagedMcpSession` JobKind 及其 `Sandbox + Job` 三元组。此前 r328/r329 的
+> 18-kind/25-triple 与 managed MCP physical-session 记录仅是 CR-216 之前的历史证据，不是当前合同。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
 > `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
@@ -104,14 +108,13 @@ JobKind、ReceiptKind、EventKind、ArtifactRelation与owner-kind pair来自一�
 nominal ID prefix、tenant、source row kind/state和合法pair。不使用generic `(owner_type: String, owner_id: UUID)`作为信任边界。
 Job可作为Artifact/Receipt等关联的typed owner，但首版Job kind-owner registry不允许Job拥有child Job。
 
-r328实现上述既有合同的internal nominal `JobKind` machine registry：18个closed kind及25个合法
+r328曾实现上述合同的internal nominal `JobKind` machine registry：当时的18个closed kind及25个合法
 `JobKind × WorkClass × OwnerKind`三元组由Rust单一owner生成到`registries.json`，每个三元组必须投影到既有execution work-owner pair。
-该批只闭合上游machine contract；baseline `jobs.job_kind`、repository读写和JSON hot-predicate替换仍待下一实现批次，不能将r328视为持久化完成证据。
+该记录是CR-216之前的历史证据；当前closed registry为17个kind及24个合法三元组，不能据旧计数恢复已删除路径。
 
-r329把该合同落实到clean baseline `jobs.job_kind`与全部repository读写。创建和读取均重验closed三元组；Artifact/Context claim的lane选择只读typed
-relational kind，JSONB只保留冻结闭包与低频证据。managed MCP physical session继续复用共享Job，合法owner为其logical Job ID，且以
-`SandboxManagedMcpSession + Sandbox + Job`与Capability Sandbox execution区分，不再发明`sandbox_job` owner kind。独立schema checker逐个扫描
-production/test Job INSERT并拒绝JSON kind热谓词或未注册SQL owner。该证据闭合仓库内持久化合同，但没有替代fresh PostgreSQL concurrency/recovery gate。
+r329把当时的合同落实到clean baseline `jobs.job_kind`与repository读写；其中 managed MCP physical-session 分支已由CR-216删除。
+当前schema checker仍逐个扫描production/test Job INSERT并拒绝JSON kind热谓词或未注册SQL owner，但不得接受
+`sandbox_managed_mcp_session`。
 
 `WorkClass::Context`的合法owner为`ContextQuery`、`ContextDataset`，以及仅用于MCP Resource subscription refresh/reconcile的
 `McpOperation`。最后一种pair必须由Context application owner transaction重载同tenant `invocation_kind=mcp_subscription` row、exact

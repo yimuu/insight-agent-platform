@@ -1,0 +1,46 @@
+{{- $components := list
+  (dict "name" "sandbox-dispatcher" "component" "dispatcher" "replicas" .Values.dispatcher.replicas)
+  (dict "name" "opensandbox-server" "component" "opensandbox-server" "replicas" .Values.server.replicas)
+  (dict "name" "opensandbox-controller" "component" "opensandbox-controller" "replicas" .Values.controller.replicas)
+-}}
+{{- range $index, $component := $components }}
+{{- if gt $index 0 }}
+---
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $component.name }}
+  namespace: {{ $.Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component.component }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: insight-platform-sandbox
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $component.component }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $component.name }}
+  namespace: {{ $.Values.namespaces.control }}
+  labels:
+    {{- include "insight-platform-sandbox.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component.component }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $component.name }}
+  minReplicas: {{ $component.replicas }}
+  maxReplicas: {{ $component.replicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 80}
+{{- end }}

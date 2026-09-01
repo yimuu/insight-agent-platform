@@ -24,9 +24,9 @@ COMPONENT_ROLES = {
     "registry_validation_worker",
     "context_worker",
     "mcp_host",
-    "sandbox_controller",
-    "sandbox_wasi_executor",
-    "sandbox_gvisor_executor",
+    "sandbox_dispatcher",
+    "opensandbox_server",
+    "opensandbox_controller",
     "artifact_gateway",
     "artifact_data_worker",
     "artifact_maintenance",
@@ -93,8 +93,13 @@ def selector_matches(selector, labels):
 def validate_pod_security(role, pod_spec, failures):
     if pod_spec.get("serviceAccountName") in (None, "", "default"):
         failures.append(f"{role} must use a non-default ServiceAccount")
-    if pod_spec.get("automountServiceAccountToken") is not False:
-        failures.append(f"{role} must disable ServiceAccount token automount")
+    kubernetes_clients = {"opensandbox_server", "opensandbox_controller"}
+    expected_automount = role in kubernetes_clients
+    if pod_spec.get("automountServiceAccountToken") is not expected_automount:
+        if expected_automount:
+            failures.append(f"{role} must use its least-privilege Kubernetes ServiceAccount token")
+        else:
+            failures.append(f"{role} must disable ServiceAccount token automount")
     pod_security = pod_spec.get("securityContext", {})
     if pod_security.get("runAsNonRoot") is not True:
         failures.append(f"{role} must run as non-root")

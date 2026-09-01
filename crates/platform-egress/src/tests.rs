@@ -1,15 +1,7 @@
 use super::*;
 use futures::StreamExt;
 use insight_platform_contracts::SecretResolutionPolicy;
-#[cfg(any())]
-use insight_platform_mcp_host::ManagedMcpSandboxSessionIdentity;
-#[cfg(any())]
-use insight_platform_sandbox::{
-    AuthorizedManagedMcpSandboxSecretDelivery, ManagedMcpSandboxSecretCommitOutcome,
-    ManagedMcpSandboxSecretDeliveryAuthority, ManagedMcpSandboxSecretDeliveryError,
-    ManagedMcpSandboxSecretDeliveryEvidence, ManagedMcpSandboxSecretDeliveryRequest,
-    ManagedMcpSandboxSecretReservationOutcome, PreparedManagedMcpSandboxSession, ScopedSecretGrant,
-};
+
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
@@ -132,153 +124,6 @@ struct FixtureSecretResolver {
     calls: AtomicUsize,
 }
 
-#[cfg(any())]
-struct FixtureSandboxSecretAuthority {
-    delivered: AtomicBool,
-    commits: AtomicUsize,
-}
-
-#[cfg(any())]
-#[async_trait]
-impl ManagedMcpSandboxSecretDeliveryAuthority for FixtureSandboxSecretAuthority {
-    async fn reserve_managed_mcp_sandbox_secret_delivery(
-        &self,
-        request: &ManagedMcpSandboxSecretDeliveryRequest,
-    ) -> Result<ManagedMcpSandboxSecretReservationOutcome, ManagedMcpSandboxSecretDeliveryError>
-    {
-        if self.delivered.load(Ordering::SeqCst) {
-            return Ok(ManagedMcpSandboxSecretReservationOutcome::AlreadyDelivered);
-        }
-        let authorization = AuthorizedManagedMcpSandboxSecretDelivery {
-            schema_version: 1,
-            receipt_id: request.receipt_id.clone(),
-            tenant_id: request.identity.tenant_id.clone(),
-            sandbox_job_id: request.identity.sandbox_job_id.clone(),
-            secret_binding: request.secret_grant.secret_binding.clone(),
-            resolved_binding_generation: request.secret_grant.resolved_binding_generation,
-            delivery_request_digest: request.canonical_digest.clone(),
-            expires_at: request.secret_grant.expires_at,
-            authorization_digest: digest('0'),
-        }
-        .seal()
-        .unwrap();
-        Ok(ManagedMcpSandboxSecretReservationOutcome::Authorized(
-            Box::new(authorization),
-        ))
-    }
-
-    async fn commit_managed_mcp_sandbox_secret_delivery(
-        &self,
-        request: &ManagedMcpSandboxSecretDeliveryRequest,
-        authorization: &AuthorizedManagedMcpSandboxSecretDelivery,
-        resolution_evidence_digest: &Sha256Digest,
-    ) -> Result<ManagedMcpSandboxSecretCommitOutcome, ManagedMcpSandboxSecretDeliveryError> {
-        self.commits.fetch_add(1, Ordering::SeqCst);
-        self.delivered.store(true, Ordering::SeqCst);
-        let evidence = ManagedMcpSandboxSecretDeliveryEvidence {
-            schema_version: 1,
-            receipt_id: request.receipt_id.clone(),
-            tenant_id: request.identity.tenant_id.clone(),
-            sandbox_job_id: request.identity.sandbox_job_id.clone(),
-            secret_binding_id: request
-                .secret_grant
-                .secret_binding
-                .secret_binding_id
-                .clone(),
-            resolved_binding_generation: request.secret_grant.resolved_binding_generation,
-            authorization_digest: authorization.authorization_digest.clone(),
-            resolution_evidence_digest: resolution_evidence_digest.clone(),
-            delivered_at: Utc::now(),
-            evidence_digest: digest('0'),
-        }
-        .seal()
-        .unwrap();
-        Ok(ManagedMcpSandboxSecretCommitOutcome::Delivered(evidence))
-    }
-}
-
-#[cfg(any())]
-fn managed_mcp_sandbox_secret_delivery() -> ManagedMcpSandboxSecretDeliveryRequest {
-    let physical_job_id = id(ResourceKind::Job, 903);
-    let sandbox_job_id =
-        ResourceId::from_uuid_v7(ResourceKind::Job, physical_job_id.uuid()).unwrap();
-    let tenant_id = id(ResourceKind::Tenant, 900);
-    let identity = ManagedMcpSandboxSessionIdentity {
-        schema_version: 1,
-        tenant_id: tenant_id.clone(),
-        subscription_id: id(ResourceKind::McpOperation, 901),
-        logical_job_id: id(ResourceKind::Job, 902),
-        admitted_subscription_version: 1,
-        admitted_logical_job_version: 1,
-        session_generation: 1,
-        sandbox_job_id: sandbox_job_id.clone(),
-        physical_job_id,
-        subscription_binding_digest: digest('1'),
-        canonical_digest: digest('2'),
-    };
-    let worker = id(ResourceKind::WorkerProcessGeneration, 904);
-    let request_digest = digest('3');
-    let fence = JobFence {
-        expected_version: 4,
-        worker_process_generation_id: worker.clone(),
-        lease_generation: 1,
-        token_digest: digest('4'),
-    };
-    let prepared = PreparedManagedMcpSandboxSession {
-        schema_version: 1,
-        identity: identity.clone(),
-        request_digest: request_digest.clone(),
-        worker_process_generation_id: worker,
-        provider_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 905),
-        lease_generation: 1,
-        executor_identity_digest: digest('5'),
-        sandbox_identity_digest: digest('6'),
-        prepare_evidence_digest: digest('7'),
-        canonical_digest: digest('0'),
-    }
-    .seal()
-    .unwrap();
-    let secret_binding = ExactSecretBindingRef::build(
-        id(ResourceKind::SecretBinding, 906),
-        1,
-        id(ResourceKind::SecretProvider, 907),
-        "mcp_access_token".parse::<SecretPurpose>().unwrap(),
-        SecretResolutionPolicy::Pinned {
-            opaque_version_identity_digest: digest('8'),
-        },
-    )
-    .unwrap();
-    let expires_at = Utc::now() + chrono::Duration::minutes(5);
-    let secret_grant = ScopedSecretGrant {
-        schema_version: 1,
-        tenant_id,
-        sandbox_job_id,
-        secret_binding,
-        resolved_binding_generation: 1,
-        runtime_digest: digest('9'),
-        maximum_reads: 1,
-        expires_at,
-        grant_digest: digest('0'),
-    }
-    .seal()
-    .unwrap();
-    ManagedMcpSandboxSecretDeliveryRequest {
-        schema_version: 1,
-        receipt_id: id(ResourceKind::Receipt, 908),
-        event_id: id(ResourceKind::Event, 909),
-        outbox_id: id(ResourceKind::OutboxEvent, 910),
-        idempotency_key_digest: digest('a'),
-        identity,
-        request_digest,
-        fence,
-        prepared,
-        secret_grant,
-        canonical_digest: digest('0'),
-    }
-    .seal()
-    .unwrap()
-}
-
 #[async_trait]
 impl SecretMaterialResolver for FixtureSecretResolver {
     async fn resolve(
@@ -297,38 +142,6 @@ impl SecretMaterialResolver for FixtureSecretResolver {
         )
         .map_err(|_| SecretMaterialResolutionError::InvalidEvidence)
     }
-}
-
-#[cfg(any())]
-#[tokio::test]
-async fn managed_mcp_sandbox_secret_is_released_only_after_fresh_commit() {
-    let request = managed_mcp_sandbox_secret_delivery();
-    let authority = Arc::new(FixtureSandboxSecretAuthority {
-        delivered: AtomicBool::new(false),
-        commits: AtomicUsize::new(0),
-    });
-    let resolver = Arc::new(FixtureSecretResolver {
-        generation: 1,
-        version_digest: digest('8'),
-        calls: AtomicUsize::new(0),
-    });
-    let broker = BrokeredManagedMcpSandboxSecretDelivery::new(
-        Arc::clone(&authority),
-        resolver.clone(),
-        1_024,
-    )
-    .unwrap();
-    let delivered = broker.deliver(request.clone()).await.unwrap();
-    assert_eq!(delivered.into_material(), b"top-secret");
-    assert_eq!(authority.commits.load(Ordering::SeqCst), 1);
-    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
-
-    assert!(matches!(
-        broker.deliver(request).await,
-        Err(ManagedMcpSandboxSecretBrokerError::OutcomeUncertain)
-    ));
-    assert_eq!(authority.commits.load(Ordering::SeqCst), 1);
-    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 }
 
 struct FixtureDnsResolver {

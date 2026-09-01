@@ -12,7 +12,7 @@ use std::{
 pub const MAX_CANDIDATE_COMPONENT_IMAGES: usize = 256;
 pub const MAX_CANDIDATE_WORKER_MANIFESTS: usize = 512;
 pub const MAX_COMPONENT_ROLE_BYTES: usize = 128;
-pub const QUALIFICATION_PROFILE_VERSION: u16 = 1;
+pub const QUALIFICATION_PROFILE_VERSION: u16 = 2;
 pub const QUALIFICATION_EVIDENCE_VERSION: u16 = 1;
 pub const CAPACITY_PROFILE_VERSION: u16 = 1;
 pub const MAX_QUALIFICATION_TOOL_VERSIONS: usize = 64;
@@ -68,22 +68,24 @@ pub enum QualificationGate {
     DomainContracts,
     EventOutboxRecovery,
     GitopsRolloutRollback,
-    GvisorAdmissionPolicy,
-    GvisorLauncherRbac,
-    GvisorRuntime,
     JobLeaseLoss,
     LaneSaturation,
     McpRemoteProtocol,
     ModelInlineToolLoop,
+    #[serde(rename = "opensandbox_lifecycle")]
+    OpenSandboxLifecycle,
+    #[serde(rename = "opensandbox_recovery")]
+    OpenSandboxRecovery,
     ReceiptReplay,
     RepositoryTransactions,
     RollingFaultRecovery,
     RunAdmissionActivationRace,
+    SandboxNetworkIsolation,
+    SandboxPrivilegeBoundary,
     SecretLogRedaction,
     SignedSupplyChain,
     SustainedSoak,
     UpgradeRollbackRehearsal,
-    WasiRuntime,
 }
 
 impl QualificationGate {
@@ -98,22 +100,22 @@ impl QualificationGate {
         Self::DomainContracts,
         Self::EventOutboxRecovery,
         Self::GitopsRolloutRollback,
-        Self::GvisorAdmissionPolicy,
-        Self::GvisorLauncherRbac,
-        Self::GvisorRuntime,
         Self::JobLeaseLoss,
         Self::LaneSaturation,
         Self::McpRemoteProtocol,
         Self::ModelInlineToolLoop,
+        Self::OpenSandboxLifecycle,
+        Self::OpenSandboxRecovery,
         Self::ReceiptReplay,
         Self::RepositoryTransactions,
         Self::RollingFaultRecovery,
         Self::RunAdmissionActivationRace,
+        Self::SandboxNetworkIsolation,
+        Self::SandboxPrivilegeBoundary,
         Self::SecretLogRedaction,
         Self::SignedSupplyChain,
         Self::SustainedSoak,
         Self::UpgradeRollbackRehearsal,
-        Self::WasiRuntime,
     ];
 
     pub const fn layer(self) -> QualificationLayer {
@@ -129,12 +131,12 @@ impl QualificationGate {
             | Self::SecretLogRedaction => QualificationLayer::L2Repository,
             Self::ComponentProtocols
             | Self::McpRemoteProtocol
-            | Self::WasiRuntime
-            | Self::ModelInlineToolLoop => QualificationLayer::L3Component,
-            Self::GvisorRuntime
-            | Self::GvisorLauncherRbac
-            | Self::GvisorAdmissionPolicy
-            | Self::ArtifactRoleIsolation
+            | Self::ModelInlineToolLoop
+            | Self::OpenSandboxLifecycle
+            | Self::OpenSandboxRecovery
+            | Self::SandboxNetworkIsolation
+            | Self::SandboxPrivilegeBoundary => QualificationLayer::L3Component,
+            Self::ArtifactRoleIsolation
             | Self::ArtifactS3KmsFaults
             | Self::RollingFaultRecovery => QualificationLayer::L4Topology,
             Self::LaneSaturation | Self::CapacityProfile | Self::SustainedSoak => {
@@ -162,10 +164,10 @@ impl QualificationGate {
             Self::CrossTenantSecurity => "cross_tenant_security",
             Self::SecretLogRedaction => "secret_log_redaction",
             Self::McpRemoteProtocol => "mcp_remote_protocol",
-            Self::WasiRuntime => "wasi_runtime",
-            Self::GvisorRuntime => "gvisor_runtime",
-            Self::GvisorLauncherRbac => "gvisor_launcher_rbac",
-            Self::GvisorAdmissionPolicy => "gvisor_admission_policy",
+            Self::OpenSandboxLifecycle => "opensandbox_lifecycle",
+            Self::OpenSandboxRecovery => "opensandbox_recovery",
+            Self::SandboxNetworkIsolation => "sandbox_network_isolation",
+            Self::SandboxPrivilegeBoundary => "sandbox_privilege_boundary",
             Self::ArtifactRoleIsolation => "artifact_role_isolation",
             Self::ArtifactS3KmsFaults => "artifact_s3_kms_faults",
             Self::ModelInlineToolLoop => "model_inline_tool_loop",
@@ -563,7 +565,7 @@ pub struct QualificationProfile {
     pub environment_class: QualificationEnvironmentClass,
     pub required_gates: Vec<QualificationGate>,
     pub minimum_soak_seconds: u32,
-    pub requires_runsc: bool,
+    pub requires_opensandbox_kubernetes: bool,
     pub requires_multi_node: bool,
     pub requires_signed_supply_chain: bool,
 }
@@ -605,7 +607,7 @@ impl QualificationProfile {
         self.validate()?;
         if self.environment_class != QualificationEnvironmentClass::Production
             || self.required_gates != QualificationGate::ALL
-            || !self.requires_runsc
+            || !self.requires_opensandbox_kubernetes
             || !self.requires_multi_node
             || !self.requires_signed_supply_chain
         {
@@ -944,9 +946,9 @@ pub enum ComponentRole {
     RegistryValidationWorker,
     ContextWorker,
     McpHost,
-    SandboxController,
-    SandboxWasiExecutor,
-    SandboxGvisorExecutor,
+    SandboxDispatcher,
+    OpenSandboxServer,
+    OpenSandboxController,
     ArtifactGateway,
     ArtifactDataWorker,
     ArtifactMaintenance,
@@ -964,9 +966,9 @@ impl ComponentRole {
         Self::RegistryValidationWorker,
         Self::ContextWorker,
         Self::McpHost,
-        Self::SandboxController,
-        Self::SandboxWasiExecutor,
-        Self::SandboxGvisorExecutor,
+        Self::SandboxDispatcher,
+        Self::OpenSandboxServer,
+        Self::OpenSandboxController,
         Self::ArtifactGateway,
         Self::ArtifactDataWorker,
         Self::ArtifactMaintenance,
@@ -984,9 +986,9 @@ impl ComponentRole {
             Self::RegistryValidationWorker => "registry_validation_worker",
             Self::ContextWorker => "context_worker",
             Self::McpHost => "mcp_host",
-            Self::SandboxController => "sandbox_controller",
-            Self::SandboxWasiExecutor => "sandbox_wasi_executor",
-            Self::SandboxGvisorExecutor => "sandbox_gvisor_executor",
+            Self::SandboxDispatcher => "sandbox_dispatcher",
+            Self::OpenSandboxServer => "opensandbox_server",
+            Self::OpenSandboxController => "opensandbox_controller",
             Self::ArtifactGateway => "artifact_gateway",
             Self::ArtifactDataWorker => "artifact_data_worker",
             Self::ArtifactMaintenance => "artifact_maintenance",
@@ -1042,6 +1044,7 @@ pub struct CandidateManifest {
     pub contract_digest: Sha256Digest,
     pub database_schema_version: u32,
     pub component_images: BTreeMap<ComponentRole, Sha256Digest>,
+    pub sandbox_runner_image_digest: Sha256Digest,
     pub worker_manifests: Vec<Sha256Digest>,
     pub deployment_config_digest: Sha256Digest,
     pub hard_limit_profile_digest: Sha256Digest,
@@ -1055,6 +1058,7 @@ pub struct NewCandidateManifest<'a> {
     pub contract_digest: Sha256Digest,
     pub database_schema_version: u32,
     pub component_images: BTreeMap<ComponentRole, Sha256Digest>,
+    pub sandbox_runner_image_digest: Sha256Digest,
     pub worker_manifests: &'a [WorkerManifest],
     pub deployment_config_digest: Sha256Digest,
     pub hard_limit_profile: &'a HardLimitProfile,
@@ -1084,6 +1088,7 @@ impl CandidateManifest {
             contract_digest: input.contract_digest,
             database_schema_version: input.database_schema_version,
             component_images: input.component_images,
+            sandbox_runner_image_digest: input.sandbox_runner_image_digest,
             worker_manifests,
             deployment_config_digest: input.deployment_config_digest,
             hard_limit_profile_digest,
@@ -1302,6 +1307,7 @@ mod tests {
                 ("runtime_api".parse().unwrap(), sha('c')),
                 ("scheduler_recovery".parse().unwrap(), sha('d')),
             ]),
+            sandbox_runner_image_digest: sha('7'),
             worker_manifests: workers,
             deployment_config_digest: sha('e'),
             hard_limit_profile,
@@ -1322,7 +1328,7 @@ mod tests {
             environment_class: QualificationEnvironmentClass::Production,
             required_gates: QualificationGate::ALL.to_vec(),
             minimum_soak_seconds: 86_400,
-            requires_runsc: true,
+            requires_opensandbox_kubernetes: true,
             requires_multi_node: true,
             requires_signed_supply_chain: true,
         }
@@ -1564,7 +1570,7 @@ mod tests {
     fn candidate_closes_exact_images_workers_limits_and_identity() {
         let workers = [
             worker("orchestration.primary", WorkClass::Orchestration, '1'),
-            worker("sandbox.gvisor", WorkClass::Sandbox, '2'),
+            worker("sandbox.dispatcher", WorkClass::Sandbox, '2'),
         ];
         let candidate = candidate(&workers);
         candidate
@@ -1581,13 +1587,13 @@ mod tests {
     fn candidate_rejects_drift_duplicate_roles_and_noncanonical_worker_order() {
         let workers = [
             worker("orchestration.primary", WorkClass::Orchestration, '1'),
-            worker("sandbox.gvisor", WorkClass::Sandbox, '2'),
+            worker("sandbox.dispatcher", WorkClass::Sandbox, '2'),
         ];
         let candidate = candidate(&workers);
 
         let changed = [
             workers[0].clone(),
-            worker("sandbox.gvisor", WorkClass::Sandbox, '3'),
+            worker("sandbox.dispatcher", WorkClass::Sandbox, '3'),
         ];
         assert_eq!(
             candidate
@@ -1607,6 +1613,7 @@ mod tests {
                 contract_digest: sha('b'),
                 database_schema_version: 7,
                 component_images: BTreeMap::from([("runtime_api".parse().unwrap(), sha('c'))]),
+                sandbox_runner_image_digest: sha('7'),
                 worker_manifests: &duplicate_roles,
                 deployment_config_digest: sha('e'),
                 hard_limit_profile: &checked_in_hard_limit_profile(),
@@ -1661,7 +1668,7 @@ mod tests {
             .parse::<GitCommit>()
             .is_ok());
         assert!("ABCDEF".parse::<GitCommit>().is_err());
-        assert!("sandbox_gvisor_executor".parse::<ComponentRole>().is_ok());
+        assert!("sandbox_dispatcher".parse::<ComponentRole>().is_ok());
         assert!("sandbox.microvm-provider".parse::<ComponentRole>().is_err());
         assert!("Sandbox Provider".parse::<ComponentRole>().is_err());
     }
@@ -1671,9 +1678,9 @@ mod tests {
         let profile = production_profile();
         profile.validate_for_production_release().unwrap();
 
-        let mut missing_runsc = profile.clone();
-        missing_runsc.requires_runsc = false;
-        assert!(missing_runsc.validate_for_production_release().is_err());
+        let mut missing_provider = profile.clone();
+        missing_provider.requires_opensandbox_kubernetes = false;
+        assert!(missing_provider.validate_for_production_release().is_err());
 
         let mut missing_gate = profile.clone();
         missing_gate.required_gates.pop();
@@ -1739,7 +1746,7 @@ mod tests {
             .iter()
             .copied()
             .enumerate()
-            .map(|(index, role)| (role, sha(char::from(b"0123456789abcdef"[index]))))
+            .map(|(index, role)| (role, sha(char::from(b"0123456789abcdef0"[index]))))
             .collect();
         candidate.qualification_profile_digest = qualification.canonical_digest().unwrap();
         let capacity = production_capacity_profile();

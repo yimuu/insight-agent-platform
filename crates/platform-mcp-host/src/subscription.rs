@@ -20,147 +20,6 @@ pub const MIN_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS: u64 = 60_000;
 pub const MAX_MCP_SUBSCRIPTION_RECONCILE_IDLE_MILLISECONDS: u64 = 86_400_000;
 const MAX_MCP_NOTIFICATION_CLOCK_SKEW_SECONDS: i64 = 60;
 
-/// Immutable identity shared by one logical MCP subscription generation and its sole physical
-/// Managed stdio Sandbox session Job.
-///
-/// The logical subscription payload and the Sandbox Job payload both retain this exact document.
-/// The physical Job ID and typed Sandbox owner ID share one UUID, while `logical_job_id` remains
-/// the distinct `work_class=mcp` recovery/notification authority.
-#[cfg(any())]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManagedMcpSandboxSessionIdentity {
-    pub schema_version: u32,
-    pub tenant_id: ResourceId,
-    pub subscription_id: ResourceId,
-    pub logical_job_id: ResourceId,
-    pub admitted_subscription_version: u64,
-    pub admitted_logical_job_version: u64,
-    pub session_generation: u64,
-    pub sandbox_job_id: ResourceId,
-    pub physical_job_id: ResourceId,
-    pub subscription_binding_digest: Sha256Digest,
-    pub canonical_digest: Sha256Digest,
-}
-
-#[cfg(any())]
-impl ManagedMcpSandboxSessionIdentity {
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
-        binding: &McpResourceSubscriptionBinding,
-        admitted_subscription_version: u64,
-        admitted_logical_job_version: u64,
-        session_generation: u64,
-        sandbox_job_id: ResourceId,
-        physical_job_id: ResourceId,
-    ) -> Result<Self, McpHostError> {
-        binding.validate_canonical()?;
-        let mut identity = Self {
-            schema_version: 1,
-            tenant_id: binding.tenant_id.clone(),
-            subscription_id: binding.subscription_id.clone(),
-            logical_job_id: binding.job_id.clone(),
-            admitted_subscription_version,
-            admitted_logical_job_version,
-            session_generation,
-            sandbox_job_id,
-            physical_job_id,
-            subscription_binding_digest: binding.canonical_digest.clone(),
-            canonical_digest: placeholder_digest()?,
-        };
-        identity.validate_for_binding(binding)?;
-        identity.canonical_digest = digest_without_field(&identity, "canonical_digest")?;
-        Ok(identity)
-    }
-
-    pub fn validate_canonical_for_binding(
-        &self,
-        binding: &McpResourceSubscriptionBinding,
-    ) -> Result<(), McpHostError> {
-        self.validate_for_binding(binding)?;
-        if digest_without_field(self, "canonical_digest")? != self.canonical_digest {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        Ok(())
-    }
-
-    fn validate_for_binding(
-        &self,
-        binding: &McpResourceSubscriptionBinding,
-    ) -> Result<(), McpHostError> {
-        if self.schema_version != 1
-            || self.tenant_id != binding.tenant_id
-            || self.subscription_id != binding.subscription_id
-            || self.logical_job_id != binding.job_id
-            || self.admitted_subscription_version == 0
-            || self.admitted_logical_job_version == 0
-            || self.session_generation == 0
-            || self.sandbox_job_id.kind() != ResourceKind::Job
-            || self.physical_job_id.kind() != ResourceKind::Job
-            || self.sandbox_job_id.uuid() != self.physical_job_id.uuid()
-            || self.subscription_binding_digest != binding.canonical_digest
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        Ok(())
-    }
-}
-
-/// Logical-side pointer to the immutable physical request. The request digest is intentionally
-/// outside `ManagedMcpSandboxSessionIdentity`: the physical request embeds the identity, so
-/// including its own digest there would create a circular canonicalization dependency.
-#[cfg(any())]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManagedMcpSandboxSessionLink {
-    pub schema_version: u32,
-    pub identity: ManagedMcpSandboxSessionIdentity,
-    pub sandbox_request_digest: Sha256Digest,
-    pub canonical_digest: Sha256Digest,
-}
-
-#[cfg(any())]
-impl ManagedMcpSandboxSessionLink {
-    pub fn build(
-        identity: ManagedMcpSandboxSessionIdentity,
-        sandbox_request_digest: Sha256Digest,
-        binding: &McpResourceSubscriptionBinding,
-    ) -> Result<Self, McpHostError> {
-        let mut link = Self {
-            schema_version: 1,
-            identity,
-            sandbox_request_digest,
-            canonical_digest: placeholder_digest()?,
-        };
-        link.validate_for(binding)?;
-        link.canonical_digest = digest_without_field(&link, "canonical_digest")?;
-        Ok(link)
-    }
-
-    pub fn validate_canonical_for(
-        &self,
-        binding: &McpResourceSubscriptionBinding,
-    ) -> Result<(), McpHostError> {
-        self.validate_for(binding)?;
-        if digest_without_field(self, "canonical_digest")? != self.canonical_digest {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        Ok(())
-    }
-
-    fn validate_for(&self, binding: &McpResourceSubscriptionBinding) -> Result<(), McpHostError> {
-        if self.schema_version != 1
-            || self
-                .identity
-                .validate_canonical_for_binding(binding)
-                .is_err()
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpSubscriptionState {
@@ -466,8 +325,7 @@ pub struct McpSubscriptionPayload {
     pub schema_version: u32,
     pub binding: McpResourceSubscriptionBinding,
     pub session: McpSessionRecord,
-    #[cfg(any())]
-    pub managed_sandbox_session: Option<ManagedMcpSandboxSessionLink>,
+
     pub last_notification_session_generation: u64,
     pub last_notification_event_generation: u64,
     pub pending_invalidation: Option<McpPendingInvalidation>,
@@ -508,8 +366,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding,
             session,
-            #[cfg(any())]
-            managed_sandbox_session: None,
+
             last_notification_session_generation: 0,
             last_notification_event_generation: 0,
             pending_invalidation: None,
@@ -600,8 +457,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session,
-            #[cfg(any())]
-            managed_sandbox_session: None,
+
             last_notification_session_generation: if generation_changed {
                 0
             } else {
@@ -629,111 +485,6 @@ impl McpSubscriptionPayload {
                 self.full_reconcile_required
             },
             canonical_digest: placeholder_digest()?,
-        };
-        next.validate_at(now)?;
-        next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
-        Ok((next, subscription_state_for_session(target)))
-    }
-
-    /// Atomically binds the next Managed stdio session generation to its sole physical Sandbox
-    /// Job. The caller must persist this payload in the same transaction that creates that Job and
-    /// parks/releases the logical MCP Job lease.
-    #[cfg(any())]
-    pub fn schedule_managed_sandbox_session(
-        &self,
-        expected_session_version: u64,
-        link: ManagedMcpSandboxSessionLink,
-        now: DateTime<Utc>,
-    ) -> Result<(Self, McpSubscriptionState), McpHostError> {
-        self.validate_canonical_at(now)?;
-        if self.binding.transport_kind != McpTransportKind::ManagedStdio
-            || self.session.state != McpSessionState::Disconnected
-            || self.managed_sandbox_session.is_some()
-            || link.validate_canonical_for(&self.binding).is_err()
-            || link.identity.session_generation
-                != self
-                    .session
-                    .generation
-                    .checked_add(1)
-                    .ok_or(McpHostError::InvalidSubscription)?
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        let session = self.session.transition(
-            expected_session_version,
-            McpSessionState::Connecting,
-            None,
-            None,
-            now,
-        )?;
-        let mut next = Self {
-            schema_version: 1,
-            binding: self.binding.clone(),
-            session,
-            managed_sandbox_session: Some(link),
-            last_notification_session_generation: 0,
-            last_notification_event_generation: 0,
-            pending_invalidation: None,
-            full_reconcile_required: self.full_reconcile_required,
-            canonical_digest: placeholder_digest()?,
-        };
-        next.validate_at(now)?;
-        next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
-        Ok((next, McpSubscriptionState::Pending))
-    }
-
-    /// Advances a Managed stdio session only when the physical Sandbox identity remains exact.
-    /// Sandbox lifecycle code uses this for `Connecting -> Initializing -> Ready` and subsequent
-    /// degradation/terminal observations; the generic MCP transport path cannot call it.
-    #[cfg(any())]
-    pub fn transition_managed_sandbox_session(
-        &self,
-        expected_session_version: u64,
-        identity: &ManagedMcpSandboxSessionIdentity,
-        target: McpSessionState,
-        ready: Option<(EncryptedMcpState, DateTime<Utc>)>,
-        maximum_session_milliseconds: u64,
-        now: DateTime<Utc>,
-    ) -> Result<(Self, McpSubscriptionState), McpHostError> {
-        self.validate_canonical_at(now)?;
-        let link = self
-            .managed_sandbox_session
-            .as_ref()
-            .ok_or(McpHostError::InvalidSubscription)?;
-        if self.binding.transport_kind != McpTransportKind::ManagedStdio
-            || &link.identity != identity
-            || link
-                .identity
-                .validate_canonical_for_binding(&self.binding)
-                .is_err()
-            || maximum_session_milliseconds == 0
-            || ready.as_ref().is_some_and(|(_, expiry)| {
-                *expiry
-                    > now
-                        + Duration::milliseconds(
-                            i64::try_from(maximum_session_milliseconds).unwrap_or(i64::MAX),
-                        )
-            })
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        let (encrypted_opaque_session, expires_at) = ready.unzip();
-        let session = self.session.transition(
-            expected_session_version,
-            target,
-            encrypted_opaque_session,
-            expires_at,
-            now,
-        )?;
-        if matches!(target, McpSessionState::Ready | McpSessionState::Degraded)
-            && session.expires_at.is_none_or(|expiry| expiry <= now)
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        let mut next = Self {
-            session,
-            canonical_digest: placeholder_digest()?,
-            ..self.clone()
         };
         next.validate_at(now)?;
         next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
@@ -772,8 +523,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session: self.session.clone(),
-            #[cfg(any())]
-            managed_sandbox_session: self.managed_sandbox_session.clone(),
+
             last_notification_session_generation: notification.session_generation,
             last_notification_event_generation: notification.event_generation,
             pending_invalidation: Some(McpPendingInvalidation {
@@ -835,49 +585,7 @@ impl McpSubscriptionPayload {
             schema_version: 1,
             binding: self.binding.clone(),
             session,
-            #[cfg(any())]
-            managed_sandbox_session: None,
-            last_notification_session_generation: 0,
-            last_notification_event_generation: 0,
-            pending_invalidation: None,
-            full_reconcile_required: true,
-            canonical_digest: placeholder_digest()?,
-        };
-        next.validate_at(now)?;
-        next.canonical_digest = digest_without_field(&next, "canonical_digest")?;
-        Ok((next, McpSubscriptionState::Pending))
-    }
 
-    /// Clears the sole physical Managed stdio generation after that exact Sandbox Job has been
-    /// durably terminalized. The next admission must create a new physical identity and complete
-    /// a full reconcile before the subscription may return to its steady waiting state.
-    #[cfg(any())]
-    pub fn rebuild_managed_sandbox_session_after_loss(
-        &self,
-        expected_session_version: u64,
-        identity: &ManagedMcpSandboxSessionIdentity,
-        now: DateTime<Utc>,
-    ) -> Result<(Self, McpSubscriptionState), McpHostError> {
-        self.validate_canonical_at(now)?;
-        let link = self
-            .managed_sandbox_session
-            .as_ref()
-            .ok_or(McpHostError::InvalidSubscription)?;
-        if self.binding.transport_kind != McpTransportKind::ManagedStdio
-            || &link.identity != identity
-            || identity.session_generation != self.session.generation
-        {
-            return Err(McpHostError::InvalidSubscription);
-        }
-        let session = self
-            .session
-            .rebuild_after_loss(expected_session_version, now)?;
-        let mut next = Self {
-            schema_version: 1,
-            binding: self.binding.clone(),
-            session,
-            #[cfg(any())]
-            managed_sandbox_session: None,
             last_notification_session_generation: 0,
             last_notification_event_generation: 0,
             pending_invalidation: None,
@@ -1813,94 +1521,6 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(any())]
-    #[test]
-    fn managed_subscription_generation_has_one_exact_physical_sandbox_job() {
-        let now = Utc::now();
-        let payload = managed_payload_fixture(now);
-        assert!(payload
-            .transition_session(1, McpSessionState::Connecting, None, None, 60_000, now)
-            .is_err());
-
-        let identity = ManagedMcpSandboxSessionIdentity::build(
-            &payload.binding,
-            7,
-            11,
-            1,
-            id("job", "a0"),
-            id("job", "a0"),
-        )
-        .unwrap();
-        let link =
-            ManagedMcpSandboxSessionLink::build(identity.clone(), sha('9'), &payload.binding)
-                .unwrap();
-        let (connecting, state) = payload
-            .schedule_managed_sandbox_session(1, link, now)
-            .unwrap();
-        assert_eq!(state, McpSubscriptionState::Pending);
-        assert_eq!(connecting.session.generation, 1);
-        assert_eq!(
-            connecting
-                .managed_sandbox_session
-                .as_ref()
-                .unwrap()
-                .identity,
-            identity
-        );
-
-        let (initializing, _) = connecting
-            .transition_managed_sandbox_session(
-                2,
-                &identity,
-                McpSessionState::Initializing,
-                None,
-                60_000,
-                now,
-            )
-            .unwrap();
-        let encrypted = EncryptedMcpState {
-            scheme: "aes256_gcm_v1".to_owned(),
-            ciphertext: vec![1, 2, 3],
-            key_id: "key-1".to_owned(),
-            key_reference_digest: sha('1'),
-            plaintext_digest: sha('e'),
-        };
-        let (ready, state) = initializing
-            .transition_managed_sandbox_session(
-                3,
-                &identity,
-                McpSessionState::Ready,
-                Some((encrypted, now + Duration::seconds(30))),
-                60_000,
-                now,
-            )
-            .unwrap();
-        assert_eq!(state, McpSubscriptionState::Active);
-        assert!(ready.validate_canonical_at(now).is_ok());
-        assert!(ready
-            .rebuild_after_session_loss(ready.session.version, now)
-            .is_err());
-        let (rebuilding, state) = ready
-            .rebuild_managed_sandbox_session_after_loss(ready.session.version, &identity, now)
-            .unwrap();
-        assert_eq!(state, McpSubscriptionState::Pending);
-        assert_eq!(rebuilding.session.state, McpSessionState::Disconnected);
-        assert_eq!(rebuilding.session.generation, identity.session_generation);
-        assert!(rebuilding.session.encrypted_opaque_session.is_none());
-        assert!(rebuilding.managed_sandbox_session.is_none());
-        assert!(rebuilding.full_reconcile_required);
-
-        let wrong_job = ManagedMcpSandboxSessionIdentity::build(
-            &payload.binding,
-            7,
-            11,
-            1,
-            id("job", "a1"),
-            id("job", "a2"),
-        );
-        assert!(wrong_job.is_err());
-    }
-
     #[test]
     fn sub_resource_update_invalidates_exact_root_but_wrong_session_is_stale() {
         let now = Utc::now();
@@ -2071,21 +1691,6 @@ mod tests {
         let payload = McpSubscriptionPayload::pending(binding, session).unwrap();
         payload.validate_canonical_at(now).unwrap();
         (payload, uri_digest)
-    }
-
-    #[cfg(any())]
-    fn managed_payload_fixture(now: DateTime<Utc>) -> McpSubscriptionPayload {
-        let (payload, _) = payload_fixture(now);
-        let mut binding = payload.binding;
-        binding.transport_kind = McpTransportKind::ManagedStdio;
-        binding.transport_binding_digest = sha('9');
-        binding.canonical_digest = digest_without_field(&binding, "canonical_digest").unwrap();
-        let mut key = payload.session.binding_key;
-        key.transport_kind = McpTransportKind::ManagedStdio;
-        key.transport_binding_digest = sha('9');
-        key.canonical_digest = digest_without_field(&key, "canonical_digest").unwrap();
-        let session = McpSessionRecord::disconnected(key).unwrap();
-        McpSubscriptionPayload::pending(binding, session).unwrap()
     }
 
     fn notification(

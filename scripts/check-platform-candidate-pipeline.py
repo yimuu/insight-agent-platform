@@ -50,7 +50,7 @@ for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTI
 for role in (
     "management_api", "runtime_api", "scheduler_recovery", "model_worker",
     "capability_native_worker", "capability_remote_worker", "registry_validation_worker", "context_worker", "mcp_host",
-    "sandbox_controller", "sandbox_wasi_executor", "sandbox_gvisor_executor",
+    "sandbox_dispatcher", "opensandbox_server", "opensandbox_controller",
     "artifact_gateway", "artifact_data_worker", "artifact_maintenance", "egress_secret_broker",
 ):
     if f'"{role}"' not in generator:
@@ -69,8 +69,7 @@ production_bins = (
     "platform-mcp-discovery-worker", "platform-mcp-subscription-worker",
     "platform-artifact-data-worker", "platform-artifact-gateway",
     "platform-artifact-maintenance", "platform-egress-broker",
-    "platform-security-authority", "platform-sandbox-controller",
-    "platform-sandbox-attestor", "platform-sandbox-executor", "platform-sandbox-guest",
+    "platform-security-authority", "platform-sandbox-dispatcher", "platform-sandbox-runner",
 )
 if dockerfile.count("cargo build --locked --release") != 1:
     failures.append("Dockerfile must compile the production closure in one Cargo invocation")
@@ -86,9 +85,9 @@ for build_cache_marker in (
 for binary in production_bins:
     if dockerfile.count(f"--bin {binary}") != 2:
         failures.append(f"Dockerfile production build misses binary {binary}")
-for runtime_package in ("python3=3.9.2-3", "nodejs=12.22.12~dfsg-1~deb11u8"):
-    if runtime_package not in dockerfile:
-        failures.append(f"Dockerfile sandbox guest misses frozen runtime package {runtime_package}")
+for runner_boundary in ("FROM runtime-base AS sandbox-runner", "ENTRYPOINT [\"/usr/local/bin/platform-sandbox-runner\"]"):
+    if runner_boundary not in dockerfile:
+        failures.append(f"Dockerfile sandbox runner misses {runner_boundary}")
 
 if failures:
     raise SystemExit("\n".join(failures))

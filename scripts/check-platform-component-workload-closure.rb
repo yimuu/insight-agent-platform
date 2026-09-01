@@ -30,9 +30,9 @@ EXPECTED_COUNTS = {
   "context_worker" => 3,
   "context_dataset_worker" => 1,
   "mcp_host" => 4,
-  "sandbox_controller" => 1,
-  "sandbox_wasi_executor" => 1,
-  "sandbox_gvisor_executor" => 1,
+  "sandbox_dispatcher" => 1,
+  "opensandbox_server" => 1,
+  "opensandbox_controller" => 1,
   "artifact_gateway" => 1,
   "artifact_data_worker" => 1,
   "artifact_maintenance" => 1,
@@ -83,7 +83,11 @@ by_role.each do |role, role_workloads|
     previous = identities[identity]
     failures << "#{role}/#{name} shares ServiceAccount with #{previous}" if previous
     identities[identity] = "#{role}/#{name}"
-    failures << "#{role}/#{name} automounts a Kubernetes token" unless pod["automountServiceAccountToken"] == false
+    kubernetes_clients = %w[opensandbox_server opensandbox_controller]
+    expected_automount = kubernetes_clients.include?(role)
+    unless pod["automountServiceAccountToken"] == expected_automount
+      failures << "#{role}/#{name} ServiceAccount token policy drifted"
+    end
 
     containers = pod["containers"] || []
     failures << "#{role}/#{name} has no containers" if containers.empty?

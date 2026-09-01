@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 8 |
+| 状态 | Accepted / CR-216 revision 9 |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
@@ -43,6 +43,9 @@ revision 8关闭authorization replay P1：若旧version重放authorization后仍
 返回`Applied | Replayed`，只有`Applied`唯一caller恰好调用一次provider；`Replayed`不调用。授权后、调用前崩溃会burn ordinal，恢复只可
 在durable quiescence后申请下一ordinal。因此每个ordinal至多发起一次create，全部调用数由Profile count hard limit约束。
 
+revision 9修复03 machine registry与既有CR-216裁决的矛盾：MCP首版只有remote Streamable HTTP，managed-stdio physical session及
+`SandboxManagedMcpSession` JobKind/三元组全部删除。既有shared Job表和`SandboxCapabilityExecution`不变，不增加替代kind、兼容映射或fallback。
+
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
@@ -65,7 +68,7 @@ revision 8关闭authorization replay P1：若旧version重放authorization后仍
 该修订不增加业务表、aggregate、ResourceKind、JobKind、WorkClass、public route、Task/Event/Receipt kind或compatibility layer。
 Kubernetes physical store 不是 Platform business database。该 revision 不新增业务表、aggregate、ResourceKind、JobKind、WorkClass、
 public route、Task/Event/Receipt kind 或 compatibility layer；candidate selection/activation evidence 使用 shared Job 同一 row/version CAS。
-revision 7重新复核state/ID/schema/error/transaction/event/permission/capacity/recovery/fixture后无未关闭P0/P1，受影响规范与ADR-0007为Accepted。
+revision 9重新复核state/ID/schema/error/transaction/event/permission/capacity/recovery/fixture后无未关闭P0/P1，受影响规范与ADR-0007为Accepted。
 Implementation Authorization 只覆盖 implementation-plan 中新的 CR-216 Sandbox 批次；旧 WASI/gVisor 证据不能抵扣新门禁。
 
 ### CR-215 browser authoring profile authority cross-review
@@ -834,7 +837,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 8 impact-reviewed | OpenSandbox Kubernetes-only provider、one-shot create authorization、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、atomic continuation reclaim、Job/cleanup fence、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
+| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 9 impact-reviewed | OpenSandbox Kubernetes-only provider、one-shot create authorization、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、atomic continuation reclaim、Job/cleanup fence、inert candidate + Armed runner activation、Direct/Disabled network、remote-only MCP 与资格闭合 |
 | 12～13 | Accepted / CR-193（CR-216影响复核） | Context/MCP authority与remote-only协议不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08 | Accepted / CR-182（CR-216影响复核） | Subagent不创建persistent Sandbox session |
@@ -1267,7 +1270,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 未决项
 
-CR-216 revision 8 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
+CR-216 revision 9 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
 product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
 [`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

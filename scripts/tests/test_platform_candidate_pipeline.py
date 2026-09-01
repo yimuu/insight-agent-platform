@@ -19,14 +19,14 @@ class CandidatePipelineTests(unittest.TestCase):
         subprocess.run([
             "python3", "scripts/build-platform-production-candidate.py",
             "--runtime-image-digest", DIGEST_A,
-            "--sandbox-guest-image-digest", DIGEST_B,
+            "--sandbox-runner-image-digest", DIGEST_B,
             "--git-commit", "sha1:" + "c" * 40,
             "--created-at", "2026-08-26T12:00:00.000000Z",
             "--environment-closure", str(environment),
             "--output-dir", str(output),
         ], cwd=ROOT, check=True)
 
-    def test_candidate_is_deterministic_and_closes_images_and_guest(self):
+    def test_candidate_is_deterministic_and_closes_images_and_runner(self):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             self.build(first)
             self.build(second)
@@ -38,19 +38,27 @@ class CandidatePipelineTests(unittest.TestCase):
             )
             candidate = json.loads((first_path / "candidate-manifest.json").read_bytes())
             self.assertEqual(16, len(candidate["component_images"]))
-            self.assertEqual({DIGEST_A}, set(candidate["component_images"].values()))
-            guest = json.loads(
-                (first_path / "worker-manifests/sandbox-executor.gvisor.json").read_bytes()
+            self.assertEqual(DIGEST_B, candidate["sandbox_runner_image_digest"])
+            self.assertEqual(
+                {
+                    DIGEST_A,
+                    "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778",
+                    "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a",
+                },
+                set(candidate["component_images"].values()),
             )
-            self.assertEqual(DIGEST_B, guest["adapter_runtime_digest"])
-            self.assertEqual(8, len(candidate["worker_manifests"]))
+            dispatcher = json.loads(
+                (first_path / "worker-manifests/sandbox-dispatcher.json").read_bytes()
+            )
+            self.assertEqual(DIGEST_A, dispatcher["adapter_runtime_digest"])
+            self.assertEqual(7, len(candidate["worker_manifests"]))
 
     def test_invalid_mutable_subject_is_rejected(self):
         with tempfile.TemporaryDirectory() as output:
             result = subprocess.run([
                 "python3", "scripts/build-platform-production-candidate.py",
                 "--runtime-image-digest", "latest",
-                "--sandbox-guest-image-digest", DIGEST_B,
+                "--sandbox-runner-image-digest", DIGEST_B,
                 "--git-commit", "sha1:" + "c" * 40,
                 "--created-at", "2026-08-26T12:00:00.000000Z",
                 "--environment-closure", output,
@@ -65,7 +73,7 @@ class CandidatePipelineTests(unittest.TestCase):
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode()
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "environment_name": "production",
             "environment_class": "production",
             "application_repository": "yimuu/insight-agent-platform",
@@ -73,18 +81,18 @@ class CandidatePipelineTests(unittest.TestCase):
             "qualification_profile_digest": "sha256:" + hashlib.sha256(canonical).hexdigest(),
             "deployment": {
                 "requires_multi_node": True,
-                "requires_runsc": True,
+                "requires_opensandbox_kubernetes": True,
                 "requires_validating_admission_policy_v1": True,
-                "wasi_node_selector": {
-                    "insight.platform.node-restriction.kubernetes.io/sandbox-wasi": "true"
-                },
-                "gvisor_node_selector": {
-                    "insight.platform.node-restriction.kubernetes.io/sandbox-gvisor": "true"
-                },
-                "attestor_node_selector": {
-                    "insight.platform.node-restriction.kubernetes.io/sandbox-attestor": "true"
-                },
-                "runtime_class": "runsc",
+                "container_runtime": "containerd-runc",
+                "sandbox_control_namespace": "platform-sandbox",
+                "sandbox_workload_namespace": "platform-sandbox-workloads",
+                "opensandbox_source_commit": "c39b814f36ded4c61d5ac6f9332ee4dfbab86c00",
+                "opensandbox_server_image_digest": "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778",
+                "opensandbox_controller_image_digest": "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a",
+                "opensandbox_execd_image_digest": "sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684",
+                "batchsandbox_crd_digest": "sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4",
+                "kubernetes_provider_template_digest": "sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a",
+                "sandbox_network_policy_digest": "sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0",
             },
             "dependencies": {
                 "postgresql": "dedicated", "nats": "tls-core", "object_storage": "versioned-s3",

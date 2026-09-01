@@ -301,8 +301,7 @@
                 },
                 "isolation": {
                   "enum": [
-                    "wasm",
-                    "sandboxed_container"
+                    "container_runtime"
                   ],
                   "type": "string"
                 },

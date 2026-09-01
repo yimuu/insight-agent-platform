@@ -122,7 +122,6 @@ end
 allowed_noop_clients = %w[
   crates/platform-egress-rpc/src/lib.rs
   crates/platform-postgres/tests/phase4_mcp_oauth.rs
-  crates/platform-sandbox-microvm/src/main.rs
 ]
 Dir.glob(File.join(root, "crates/**/*.rs")).each do |path|
   next unless File.read(path).include?("EgressBrokerGrpcClient::new(")
@@ -149,8 +148,7 @@ dependency_owner_contracts = {
   "crates/platform-mcp-service/src/subscription_main.rs" => ["install_mcp_dependency_metrics(true)", "new_with_observer", "run_postgres_health_sampler", "with_durable_job_queue", "run_subscription_queue_sampler"],
   "crates/platform-mcp-service/src/subscription_queue_observer.rs" => ["observe_durable_job_queue_for_kinds", "JobKind::McpSubscription"],
   "crates/platform-mcp-cleanup-worker/src/main.rs" => %w[install_cleanup_dependency_metrics new_with_observer run_postgres_health_sampler],
-  "crates/platform-sandbox-controller/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler with_durable_job_queue WorkClass::Sandbox DurableJobOwnerKind::SandboxExecution],
-  "crates/platform-sandbox-executor/src/main.rs" => %w[install_sandbox_executor_dependency_metrics bind_with_observer with_dependency_observations],
+  "crates/platform-sandbox-dispatcher/src/main.rs" => %w[DependencyObservationMetrics::install PlatformDependency::Postgresql PlatformDependency::OpenSandbox with_dependency_observations WorkClass::Sandbox],
   "crates/platform-callback-api/src/main.rs" => %w[install_callback_dependency_metrics new_with_observer run_postgres_health_sampler],
   "crates/platform-gateway/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
   "crates/platform-orchestration-worker/src/main.rs" => %w[install_postgres_dependency_metrics run_postgres_health_sampler],
@@ -167,7 +165,6 @@ adapter_dependency_contracts = {
   "crates/platform-artifact-broker/src/aws.rs" => %w[ArtifactExternalDependency::S3 ArtifactExternalDependency::Kms observe_external],
   "crates/platform-secret-broker/src/aws.rs" => %w[SecretExternalDependency::Secret SecretExternalDependency::Kms observe_external],
   "crates/platform-model-worker/src/lib.rs" => %w[ModelNatsDependencyObserver ModelNatsDependencyOutcome],
-  "crates/platform-sandbox-rpc/src/control.rs" => %w[SandboxNatsDependencyObserver SandboxNatsDependencyOutcome],
 }
 adapter_dependency_contracts.each do |relative, needles|
   source = File.read(File.join(root, relative))

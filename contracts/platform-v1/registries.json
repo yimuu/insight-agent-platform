@@ -474,11 +474,6 @@
       "work_class": "sandbox"
     },
     {
-      "job_kind": "sandbox_managed_mcp_session",
-      "owner_kind": "job",
-      "work_class": "sandbox"
-    },
-    {
       "job_kind": "interaction",
       "owner_kind": "interaction",
       "work_class": "interaction"
@@ -551,7 +546,6 @@
     "context_dataset_build",
     "context_subscription_refresh",
     "sandbox_capability_execution",
-    "sandbox_managed_mcp_session",
     "interaction",
     "artifact_scan",
     "artifact_rescan",
@@ -921,18 +915,6 @@
       "name": "gitops_rollout_rollback"
     },
     {
-      "layer": "l4_topology",
-      "name": "gvisor_admission_policy"
-    },
-    {
-      "layer": "l4_topology",
-      "name": "gvisor_launcher_rbac"
-    },
-    {
-      "layer": "l4_topology",
-      "name": "gvisor_runtime"
-    },
-    {
       "layer": "l2_repository",
       "name": "job_lease_loss"
     },
@@ -947,6 +929,14 @@
     {
       "layer": "l3_component",
       "name": "model_inline_tool_loop"
+    },
+    {
+      "layer": "l3_component",
+      "name": "opensandbox_lifecycle"
+    },
+    {
+      "layer": "l3_component",
+      "name": "opensandbox_recovery"
     },
     {
       "layer": "l2_repository",
@@ -965,6 +955,14 @@
       "name": "run_admission_activation_race"
     },
     {
+      "layer": "l3_component",
+      "name": "sandbox_network_isolation"
+    },
+    {
+      "layer": "l3_component",
+      "name": "sandbox_privilege_boundary"
+    },
+    {
       "layer": "l2_repository",
       "name": "secret_log_redaction"
     },
@@ -979,10 +977,6 @@
     {
       "layer": "l6_release",
       "name": "upgrade_rollback_rehearsal"
-    },
-    {
-      "layer": "l3_component",
-      "name": "wasi_runtime"
     }
   ],
   "qualification_layers": [
@@ -1542,18 +1536,14 @@
   ],
   "sandbox_isolation_classes": [
     {
-      "name": "wasm",
+      "name": "container_runtime",
       "security_rank": 1
-    },
-    {
-      "name": "sandboxed_container",
-      "security_rank": 2
     }
   ],
   "sandbox_runtime_families": [
     "python",
     "node_js",
-    "wasm_wasi",
+    "wasm_module",
     "reviewed_shell"
   ],
   "scheduler_priorities": [

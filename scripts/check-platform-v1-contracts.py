@@ -558,6 +558,7 @@ def check_candidate_manifest(errors):
         "contract_digest",
         "database_schema_version",
         "component_images",
+        "sandbox_runner_image_digest",
         "worker_manifests",
         "deployment_config_digest",
         "hard_limit_profile_digest",
@@ -571,6 +572,8 @@ def check_candidate_manifest(errors):
         errors.append("CandidateManifest schema differs from its closed qualification shape")
     if properties.get("qualification_profile_digest", {}).get("pattern") != DIGEST.pattern:
         errors.append("CandidateManifest qualification profile digest is invalid")
+    if properties.get("sandbox_runner_image_digest", {}).get("pattern") != DIGEST.pattern:
+        errors.append("CandidateManifest sandbox runner image digest is invalid")
     if properties.get("git_commit", {}).get("pattern") != (
         "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
     ):
@@ -658,22 +661,22 @@ def check_qualification_manifests(errors):
         ("domain_contracts", "l1_domain"),
         ("event_outbox_recovery", "l2_repository"),
         ("gitops_rollout_rollback", "l6_release"),
-        ("gvisor_admission_policy", "l4_topology"),
-        ("gvisor_launcher_rbac", "l4_topology"),
-        ("gvisor_runtime", "l4_topology"),
         ("job_lease_loss", "l2_repository"),
         ("lane_saturation", "l5_capacity"),
         ("mcp_remote_protocol", "l3_component"),
         ("model_inline_tool_loop", "l3_component"),
+        ("opensandbox_lifecycle", "l3_component"),
+        ("opensandbox_recovery", "l3_component"),
         ("receipt_replay", "l2_repository"),
         ("repository_transactions", "l2_repository"),
         ("rolling_fault_recovery", "l4_topology"),
         ("run_admission_activation_race", "l2_repository"),
+        ("sandbox_network_isolation", "l3_component"),
+        ("sandbox_privilege_boundary", "l3_component"),
         ("secret_log_redaction", "l2_repository"),
         ("signed_supply_chain", "l6_release"),
         ("sustained_soak", "l5_capacity"),
         ("upgrade_rollback_rehearsal", "l6_release"),
-        ("wasi_runtime", "l3_component"),
     ]
     if registries.get("qualification_layers") != expected_layers:
         errors.append("18 qualification layer registry is not closed")
@@ -688,7 +691,7 @@ def check_qualification_manifests(errors):
         "environment_class",
         "required_gates",
         "minimum_soak_seconds",
-        "requires_runsc",
+        "requires_opensandbox_kubernetes",
         "requires_multi_node",
         "requires_signed_supply_chain",
     }
@@ -711,13 +714,13 @@ def check_qualification_manifests(errors):
         errors.append("QualificationProfile environment class is not closed")
     if (
         set(production) != profile_fields
-        or production.get("schema_version") != 1
+        or production.get("schema_version") != 2
         or production.get("profile_name") != "production-release"
         or production.get("environment_class") != "production"
         or production.get("required_gates") != [name for name, _ in expected_gates]
         or not isinstance(production.get("minimum_soak_seconds"), int)
         or production.get("minimum_soak_seconds", 0) <= 0
-        or production.get("requires_runsc") is not True
+        or production.get("requires_opensandbox_kubernetes") is not True
         or production.get("requires_multi_node") is not True
         or production.get("requires_signed_supply_chain") is not True
     ):
@@ -962,7 +965,7 @@ def check_spec_registry_alignment(errors):
         "capability_invocation", "mcp_discovery", "mcp_subscription",
         "context_query_native", "context_query_remote", "context_dataset_build",
         "context_subscription_refresh", "sandbox_capability_execution",
-        "sandbox_managed_mcp_session", "interaction", "artifact_scan",
+        "interaction", "artifact_scan",
         "artifact_rescan", "artifact_delete", "artifact_blob_cleanup", "recovery",
     ]
     if registries.get("job_kinds") != expected_job_kinds:
@@ -1031,7 +1034,6 @@ def check_spec_registry_alignment(errors):
         {"job_kind": "context_dataset_build", "work_class": "context", "owner_kind": "context_dataset"},
         {"job_kind": "context_subscription_refresh", "work_class": "context", "owner_kind": "mcp_operation"},
         {"job_kind": "sandbox_capability_execution", "work_class": "sandbox", "owner_kind": "job"},
-        {"job_kind": "sandbox_managed_mcp_session", "work_class": "sandbox", "owner_kind": "job"},
         {"job_kind": "interaction", "work_class": "interaction", "owner_kind": "interaction"},
         {"job_kind": "artifact_scan", "work_class": "artifact", "owner_kind": "artifact"},
         {"job_kind": "artifact_rescan", "work_class": "artifact", "owner_kind": "artifact"},
@@ -1191,13 +1193,12 @@ def check_spec_registry_alignment(errors):
     if registries.get("sandbox_runtime_families") != [
         "python",
         "node_js",
-        "wasm_wasi",
+        "wasm_module",
         "reviewed_shell",
     ]:
         errors.append("14 Sandbox runtime family registry is not closed")
     if registries.get("sandbox_isolation_classes") != [
-        {"name": "wasm", "security_rank": 1},
-        {"name": "sandboxed_container", "security_rank": 2},
+        {"name": "container_runtime", "security_rank": 1},
     ]:
         errors.append("14 Sandbox isolation class registry is not rank-closed")
     if registries.get("sandbox_abi_versions") != ["v1"]:

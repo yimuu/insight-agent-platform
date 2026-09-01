@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 8 |
+| 状态 | In Progress / CR-216 revision 9 |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -40,6 +40,10 @@
 
 > 2026-09-02 dispatch closure（CR-216 revision 8）：create authorization repository返回`Applied | Replayed`；只有`Applied` caller
 > 可调用一次provider，`Replayed`绝不调用。授权后、provider调用前崩溃会burn ordinal，静默窗口后只可申请下一ordinal。
+
+> 2026-09-02 registry consistency repair（CR-216 revision 9）：首版MCP只保留remote Streamable HTTP，删除旧
+> managed-stdio physical session 的`SandboxManagedMcpSession` JobKind、注册三元组与dead repository/Host/Egress代码；不增加
+> 替代JobKind、兼容映射或fallback。Spec 03与生成registry恢复为同一17-kind/24-triple closed machine合同。
 
 > 2026-08-30 implementation feedback（CR-206）：Context Dataset build的Operation target会公开预留的`dset`，但成功
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
@@ -289,7 +293,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 00 | `00-overview.md` | In Progress / CR-216 | 总体路线、规范模板、依赖和完成定义 |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 revision 1 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 revision 1 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 revision 3 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 revision 4 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-216 revision 1 | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-214 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-203（CR-204 reviewed） | Run、NodeExecution、暂停、重试、取消 |
@@ -803,7 +807,7 @@ Artifact 和最小 `/v1`。OpenSandbox/Kubernetes provider state 不得成为
 第二业务持久状态权威，host process仍禁止。
 
 [implementation-plan.md](implementation-plan.md)保留CR-216之前的仓库范围记录并重新打开OpenSandbox批次；当前00为In Progress，
-受影响01～04、07、09、10、14、15、17、18为Accepted目标合同，均不得标作Implemented/Verified。OpenSandbox candidate discovery、
-Dispatcher/Armed runner activation/cleanup、Kubernetes profile 与 L1～L3 尚未实现；该状态不声明 production 拓扑、容量/SLO、强隔离、
-restore、promotion 或 clean cut 通过。
+受影响01～04、07、09、10、14、15、17、18为Accepted目标合同，均不得在资格证据关闭前标作Implemented/Verified。OpenSandbox
+candidate discovery、Dispatcher/Armed runner activation/cleanup与Kubernetes profile已有实现checkpoint，L1～L3全量资格仍未关闭；
+该状态不声明 production 拓扑、容量/SLO、强隔离、restore、promotion 或 clean cut 通过。
 cutover前current behavior继续以[docs/current](../../current/README.md)为准。

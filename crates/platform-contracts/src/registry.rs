@@ -168,7 +168,6 @@ string_enum! {
         ContextDatasetBuild => "context_dataset_build",
         ContextSubscriptionRefresh => "context_subscription_refresh",
         SandboxCapabilityExecution => "sandbox_capability_execution",
-        SandboxManagedMcpSession => "sandbox_managed_mcp_session",
         Interaction => "interaction",
         ArtifactScan => "artifact_scan",
         ArtifactRescan => "artifact_rescan",
@@ -525,23 +524,21 @@ string_enum! {
     pub enum SandboxRuntimeFamily, "sandbox runtime family" {
         Python => "python",
         NodeJs => "node_js",
-        WasmWasi => "wasm_wasi",
+        WasmModule => "wasm_module",
         ReviewedShell => "reviewed_shell"
     }
 }
 
 string_enum! {
     pub enum SandboxIsolationClass, "sandbox isolation class" {
-        Wasm => "wasm",
-        SandboxedContainer => "sandboxed_container"
+        ContainerRuntime => "container_runtime"
     }
 }
 
 impl SandboxIsolationClass {
     pub const fn security_rank(self) -> u8 {
         match self {
-            Self::Wasm => 1,
-            Self::SandboxedContainer => 2,
+            Self::ContainerRuntime => 1,
         }
     }
 }
@@ -1280,10 +1277,7 @@ mod tests {
 
     #[test]
     fn sandbox_isolation_security_rank_is_explicit_and_strict() {
-        assert!(
-            SandboxIsolationClass::Wasm.security_rank()
-                < SandboxIsolationClass::SandboxedContainer.security_rank()
-        );
+        assert_eq!(SandboxIsolationClass::ContainerRuntime.security_rank(), 1);
     }
 
     #[test]

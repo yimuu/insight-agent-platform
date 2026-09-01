@@ -38,22 +38,22 @@
           "domain_contracts",
           "event_outbox_recovery",
           "gitops_rollout_rollback",
-          "gvisor_admission_policy",
-          "gvisor_launcher_rbac",
-          "gvisor_runtime",
           "job_lease_loss",
           "lane_saturation",
           "mcp_remote_protocol",
           "model_inline_tool_loop",
+          "opensandbox_lifecycle",
+          "opensandbox_recovery",
           "receipt_replay",
           "repository_transactions",
           "rolling_fault_recovery",
           "run_admission_activation_race",
+          "sandbox_network_isolation",
+          "sandbox_privilege_boundary",
           "secret_log_redaction",
           "signed_supply_chain",
           "sustained_soak",
-          "upgrade_rollback_rehearsal",
-          "wasi_runtime"
+          "upgrade_rollback_rehearsal"
         ],
         "type": "string"
       },
@@ -65,14 +65,14 @@
     "requires_multi_node": {
       "type": "boolean"
     },
-    "requires_runsc": {
+    "requires_opensandbox_kubernetes": {
       "type": "boolean"
     },
     "requires_signed_supply_chain": {
       "type": "boolean"
     },
     "schema_version": {
-      "const": 1,
+      "const": 2,
       "type": "integer"
     }
   },
@@ -82,7 +82,7 @@
     "environment_class",
     "required_gates",
     "minimum_soak_seconds",
-    "requires_runsc",
+    "requires_opensandbox_kubernetes",
     "requires_multi_node",
     "requires_signed_supply_chain"
   ],

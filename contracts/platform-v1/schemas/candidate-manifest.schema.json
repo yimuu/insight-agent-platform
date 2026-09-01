@@ -22,9 +22,9 @@
           "registry_validation_worker",
           "context_worker",
           "mcp_host",
-          "sandbox_controller",
-          "sandbox_wasi_executor",
-          "sandbox_gvisor_executor",
+          "sandbox_dispatcher",
+          "opensandbox_server",
+          "opensandbox_controller",
           "artifact_gateway",
           "artifact_data_worker",
           "artifact_maintenance",
@@ -67,6 +67,10 @@
       "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
+    "sandbox_runner_image_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
     "worker_manifests": {
       "description": "Canonical ascending digest set; Rust validation additionally enforces ordering and exact installed WorkerManifest closure.",
       "items": {
@@ -84,6 +88,7 @@
     "contract_digest",
     "database_schema_version",
     "component_images",
+    "sandbox_runner_image_digest",
     "worker_manifests",
     "deployment_config_digest",
     "hard_limit_profile_digest",

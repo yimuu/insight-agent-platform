@@ -1119,8 +1119,6 @@ fn sandbox_policy_closure(
             maximum_idle_milliseconds: 60_000,
             maximum_wall_milliseconds: 300_000,
             maximum_cleanup_milliseconds: 10_000,
-            maximum_wasm_fuel: None,
-            maximum_wasm_memory_pages: None,
             swap_disabled: true,
         },
         network: SandboxNetworkPolicyDocument {
@@ -2640,7 +2638,6 @@ impl ProductionArtifactProcessFixture {
     fn config(
         &self,
         controller_address: SocketAddr,
-        guest_address: SocketAddr,
         observability_address: SocketAddr,
     ) -> serde_json::Value {
         let ruleset_digest = sandbox_policy_closure(
@@ -2654,23 +2651,7 @@ impl ProductionArtifactProcessFixture {
             "schema_version": 1,
             "audience": "data_worker",
             "controller_listen_address": controller_address.to_string(),
-            "guest_listen_address": guest_address.to_string(),
             "observability_listen_address": observability_address.to_string(),
-            "guest_identity": {
-                "issuer": "https://kubernetes.default.svc.cluster.local",
-                "audience": "insight-platform-gvisor-guest",
-                "namespace": "insight-platform-sandbox-guests",
-                "service_account_name": "insight-platform-gvisor-guest",
-                "jwks": {"keys": [{
-                    "kty": "RSA",
-                    "kid": "guest-key-1",
-                    "use": "sig",
-                    "alg": "RS256",
-                    "n": "sXch4-7u-lQpR0lJHJj3-JpGcC7dCqHj8P5mW52w8GQ",
-                    "e": "AQAB"
-                }]},
-                "jwks_digest": "sha256:ed90fd7173d7d068236917e3cf1f9f58a55977a88a6355375591ee694347ad49"
-            },
             "read_database_max_connections": 4,
             "work_database_max_connections": 4,
             "database_acquire_timeout_milliseconds": 5000,
@@ -3705,16 +3686,11 @@ async fn run_discovery_worker_process_l3(
         serde_json::to_vec(&artifact_config).unwrap(),
     )
     .unwrap();
-    let artifact_guest_address = available_address();
     let artifact_observability_address = available_address();
     let production_artifact_config = production_artifact.map(|fixture| {
         files.write_config(
             "artifact-data-worker",
-            &fixture.config(
-                artifact_address,
-                artifact_guest_address,
-                artifact_observability_address,
-            ),
+            &fixture.config(artifact_address, artifact_observability_address),
         )
     });
     let observability_address = available_address();

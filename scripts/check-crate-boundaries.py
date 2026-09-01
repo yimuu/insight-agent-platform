@@ -51,13 +51,9 @@ INTERNAL_ROLES = {
     "insight-platform-rpc-trace": "rpc_trace",
     "insight-platform-runtime": "platform_runtime",
     "insight-platform-sandbox": "sandbox_domain",
-    "insight-platform-sandbox-attestor": "sandbox_attestor",
-    "insight-platform-sandbox-controller": "sandbox_controller",
-    "insight-platform-sandbox-executor": "sandbox_executor",
-    "insight-platform-sandbox-rpc": "sandbox_rpc",
-    "insight-platform-sandbox-gvisor": "sandbox_gvisor_executor",
-    "insight-platform-sandbox-guest": "sandbox_guest",
-    "insight-platform-sandbox-wasi": "sandbox_wasi_executor",
+    "insight-platform-opensandbox-client": "opensandbox_client",
+    "insight-platform-sandbox-dispatcher": "sandbox_dispatcher",
+    "insight-platform-sandbox-runner": "sandbox_runner",
     "insight-platform-scheduler": "scheduler_domain",
     "insight-platform-secret-broker": "secret_broker",
     "insight-platform-security": "security_domain",
@@ -129,15 +125,11 @@ ALLOWED_INTERNAL = {
     "tasks_domain": {"contracts"},
     "platform_postgres": {"artifact_broker", "artifacts_domain", "capability_adapters", "contracts", "context_domain", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "security_domain", "tasks_domain"},
     "qualification_tests": set(),
-    "platform_runtime": {"artifact_rpc", "artifacts_domain", "contracts", "invocations_domain", "jobs_domain", "models_domain", "orchestrator_domain", "platform_postgres", "platform_worker", "rpc_trace", "sandbox_domain", "sandbox_rpc", "security_domain", "tasks_domain"},
+    "platform_runtime": {"artifact_rpc", "artifacts_domain", "contracts", "invocations_domain", "jobs_domain", "models_domain", "orchestrator_domain", "platform_postgres", "platform_worker", "rpc_trace", "sandbox_domain", "security_domain", "tasks_domain"},
     "sandbox_domain": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
-    "sandbox_attestor": {"contracts", "observability", "sandbox_domain", "sandbox_rpc"},
-    "sandbox_controller": {"artifact_rpc", "contracts", "observability", "platform_postgres", "platform_runtime", "sandbox_domain", "sandbox_rpc"},
-    "sandbox_executor": {"contracts", "jobs_domain", "observability", "platform_worker", "rpc_trace", "sandbox_domain", "sandbox_rpc", "sandbox_gvisor_executor", "sandbox_wasi_executor"},
-    "sandbox_gvisor_executor": {"contracts"},
-    "sandbox_guest": {"artifact_rpc", "contracts", "sandbox_domain"},
-    "sandbox_rpc": {"contracts", "jobs_domain", "rpc_trace", "sandbox_domain"},
-    "sandbox_wasi_executor": {"contracts", "sandbox_domain"},
+    "opensandbox_client": {"contracts", "sandbox_domain"},
+    "sandbox_dispatcher": {"contracts", "observability", "opensandbox_client", "platform_postgres", "platform_worker", "sandbox_domain"},
+    "sandbox_runner": {"contracts", "sandbox_domain"},
     "platform_worker": {"contracts"},
 }
 
@@ -145,10 +137,6 @@ ALLOWED_INTERNAL = {
 # permitting that edge in the shipped dependency graph. Every resolved dep-kind must be `dev`;
 # adding the same crate as a normal or build dependency remains a boundary failure.
 ALLOWED_DEV_INTERNAL = {
-    # The archived root runtime retains only a cross-cutover qualification fixture for the public
-    # WASI adapter. This is dev-only and does not make the default CLI or candidate image depend on
-    # the archived runtime.
-    "root": {"sandbox_wasi_executor"},
     # The MCP service production-process fixture stands up the real Egress RPC service and must
     # implement its three leaf connector traits. These edges are test-only; the shipped Host still
     # reaches provider/MCP networks solely through the egress_rpc dependency.
@@ -156,13 +144,14 @@ ALLOWED_DEV_INTERNAL = {
     "platform_postgres": {"artifact_rpc", "egress_core", "egress_rpc"},
     # Cross-plane qualification targets compose real durable authority with physical execution
     # adapters. This package has no production targets or normal internal dependencies.
-    "qualification_tests": {"artifact_broker", "artifacts_domain", "contracts", "invocations_domain", "platform_postgres", "sandbox_domain", "sandbox_wasi_executor"},
+    "qualification_tests": {"artifact_broker", "artifacts_domain", "contracts", "invocations_domain", "platform_postgres", "sandbox_domain"},
     "cli": {"platform_api"},
 }
 
 # Test harnesses may install a tracing collector without granting production crates permission to
 # own subscriber configuration. The dependency must remain dev-only; a normal/build edge fails.
 ALLOWED_DEV_DIRECT = {
+    "opensandbox_client": {"axum"},
     "platform_api": {"tracing-subscriber"},
     "rpc_trace": {"tracing-subscriber"},
 }
@@ -236,13 +225,9 @@ FORBIDDEN_DIRECT = {
     "platform_postgres": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "platform_runtime": {"axum", "reqwest", "dotenvy", "tracing-subscriber"},
     "sandbox_domain": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_attestor": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_controller": {"reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_executor": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_gvisor_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_guest": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_rpc": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
-    "sandbox_wasi_executor": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
+    "opensandbox_client": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
+    "sandbox_dispatcher": {"reqwest", "dotenvy", "tracing-subscriber"},
+    "sandbox_runner": {"sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
     "platform_worker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
 }
 

@@ -15,7 +15,7 @@ TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\
 COMPONENT_ROLES = (
     "management_api", "runtime_api", "scheduler_recovery", "model_worker",
     "capability_native_worker", "capability_remote_worker", "registry_validation_worker", "context_worker", "mcp_host",
-    "sandbox_controller", "sandbox_wasi_executor", "sandbox_gvisor_executor",
+    "sandbox_dispatcher", "opensandbox_server", "opensandbox_controller",
     "artifact_gateway", "artifact_data_worker", "artifact_maintenance", "egress_secret_broker",
 )
 WORKERS = (
@@ -25,8 +25,7 @@ WORKERS = (
     ("capability.native", "capability_native", 4, 1, "runtime"),
     ("capability.remote", "capability_remote", 4, 1, "runtime"),
     ("context-worker", "context", 8, 2, "runtime"),
-    ("sandbox-executor.wasi", "sandbox", 4, 1, "runtime"),
-    ("sandbox-executor.gvisor", "sandbox", 4, 1, "sandbox_guest"),
+    ("sandbox-dispatcher", "sandbox", 4, 1, "runtime"),
 )
 BASE_DEPLOYMENT_PATHS = (Path("Dockerfile"), Path("deploy/helm"))
 POLICY_PATHS = (
@@ -108,7 +107,7 @@ def require(pattern, value, name):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-image-digest", required=True)
-    parser.add_argument("--sandbox-guest-image-digest", required=True)
+    parser.add_argument("--sandbox-runner-image-digest", required=True)
     parser.add_argument("--git-commit", required=True)
     parser.add_argument("--created-at", required=True)
     parser.add_argument("--environment-closure", required=True, type=Path)
@@ -116,7 +115,7 @@ def main():
     args = parser.parse_args()
 
     runtime = require(DIGEST, args.runtime_image_digest, "runtime image digest")
-    sandbox_guest = require(DIGEST, args.sandbox_guest_image_digest, "sandbox guest image digest")
+    sandbox_runner = require(DIGEST, args.sandbox_runner_image_digest, "sandbox runner image digest")
     git_commit = require(GIT_COMMIT, args.git_commit, "git commit")
     created_at = require(TIMESTAMP, args.created_at, "created_at")
     environment_closure = args.environment_closure.resolve()
@@ -142,7 +141,7 @@ def main():
             "manifest_version": 1,
             "worker_role": role,
             "work_class": work_class,
-            "adapter_runtime_digest": runtime if adapter == "runtime" else sandbox_guest,
+            "adapter_runtime_digest": runtime,
             "protocol_version": 1,
             "max_concurrency": concurrency,
             "critical_control_reserved_slots": reserved,
@@ -154,7 +153,14 @@ def main():
         "git_commit": git_commit,
         "contract_digest": contract_digest,
         "database_schema_version": 1,
-        "component_images": {role: runtime for role in COMPONENT_ROLES},
+        "component_images": {
+            role: (
+                "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778" if role == "opensandbox_server"
+                else "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a" if role == "opensandbox_controller"
+                else runtime
+            ) for role in COMPONENT_ROLES
+        },
+        "sandbox_runner_image_digest": sandbox_runner,
         "worker_manifests": sorted(worker_digests),
         "deployment_config_digest": canonical_digest({
             "application": tree_digest(BASE_DEPLOYMENT_PATHS),

@@ -24,18 +24,11 @@ pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-dataset-worker";
-pub const WASI_EXECUTOR_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-executor.wasi";
-pub const GVISOR_EXECUTOR_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-executor.gvisor";
-pub const SANDBOX_CONTROLLER_WORKLOAD_IDENTITY: &str =
-    "spiffe://insight.platform/workload/sandbox-controller";
 pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
 
 pub const BUILTIN_JSON_CODEC_ID: &str = "platform.json";
 pub const BUILTIN_JSON_CODEC_VERSION: &str = "1.0.0";
-pub const WASI_ABI_V1_RUNTIME_VERSION: &str = "wasmtime-46.0.2";
 
 pub fn builtin_json_codec_module_digest() -> Sha256Digest {
     builtin_capability_digest("builtin-json-codec-module")
@@ -108,15 +101,11 @@ mod tests {
             MCP_CALLBACK_WORKLOAD_IDENTITY,
             CONTEXT_WORKER_WORKLOAD_IDENTITY,
             CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY,
-            WASI_EXECUTOR_WORKLOAD_IDENTITY,
-            GVISOR_EXECUTOR_WORKLOAD_IDENTITY,
-            SANDBOX_CONTROLLER_WORKLOAD_IDENTITY,
             EGRESS_BROKER_WORKLOAD_IDENTITY,
         ] {
             assert!(identity.starts_with("spiffe://insight.platform/workload/"));
             assert_eq!(identity, identity.trim());
         }
         assert_eq!(builtin_json_codec_module_digest().as_str().len(), 71);
-        assert_eq!(WASI_ABI_V1_RUNTIME_VERSION, "wasmtime-46.0.2");
     }
 }

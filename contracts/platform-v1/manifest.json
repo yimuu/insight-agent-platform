@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:49d83066d1ecb22809a73f24e261ffa4fb88dd3c83373667869446268d64784a",
+  "contract_digest": "sha256:5e7c304148529cb2dc628546510f5b7bb4a4f850d0466b96ca6c8b86dfc921ff",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -9,10 +9,10 @@
       "sha256": "059ecf36de23b12e9696b966d14512c10556873800099bf758c90cd8c2e477ce"
     },
     {
-      "bytes": 33721,
+      "bytes": 33533,
       "media_type": "application/json",
       "path": "contracts/platform-v1/registries.json",
-      "sha256": "d822eef8cc5c6244e4a0ec4c3c8e421abeef7b350dee806a4e7d99a4d0b5f10d"
+      "sha256": "755e7e6eeaf78fb171bed0cad0fa24b46125e4b84c48135dd441af5b21548abe"
     },
     {
       "bytes": 1949,
@@ -63,10 +63,10 @@
       "sha256": "47baa322cbd057e1cb1dcedb51925522f8bdd332f5a2c4c5e8ee1e31035ab1d7"
     },
     {
-      "bytes": 33344,
+      "bytes": 33314,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/deployment-closure.schema.json",
-      "sha256": "219ad559ad560c5ee3d3c7c442c752b5510e3c597ddce8cceba99ff94745e055"
+      "sha256": "2500b02c1756ec83b2f4b1b58916f55e531340d2c5566e79a53a985bcef0a125"
     },
     {
       "bytes": 1524,
@@ -75,34 +75,34 @@
       "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
     },
     {
-      "bytes": 2785,
+      "bytes": 2925,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
-      "sha256": "7585fac2fcbd60760bffdee8a0e9844876afde56cca9a8f5e7df9430e11ebdc8"
+      "sha256": "d8ffa6794454d800fe98e916be55a5fc96e85262c8347114399830d8c179e3a6"
     },
     {
-      "bytes": 9041,
+      "bytes": 9033,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/capacity-profile.schema.json",
-      "sha256": "93005d4efdcfaa3ba4e91840d6117affbd41b85a82138ed5f32eefa7c2a8d8b3"
+      "sha256": "3c62ad9c2bc1d948cd1d3cc147630bd517042fa9eba62fc4856350720029f360"
     },
     {
-      "bytes": 2477,
+      "bytes": 2534,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/qualification-profile.schema.json",
-      "sha256": "2d7be3d0fd6ecf97cfd3fd77bb309ef11ad1fac1a01e5f8140ddc05d6e08d309"
+      "sha256": "19fefbcc8a027dc1d9946c69e86f711d016d24ec370c62ed6c2eb795dc4e54f5"
     },
     {
-      "bytes": 4827,
+      "bytes": 4850,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
-      "sha256": "21d1df5c6da08facf2199b168225d5d0f100e96d3d1c37b58f8be6301785b511"
+      "sha256": "e0dd9a4b57d877c3a67d17fa3b99c81a79af11d8de08636d9fc0f5318c2a5405"
     },
     {
-      "bytes": 972,
+      "bytes": 1012,
       "media_type": "application/json",
       "path": "contracts/platform-v1/qualification/production-release-profile.json",
-      "sha256": "083a9e27f7a869b807deda367ed182f03129594f321035bcf9baf829d3f7f192"
+      "sha256": "9781f9454d06020e86485890be1573c81acd3a3a810039c28d29083195bb0ea5"
     },
     {
       "bytes": 1117,

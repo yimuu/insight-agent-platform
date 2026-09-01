@@ -135,6 +135,7 @@ spec:
         app.kubernetes.io/name: insight-platform-sandbox
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: opensandbox-server
+        insight.platform/component-role: opensandbox_server
       annotations:
         checksum/config: {{ printf "%s%s%s" (toJson .Values.server) (include "insight-platform-sandbox.image" .Values.images.execd) (.Files.Get "files/batchsandbox-template.yaml") | sha256sum }}
         insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}

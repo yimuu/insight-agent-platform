@@ -45,7 +45,10 @@ cp "$capacity" "$output/capacity-profile.json"
 
 "$kubectl_bin" version -o json >"$output/raw/kubernetes-version.json"
 "$kubectl_bin" get nodes -o json >"$output/raw/nodes.json"
-"$kubectl_bin" get runtimeclass runsc -o json >"$output/raw/runtimeclass-runsc.json"
+"$kubectl_bin" get customresourcedefinition batchsandboxes.sandbox.opensandbox.io -o json \
+  >"$output/raw/batchsandbox-crd.json"
+"$kubectl_bin" get services --all-namespaces -o json >"$output/raw/services.json"
+"$kubectl_bin" get ingresses --all-namespaces -o json >"$output/raw/ingresses.json"
 "$kubectl_bin" get deployments --all-namespaces -o json >"$output/raw/deployments.json"
 "$kubectl_bin" get daemonsets --all-namespaces -o json >"$output/raw/daemonsets.json"
 "$kubectl_bin" get networkpolicies --all-namespaces -o json >"$output/raw/networkpolicies.json"
@@ -62,7 +65,9 @@ fi
 python3 "$root/scripts/check-platform-production-topology.py" \
   --version "$output/raw/kubernetes-version.json" \
   --nodes "$output/raw/nodes.json" \
-  --runtime-class "$output/raw/runtimeclass-runsc.json" \
+  --batchsandbox-crd "$output/raw/batchsandbox-crd.json" \
+  --services "$output/raw/services.json" \
+  --ingresses "$output/raw/ingresses.json" \
   --output "$output/topology.json"
 
 python3 "$root/scripts/check-platform-production-workloads.py" \
