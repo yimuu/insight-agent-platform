@@ -27,7 +27,7 @@ archive只包含`insight`、license和最小版本说明。不得捆绑credentia
 ### OCI images
 
 - runtime image包含同一release所需Platform role binaries；
-- sandbox guest保持独立最小image和exact digest；
+- fixed Sandbox runner保持独立最小image和exact digest，official OpenSandbox Server/Controller/execd同样固定digest；
 - Console为不可变静态bundle，可嵌入runtime static server或独立OCI image，但不能增加BFF；
 - manifest list覆盖release声明的平台；每个目标架构绑定exact child digest。
 
@@ -45,7 +45,7 @@ archive只包含`insight`、license和最小版本说明。不得捆绑credentia
 - main可生成未promotion candidate，但同一commit相同输入不得为每个journey重复build；
 - tag/release workflow执行一次locked release build，并从同一Cargo invocation产出所需binaries；
 - Docker BuildKit缓存Cargo registry/git/target和image layer，cache key绑定toolchain、lockfile、target和build flags；
-- sandbox guest变化只重建guest和受影响release index；普通文档/Console变化不重编译全部Rust binary；
+- Sandbox runner或OpenSandbox BOM变化只重建受影响image/index；普通文档/Console变化不重编译全部Rust binary；
 - 签名步骤设置bounded timeout和可重试网络边界；超时保持release未发布，不能跳过签名后标记成功。
 
 ## 4. 安装与升级

@@ -1,7 +1,9 @@
 # Full profile fresh journey evidence
 
-状态：**Passed（composition + ten-scenario manifest gate + durable Sandbox admission + LangGraph.js reference）**。
-外部 L4～L6 发布门禁仍单独保持未完成。
+状态：**Historical Passed / superseded for current Sandbox by CR-216**。
+本页WASI/Wasmtime与旧Sandbox角色只属于所列exact revision；CR-216 active composition已删除这些路径，不能将本页作为current
+M4或OpenSandbox L1～L3证据。current证据见[`cr-216-opensandbox-l1-l3.md`](../../qualifications/cr-216-opensandbox-l1-l3.md)。
+外部L4～L6发布门禁仍Not run。
 
 ## 1. 权威运行
 

@@ -15,11 +15,12 @@
 | 验收 | 状态 | 目标 |
 |---|---|---|
 | [Durable Runtime 24 小时 RC](durable-runtime-24h-rc.md) | Pending / requires always-on runner | 补齐 50 active Run 能力的 release-candidate 级 24 小时稳定性证据 |
-| [Platform v2 Production L4～L6](platform-v2-production-l4-l6.md) | Not run / optional deployment release gate | 部署方如需production-ready声明，执行真实runsc拓扑、容量、恢复与GitOps clean cut门禁 |
+| [CR-216 OpenSandbox L1～L3](cr-216-opensandbox-l1-l3.md) | Passed / repository qualification | 记录exact L1、真实PostgreSQL L2与真实OpenSandbox/Kubernetes/containerd-runc L3证据 |
+| [Platform v2 Production L4～L6](platform-v2-production-l4-l6.md) | Not run / optional deployment release gate | 部署方如需production-ready声明，执行真实多节点OpenSandbox拓扑、容量、恢复与GitOps clean cut门禁 |
 
 Platform v2当前仓库实现与四阶段exit gate的逐项状态见
-[spec00～18完成度审计](platform-v2-completion-audit.md)。CR-201已关闭仓库实现范围；审计保留的L4～L6项目是未执行的环境资格，
-不是spec00～18或implementation plan的剩余任务。
+[spec00～18完成度审计](platform-v2-completion-audit.md)。CR-216已关闭OpenSandbox仓库实现与L1～L3；审计保留的L4～L6项目是
+未执行的environment release gate，不是兼容旧Sandbox backend或production-ready声明。
 
 ## Platform v2 机器门禁
 

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 9 OpenSandbox replacement pending |
+| 状态 | Implemented / CR-216 L1～L3 passed; L4～L6 Not run |
 | 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -50,6 +50,14 @@
 > first-winner、Cancelled/TimedOut同步Job+Invocation终态、四维quota settle/release、selected/late/stale-attempt/missing-owner orphan
 > decision及terminal后cleanup claim/absence replay；target strict Clippy通过。该证据关闭仓库L2，不代表OpenSandbox/Kubernetes L3或
 > L4～L6环境资格。
+
+> 2026-09-02 CR-216 L3 evidence：`scripts/qualify-platform-sandbox-l3.sh`在fresh kind v0.31、Kubernetes v1.35、Calico
+> 3.32.1、containerd 2.2/runc与source-pinned official OpenSandbox Server/Controller/execd image上完整单次通过。真实fixture覆盖
+> wrong-source/credential拒绝、Direct外部访问、Disabled零出站与static internal/metadata deny closure、concurrent create、response loss discovery、Server/
+> Controller restart后candidate恢复、Dispatcher kill/lease reclaim保持同一attempt/token/candidate/boot/Package execution、TTL/delete/
+> absence/orphan cleanup与最终零BatchSandbox residue。随后workspace all-target/all-feature tests、doc tests、check、strict Clippy、
+> contract/schema/generated contract、CLI/profile、candidate、deployment、observability/security及active cutover residual gates全部通过。
+> L1～L3由此关闭；L4、L5、L6均Not run，不声明production-ready。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
@@ -1283,7 +1291,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 ### 5.1 目标
 
 保留已交付的 Context、remote MCP、Artifact 三 role、Egress/Secret 与真实 Model adapter，并将 Sandbox physical execution
-clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 L1/L2 passed；L3 Pending**。
+clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 L1～L3 passed；L4～L6 Not run**。
 
 ### 5.2 实现批次
 

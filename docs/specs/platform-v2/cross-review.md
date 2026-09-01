@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 9 |
+| 状态 | Accepted / CR-216 final implementation review |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
@@ -46,6 +46,11 @@ revision 8关闭authorization replay P1：若旧version重放authorization后仍
 revision 9修复03 machine registry与既有CR-216裁决的矛盾：MCP首版只有remote Streamable HTTP，managed-stdio physical session及
 `SandboxManagedMcpSession` JobKind/三元组全部删除。既有shared Job表和`SandboxCapabilityExecution`不变，不增加替代kind、兼容映射或fallback。
 
+final implementation review对实现、schema contract 8、OpenSandbox client/runner/Dispatcher、Helm/Profile/CLI、persistent physical
+evidence、L1～L3 fixture和active residual scan逐项复核。实现没有修改OpenSandbox源码，没有新增业务aggregate/table/route/JobKind/
+WorkClass，没有OpenSandbox业务写权限、兼容层、双写或旧backend fallback。shared Job/RunValue/Invocation authority、exact-ordinal create
+authorization、current lease terminal fence、PotentiallyStarted后的no-replacement和workload external-effect边界均与下表Accepted ruling一致。
+
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
@@ -68,8 +73,9 @@ revision 9修复03 machine registry与既有CR-216裁决的矛盾：MCP首版只
 该修订不增加业务表、aggregate、ResourceKind、JobKind、WorkClass、public route、Task/Event/Receipt kind或compatibility layer。
 Kubernetes physical store 不是 Platform business database。该 revision 不新增业务表、aggregate、ResourceKind、JobKind、WorkClass、
 public route、Task/Event/Receipt kind 或 compatibility layer；candidate selection/activation evidence 使用 shared Job 同一 row/version CAS。
-revision 9重新复核state/ID/schema/error/transaction/event/permission/capacity/recovery/fixture后无未关闭P0/P1，受影响规范与ADR-0007为Accepted。
-Implementation Authorization 只覆盖 implementation-plan 中新的 CR-216 Sandbox 批次；旧 WASI/gVisor 证据不能抵扣新门禁。
+final review重新复核state/ID/schema/error/transaction/event/permission/capacity/recovery/fixture后无未关闭P0/P1。L1、真实PostgreSQL L2与
+真实OpenSandbox/Kubernetes/containerd-runc L3均有独立通过证据；workspace、contract、CLI/profile、deployment与docs gates通过。
+L4～L6仍Not run且不作production-ready声明。旧WASI/gVisor证据没有抵扣任何CR-216门禁。
 
 ### CR-215 browser authoring profile authority cross-review
 
@@ -846,7 +852,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Superseded | 保留gVisor历史决策，不再作为实现输入 |
 | ADR-0007 | Accepted / CR-216 revision 8 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；one-shot create authorization、Runtime/Profile-bound candidate、point-read orphan decision、atomic continuation/terminal/cleanup fencing 与 Armed runner activation |
-| implementation-plan | In Progress / CR-216 | OpenSandbox合同实现与L1～L3 Pending；L4～L6仍Not run |
+| implementation-plan | Implemented / CR-216 | OpenSandbox实现与L1～L3 passed；L4～L6仍Not run |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
 18不再是17的Release state上游，因而不存在17→18→17的循环。
@@ -1268,13 +1274,12 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     一次provider create，`Replayed`不得调用。authorization commit后、provider call前崩溃会burn该ordinal，恢复只能在durable
     quiescence后授权下一ordinal；每个ordinal至多一次外部create调用，全部调用数不超过Profile maximum candidates。
 
-## 16. 未决项
+## 16. 最终结论与未运行环境门禁
 
-CR-216 revision 9 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
-product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
-[`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
+CR-216 final implementation review没有未关闭P0/P1合同或实现偏差；00标记Implemented / repository L1～L3 passed，受影响
+01～04、07、09、10、14、15、17、18与product-experience 00/06保持Accepted合同。OpenSandbox Kubernetes/BatchSandbox/Armed
+runner、shared Job fencing、CLI/profile、部署与cleanup/recovery已经实现，当前产品文档已切换。
 
-真实 OpenSandbox Kubernetes/BatchSandbox/Armed runner 流程与 L1～L3 尚未执行；L4 强隔离拓扑、L5 容量/持续 soak 与首个
-CapacityProfile、L6 backup-restore/rollout-rollback 以及人工 GitOps clean cut 均未执行。它们保留为 implementation/environment
-门禁，不回退其他 domain 已关闭证据；实际通过前禁止声称 OpenSandbox 已替换 current runtime、production capacity、SLO、HA、
-强隔离/restore 或 environment 已完成 clean cut。
+L4 production topology/strong isolation、L5 capacity/持续soak与首个CapacityProfile、L6 backup-restore/rollout-rollback和人工GitOps
+promotion均Not run。它们是environment release gate，不回退已关闭仓库证据；实际通过前禁止声称production capacity、SLO、HA、
+强隔离/restore或environment production-ready。

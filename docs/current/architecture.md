@@ -8,8 +8,10 @@ Agent、Skill、Capability、Context、MCP、Model、Policy 和 Sandbox 复用
 Resource -> immutable ResourceVersion -> Deployment -> Binding 生命周期。Run admission 冻结 exact binding；active head
 变化不会改变既有 Run。Capability 是唯一通用可调用合同，Native、Remote HTTP/gRPC、MCP Tool 与 Sandbox 只是实现后端。
 
-代码仅在 restricted WASI 或每 Job gVisor container 中运行。普通 Sandbox Capability 会原子创建 durable Sandbox Job，
-由独立 Executor 领取并以 fence 合并结果。Python、Node、Shell 或 WASM 不在 Gateway/Worker 内 spawn。
+不可信代码只有一条物理路径：Sandbox Dispatcher -> internal OpenSandbox Server -> Kubernetes API -> BatchSandbox Controller ->
+containerd/runc。普通 Sandbox Capability 原子创建 shared durable Job；Dispatcher领取并续租同一Job，持久化physical evidence，
+通过immutable fixed Armed runner最多启动一次Package，并在提交terminal结果前重新验证current Job lease fence。OpenSandbox、
+Controller和runner不修改Job、Run、Invocation或其他Platform业务状态。Python、Node和Shell不在Gateway或普通Worker内spawn。
 
-完整规范入口为 [`../specs/platform-v2/00-overview.md`](../specs/platform-v2/00-overview.md)。spec00～18 仍为
-Accepted/In Progress，因为多节点 Kubernetes、runsc 和发布资格尚未执行。
+完整规范入口为 [`../specs/platform-v2/00-overview.md`](../specs/platform-v2/00-overview.md)。CR-216仓库L1～L3已通过；
+真实production topology、capacity/soak、restore与promotion的L4～L6仍为Not run，因此不作production-ready声明。

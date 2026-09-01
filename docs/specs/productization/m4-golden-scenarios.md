@@ -1,7 +1,8 @@
 # M4 黄金场景证据合同
 
-状态：**Passed**。十条 required scenario 已在同一 exact revision 取得 Passed report；普通 Agent 到 durable
-Sandbox Job 的链路与固定 LangGraph.js reference 也由同一 full-profile journey 证明。
+状态：**CR-216 current report Not run**。CR-216之前十条required scenario的Passed report保留为历史；current manifest已将Sandbox场景
+clean-cut为`sandbox-and-remote-framework-capability`与显式`sandbox` feature，但尚未在同一current exact revision重跑完整十场景M4。
+OpenSandbox repository L1～L3通过记录在[`cr-216-opensandbox-l1-l3.md`](../../qualifications/cr-216-opensandbox-l1-l3.md)，不能冒充M4 fresh journey。
 
 ## 1. 权威输入与输出
 
@@ -40,8 +41,8 @@ working-tree revision 或 manifest drift 都失败。
 
 ## 3. 当前证据
 
-本节按 exact revision 保留从四份到十份报告的增量时间线。中间段落中的“其余场景尚未产生”“严格门禁失败”
-只描述该段明确 revision 的当时状态；本节最后的 clean-cut revision 与文件顶部 `Passed` 是当前结论。
+本节按exact revision保留CR-216之前从四份到十份报告的历史增量时间线。所有WASI/Wasmtime/旧Sandbox role表述只描述对应旧revision，
+不代表active composition，也不能通过current source-revision校验。current结论只以文件顶部CR-216状态为准。
 
 `deterministic_first_run.rs` 的真实 P2 journey 已覆盖 CLI、checked curl 七步 Resource lifecycle、独立 raw public HTTP、
 terminal Run、durable SSE、exact binding、Orchestration Worker replacement、Artifact S3/KMS I/O、invalid Receipt conflict、Gateway unavailable diagnostic

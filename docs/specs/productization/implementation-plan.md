@@ -5,7 +5,7 @@
 | 状态 | Completed（repository scope；外部 L4～L6 Not run） |
 | 日期 | 2026-08-29 |
 | 目标 | 执行 [`00-goals.md`](00-goals.md) 的 Productization Convergence |
-| 合同基线 | Platform v2 spec00～18（Accepted/In Progress；CR-203 Agent publication identity revision） |
+| 合同基线 | Platform v2 spec00～18（CR-216 OpenSandbox repository L1～L3 passed） |
 | 当前行为 | M0～M5 仓库范围已实施并完成 clean cut；当前 `/v1` 行为以 `docs/current` 为准 |
 
 ## 1. 实施原则
@@ -19,6 +19,8 @@ untrusted execution plane 分离。
 
 本计划保留了按 exact revision 追加的实施时间线。段落中的“尚未完成”“仍缺”只描述其前方明确日期/revision
 对应的当时状态；各 milestone 标题处的当前状态，以及该 milestone 最后一条 exact-revision 证据，才是当前结论。
+CR-216之后，时间线中的WASI、Wasmtime、gVisor、runsc、attestor和旧Sandbox角色全部属于被替换的历史composition；
+active产品面以本文第9～10节的Sandbox更新、Platform CR-216 final evidence与`docs/current`为准。
 
 ## 2. 交付物布局
 
@@ -84,7 +86,7 @@ schema verify 与 exact development bootstrap replay，再启动七个 roles；�
 profile/build state 字节与 build-state mtime 均未变化，证明没有 release rebuild 或 identity/port/key rotation。该证据覆盖
 应用角色重启，不宣称 LocalStack/KMS 基础设施销毁恢复或 production restore。
 
-该 base 证据已由 [`run-productization-base-journey.sh`](../../../scripts/run-productization-base-journey.sh) 固化为单一可复制
+该base证据入口后来clean-cut为[`run-productization-journey.sh`](../../../scripts/run-productization-journey.sh)，作为单一可复制
 入口：它执行 release CLI build、`doctor -> init -> dev -> status`、真实 P2 journey 与 `stop`，默认关闭精确 Compose
 dependency project 但不删除卷，并保留 fresh project 供审计。显式 `--report-directory` 只允许 clean Git worktree，设置
 fresh-profile evidence 环境并运行 manifest-aware partial checker；脚本不会把缺失 Console 的 incomplete report 升级为 Passed。
@@ -491,11 +493,11 @@ G6 运行 SLO 观测，不再把未来样本误作当前代码行为门禁。精
 | 前置 | 阻塞的工作 | 处理方式 |
 |---|---|---|
 | Platform OpenAPI 与实现 drift | CLI、Console | M0 建立生成/校验门禁，先修 owner contract 或实现 |
-| full场景依赖的内部定义无authoring surface | Model/Capability/Context/WASI场景 | CR-205扩展closed domain noun；四类definition-only只publish Version，Model Provider走exact Deployment；禁止fixture预写数据库 |
+| full场景依赖的内部定义无authoring surface | Model/Capability/Context/Sandbox场景 | CR-205扩展closed domain noun；四类definition-only只publish Version，Model Provider走exact Deployment；禁止fixture预写数据库 |
 | 本地身份和 Secret profile | CLI、Console | ADR 固定 non-production identity；禁止 production default fallback |
 | 最小 role closure 不清楚 | `insight dev` | 从黄金场景反推 required role，不合并 authority |
 | Artifact/S3/KMS 本地依赖过重 | base profile | Runtime Gateway 和 Orchestration 的现有启动闭包要求 Artifact；base 使用显式 digest-pinned、真实 HTTPS-compatible local dependency，不能用 mock 或将失败隐藏为可运行 first Run |
-| gVisor 在 macOS/普通 CI 不可用 | Sandbox 场景 | 本地验证 WASI 和 runsc preflight；真实 gVisor 留给 L4～L6 |
+| production多节点环境在普通CI不可用 | Sandbox场景 | 单节点真实OpenSandbox L3验证；production topology/strong isolation留给L4～L6 |
 | 旧 current 与新 `/v1` 名称冲突 | README/发行 | M5 一次 clean cut；M1～M4 不提前声称 current |
 
 关键路径为 M0 -> M1 -> M2 -> M4 -> M5。M3 可在 M2 的稳定 OpenAPI 和 auth contract 完成后并行推进，
@@ -508,7 +510,7 @@ G6 运行 SLO 观测，不再把未来样本误作当前代码行为门禁。精
 | P0 | CLI/Console unit、schema generation、redaction | 普通 CI |
 | P1 | public `/v1` contract、Receipt/CAS/SSE/Problem | 真实进程 + fresh PostgreSQL |
 | P2 | base/full profile journey 与 restart recovery | 容器化本地/CI runner |
-| P3 | 十条黄金场景、remote framework、Artifact/WASI 负向 | 专用 integration runner |
+| P3 | 十条黄金场景、remote framework、Artifact/Sandbox负向 | 专用 integration runner |
 | P4 | repository clean cut、default build/image/docs residual | release candidate workflow |
 
 P0～P4 是产品化门禁，不替代 Platform v2 production L4～L6。任何报告必须分别记录两组状态。

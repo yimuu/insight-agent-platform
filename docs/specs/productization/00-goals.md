@@ -105,9 +105,9 @@ Control/Orchestration Plane 内执行用户代码，也不绕过 Resource -> Res
 7. timer/signal、进程重启和 durable resume；
 8. typed Subagent child Run、配额和取消传播；
 9. Artifact 上传、生成、读取与拒绝路径；
-10. restricted WASI 与一个 Agno/LangGraph remote Capability 参考集成。
+10. OpenSandbox fixed runner 与一个 LangGraph remote Capability 参考集成。
 
-本地开发机无法诚实证明 gVisor 多节点隔离；对应场景只检查合同、manifest 和 preflight，真实 runsc 仍由
+单节点开发机无法诚实证明production多节点强隔离；对应场景只检查合同、manifest和preflight，真实多节点OpenSandbox topology仍由
 [`Platform v2 Production L4～L6`](../../qualifications/platform-v2-production-l4-l6.md) 资格门禁负责。
 
 ### G5：复用生态，而不是复制生态
@@ -142,7 +142,7 @@ Control/Orchestration Plane 内执行用户代码，也不绕过 Resource -> Res
 
 ## 6. 非目标
 
-- 不在本阶段执行或宣称真实多节点 Kubernetes、runsc、容量、混沌、restore、24 小时 soak 或 production
+- 不在本阶段执行或宣称真实多节点 OpenSandbox/Kubernetes、容量、混沌、restore、24 小时 soak 或 production
   GitOps promotion；
 - 不宣称 production-ready 或发布 CapacityProfile；
 - 不提供与 Agno、LangGraph 等框架等量的 integrations/cookbook；

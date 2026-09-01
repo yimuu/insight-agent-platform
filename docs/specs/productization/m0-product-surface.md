@@ -37,10 +37,10 @@ OpenAPI 已在 M5 clean cut 后标记为 `current`；`docs/current`、默认 Car
 | MCP | `platform-mcp-host`、`platform-mcp-resource-host`、`platform-mcp-discovery-worker`、`platform-mcp-subscription-worker`、`platform-mcp-cleanup-worker`、`platform-subscription-context-worker` | 仅 `full` profile 的 remote MCP/Context 场景 |
 | Artifact | `platform-artifact-gateway`、`platform-artifact-data-worker`、`platform-artifact-maintenance` | Runtime Gateway 的 Artifact forwarder 与 Orchestration 的 Scheduler RPC 都在启动时强制连接前两者；因此它们以及真实 HTTPS S3/KMS-compatible dependency 属于 `base` closure。Maintenance 只在 `full` 的 Artifact lifecycle 场景启用；不在任一 profile 中伪造 object store。 |
 | Egress/security | `platform-egress-broker`、`platform-security-authority` | remote Capability、Model、MCP 的网络和 Secret authority |
-| Sandbox | `platform-sandbox-controller`、`platform-sandbox-attestor`、`platform-sandbox-executor`、`platform-sandbox-guest` | WASI 在专用 local/full 配置验证；gVisor 只做 preflight，真实 runsc 不在本地宣称通过 |
+| Sandbox | `platform-sandbox-dispatcher`、`opensandbox-server`、`opensandbox-controller`、`platform-sandbox-runner` | OpenSandbox Kubernetes/containerd-runc在显式`sandbox` profile验证；只有Dispatcher访问Platform shared Job authority |
 
 `insight` 只从无执行能力的 `platform-contracts` 读取 full 配置所需的 closed workload identity、内置 codec
-摘要和 WASI ABI 版本；它不得依赖 Worker、RPC broker 或 Wasmtime adapter。独立进程仍负责消费并验证配置，
+摘要和OpenSandbox runtime/Profile digest；它不得依赖Worker、RPC broker或provider adapter。独立进程仍负责消费并验证配置，
 crate-boundary 全图门禁禁止这些执行依赖回流到 CLI。
 
 所有 role 必须继续使用自己的配置、连接池、permit 和 credential。不允许把多个 authority 合并进
@@ -51,8 +51,9 @@ crate-boundary 全图门禁禁止这些执行依赖回流到 CLI。
 | profile | 目标场景 | 必要依赖 | 现状与 M1 要求 |
 |---|---|---|---|
 | `base` | deterministic first Run、CLI/HTTP、Run event/read、重启恢复 | PostgreSQL 16、NATS、Management/Runtime Gateway、Artifact Gateway、Artifact Data Worker、最小 Orchestration/Native Capability/Registry Validation Worker role、显式 local OIDC、mTLS/local CA、真实 HTTPS S3/KMS-compatible test dependency | **Passed**：fresh authority 上的 Artifact -> Policy/Agent -> Run -> SSE/result 已通过，停止唯一 Orchestration Worker 后创建的 durable queued Run 可由同身份替代 Worker 恢复；NATS 使用 fresh project CA、ServerAuth/ClientAuth 与 client certificate verification。 |
-| `full` | Model、remote Capability、MCP、Context、Artifact maintenance、WASI | `base` 加 Egress/Security、对应 worker、Artifact Maintenance 与其所需 lifecycle configuration | **已通过本地 P3**。25 个独立角色已有 closed/digest-bound 配置、持久化动态端口和只对 full 生效的单次 release build/受监督 launch；base 不额外构建这些二进制。2026-08-30 exact revision `a70a9f99f58b8fd9fecb4c309f910aa99434b122` 已在 fresh profile 上使十条 manifest scenario、真实 Runtime Gateway 与 headless Chrome 全部 Passed，详见 [`full-journey-evidence.md`](full-journey-evidence.md)。真实 local attestation registry 只记录 UID/GID/PID、boot/start identity 与 project-local instance UID，不伪造 Pod/cgroup；生产 Helm 仍固定 Linux procfs/private-node 语义并拒绝 loopback。Egress 独立身份、双向 TLS、exact state key、每调用角色 SPIFFE ClientAuth、Remote HTTP/MCP dispatch、普通 Agent 到 durable Sandbox Job/WASI terminal result，以及固定 LangGraph.js `StateGraph` reference 均有场景证据。未安装的 remote lane 继续使用显式空 catalog fail closed。每个增量依赖只能由所需场景启用；外部 L4～L6 不由该结论覆盖。 |
-| `qualification` | gVisor preflight 与生产结构检查 | Kubernetes、`RuntimeClass=runsc`、restricted launcher RBAC、专用 node pool | 已有 static tooling；真实多节点 L4～L6 仍 Not run。 |
+| `full` | Model、remote Capability、MCP、Context、Artifact maintenance | `base` 加 Egress/Security、对应 worker、Artifact Maintenance 与其所需 lifecycle configuration | CR-216之前的25-role/十场景报告保留为历史；当前OpenSandbox不混入`full`隐式启动，必须使用显式`sandbox` feature。 |
+| `sandbox` | bounded Sandbox与remote framework | Kubernetes、OpenSandbox Server、BatchSandbox Controller、Dispatcher、fixed runner、Direct/Disabled policy | repository L1～L3 passed；production多节点L4～L6 Not run。 |
+| `qualification` | production OpenSandbox结构与release检查 | 多节点Kubernetes、exact OpenSandbox/containerd-runc closure、admission/RBAC/CNI | 已有static tooling；真实production L4～L6仍Not run。 |
 
 ## 4. 当前启动与 bootstrap 事实
 

@@ -940,7 +940,7 @@ spec/implementation phase在以下仓库条件成立时可以标记完成：
 
 ## 17. 未决问题
 
-CR-216 revision 1 没有阻塞合同 review 的问题，也没有修改 OpenSandbox 源码的硬前置。真实 OpenSandbox Kubernetes/BatchSandbox/
-Armed runner 实现与 L1～L3 尚未执行，L4～L6 也未执行；
-它们只在相应实现或部署方声明production-ready时成为门禁。首个production CapacityProfile只能由目标环境实测冻结；当前仓库没有
-OpenSandbox production capacity、SLO、HA、强隔离或restore声明。
+CR-216没有阻塞合同review的问题，也没有修改OpenSandbox源码的硬前置。真实OpenSandbox Kubernetes/BatchSandbox/Armed runner实现、
+真实PostgreSQL L2与单节点Kubernetes/containerd-runc L3已执行并通过；workspace、contract、CLI/profile、deployment与docs gates也已通过。
+L4 production topology/fault、L5 capacity/soak和L6 restore/promotion均Not run。首个production CapacityProfile只能由目标环境实测冻结；
+当前仓库没有OpenSandbox production capacity、SLO、HA、强隔离或restore声明，也不声明production-ready。

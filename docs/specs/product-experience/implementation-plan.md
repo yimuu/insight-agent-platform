@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 1；OpenSandbox profile batch pending |
+| 状态 | Implemented / CR-216 OpenSandbox profile L1～L3 passed；L4～L6 Not run |
 | 日期 | 2026-09-01 |
 | 输入 | product-experience 00～06、Platform 17/18、ADR-0003～0005 |
 | 不变量 | `/v1` clean cut、无新业务authority/表/常驻role、L4～L6 Not run |
@@ -107,7 +107,7 @@ high-contrast/ARIA，以及既有Task/Artifact安全回归。
 
 ## Phase 6：starter与feature profile
 
-状态：**In Progress**；既有非Sandbox profile已完成，CR-216 `sandbox` feature implementation/L1～L3与真实资源实测为**Pending/Not run**。
+状态：**Complete（implementation + L1～L3）**；真实production资源资格L4～L6为**Not run**。
 
 交付：
 
@@ -124,7 +124,7 @@ recovery、deterministic Agent在starter/all结果与authority一致。资源预
 
 ## Phase 7：总回归与clean cut
 
-状态：**Pending for CR-216 Sandbox slice**；其他repository L1～L3历史证据保留，fresh OpenSandbox发行环境与L4～L6为**Not run**。
+状态：**Complete for CR-216 repository scope**；production OpenSandbox environment与L4～L6为**Not run**。
 
 交付：
 
@@ -136,7 +136,10 @@ recovery、deterministic Agent在starter/all结果与authority一致。资源预
 
 禁止用route/object count、mock-only旅程、checked-in dist、静态Compose或本机Docker结果替代所声明层级证据。
 
-## 实施证据（2026-09-01）
+## 实施证据（2026-09-02）
+
+- CR-216 Sandbox：20项L1 target、fresh PostgreSQL 16.14 L2与real OpenSandbox/BatchSandbox/Kubernetes/containerd-runc L3通过；
+  `sandbox` profile、CLI preflight、Direct/Disabled、provider restart、Dispatcher kill/reclaim和cleanup均有exact evidence。
 
 - Rust：workspace `fmt`、all-target/all-feature `check`、strict Clippy、全量unit/integration tests、doc tests与root public API
   baseline通过；PostgreSQL合同测试在其既有available/conditional语义下通过。

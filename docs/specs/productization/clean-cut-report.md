@@ -1,6 +1,8 @@
 # Productization repository clean-cut report
 
-状态：**Passed（M0～M5 repository scope）**
+状态：**Historical Passed（pre-CR-216 M0～M5 repository scope）**
+
+本报告按下列exact revision保留历史证据；其中旧Sandbox/runsc术语已被CR-216 OpenSandbox clean-cut取代，不代表active composition。
 
 切换实现 revision：`b8dada4ec805ffc80777ea203b9f5d72dde20b6c`
 

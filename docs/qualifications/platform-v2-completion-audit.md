@@ -1,28 +1,30 @@
 # Platform v2 spec00～18 完成度审计
 
-状态：Closed / CR-201 repository scope verified; environment qualification not run
+状态：Closed / CR-216 repository L1～L3 passed; environment L4～L6 not run
 
-日期：2026-08-29
+日期：2026-09-02
 
 本审计按 `00-overview.md` 的统一完成定义和 `implementation-plan.md` 四阶段 exit gate 核对当前工作树。
-它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。
+它记录可以复现的证据与缺口，不改变合同，也不把存在源码、测试或静态清单等同于 production behavior。本文中CR-216之前
+关于WASI/gVisor/runsc的逐提交记录只保留为历史审计轨迹，已被CR-216 clean-cut取代，不代表active composition或当前资格目标。
 
 ## 1. 结论
 
-00～18已完成CR-201全量cross-review并推进为Verified。Phase 1的仓库实现与fresh PostgreSQL门禁、Phase 2/3的production process L3链路、
-Phase 4 public API、15-role/21-pool静态部署闭包、业务队列/依赖观测以及signed candidate producer均已闭合。commit
-`1efcbabc17af73bef9f21237eee65a5e6af78f19`的GitHub CI run `33182282744`与production-candidate run `33183969085`均成功。
+CR-216已完成Accepted合同下的OpenSandbox clean-cut实现与最终cross-review。Phase 1既有fresh PostgreSQL门禁、Phase 2既有业务链、
+Phase 3的OpenSandbox L1/真实PostgreSQL L2/真实Kubernetes-containerd-runc L3，以及Phase 4 public API、16-role/23-pool静态部署闭包、
+业务队列/依赖观测和candidate producer均已通过相称仓库门禁。exact Sandbox证据见
+[`cr-216-opensandbox-l1-l3.md`](cr-216-opensandbox-l1-l3.md)。
 
-CR-201按项目owner决定将真实多节点Kubernetes/runsc、production telemetry、容量/故障/soak、restore和人工GitOps promotion移为部署方
-production release gate。本项目没有执行这些L4～L6环境门禁；Verified不表示production-ready，也不提供实测CapacityProfile、SLO、HA、
-真实runsc隔离或恢复声明。
+真实多节点OpenSandbox/Kubernetes production topology、production telemetry、容量/故障/soak、restore和人工GitOps promotion仍是部署方
+release gate。本项目没有执行这些L4～L6环境门禁；仓库L1～L3通过不表示production-ready，也不提供实测CapacityProfile、SLO、HA、
+强多租户隔离或恢复声明。
 
 因此：
 
-- `docs/current`继续描述旧current behavior；
-- `implementation-plan.md`按仓库范围标记Complete；
+- `docs/current`已经在L1～L3全部通过后更新为OpenSandbox-only current behavior；
+- `implementation-plan.md`按CR-216仓库范围标记Implemented / L1～L3 passed；
 - 不生成通过的QualificationEvidenceManifest或production CapacityProfile；
-- 不执行GitOps clean cut或规范归档；00～18保持活动Verified文档，直至未来实际cutover后才Archived。
+- 不执行production GitOps promotion或规范归档；L4～L6继续保持活动Not run文档。
 
 ## 2. 已证明证据
 
@@ -36,13 +38,13 @@ production release gate。本项目没有执行这些L4～L6环境门禁；Verif
 | Typed Plan materialization | Agent Revision冻结`typed_plan_artifact_id`与digest；发布事务校验Ready JSON Artifact/Verified Blob；Scheduler专用mTLS Data RPC以Run、Job lease、exact Plan Revision和ArtifactRef双重授权读取 | 闭合Scheduler物化输入与传输边界，不代表production Scheduler handler完成 |
 | Typed Plan v4 wire | RuntimePlan保存closed dependency slots及全部external leaf payload，拒绝v1/v2/v3并验证slot kind、output producer、input reachability与bounded budget；fresh PG的phase2 Run kernel和真实coordinator既有路径通过 | L1/L2 wire与controller已闭合；Timer/Signal/HumanTask/ChildAgent、Model tool-result、Capability和Context的production component L3均有独立证据 |
 | Candidate selection owner | `PolicyKind::Selection`要求非空schema v1 document且`rules_digest`绑定canonical bytes；共享纯evaluator实现only-candidate/ordered-first/route-hash、canonical candidate order与evidence digest；各owner按Run冻结exact Policy/Revision重算并拒绝伪造结果 | L1/L2 owner闭合，production Model/Capability/Context dispatch已在对应L3链路重验exact binding |
-| 已有部署 | 11个chart覆盖全部15个ComponentRole、21个隔离pool；Gateway双role、Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、MCP Tool/Resource/Discovery/Subscription、Sandbox、Artifact三role及Security/Egress全局render门禁通过 | L1静态闭包；不替代live L4 |
-| HTTP observability | shared bounded-label owner；全部21个ComponentRole workload pool、Sandbox两种process attestor及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，公网role另有request/outcome/latency；真实TCP fixture验证Prometheus text scrape和metric canary为零 | process wiring与component real-socket scrape闭合，不代表Prometheus deployment scrape或完整业务observability |
+| 已有部署 | 11个chart覆盖全部16个ComponentRole、23个隔离pool；Sandbox只包含Dispatcher、internal OpenSandbox Server、BatchSandbox Controller和fixed runner workload，全部role全局render门禁通过 | L1静态闭包；不替代live L4 |
+| HTTP observability | shared bounded-label owner；全部23个workload pool及OAuth Cleanup Worker具备ready、`/metrics`及ServiceMonitor/NetworkPolicy，Sandbox Dispatcher与Controller有独立low-cardinality观测 | process wiring与component real-socket scrape闭合，不代表Prometheus production scrape或完整业务observability |
 | Dashboard/alerts | 独立chart提供15-panel role-filtered process/HTTP、capacity、durable Job/Outbox、dependency与observation dashboard；28条symptom-first PrometheusRule覆盖全部已接线durable queue role并各有checked-in runbook；CI拒绝inventory漂移、非法threshold、非HTTPS runbook、高基数/Secret label与缺失discovery metadata | 仓库内L1运营合同闭合；不替代production scrape、完整业务SLI或真实alert delivery |
-| Worker/queue telemetry | 全部21个workload pool从实际semaphore或SQLx owner导出capacity；Orchestration、Model、Capability Native/Remote、Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从共享Job authority采样各自due/expired lease backlog与lag；共享Outbox及六类外部依赖另有低基数观测 | 仓库内动态capacity、domain queue与dependency owner接线闭合；production scrape和L5 mixed-load/saturation profile仍待外部证据 |
-| Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security mTLS/UDS hop保持同一trace ID/new span；fixed public/internal spans的动态采集验证parent trace、per-hop span与context outcome，reclaim恢复原trace，provider与guest/storage边界不转发header | CR-197 machine/runtime、component L3连续性与动态correlation采集闭合；不替代production telemetry backend验证 |
+| Worker/queue telemetry | 全部23个workload pool从实际semaphore或SQLx owner导出capacity；Sandbox Dispatcher从shared Job authority采样due/expired lease、cleanup与provider outcome，OpenSandbox不成为业务telemetry authority | 仓库内动态capacity、domain queue与dependency owner接线闭合；production scrape和L5 mixed-load/saturation profile仍待外部证据 |
+| Trace correlation | public W3C入口、Run/Invocation/Job/Task/Event/Outbox durable owner及首版MCP/Egress/Artifact/Sandbox/Security边界保持同一trace ID/new span；Dispatcher reclaim恢复原trace，OpenSandbox/provider boundary不接收Platform业务payload | component连续性与动态correlation采集闭合；不替代production telemetry backend验证 |
 | Telemetry redaction | production Rust source静态门禁拒绝identity、Secret、prompt/response、object key及URL进入structured tracing或插值日志；真实TCP metrics与真实loopback provider tracing动态注入payload/identity/token/query、`tracestate`及`baggage` canary，采集结果均为零且允许的bounded metadata存在 | source-level与component L3 dynamic metric/log/trace负向合同闭合；不替代RBAC/retention或production backend验证 |
-| gVisor | Launcher RBAC/admission脚本、chart和fail-closed preflight已实现 | development静态证据；无真实runsc L4结果 |
+| OpenSandbox | fixed official image/source closure、least-privilege RBAC/admission、Direct/Disabled CNI、real Server/Controller restart和Dispatcher reclaim L3通过 | 单节点真实L3；不替代production多节点L4 |
 | Qualification contracts | QualificationProfile/Candidate/Capacity/Evidence nominal type、closed schema与digest validator；live topology/workload preflight对照Candidate/Capacity并拒绝rollout、image、config、identity、安全和容量漂移 | 可验证证据形状与preflight行为，不证明任一外部门禁通过 |
 | Runbooks | production dependency recovery与GitOps clean-cut手册已提交 | 操作准备完成，execution evidence pending |
 
@@ -324,7 +326,7 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 - Artifact Gateway/Data Worker/Maintenance binaries、role grants、mTLS调用边界和Helm清单；
 - Context/Dataset/Text2SQL domain、repository与negative fixtures；
 - remote Streamable HTTP MCP协议/OAuth/Task/subscription实现与SDK互操作fixture；
-- restricted WASI runtime、gVisor Controller/Launcher/guest/attestor协议和静态准入闭包；
+- OpenSandbox Kubernetes provider、BatchSandbox Controller、Dispatcher、fixed Armed runner、Direct/Disabled网络和cleanup/recovery闭包；
 - Model provider/turn/adapters、Inline-only与独立Model Worker清单；
 - Security Authority与Egress/Secret broker binaries及隔离清单。
 
@@ -338,7 +340,7 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
    production qualification matrix取得适用的真实协议、故障与隔舱证据。r364已证明production Artifact Discovery正向链，不替代这些矩阵。
 3. r362以production AWS provider闭合真实HTTPS S3 versioned object及KMS Encrypt/Decrypt roundtrip；r364进一步由production Artifact Data Worker
    消费同一provider closure并完成stage/read/scan。Secret Manager及S3/KMS fault、rotation、backup/restore仍无production-equivalent证据。
-4. gVisor没有真实`RuntimeClass=runsc`多节点执行、escape/cleanup/process-kill/watch-restart/node-loss证据。
+4. OpenSandbox单节点真实L3已覆盖create/restart/cleanup/process-kill/reclaim/network；production多节点HA、node-loss和强隔离仍归L4。
 5. 单lane saturation对其他lane与critical-control的production profile SLO影响尚未测量。
 
 ## 6. Phase 4 审计
@@ -357,13 +359,13 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 
 ### 未执行的environment证据（不阻塞仓库关闭）
 
-1. 15个ComponentRole已由21个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
+1. 16个ComponentRole已由23个独立workload pool闭合；Candidate image与`deployment_config_digest`已进入全局render/live preflight门禁，
    但真实cluster startup/readiness、mTLS、RBAC和NetworkPolicy enforcement仍未执行。
-2. 全部21个ComponentRole workload pool及Sandbox process attestor已有shared process metrics与动态capacity；Orchestration、Model、Capability Native/Remote、
-   Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Controller及MCP Discovery/Subscription均从实际permit、连接池或共享Job authority
+2. 全部23个workload pool已有shared process metrics与动态capacity；Orchestration、Model、Capability Native/Remote、
+   Context Native/Remote/Subscription、Artifact Data/Maintenance、Sandbox Dispatcher及MCP Discovery/Subscription均从实际permit、连接池或共享Job authority
    导出domain backlog/recovery观测；共享Outbox及六类external dependency的仓库内owner接线也已闭合。仍缺production Prometheus scrape及L5
    mixed-load/saturation profile证据。
-3. 全部21个pool及Sandbox process attestor已有ServiceMonitor；15-panel dashboard覆盖process/HTTP、capacity、全部已接线durable Job queue、
+3. 全部23个pool已有ServiceMonitor；dashboard覆盖process/HTTP、capacity、全部已接线durable Job queue、
    shared Outbox、dependency与observation outcome。28条逐项runbook的symptom-first alert覆盖Orchestration、Model、Capability、Context、Artifact、
    Sandbox及MCP Discovery/Subscription的due/expired-lease lag，以及capacity、dependency与Outbox症状；仓库内inventory由静态门禁fail closed。
    production Prometheus scrape、alert delivery和L5 SLO/error-budget判定仍须外部环境。
@@ -379,24 +381,24 @@ Orchestration Worker↔Artifact Data Worker Typed Plan RPC双进程kill/restart�
 
 2026-08-28已创建private `yimuu/insight-agent-platform-environments`，生产闭包路径为
 `platform-v2/production/closure`；应用仓库的`platform-production-candidate` Environment只允许`main`，并通过只读deploy key Secret访问环境仓库。
-独立人工reviewer尚未配置；candidate workflow已有成功run `33183969085`。本机Kubernetes context为单节点OrbStack且
-`RuntimeClass/runsc`不存在，因此本审计明确记录L4～L6为Not run。不得以本机Docker替代真实环境证据，也不得把本次spec关闭解释为clean cut。
+独立人工reviewer尚未配置；candidate workflow已有成功run `33183969085`。CR-216仅在单节点kind集群执行真实OpenSandbox L3，
+没有执行production-equivalent多节点环境，因此本审计明确记录L4～L6为Not run。不得以该开发L3替代production环境证据。
 该候选的GitOps记录显式保持`production_ready=false`和`clean_cut_completed=false`，并列出CapacityProfile、QualificationEvidence、人工批准、
 controller reconciliation、rollout observation、rollback、current pointer与traffic switch八项未完成环境门禁；环境仓库没有
 `production/current`或qualified release记录。
 
-- production-equivalent多节点Kubernetes、独立WASI/gVisor node pool、exact runsc与支持范围内kubectl/server版本；
+- production-equivalent多节点Kubernetes、exact OpenSandbox/BatchSandbox/containerd-runc closure与支持范围内kubectl/server版本；
 - L4 RBAC/mTLS/NetworkPolicy/admission与真实协议/故障矩阵；
 - L5 mixed load、lane saturation、SLO/error budget和不少于86,400秒soak后冻结CapacityProfile；
 - L6 signed supply chain、upgrade/rollback、backup/restore、GitOps rollout/rollback与人工promotion；
-- clean `/v1` replacement后更新`docs/current`，再将00～18从Verified归档。
+- environment promotion后归档exact资格证据；当前`docs/current`只声明仓库L1～L3已经证明的行为。
 
 ## 7. 关闭结论与未来部署动作
 
 仓库范围没有剩余实现任务。若未来部署方需要production-ready声明，可执行以下独立release工作，但它不重开本实现计划：
 
-1. 为目标环境准备production-equivalent多节点/runsc runner并执行适用L4～L6；
-2. 取得人工promotion后执行GitOps clean cut，更新`docs/current`并归档规范与资格报告。
+1. 为目标环境准备production-equivalent多节点OpenSandbox runner并执行适用L4～L6；
+2. 取得人工promotion后执行GitOps clean cut并归档exact资格报告。
 
 如果实现发现domain port不足以支持production handler，必须先按02→06/07/09/10→17/18修订合同并重新cross-review，
 不得在binary中以自由JSON、in-memory authority或host process execution绕过缺口。

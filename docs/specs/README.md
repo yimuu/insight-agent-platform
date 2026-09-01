@@ -16,11 +16,11 @@
   ADR与Platform 17→18→00 cross-review已由CR-207关闭，当前为Accepted并授权clean-cut实现；
 - [产品化收敛阶段目标](productization/00-goals.md)及其
   [实施计划](productization/implementation-plan.md)：repository scope 已完成，CLI/HTTP、base/full profile、Console和
-  十条黄金场景已有证据；真实多节点Kubernetes、runsc、容量、混沌、restore、soak与production GitOps promotion仍是
+  十条CR-216之前黄金场景证据保留为历史；当前Sandbox场景已改为OpenSandbox，真实多节点Kubernetes、容量、混沌、restore、soak与production GitOps promotion仍是
   未执行的外部L4～L6门禁；
 - [Platform v2 clean-cut 规范集合](platform-v2/00-overview.md)：重新定义 Agent、Skill、Capability、
-  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。00～18 当前保持 Accepted/In Progress；
-  repository实现和L1～L3证据不等于真实环境Verified或production-ready。真实多节点Kubernetes、runsc、
+  Context、MCP、Subagent、Model、Sandbox 与 Artifact 的目标边界。CR-216 repository实现与L1～L3已通过；
+  repository证据不等于真实环境Verified或production-ready。真实多节点OpenSandbox/Kubernetes、
   production telemetry、容量/混沌/恢复/soak与人工GitOps promotion仍为L4～L6 `Not run`。“v2”是架构代号，
   公共合同仍为 `insight.platform/v1` 和 `/v1`，不会提供 `/v2` 或兼容双栈。
 

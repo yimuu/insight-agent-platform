@@ -15,5 +15,5 @@ feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L
 [`docs/archive/current-dsl-v1`](../archive/current-dsl-v1/)，不再是默认产品合同。
 
 当前行为以 `contracts/platform-v1/openapi.yaml`、public JSON Schema、protobuf、Rust nominal type、实现和
-conformance tests 的交集为准。真实多节点 Kubernetes/runsc 与 production GitOps promotion 仍为外部门禁，不因
-仓库 clean cut 自动通过。
+conformance tests 的交集为准。真实多节点 OpenSandbox/Kubernetes production topology 与 GitOps promotion 仍为外部门禁，
+不因仓库 clean cut 自动通过。

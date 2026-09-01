@@ -7,7 +7,7 @@ replacement 的人工审批边界。GitOps repository、registry、CI artifact s
 业务数据库不创建 Release/Gate/Candidate 状态。
 
 候选制品由`.github/workflows/platform-production-candidate.yml`产生：所有action与GitOps environment输入固定commit SHA，后者与application
-Helm/Docker closure共同形成deployment config digest；runtime与sandbox guest均以exact digest
+Helm/Kubernetes closure共同形成deployment config digest；runtime、fixed Sandbox runner与official OpenSandbox images均以exact digest
 签名并附SPDX SBOM和provenance；CandidateManifest与包含migration、测试报告、SBOM和各签名bundle摘要的release-bundle index分别签名。
 运行人员必须验证该实际CI run来自受保护environment和目标Git commit；仅审查workflow源码不等于供应链门禁通过。
 
@@ -26,8 +26,8 @@ promotion请求必须只引用不可变输入：
 
 ## 2. 预检
 
-1. 在全新的evidence root运行 `scripts/preflight-platform-production-qualification.sh`，确认多节点、独立node pool、
-   exact `runsc` RuntimeClass、ValidatingAdmissionPolicy和版本偏差均合格。
+1. 在全新的evidence root运行 `scripts/preflight-platform-production-qualification.sh`，确认多节点、Established BatchSandbox CRD、
+   exact OpenSandbox/Controller/execd/runner digest、containerd-runc、Direct/Disabled NetworkPolicy、internal-only Service和版本偏差均合格。
 2. 验证镜像签名、SBOM和provenance的subject均为CandidateManifest中的exact digest，builder/source/material闭包符合组织policy。
 3. 运行 `platform-qualification validate-release-evidence`并传入只读artifact root，确认26个required gate恰有一个通过结果；命令必须逐一读取
    `artifact_links[].name`对应的普通文件并重算长度和SHA-256，禁止只验证manifest内自洽引用或接受符号链接。

@@ -2,10 +2,10 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1；OpenSandbox profile implementation pending |
+| 状态 | Implemented / CR-216 OpenSandbox profile L1～L3 passed |
 | 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
-| 当前行为 | CR-216尚未实现；现行使用说明仍以 [`docs/current`](../../current/README.md) 为准 |
+| 当前行为 | CR-216已实现；现行使用说明以 [`docs/current`](../../current/README.md) 为准 |
 | 前置阶段 | [`productization`](../productization/00-goals.md) repository scope 已完成 |
 
 本阶段把已经通过资格场景的平台内核收敛为普通开发者可使用的 Agent 产品。成功标准不是再增加
@@ -13,8 +13,8 @@ ResourceKind、Job、Worker、表或资格证据，而是让默认用户只需�
 
 > CR-216 revision 1 impact：开发 profile 把 `wasi` feature clean-cut 为 `sandbox`，启动 Sandbox Dispatcher、internal OpenSandbox
 > Server、BatchSandbox Controller 与 single-node Kubernetes/containerd-runc；不修改 OpenSandbox 源码，也不启用其 Docker provider。
-> CLI/Console不直接访问OpenSandbox，Run/Operation体验与shared Job authority不变。既有WASI profile证据只保留为历史，不能宣称
-> 新`sandbox` feature已实现或通过L1～L3。
+> CLI/Console不直接访问OpenSandbox，Run/Operation体验与shared Job authority不变。既有WASI profile证据只保留为历史；
+> 新`sandbox` feature、CLI/profile/preflight与真实OpenSandbox L3已经通过，L4～L6仍Not run。
 
 ## 1. 北极星旅程
 

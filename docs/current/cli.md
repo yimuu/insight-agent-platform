@@ -41,7 +41,7 @@ insight reset --path ./my-agent
 insight reset --path ./my-agent --confirm my-agent
 ```
 
-默认 profile 名为 `starter`。closed feature 是 `model`、`remote-capability`、`context`、`mcp`、`wasi` 和其
+默认 profile 名为 `starter`。closed feature 是 `model`、`remote-capability`、`context`、`mcp`、`sandbox` 和其
 canonical union `all`。增加 feature 只追加 identity/config/role；隐式移除被拒绝。`--offline` 只使用已验证 cache，
 缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
 

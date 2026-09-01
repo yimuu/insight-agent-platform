@@ -16,8 +16,9 @@ feature 都运行相同 public `/v1` 合同和独立 role；loopback、local OID
 `.insight/runtime/releases/<bundle-digest>/bin`。缓存不完整、image/profile/schema drift 或签名失败均 fail closed；不会回退
 到 Cargo。`--offline` 需要 bundle、signature、image 与 binary cache 全部已存在。
 
-`doctor` 检查 Docker Engine/Compose、固定 dependency 端口、Docker CPU/memory 和本地 free disk，不会自动删除用户容器或
-volume。`runsc` 与 Rust toolchain 是 optional diagnostic：macOS 缺少 runsc 时不得把 WASI 本地结果表述为 gVisor 资格。
+`doctor`检查Docker Engine/Compose、固定dependency端口、Docker CPU/memory和本地free disk，不会自动删除用户容器或
+volume。`dev/start`启用`sandbox` feature时会另外检查kubectl、Established BatchSandbox CRD、internal-only OpenSandbox服务、固定官方
+image digest、containerd节点、Direct/Disabled NetworkPolicy和不存在public Ingress；检查失败不会回退到host execution或其他backend。
 
 指定 release runner 生成 closed `insight.dev.performance-report/v1`，分别记录 cold pull-to-ready、warm start、download
 content bytes/time、稳定 5 分钟后的 RSS/CPU、project/volume disk 与 source compilation count。预算为 cold ≤300 秒、warm
@@ -25,11 +26,12 @@ content bytes/time、稳定 5 分钟后的 RSS/CPU、project/volume disk 与 sou
 
 ## 发行与生产
 
-受保护 tag workflow 构建四个平台 CLI archive、runtime/Sandbox guest/Console 双架构 manifest list、checksum、SPDX SBOM、
+受保护 tag workflow 构建四个平台 CLI archive、runtime/fixed Sandbox runner/Console与official OpenSandbox image闭包、checksum、SPDX SBOM、
 SLSA provenance、签名与 canonical ReleaseBundle。资产不可覆盖，修复必须发布新版本。未实际执行的跨架构、push/sign 或
 performance 项必须保留 Not run，不能由本机结果推断。
 
-生产 promotion 仍由 Kubernetes/GitOps 持有。Helm role chart 位于 [`deploy/helm`](../../deploy/helm/)；每个 role 固定
-command、ServiceAccount、NetworkPolicy、workload identity 与 digest。真实多节点 Kubernetes、`RuntimeClass=runsc`、capacity、
-chaos、restore 与 soak 属于 [`platform-v2-production-l4-l6.md`](../qualifications/platform-v2-production-l4-l6.md)，当前 L4～L6
-仍为 Not run。
+生产promotion仍由Kubernetes/GitOps持有。Helm role chart位于[`deploy/helm`](../../deploy/helm/)；Sandbox chart部署internal
+ClusterIP OpenSandbox Server、BatchSandbox Controller和Dispatcher，并固定command、ServiceAccount、NetworkPolicy、workload identity
+与image/config digest。开发Profile网络默认Direct，也支持显式Disabled；二者均禁止public ingress、host network/runtime socket和
+Platform credential。真实多节点production topology、capacity、chaos、restore与soak属于
+[`platform-v2-production-l4-l6.md`](../qualifications/platform-v2-production-l4-l6.md)，当前L4～L6仍为Not run。

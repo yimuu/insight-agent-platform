@@ -19,9 +19,9 @@
 `insight agent`、Console、签名发行合同和 `starter + features` 开发闭包。Python SDK 已取消；Node 只用于 Console
 构建、浏览器测试和独立 LangGraph.js reference，不是用户安装或 Rust 平台运行前置。
 
-Platform v2 的架构代号不会产生 `/v2` API。spec00～18 继续保持 Accepted/In Progress：真实多节点 Kubernetes、
-runsc、容量、混沌、restore、soak 与 production GitOps promotion 仍为外部 L4～L6 Not run，不被仓库内 clean cut
-掩盖。
+Platform v2 的架构代号不会产生 `/v2` API。CR-216 OpenSandbox仓库实现与L1～L3已通过；真实多节点
+OpenSandbox/Kubernetes production topology、容量、混沌、restore、soak与GitOps promotion仍为外部L4～L6 Not run，
+不被仓库内clean cut掩盖。
 
 ## 权威关系
 

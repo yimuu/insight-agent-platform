@@ -685,6 +685,6 @@ OpenSandbox late observation、old lease cleanup、orphan误删保护与 provide
 multi-tenant isolation、Artifact large I/O、Secret injection、Platform egress broker、interactive exec/PTY、Pool/persistent sandbox、public
 endpoint、managed MCP stdio 与 workload external-effect idempotency。
 
-没有需要修改 OpenSandbox 源码的架构前置。实施仍必须在 deployment BOM 中解析并固定 source-pinned chart、CRD、Server、Controller、
-execd、runner、CNI 与 container runtime 的真实 manifest digest；未通过 exact L3 的 CNI/runtime 组合不得 activate。Accepted 表示目标合同
-完成 cross-review，不表示当前代码已经切换或系统 production-ready。
+没有需要修改OpenSandbox源码的架构前置。CR-216实现已在deployment BOM中固定source-pinned chart、CRD、Server、Controller、execd、
+runner、CNI与container runtime digest，并以真实OpenSandbox/Kubernetes/containerd-runc完成L3。Accepted仍表示目标合同；仓库实现与
+L1～L3通过不表示系统production-ready，L4～L6保持Not run。

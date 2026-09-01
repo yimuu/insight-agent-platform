@@ -2,11 +2,11 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 9 |
+| 状态 | Implemented / CR-216 repository L1～L3 passed; L4～L6 Not run |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
-| 当前行为 | 不变；仍以 [`docs/current`](../../current/README.md) 为准 |
+| 当前行为 | OpenSandbox-only；以 [`docs/current`](../../current/README.md) 为准 |
 
 > 2026-09-01 architecture revision（CR-216 revision 1）：首版 Sandbox 物理实现 clean-cut 为 OpenSandbox Kubernetes provider、
 > BatchSandbox Controller 与 containerd/runc。create 只产生 inert Armed candidates，PostgreSQL 选择唯一 candidate，fixed runner
@@ -44,6 +44,12 @@
 > 2026-09-02 registry consistency repair（CR-216 revision 9）：首版MCP只保留remote Streamable HTTP，删除旧
 > managed-stdio physical session 的`SandboxManagedMcpSession` JobKind、注册三元组与dead repository/Host/Egress代码；不增加
 > 替代JobKind、兼容映射或fallback。Spec 03与生成registry恢复为同一17-kind/24-triple closed machine合同。
+
+> 2026-09-02 implementation qualification（CR-216 final）：实现、部署、迁移与L1～L3已完成。L1通过20项Sandbox target与
+> 118项contract；L2在fresh PostgreSQL 16.14/schema contract 8覆盖claim、lease/fence、terminal、cancel/timeout、quota与orphan；
+> L3在真实OpenSandbox Server + BatchSandbox Controller + Kubernetes/containerd-runc覆盖create race/response loss、provider restart、
+> Dispatcher kill/reclaim、Direct/Disabled和cleanup/absence。全workspace tests/doc tests/check/strict Clippy及受影响static gates通过。
+> L4、L5、L6均Not run，不声明production-ready。
 
 > 2026-08-30 implementation feedback（CR-206）：Context Dataset build的Operation target会公开预留的`dset`，但成功
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
@@ -290,7 +296,7 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | In Progress / CR-216 | 总体路线、规范模板、依赖和完成定义 |
+| 00 | `00-overview.md` | Implemented / CR-216 L1～L3 passed | 总体路线、规范模板、依赖和完成定义；L4～L6 Not run |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 revision 1 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 revision 1 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 revision 4 | PostgreSQL、事务、Outbox、Lease、恢复 |
@@ -806,8 +812,6 @@ Managed stdio session 和 Model Artifact Producer；首版闭包变为 OpenSandb
 Artifact 和最小 `/v1`。OpenSandbox/Kubernetes provider state 不得成为
 第二业务持久状态权威，host process仍禁止。
 
-[implementation-plan.md](implementation-plan.md)保留CR-216之前的仓库范围记录并重新打开OpenSandbox批次；当前00为In Progress，
-受影响01～04、07、09、10、14、15、17、18为Accepted目标合同，均不得在资格证据关闭前标作Implemented/Verified。OpenSandbox
-candidate discovery、Dispatcher/Armed runner activation/cleanup与Kubernetes profile已有实现checkpoint，L1～L3全量资格仍未关闭；
-该状态不声明 production 拓扑、容量/SLO、强隔离、restore、promotion 或 clean cut 通过。
-cutover前current behavior继续以[docs/current](../../current/README.md)为准。
+[implementation-plan.md](implementation-plan.md)保留CR-216之前的历史记录，并以CR-216 final evidence关闭OpenSandbox仓库批次。
+受影响01～04、07、09、10、14、15、17、18仍是Accepted目标合同；实现、L1～L3和仓库clean-cut已通过，current behavior已同步到
+[docs/current](../../current/README.md)。该状态不声明production多节点拓扑、容量/SLO、强隔离、restore或promotion通过；L4～L6均Not run。
