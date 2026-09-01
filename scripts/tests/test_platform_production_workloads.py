@@ -20,9 +20,10 @@ def labels(role):
 
 
 def pod_spec(role, digest):
+    kubernetes_clients = {"opensandbox_server", "opensandbox_controller"}
     return {
         "serviceAccountName": role.replace("_", "-"),
-        "automountServiceAccountToken": False,
+        "automountServiceAccountToken": role in kubernetes_clients,
         "securityContext": {
             "runAsNonRoot": True,
             "seccompProfile": {"type": "RuntimeDefault"},
@@ -72,20 +73,6 @@ def deployment(role, digest):
     }
 
 
-def daemonset(role, digest):
-    resource = deployment(role, digest)
-    resource["kind"] = "DaemonSet"
-    del resource["spec"]["replicas"]
-    resource["status"] = {
-        "observedGeneration": 3,
-        "desiredNumberScheduled": 2,
-        "updatedNumberScheduled": 2,
-        "numberReady": 2,
-        "numberUnavailable": 0,
-    }
-    return resource
-
-
 def pdb(role):
     return {
         "apiVersion": "policy/v1",
@@ -122,17 +109,12 @@ def valid_inputs():
         "replicas": {role: {"min_replicas": 2, "max_replicas": 4} for role in digests},
         "hpa": {role: {"target_utilization_basis_points": 7000} for role in digests},
     }
-    capacity["replicas"]["sandbox_wasi_executor"]["max_replicas"] = 2
     deployments = []
-    daemonsets = []
     pdbs = []
     hpas = []
     for role, digest in digests.items():
-        if role == "sandbox_wasi_executor":
-            daemonsets.append(daemonset(role, digest))
-        else:
-            deployments.append(deployment(role, digest))
-            hpas.append(hpa(role))
+        deployments.append(deployment(role, digest))
+        hpas.append(hpa(role))
         pdbs.append(pdb(role))
     policies = [
         {
@@ -146,7 +128,7 @@ def valid_inputs():
         candidate,
         capacity,
         kubernetes_list(*deployments),
-        kubernetes_list(*daemonsets),
+        kubernetes_list(),
         kubernetes_list(*policies),
         kubernetes_list(*pdbs),
         kubernetes_list(*hpas),
