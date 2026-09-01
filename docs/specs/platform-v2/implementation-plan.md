@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 2 OpenSandbox replacement pending |
+| 状态 | In Progress / CR-216 revision 3 OpenSandbox replacement pending |
 | 日期 | 2026-09-02 |
 | 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -14,6 +14,9 @@
 > 2026-09-02 CR-216 revision 2：先把Job payload收敛为不含正文的execution plan/physical evidence，claim从exact immutable input
 > RunValue重建request，terminal transaction原子写预分配output RunValue与Job/Invocation/quota/Event/Outbox/cleanup intent；再实现terminal
 > 后独立cleanup generation fence与absence CAS。Inline effective ceiling为`min(Profile, 1_048_576)`，不新增表或第二业务lease。
+
+> 2026-09-02 CR-216 revision 3：先扩展shared Job closed state graph，使owner-proven external continuation可在expired
+> `Running` lease后以`Running -> Ready`接管同一physical attempt；continuation claim保持attempt count并禁止任何replacement effect。
 
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI

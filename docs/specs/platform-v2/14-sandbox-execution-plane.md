@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 2 |
+| 状态 | Accepted / CR-216 revision 3 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
@@ -14,6 +14,9 @@
 >
 > revision 2关闭实现前P1：Job JSON不复制input/result body；exact RunValue负责正文，terminal transaction原子写output；业务
 > Job lease清除后，Dispatcher只用同一Job physical evidence中的独立cleanup generation fence继续delete/absence，不新增表或aggregate。
+>
+> revision 3关闭reclaim状态机P1：一旦Job持久化physical attempt，expired `Running` lease只能以不增加attempt count的
+> `Running -> Ready -> Leased` continuation接管相同token/candidate/activation；没有physical evidence时禁止使用该转换。
 
 ## 1. 决策摘要
 
@@ -440,6 +443,8 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 
 - create response 丢失：先按同 token bounded list；已有候选保持 inert，CAS 只选一个；不得把 metadata list 称为原子唯一性；
 - Dispatcher crash/reclaim：先读取 Job physical evidence，再 list/observe；旧 lease 不能写业务状态，新 lease 不重算 token；
+- expired `Running` reclaim必须先验证payload中的exact physical attempt，再把同一Job窄化为`Ready`并continuation-claim；
+  只增加lease generation，不增加attempt count，不创建新token/candidate/sandbox或Package activation；
 - `CandidateSelected` 后：不得选择第二个 candidate，除非 current fence 在激活前以明确 pre-start failure 创建新的 physical attempt；
 - `ActivationAuthorized/PotentiallyStarted` 后：只能对相同 sandbox、boot ID、activation token 查询或重放；禁止新 token、candidate、
   sandbox、physical attempt 或自动 workload retry；

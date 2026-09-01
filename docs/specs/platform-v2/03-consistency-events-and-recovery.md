@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 2 |
+| 状态 | Accepted / CR-216 revision 3 |
 | 日期 | 2026-09-02 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
@@ -14,6 +14,9 @@
 > CR-216 revision 2 closure：Job JSON 不复制 input/result body；exact immutable input RunValue 在 claim/recovery 时重建 request，terminal
 > transaction 原子写 output RunValue。terminal 后业务 lease 已清除，Dispatcher 只能用 shared Job physical evidence 内独立、可过期、
 > generation-fenced 的 cleanup claim 写 delete/absence evidence；该 CAS 不得改变任何 terminal business fact。
+
+> CR-216 revision 3 closure：只有 owner payload 已证明同一 external physical attempt 可安全 observe/replay 时，expired
+> `Running` Job 才可 `Running -> Ready` 并由新 lease continuation claim；转换保持 `attempt_count`，且不能 dispatch 新 effect。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
 > `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
@@ -223,6 +226,11 @@ Sandbox 是更严格的 specialization：同一 `SandboxProvisioningTokenV1` 可
 只能查询或重放相同 sandbox/boot/activation token，不能创建新 token/candidate/sandbox/physical attempt。boot identity 变化且无完整 result
 时进入 `UnknownOutcome` 并执行 absence reconcile。这个规则防止 Platform 制造重复 Package 启动，但不声称 workload 内部网络、数据库、
 消息或第三方 API 具备幂等或 exactly-once。
+
+该 durable external continuation 的 lease 恢复是 shared Job 状态机的窄转换：旧 `Running` lease 到期后，owner transaction 必须先验证
+payload 已有 exact provisioning token/physical attempt 且 recovery decision 只会 observe 或 replay 同一 selected activation，才可将 Job
+变为 `Ready`；随后 continuation claim 增加 lease generation、保持 attempt count。普通 Running Job、没有 physical evidence 的 Sandbox
+Job 或任何会创建新 token/candidate/sandbox/Package start 的路径不得使用此转换。
 
 `Context -> McpOperation` subscription refresh Job固定为ReadOnly physical attempt。Context owner以Job lease/fence调用协议adapter；
 成功只允许保存closed terminal evidence（request/response/resource digest、item/byte count、observed time），不把remote body、session或

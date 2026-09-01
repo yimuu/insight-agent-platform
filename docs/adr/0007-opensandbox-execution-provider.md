@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 2 |
+| 状态 | Accepted / CR-216 revision 3 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -12,6 +12,9 @@
 首版自建 restricted WASI 与 per-Job gVisor 链路包含 Wasmtime Executor、Kubernetes Pod Launcher、
 `RuntimeClass=runsc`、admission/RBAC、process attestor、guest bootstrap 与多套资格矩阵。CR-216 要以 clean-cut
 方式替换这些物理执行实现，同时保留 shared Job、Invocation、Run、Artifact 与 terminal transaction 的业务authority。
+
+revision 3明确：physical attempt已持久化后，Dispatcher lease recovery是同一effect的durable continuation。shared Job允许
+`Running -> Ready` 后由新lease接管，但保持attempt count，并禁止创建或激活replacement sandbox；无physical evidence时不适用。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：

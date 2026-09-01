@@ -2,14 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-216 revision 3 |
+| 日期 | 2026-09-02 |
 | 依赖 | 02、03、04、06 |
 | 直接下游 | 08、10、12、14、16、17、18 |
 
 > CR-216 revision 1 impact：`WorkClass::Sandbox`不变，physical worker收敛为唯一Sandbox Dispatcher pool；OpenSandbox Server、
 > BatchSandbox Controller 与 sandbox Pod 是 credential-isolated provider pool，不 claim Job、不连接 Platform PostgreSQL、不持有 business
 > permit。旧 WASI/gVisor/Docker-provider pool 与 fallback 删除。
+
+> CR-216 revision 3 impact：Sandbox owner payload 已证明 durable external continuation 后，expired `Running` lease 可窄化为
+> `Ready` 并 continuation-claim 同一 physical attempt；lease generation 增加、attempt count不增加，也不能重新dispatch workload。
 
 > CR-197 impact：每个claim从durable Job/owner snapshot加载trace ID并安装本attempt context；heartbeat不创建业务span，dispatch/RPC/commit
 > 各生成有界child span。Worker强杀后reclaim保持trace ID、生成新span ID。缺失/非法内部`traceparent`在解码业务envelope前拒绝，但不得改变
@@ -196,6 +199,8 @@ round、cursor和bounded tenant deficit，不复制Job current state。
 - retry写入`retry_at`，Worker不在内存sleep；
 - NATS丢消息时由bounded safety scan恢复；
 - lease过期后Recovery复核owner、generation、effect、deadline与attempt budget后first-win；
+- durable external continuation的owner还必须复核已持久化physical identity与“只observe/replay同一effect”证明，才可
+  `Running -> Ready`；新claim只更换lease generation，不增加attempt count；
 - 对外部非幂等Effect的timeout不推断“没有发生”，而进入reconciliation。
 
 `Context -> McpOperation`只能由Context Worker候选扫描和claim；普通ContextQuery handler不能解析其payload，MCP Host也没有claim权限。

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 2 |
+| 状态 | Accepted / CR-216 revision 3 |
 | 日期 | 2026-09-02 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
@@ -14,6 +14,9 @@
 > CR-216 revision 2 closure：Sandbox Job payload只冻结 input/output RunValue identity、schema/content digest与execution closure，
 > 不复制正文。Dispatcher claim/recovery在事务快照内读取exact immutable input RunValue；terminal first-winner在同一事务写唯一 output
 > RunValue并推进 Job/Invocation/quota/Event/Outbox。首条 Inline input/output各自不超过 `1_048_576` bytes，Artifact port inactive。
+
+> CR-216 revision 3 closure：Sandbox Job已持久化同一physical attempt后，Dispatcher lease过期只允许 continuation reclaim；
+> Job `attempt_count`不增加，Invocation不产生新attempt/effect，且不得创建或激活replacement sandbox。
 
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
