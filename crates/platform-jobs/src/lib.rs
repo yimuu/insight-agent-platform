@@ -432,6 +432,35 @@ pub fn decide_terminal(
     transition(current, terminal, false)
 }
 
+/// Advances only the optimistic Job version for terminal physical cleanup evidence.
+///
+/// A terminal Job no longer has a business lease. The owning repository must separately validate
+/// its closed cleanup-generation fence before using this decision; this function deliberately
+/// cannot change state, result, scheduling, or lease fields.
+pub fn decide_terminal_physical_update(
+    current: &JobProjection,
+    expected_version: u64,
+) -> Result<JobProjection, JobError> {
+    current.validate()?;
+    if current.version != expected_version
+        || current.lease.is_some()
+        || !matches!(
+            current.state,
+            JobState::Succeeded
+                | JobState::Failed
+                | JobState::Cancelled
+                | JobState::TimedOut
+                | JobState::ReconciliationRequired
+        )
+    {
+        return Err(JobError::StaleFence);
+    }
+    let mut next = current.clone();
+    next.version = increment(next.version)?;
+    next.validate()?;
+    Ok(next)
+}
+
 /// Commits a terminal result during an explicitly bounded post-deadline cleanup window.
 ///
 /// The worker identity, lease generation, token and optimistic version remain exact. Only the
@@ -686,6 +715,34 @@ pub fn decide_expired_lease(
     }
 }
 
+/// Releases an expired lease for a durable external continuation without consuming a new attempt.
+///
+/// The owner payload must prove that the same physical attempt can only be observed/replayed and
+/// cannot be redispatched before a repository calls this decision.
+pub fn decide_expired_continuation(
+    current: &JobProjection,
+    observed_version: u64,
+    observed_lease_generation: u64,
+    database_now: DateTime<Utc>,
+) -> Result<JobProjection, JobError> {
+    current.validate()?;
+    let lease = current.lease.as_ref().ok_or(JobError::InvalidLease)?;
+    if current.version != observed_version
+        || lease.lease_generation != observed_lease_generation
+        || database_now < lease.expires_at
+        || current.state != JobState::Running
+        || current.attempt_count == 0
+        || current.attempt_count > current.attempt_limit
+        || database_now >= current.deadline
+    {
+        return Err(JobError::StaleFence);
+    }
+    let mut next = transition(current, JobState::Ready, false)?;
+    next.scheduled_at = database_now;
+    next.validate()?;
+    Ok(next)
+}
+
 fn validate_fence(
     current: &JobProjection,
     fence: &JobFence,
@@ -933,6 +990,35 @@ mod tests {
     }
 
     #[test]
+    fn terminal_physical_update_only_advances_version() {
+        let now = DateTime::parse_from_rfc3339("2026-08-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (claimed, fence) = claim(now);
+        let running = decide_start(&claimed, &fence, now + Duration::seconds(1)).unwrap();
+        let running_fence = JobFence {
+            expected_version: running.version,
+            ..fence
+        };
+        let terminal = decide_terminal(
+            &running,
+            &running_fence,
+            now + Duration::seconds(2),
+            JobState::Succeeded,
+        )
+        .unwrap();
+        let updated = decide_terminal_physical_update(&terminal, terminal.version).unwrap();
+        assert_eq!(updated.state, terminal.state);
+        assert_eq!(updated.version, terminal.version + 1);
+        assert_eq!(updated.attempt_count, terminal.attempt_count);
+        assert_eq!(updated.lease_generation, terminal.lease_generation);
+        assert_eq!(
+            decide_terminal_physical_update(&updated, terminal.version),
+            Err(JobError::StaleFence)
+        );
+    }
+
+    #[test]
     fn wait_and_wake_are_generation_first_winner() {
         let now = DateTime::parse_from_rfc3339("2026-08-09T00:00:00Z")
             .unwrap()
@@ -1149,6 +1235,51 @@ mod tests {
         let cancelled = decide_owner_terminal(&running, JobState::Cancelled).unwrap();
         assert_eq!(cancelled.state, JobState::Cancelled);
         assert!(cancelled.lease.is_none());
+    }
+
+    #[test]
+    fn expired_external_continuation_reclaims_the_same_attempt() {
+        let now = DateTime::parse_from_rfc3339("2026-08-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (claimed, fence) = claim(now);
+        let running = decide_start(&claimed, &fence, now + Duration::seconds(1)).unwrap();
+        let expired_at = running.lease.as_ref().unwrap().expires_at;
+
+        let ready = decide_expired_continuation(
+            &running,
+            running.version,
+            running.lease_generation,
+            expired_at,
+        )
+        .unwrap();
+        assert_eq!(ready.state, JobState::Ready);
+        assert_eq!(ready.attempt_count, running.attempt_count);
+        assert!(ready.lease.is_none());
+
+        let reclaimed = decide_claim_continuation(
+            &ready,
+            expired_at,
+            id("wrk", "6004"),
+            digest('8'),
+            LeasePolicy {
+                requested_milliseconds: 30_000,
+                hard_maximum_milliseconds: 60_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(reclaimed.attempt_count, running.attempt_count);
+        assert_eq!(reclaimed.lease_generation, running.lease_generation + 1);
+
+        assert_eq!(
+            decide_expired_continuation(
+                &running,
+                running.version,
+                running.lease_generation,
+                expired_at - Duration::milliseconds(1),
+            ),
+            Err(JobError::StaleFence)
+        );
     }
 
     #[test]

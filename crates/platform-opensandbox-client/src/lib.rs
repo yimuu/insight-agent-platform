@@ -854,7 +854,7 @@ mod tests {
         Router,
     };
     use chrono::TimeZone as _;
-    use insight_platform_contracts::{ResourceId, ResourceKind};
+    use insight_platform_contracts::{DataClassification, ResourceId, ResourceKind};
     use insight_platform_sandbox::opensandbox::{
         OpaqueActivationToken, RunnerBootId, SandboxExecutionRequestV1, SandboxPhysicalEvidenceV1,
         SandboxProvisioningTokenV1, SandboxResourceLimitsV1, SandboxRunnerConfigV1,
@@ -1086,13 +1086,18 @@ mod tests {
             tenant_id: id(ResourceKind::Tenant, 1),
             invocation_id: id(ResourceKind::CapabilityInvocation, 2),
             job_id: id(ResourceKind::Job, 3),
+            lease_generation: 1,
             physical_attempt: 1,
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 7),
             package_version_id: id(ResourceKind::SandboxPackageRevision, 4),
             image_uri: format!("registry.invalid/package@sha256:{}", "a".repeat(64)),
             runtime_version_id: id(ResourceKind::SandboxRuntimeRevision, 5),
             sandbox_profile_deployment_id: id(ResourceKind::SandboxProfileDeployment, 6),
             runner_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
             package_argv: vec!["/opt/insight/package".to_owned()],
+            input_value_id: id(ResourceKind::RunValue, 8),
+            output_value_id: id(ResourceKind::RunValue, 9),
+            classification: DataClassification::Internal,
             input: json!({"question":"answer"}),
             input_schema_digest: digest('b'),
             input_digest: zero_digest(),
@@ -1100,6 +1105,7 @@ mod tests {
             network_mode: SandboxNetworkMode::Direct,
             limits: limits(),
             deadline_at: Utc.timestamp_opt(2_000_000_000, 0).unwrap(),
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
             request_digest: zero_digest(),
         }
         .seal()
