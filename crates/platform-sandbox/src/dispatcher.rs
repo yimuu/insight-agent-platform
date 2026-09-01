@@ -19,10 +19,10 @@ use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 const MAX_DISPATCH_TRANSITIONS: usize = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SandboxDispatchProgressV1 {
-    AwaitingCandidate,
-    AwaitingRunner,
+    AwaitingCandidate(Box<LeasedSandboxJobV1>),
+    AwaitingRunner(Box<LeasedSandboxJobV1>),
     TerminalCommitted(JobState),
 }
 
@@ -151,10 +151,17 @@ where
                         })
                         .await
                         .map_err(SandboxDispatchError::Repository)?;
-                    let PhysicalDecision::Applied(authorization) = authorization else {
-                        // A replayed authorization is deliberately burned. Calling the provider
-                        // here would make an ambiguous response restart-unsafe.
-                        return Ok(SandboxDispatchProgressV1::AwaitingCandidate);
+                    let authorization = match authorization {
+                        PhysicalDecision::Applied(authorization) => authorization,
+                        PhysicalDecision::Replayed(authorization) => {
+                            // A replayed authorization is deliberately burned. Calling the
+                            // provider here would make an ambiguous response restart-unsafe.
+                            apply_decision(&mut leased, authorization.decision)
+                                .map_err(SandboxDispatchError::Contract)?;
+                            return Ok(SandboxDispatchProgressV1::AwaitingCandidate(Box::new(
+                                leased,
+                            )));
+                        }
                     };
                     apply_decision(&mut leased, authorization.decision)
                         .map_err(SandboxDispatchError::Contract)?;
@@ -271,7 +278,7 @@ where
                         state.phase,
                         SandboxRunnerPhaseV1::ActivationLatched | SandboxRunnerPhaseV1::Started
                     ) {
-                        return Ok(SandboxDispatchProgressV1::AwaitingRunner);
+                        return Ok(SandboxDispatchProgressV1::AwaitingRunner(Box::new(leased)));
                     }
                     let decision = self
                         .repository
@@ -859,10 +866,10 @@ mod tests {
             create_calls: AtomicUsize::new(0),
         });
         let dispatcher = OpenSandboxDispatcher::new(repository, Arc::clone(&provider));
-        assert_eq!(
+        assert!(matches!(
             dispatcher.drive_job(leased).await.unwrap(),
-            SandboxDispatchProgressV1::AwaitingCandidate
-        );
+            SandboxDispatchProgressV1::AwaitingCandidate(_)
+        ));
         assert_eq!(provider.create_calls.load(Ordering::SeqCst), 0);
     }
 
