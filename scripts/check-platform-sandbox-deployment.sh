@@ -65,6 +65,15 @@ end.compact
 values = YAML.safe_load(File.read(File.join(chart, "values.yaml")), permitted_classes: [], aliases: true)
 failures = []
 
+label_value = /\A(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?)?\z/
+docs.each do |doc|
+  (doc.dig("metadata", "labels") || {}).each do |key, value|
+    unless value.is_a?(String) && value.bytesize <= 63 && label_value.match?(value)
+      failures << "#{doc['kind']}/#{doc.dig('metadata', 'name')} has invalid Kubernetes label #{key}=#{value.inspect}"
+    end
+  end
+end
+
 find = lambda do |kind, name, namespace = nil|
   docs.find do |doc|
     doc["kind"] == kind && doc.dig("metadata", "name") == name &&

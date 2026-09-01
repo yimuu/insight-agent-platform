@@ -7,7 +7,6 @@ app.kubernetes.io/name: {{ include "insight-platform-sandbox.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
-insight.platform/deployment-config-digest: {{ .Values.global.deploymentConfigDigest | quote }}
 {{- end }}
 
 {{- define "insight-platform-sandbox.image" -}}
