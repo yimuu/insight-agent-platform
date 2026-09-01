@@ -43,6 +43,14 @@
 > target的all-target/all-feature strict Clippy、sandbox Helm/static deployment boundary与workspace locked all-target/all-feature check通过。
 > 该证据只关闭仓库L1；未使用真实PostgreSQL或OpenSandbox/Kubernetes，L2、L3与L4～L6仍Pending。
 
+> 2026-09-02 CR-216 L2 evidence：在全新PostgreSQL 16.14数据库实际原子provision schema contract 8（migration set
+> `sha256:ba5080ceb152d56d54684f8345f0809b947bb880b660a904995b293d9b9d7612`，23 tables）后运行最终
+> `phase3_opensandbox`通过。复合fixture覆盖concurrent Job claim单winner、同ordinal create authorization并发`Applied | Replayed`、
+> lease expiry continuation generation rollover且attempt/physical identity不变、old-fence stale result零写入、terminal replay与不同结果
+> first-winner、Cancelled/TimedOut同步Job+Invocation终态、四维quota settle/release、selected/late/stale-attempt/missing-owner orphan
+> decision及terminal后cleanup claim/absence replay；target strict Clippy通过。该证据关闭仓库L2，不代表OpenSandbox/Kubernetes L3或
+> L4～L6环境资格。
+
 > 2026-08-30 CR-206：先把`SafeJobResult`改为Rust-owned closed tagged union并更新OpenAPI；再让PostgreSQL Operation
 > projection只在succeeded ContextDatasetBuild从已验证Job payload返回预分配`dgen`；补kind/target/state/ID漂移负向与CLI
 > consumer tests；最后由Context golden scenario通过Operation result读取exact generation。禁止数据库查询或active-head scan补ID。
@@ -1275,7 +1283,7 @@ Managed stdio session、Model Artifact或过度Artifact role拆分。
 ### 5.1 目标
 
 保留已交付的 Context、remote MCP、Artifact 三 role、Egress/Secret 与真实 Model adapter，并将 Sandbox physical execution
-clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 L1 passed；L2/L3 Pending**。
+clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox Controller + containerd/runc。状态：**CR-216 L1/L2 passed；L3 Pending**。
 
 ### 5.2 实现批次
 

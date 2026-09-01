@@ -452,6 +452,7 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     assert_eq!(absence_replay.job.version, absent.job.version);
 
     exercise_lease_rollover_and_stale_result(fixture.pool.clone()).await;
+    exercise_cancel_timeout_and_quota(fixture.pool.clone()).await;
 }
 
 async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
@@ -626,6 +627,114 @@ async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
     .await
     .unwrap();
     assert!(!absent.payload.cleanup.required);
+}
+
+async fn exercise_cancel_timeout_and_quota(pool: PgPool) {
+    let cases = [
+        (
+            JobState::Cancelled,
+            "cancelled",
+            SandboxTerminalOutcomeV1::Cancelled {
+                evidence_digest: digest('b'),
+            },
+            SandboxTerminalOutcomeV1::TimedOut {
+                evidence_digest: digest('c'),
+            },
+        ),
+        (
+            JobState::TimedOut,
+            "timed_out",
+            SandboxTerminalOutcomeV1::TimedOut {
+                evidence_digest: digest('d'),
+            },
+            SandboxTerminalOutcomeV1::Cancelled {
+                evidence_digest: digest('e'),
+            },
+        ),
+    ];
+
+    for (expected_job_state, expected_invocation_state, outcome, losing_outcome) in cases {
+        let fixture = seed_fixture(pool.clone()).await;
+        let leased = SandboxJobRepository::claim(
+            &fixture.repository,
+            claim(&id(ResourceKind::WorkerProcessGeneration), digest('a')),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+        let started = SandboxJobRepository::record_provisioning_intent(
+            &fixture.repository,
+            RecordProvisioningIntentV1 {
+                identity: identity(&leased),
+                activation_token: OpaqueActivationToken::parse("3".repeat(64)).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let command = CommitSandboxTerminalV1 {
+            identity: decision_identity(&started),
+            outcome,
+        };
+        let terminal = SandboxJobRepository::commit_terminal(&fixture.repository, command.clone())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(terminal.job.state, expected_job_state);
+        assert!(matches!(
+            SandboxJobRepository::commit_terminal(&fixture.repository, command.clone())
+                .await
+                .unwrap(),
+            PhysicalDecision::Replayed(_)
+        ));
+        assert!(matches!(
+            SandboxJobRepository::commit_terminal(
+                &fixture.repository,
+                CommitSandboxTerminalV1 {
+                    identity: command.identity,
+                    outcome: losing_outcome,
+                },
+            )
+            .await,
+            Err(RepositoryError::Conflict(_))
+        ));
+
+        let invocation_state: String = sqlx::query_scalar(
+            "SELECT state FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
+        )
+        .bind(fixture.request.tenant_id.to_string())
+        .bind(fixture.invocation.invocation_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(invocation_state, expected_invocation_state);
+        let settlement_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'",
+        )
+        .bind(fixture.request.tenant_id.to_string())
+        .bind(fixture.usage_reservation_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(settlement_count, 4);
+        let unreleased_reservations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND reserved_value <> 0",
+        )
+        .bind(fixture.request.tenant_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(unreleased_reservations, 0);
+        let quota_reservation_id: Option<String> = sqlx::query_scalar(
+            "SELECT quota_reservation_id FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(fixture.request.tenant_id.to_string())
+        .bind(fixture.request.job_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert!(quota_reservation_id.is_none());
+    }
 }
 
 async fn seed_fixture(pool: PgPool) -> Fixture {
