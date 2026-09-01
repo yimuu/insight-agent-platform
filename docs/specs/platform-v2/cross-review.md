@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 5 |
+| 状态 | Accepted / CR-216 revision 6 |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
 
@@ -30,6 +30,10 @@ revision 5关闭orphan L2设计发现的lookup P1：candidate metadata缺少tena
 高效地定位shared Job，只能全表扫描JSON payload。裁决是增加这三个operator-only identity字段，repository以tenant/job point-read后重验
 current attempt/token与全部candidate closure，返回只读closed retain/delete decision；corrupt/ambiguous/unavailable必须retain。
 
+revision 6关闭lease rollover L2发现的reclaim P1：若expired Running仅持久化为continuation Leased，observation/terminal不接受该状态，
+而下一次reclaim也拒绝带physical evidence的Leased。裁决是在同一claim transaction内逻辑执行
+`Running -> Ready -> Leased -> Running`，只提交最终Running；lease generation增加一次，attempt与全部physical identity保持。
+
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
@@ -41,7 +45,7 @@ current attempt/token与全部candidate closure，返回只读closed retain/dele
 | permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；官方 execd init 只监督 fixed runner 且 Platform 不调用 general exec/file API；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
 | network/Secret | Profile 只允许 `Disabled | Direct` operator policy；默认 deny ingress，无 public exposure；Direct 拒绝 internal/metadata CIDR，Disabled 零 egress；Secret injection disabled |
 | capacity | `WorkClass::Sandbox` 不变；candidate count/quiescence/time、Dispatcher permits、OpenSandbox API、BatchSandbox/Pod、result bytes 与 cleanup backlog 独立有界，饱和不得消耗其他 lane |
-| recovery | create response loss先list inert candidates；PostgreSQL只选一个；`ActivationAuthorized/PotentiallyStarted`后只查询/重放同runner/token；expired Running lease只可用owner-proven continuation做不增加attempt count的`Running -> Ready` reclaim；boot变化则UnknownOutcome；terminal后cleanup claim/reclaim由database time与generation first-winner；orphan以tenant/job point-read并在corrupt/ambiguous/unavailable时retain；delete/TTL/orphan sweep不推进业务state |
+| recovery | create response loss先list inert candidates；PostgreSQL只选一个；`ActivationAuthorized/PotentiallyStarted`后只查询/重放同runner/token；expired Running lease只可用owner-proven continuation在一个claim transaction内逻辑执行`Running -> Ready -> Leased -> Running`并只提交最终Running，attempt不变；boot变化则UnknownOutcome；terminal后cleanup claim/reclaim由database time与generation first-winner；orphan以tenant/job point-read并在corrupt/ambiguous/unavailable时retain；delete/TTL/orphan sweep不推进业务state |
 | fixtures | L1 closed contract/digest/runner/result/limits；L2 real PostgreSQL claim/CAS/fence/terminal/cancel/quota/orphan；L3 real OpenSandbox+Kubernetes/containerd-runc create/restart/kill/activation/network/cleanup；L4～L6 `Not run` |
 
 完整00～18影响复核结论：01/02收敛plane与ComponentRole；03收敛provisioning/terminal幂等及recovery；04收敛Direct network和Secret边界；
@@ -821,7 +825,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 
 | 范围 | 状态 | Cross-review ruling |
 |---|---|---|
-| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 5 impact-reviewed | OpenSandbox Kubernetes-only provider、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、Job/cleanup fence、owner-proven continuation reclaim、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
+| 00、01～04、07、09～10、14～15、17～18 | Accepted / CR-216 revision 6 impact-reviewed | OpenSandbox Kubernetes-only provider、RunValue正文authority、Runtime/Profile candidate binding、point-read orphan decision、atomic continuation reclaim、Job/cleanup fence、inert candidate + Armed runner activation、Direct/Disabled network 与资格闭合 |
 | 12～13 | Accepted / CR-193（CR-216影响复核） | Context/MCP authority与remote-only协议不变 |
 | 05～06 | Accepted / CR-184（CR-189影响复核） | Plan v4 external leaf与Run snapshot只复制补全后的exact closure |
 | 08 | Accepted / CR-182（CR-216影响复核） | Subagent不创建persistent Sandbox session |
@@ -829,7 +833,7 @@ Context Deployment闭包冻结；MCP discover route也未说明authorization bin
 | 16 | Accepted / CR-187（CR-189影响复核） | Model provider/Inline authority不变 |
 | ADR-0001 | Accepted | target v7/23/22与GitOps/Job/Artifact简化对齐 |
 | ADR-0002 | Superseded | 保留gVisor历史决策，不再作为实现输入 |
-| ADR-0007 | Accepted / CR-216 revision 5 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；Runtime/Profile-bound candidate、point-read orphan decision、shared Job continuation/terminal/cleanup fencing 与 Armed runner activation |
+| ADR-0007 | Accepted / CR-216 revision 6 | OpenSandbox Kubernetes + BatchSandbox；不修改上游；Runtime/Profile-bound candidate、point-read orphan decision、atomic continuation/terminal/cleanup fencing 与 Armed runner activation |
 | implementation-plan | In Progress / CR-216 | OpenSandbox合同实现与L1～L3 Pending；L4～L6仍Not run |
 
 依赖图为`00 -> 01 -> 02/03/04 -> 05～16 -> 17 -> 18 -> cross-review -> implementation-plan`。
@@ -1241,10 +1245,13 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     唯一shared Job并重验current token、request/runtime/profile/network、selection/activation/terminal/cleanup。它只返回closed只读
     retain/delete decision；Provisioning或selected candidate retain，missing owner/stale attempt/selection后的late或unselected candidate才可
     delete；corrupt、ambiguous、数据库不可用一律retain。OpenSandbox不因此获得Platform credential或业务state权限。
+40. Acceptance 47：expired Running且owner payload证明exact physical continuation时，claim必须在一个PostgreSQL transaction内逻辑完成
+    `Running -> Ready -> Leased -> Running`并只提交最终Running projection；lease generation只增加一次，attempt count、token、candidate、
+    activation与runner identity保持。中间Leased不得对其他事务可见，旧lease result/terminal必须stable stale-fence且零写入。
 
 ## 16. 未决项
 
-CR-216 revision 5 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
+CR-216 revision 6 cross-review 没有未关闭 P0/P1 合同冲突；00 保持 In Progress，受影响 01～04、07、09、10、14、15、17、18 与
 product-experience 00/06 恢复 Accepted，但 OpenSandbox 实现与 L1～L3 均 Pending，不得标记 Implemented 或 Verified。具体任务以
 [`implementation-plan.md`](implementation-plan.md)和[`../product-experience/implementation-plan.md`](../product-experience/implementation-plan.md)为准。
 

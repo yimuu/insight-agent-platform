@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In Progress / CR-216 revision 5 |
+| 状态 | In Progress / CR-216 revision 6 |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -30,6 +30,9 @@
 > 2026-09-02 orphan closure（CR-216 revision 5）：operator-only candidate metadata增加`tenant_id + job_id + physical_attempt`，
 > orphan repository据此point-read唯一shared Job并返回只读closed retain/delete decision；Provisioning、selected、corrupt、ambiguous或
 > repository unavailable均retain，不能以全表payload扫描或猜测删除替代。OpenSandbox仍无Platform业务state或credential权限。
+
+> 2026-09-02 continuation closure（CR-216 revision 6）：expired Running reclaim在同一claim transaction内逻辑完成
+> `Running -> Ready -> Leased -> Running`且只提交最终Running；lease generation增加，attempt与全部physical identity保持，旧fence零写入。
 
 > 2026-08-30 implementation feedback（CR-206）：Context Dataset build的Operation target会公开预留的`dset`，但成功
 > `SafeJobResult`只有digest，生成的immutable `dgen`没有任何public discovery路径；fresh客户端因此无法调用既有exact
@@ -290,7 +293,7 @@ Platform v2 采用以下不可逆的架构决定：
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-209 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-206 | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203（CR-204 reviewed） | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 5 | OpenSandbox Kubernetes、Armed runner activation、执行、point-read orphan decision和清理 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 6 | OpenSandbox Kubernetes、Armed runner activation、atomic continuation、执行、point-read orphan decision和清理 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 revision 1 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 revision 1 | 管理 API、Run API、事件流和错误模型 |

@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 5 |
+| 状态 | Accepted / CR-216 revision 6 |
 | 日期 | 2026-09-02 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -22,6 +22,9 @@ revision 4明确：冻结Runtime contract/Profile Deployment digest属于Executi
 revision 5明确：orphan page必须能以operator metadata中的`tenant_id + job_id + physical_attempt` point-read唯一shared Job，再重验
 current token与全部frozen candidate binding。该metadata不含正文、Secret或credential；OpenSandbox仍无Platform repository权限。
 orphan repository裁决只读，corrupt/ambiguous/unavailable fail closed为retain，不能以全表payload扫描或猜测删除替代。
+
+revision 6明确：expired Running continuation reclaim在同一数据库claim事务中逻辑完成`Running -> Ready -> Leased -> Running`，
+只持久化最终Running，防止带physical evidence的中间Leased在Dispatcher再次故障后无法接管；attempt和全部physical identity保持不变。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
