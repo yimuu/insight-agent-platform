@@ -7,6 +7,9 @@
 - 原始本地证据：`target/local-l4-l6-validation-fdc4311a/`（gitignored，不是可发布资格证据）
 - 修复复验：**CR-217 已关闭 LV-P1-01～06 的已复现绕过；Sandbox LV-P1-07 未改，L4～L6 仍为 Not run**
 
+> 后续已使用三节点 Kind 补做真实 containerd、NetworkPolicy、CRD、准入和 OpenSandbox 物理链路验证；见
+> [Kind 本地 L4 跟进验证报告](2026-09-02-kind-local-l4-validation.md)。Platform-wide L4～L6 状态仍为 Not run。
+
 ## 1. 结论
 
 本地验证确认：多节点、工作负载和 release evidence 的数据结构可以在单机覆盖。下文保留修复前的可执行
