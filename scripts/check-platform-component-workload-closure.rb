@@ -43,6 +43,41 @@ DIGEST_IMAGE = /\A[^\s@]+@sha256:[0-9a-f]{64}\z/
 CONFIG_DIGEST = /\Asha256:[0-9a-f]{64}\z/
 CONFIG_DIGEST_ANNOTATION = "insight.platform/deployment-config-digest"
 
+def valid_network_selector?(selector)
+  return false unless selector.is_a?(Hash)
+  return false unless (selector.keys - %w[matchLabels matchExpressions]).empty?
+
+  labels = selector.fetch("matchLabels", {})
+  expressions = selector.fetch("matchExpressions", [])
+  labels.is_a?(Hash) && expressions.is_a?(Array) &&
+    expressions.all? do |expression|
+      expression.is_a?(Hash) && expression["key"].is_a?(String) &&
+        !expression["key"].empty? && expression["operator"].is_a?(String) &&
+        !expression["operator"].empty?
+    end
+end
+
+def schema_shaped_network_peer?(peer)
+  return false unless peer.is_a?(Hash) && !peer.empty?
+  return false unless (peer.keys - %w[ipBlock namespaceSelector podSelector]).empty?
+
+  if peer.key?("ipBlock")
+    return false unless peer.keys == ["ipBlock"]
+
+    block = peer["ipBlock"]
+    return block.is_a?(Hash) && (block.keys - %w[cidr except]).empty? &&
+      block["cidr"].is_a?(String) && !block["cidr"].empty? &&
+      block.fetch("except", []).is_a?(Array)
+  end
+
+  selectors = peer.values_at("namespaceSelector", "podSelector").compact
+  selectors.any? && selectors.all? { |selector| valid_network_selector?(selector) } &&
+    selectors.any? do |selector|
+      !selector.fetch("matchLabels", {}).empty? ||
+        !selector.fetch("matchExpressions", []).empty?
+    end
+end
+
 documents = CHARTS.flat_map do |chart|
   path = File.join(ROOT, "deploy", "helm", chart)
   rendered, error, status = Open3.capture3("helm", "template", chart.delete_prefix("insight-platform-"), path)
@@ -160,7 +195,7 @@ workload_namespaces.each do |namespace|
 
         peers = rule[peers_key]
         ports = rule["ports"]
-        !peers.is_a?(Array) || peers.empty? || peers.any? { |peer| !peer.is_a?(Hash) || peer.empty? } ||
+        !peers.is_a?(Array) || peers.empty? || peers.any? { |peer| !schema_shaped_network_peer?(peer) } ||
           !ports.is_a?(Array) || ports.empty?
       end
       if unbounded
