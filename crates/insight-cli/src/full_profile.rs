@@ -977,6 +977,7 @@ pub(crate) fn initial_process_launches(
             .release
             .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
     };
+    let config_digest = |role: &str| config_digests.get(role).cloned().unwrap_or_default();
     vec![
         ProcessLaunch {
             role: "context-native",
@@ -993,7 +994,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_CONTEXT_WORKER_CONFIG_DIGEST",
-                    config_digests["context-native"].clone(),
+                    config_digest("context-native"),
                 ),
                 (
                     "PLATFORM_CONTEXT_WORKER_DATABASE_URL",
@@ -1017,7 +1018,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST",
-                    config_digests["artifact-maintenance"].clone(),
+                    config_digest("artifact-maintenance"),
                 ),
                 (
                     "PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL",
@@ -1044,7 +1045,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_SECURITY_AUTHORITY_CONFIG_DIGEST",
-                    config_digests["security-authority"].clone(),
+                    config_digest("security-authority"),
                 ),
                 (
                     "PLATFORM_SECURITY_AUTHORITY_DATABASE_URL",
@@ -1092,7 +1093,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_EGRESS_BROKER_CONFIG_DIGEST",
-                    config_digests["egress-broker"].clone(),
+                    config_digest("egress-broker"),
                 ),
                 (
                     "PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH",
@@ -1163,7 +1164,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_MODEL_WORKER_CONFIG_DIGEST",
-                    config_digests["model-worker"].clone(),
+                    config_digest("model-worker"),
                 ),
                 (
                     "PLATFORM_MODEL_WORKER_DATABASE_URL",
@@ -1235,7 +1236,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_REMOTE_CONTEXT_WORKER_CONFIG_DIGEST",
-                    config_digests["context-remote"].clone(),
+                    config_digest("context-remote"),
                 ),
                 (
                     "PLATFORM_REMOTE_CONTEXT_WORKER_DATABASE_URL",
@@ -1281,10 +1282,7 @@ pub(crate) fn initial_process_launches(
                         .display()
                         .to_string(),
                 ),
-                (
-                    "PLATFORM_MCP_HOST_CONFIG_DIGEST",
-                    config_digests["mcp-host"].clone(),
-                ),
+                ("PLATFORM_MCP_HOST_CONFIG_DIGEST", config_digest("mcp-host")),
                 (
                     "PLATFORM_MCP_HOST_SERVER_CLIENT_CA_PATH",
                     paths
@@ -1351,7 +1349,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_MCP_RESOURCE_HOST_CONFIG_DIGEST",
-                    config_digests["mcp-resource-host"].clone(),
+                    config_digest("mcp-resource-host"),
                 ),
                 (
                     "PLATFORM_MCP_RESOURCE_HOST_DATABASE_URL",
@@ -1423,7 +1421,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST",
-                    config_digests["capability-remote"].clone(),
+                    config_digest("capability-remote"),
                 ),
                 (
                     "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
@@ -1495,7 +1493,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_MCP_DISCOVERY_WORKER_CONFIG_DIGEST",
-                    config_digests["mcp-discovery"].clone(),
+                    config_digest("mcp-discovery"),
                 ),
                 (
                     "PLATFORM_MCP_DISCOVERY_WORKER_DATABASE_URL",
@@ -1551,7 +1549,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_MCP_SUBSCRIPTION_WORKER_CONFIG_DIGEST",
-                    config_digests["mcp-subscription"].clone(),
+                    config_digest("mcp-subscription"),
                 ),
                 (
                     "PLATFORM_MCP_SUBSCRIPTION_WORKER_DATABASE_URL",
@@ -1599,7 +1597,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST",
-                    config_digests["mcp-cleanup"].clone(),
+                    config_digest("mcp-cleanup"),
                 ),
                 ("PLATFORM_MCP_CLEANUP_DATABASE_URL", database_url.to_owned()),
                 (
@@ -1644,7 +1642,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_CONFIG_DIGEST",
-                    config_digests["context-subscription"].clone(),
+                    config_digest("context-subscription"),
                 ),
                 (
                     "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_DATABASE_URL",
@@ -1692,7 +1690,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_CALLBACK_API_CONFIG_DIGEST",
-                    config_digests["callback-api"].clone(),
+                    config_digest("callback-api"),
                 ),
                 (
                     "PLATFORM_CALLBACK_API_DATABASE_URL",
@@ -1740,7 +1738,7 @@ pub(crate) fn initial_process_launches(
                 ),
                 (
                     "PLATFORM_CONTEXT_DATASET_WORKER_CONFIG_DIGEST",
-                    config_digests["context-dataset"].clone(),
+                    config_digest("context-dataset"),
                 ),
                 (
                     "PLATFORM_CONTEXT_DATASET_WORKER_DATABASE_URL",
@@ -1774,6 +1772,9 @@ pub(crate) fn initial_process_launches(
             extra_environment: Vec::new(),
         },
     ]
+    .into_iter()
+    .filter(|launch| config_digests.contains_key(launch.role))
+    .collect()
 }
 
 fn loopback_address(port: u16) -> String {
@@ -2038,6 +2039,30 @@ mod tests {
         assert!(launches[14].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_CERT_PATH"
             && value == "/project/runtime/tls/context-dataset-client.pem"));
+
+        let scoped_launches = initial_process_launches(
+            ProcessPaths {
+                release: Path::new("/workspace/target/release"),
+                configuration: Path::new("/project/runtime/config"),
+                tls: Path::new("/project/runtime/tls"),
+                ca_certificate_file: "ca.pem",
+                nats_client_certificate_file: "nats-client.pem",
+                nats_client_private_key_file: "nats-client-key.pem",
+            },
+            &ports,
+            &BTreeMap::from([("model-worker".to_owned(), digest('e'))]),
+            "postgres://local-authority",
+            &[],
+        );
+        assert_eq!(scoped_launches.len(), 1);
+        assert_eq!(scoped_launches[0].role, "model-worker");
+        assert!(scoped_launches[0]
+            .environment
+            .iter()
+            .any(
+                |(name, value)| *name == "PLATFORM_MODEL_WORKER_CONFIG_DIGEST"
+                    && value == &digest('e')
+            ));
     }
 
     #[test]

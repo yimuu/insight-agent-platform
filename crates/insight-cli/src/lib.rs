@@ -4359,6 +4359,14 @@ fn start_profile_processes(
                     profile.config_digests["gateway-management"].clone(),
                 ),
                 ("PLATFORM_GATEWAY_DATABASE_URL", database_url.to_owned()),
+                (
+                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
+                    runtime.join(RUNTIME_CURSOR_KEY_FILE).display().to_string(),
+                ),
+                (
+                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST",
+                    cursor_key_digest(&runtime.join(RUNTIME_CURSOR_KEY_FILE))?,
+                ),
             ],
             Vec::new(),
         ),
