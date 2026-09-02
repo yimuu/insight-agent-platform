@@ -679,7 +679,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       └── tokio feature "sync"
 │       │           └── tokio v1.52.3 (*)
 │       ├── aws-smithy-runtime-api feature "client"
-│       │   └── aws-smithy-runtime-api v1.14.0
+│       │   └── aws-smithy-runtime-api v1.15.0
 │       │       ├── aws-smithy-async feature "default" (*)
 │       │       ├── pin-project-lite feature "default" (*)
 │       │       ├── tokio feature "default" (*)
@@ -692,7 +692,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       ├── syn feature "default" (*)
 │       │       │       └── syn feature "full" (*)
 │       │       ├── aws-smithy-types feature "default"
-│       │       │   └── aws-smithy-types v1.6.1
+│       │       │   └── aws-smithy-types v1.6.2
 │       │       │       ├── futures-core feature "default"
 │       │       │       │   ├── futures-core v0.3.32
 │       │       │       │   └── futures-core feature "std" (*)
@@ -819,7 +819,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │               ├── tokio feature "sync" (*)
 │       │       │               └── bytes feature "default" (*)
 │       │       ├── aws-smithy-types feature "http-body-1-x"
-│       │       │   └── aws-smithy-types v1.6.1 (*)
+│       │       │   └── aws-smithy-types v1.6.2 (*)
 │       │       ├── http feature "default" (*)
 │       │       ├── http feature "default" (*)
 │       │       ├── tracing feature "default"
@@ -867,9 +867,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │           └── zeroize feature "alloc"
 │       │               └── zeroize v1.9.0 (*)
 │       ├── aws-smithy-runtime-api feature "default"
-│       │   └── aws-smithy-runtime-api v1.14.0 (*)
+│       │   └── aws-smithy-runtime-api v1.15.0 (*)
 │       ├── aws-smithy-runtime-api feature "http-auth"
-│       │   └── aws-smithy-runtime-api v1.14.0 (*)
+│       │   └── aws-smithy-runtime-api v1.15.0 (*)
 │       ├── aws-smithy-types feature "default" (*)
 │       └── zeroize feature "default" (*)
 ├── aws-credential-types feature "hardcoded-credentials"
@@ -942,16 +942,16 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       └── tokio-util v0.7.18 (*)
 ├── tracing feature "default" (*)
 ├── aws-sdk-s3 feature "behavior-version-latest"
-│   └── aws-sdk-s3 v1.140.0
+│   └── aws-sdk-s3 v1.144.0
 │       ├── aws-credential-types feature "default" (*)
 │       ├── aws-smithy-async feature "default" (*)
 │       ├── bytes feature "default" (*)
 │       ├── aws-smithy-runtime-api feature "client" (*)
 │       ├── aws-smithy-runtime-api feature "default" (*)
 │       ├── aws-smithy-runtime-api feature "http-02x"
-│       │   └── aws-smithy-runtime-api v1.14.0 (*)
+│       │   └── aws-smithy-runtime-api v1.15.0 (*)
 │       ├── aws-smithy-runtime-api feature "http-1x"
-│       │   └── aws-smithy-runtime-api v1.14.0 (*)
+│       │   └── aws-smithy-runtime-api v1.15.0 (*)
 │       ├── aws-smithy-types feature "default" (*)
 │       ├── aws-smithy-types feature "http-body-1-x" (*)
 │       ├── http feature "default" (*)
@@ -991,7 +991,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   ├── time feature "default" (*)
 │       │       │   │   ├── tracing feature "default" (*)
 │       │       │   │   ├── aws-smithy-eventstream feature "default"
-│       │       │   │   │   └── aws-smithy-eventstream v0.61.1
+│       │       │   │   │   └── aws-smithy-eventstream v0.61.2
 │       │       │   │   │       ├── bytes feature "default" (*)
 │       │       │   │   │       ├── aws-smithy-types feature "default" (*)
 │       │       │   │   │       ├── aws-smithy-types feature "http-body-1-x" (*)
@@ -1010,7 +1010,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   │       ├── aws-smithy-runtime-api feature "default" (*)
 │       │       │   │   │       ├── aws-smithy-runtime-api feature "http-1x" (*)
 │       │       │   │   │       ├── aws-smithy-types feature "byte-stream-poll-next"
-│       │       │   │   │       │   └── aws-smithy-types v1.6.1 (*)
+│       │       │   │   │       │   └── aws-smithy-types v1.6.2 (*)
 │       │       │   │   │       ├── aws-smithy-types feature "default" (*)
 │       │       │   │   │       ├── aws-smithy-types feature "http-body-1-x" (*)
 │       │       │   │   │       ├── bytes-utils feature "default" (*)
@@ -1087,7 +1087,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       ├── aws-smithy-http feature "default" (*)
 │       │       ├── percent-encoding feature "default" (*)
 │       │       ├── aws-smithy-runtime feature "client"
-│       │       │   ├── aws-smithy-runtime v1.12.1
+│       │       │   ├── aws-smithy-runtime v1.14.0
 │       │       │   │   ├── aws-smithy-async feature "default" (*)
 │       │       │   │   ├── pin-project-lite feature "default" (*)
 │       │       │   │   ├── tokio feature "default" (*)
@@ -1095,7 +1095,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   ├── aws-smithy-runtime-api feature "default" (*)
 │       │       │   │   ├── aws-smithy-types feature "default" (*)
 │       │       │   │   ├── aws-smithy-types feature "http-body-0-4-x"
-│       │       │   │   │   └── aws-smithy-types v1.6.1 (*)
+│       │       │   │   │   └── aws-smithy-types v1.6.2 (*)
 │       │       │   │   ├── http feature "default" (*)
 │       │       │   │   ├── http feature "default" (*)
 │       │       │   │   ├── http-body feature "default" (*)
@@ -1105,7 +1105,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   ├── tracing feature "default" (*)
 │       │       │   │   ├── aws-smithy-http feature "default" (*)
 │       │       │   │   ├── aws-smithy-http-client feature "default"
-│       │       │   │   │   └── aws-smithy-http-client v1.2.0
+│       │       │   │   │   └── aws-smithy-http-client v1.4.0
 │       │       │   │   │       ├── h2 v0.4.16
 │       │       │   │   │       │   ├── futures-core v0.3.32
 │       │       │   │   │       │   ├── futures-sink v0.3.32
@@ -1354,7 +1354,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   │   │       └── aws-smithy-runtime-api feature "default" (*)
 │       │       │   │   ├── aws-smithy-schema feature "default"
 │       │       │   │   │   └── aws-smithy-schema v0.2.0
-│       │       │   │   │       ├── aws-smithy-types v1.6.1 (*)
+│       │       │   │   │       ├── aws-smithy-types v1.6.2 (*)
 │       │       │   │   │       ├── aws-smithy-runtime-api feature "client" (*)
 │       │       │   │   │       ├── aws-smithy-runtime-api feature "default" (*)
 │       │       │   │   │       └── http feature "default" (*)
@@ -1367,7 +1367,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   ├── aws-smithy-runtime-api feature "client" (*)
 │       │       │   └── aws-smithy-types feature "http-body-1-x" (*)
 │       │       ├── aws-smithy-runtime feature "default"
-│       │       │   └── aws-smithy-runtime v1.12.1 (*)
+│       │       │   └── aws-smithy-runtime v1.14.0 (*)
 │       │       ├── fastrand feature "default" (*)
 │       │       ├── aws-types feature "default"
 │       │       │   └── aws-types v1.5.0
@@ -1508,20 +1508,10 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │           └── xmlparser feature "std"
 │       │               └── xmlparser v0.13.6
 │       ├── lru feature "default"
-│       │   ├── lru v0.16.4
-│       │   │   └── hashbrown feature "default"
-│       │   │       ├── hashbrown v0.16.1 (*)
-│       │   │       ├── hashbrown feature "allocator-api2"
-│       │   │       │   └── hashbrown v0.16.1 (*)
-│       │   │       ├── hashbrown feature "default-hasher" (*)
-│       │   │       ├── hashbrown feature "equivalent"
-│       │   │       │   └── hashbrown v0.16.1 (*)
-│       │   │       ├── hashbrown feature "inline-more"
-│       │   │       │   └── hashbrown v0.16.1 (*)
-│       │   │       └── hashbrown feature "raw-entry"
-│       │   │           └── hashbrown v0.16.1 (*)
+│       │   ├── lru v0.18.3
+│       │   │   └── hashbrown feature "default" (*)
 │       │   └── lru feature "hashbrown"
-│       │       └── lru v0.16.4 (*)
+│       │       └── lru v0.18.3 (*)
 │       ├── regex-lite feature "default"
 │       │   ├── regex-lite v0.1.9
 │       │   ├── regex-lite feature "std"
@@ -1540,15 +1530,15 @@ insight-agent-platform v0.1.0 (<workspace>)
 │               ├── form_urlencoded feature "std" (*)
 │               └── idna feature "std" (*)
 ├── aws-sdk-s3 feature "default-https-client"
-│   ├── aws-sdk-s3 v1.140.0 (*)
+│   ├── aws-sdk-s3 v1.144.0 (*)
 │   └── aws-smithy-runtime feature "default-https-client"
-│       ├── aws-smithy-runtime v1.12.1 (*)
+│       ├── aws-smithy-runtime v1.14.0 (*)
 │       └── aws-smithy-http-client feature "rustls-aws-lc"
-│           ├── aws-smithy-http-client v1.2.0 (*)
+│           ├── aws-smithy-http-client v1.4.0 (*)
 │           ├── aws-smithy-http-client feature "__rustls"
-│           │   ├── aws-smithy-http-client v1.2.0 (*)
+│           │   ├── aws-smithy-http-client v1.4.0 (*)
 │           │   └── aws-smithy-http-client feature "default-client"
-│           │       ├── aws-smithy-http-client v1.2.0 (*)
+│           │       ├── aws-smithy-http-client v1.4.0 (*)
 │           │       ├── aws-smithy-runtime-api feature "http-1x" (*)
 │           │       ├── aws-smithy-types feature "http-body-1-x" (*)
 │           │       ├── hyper-util feature "client-legacy" (*)
@@ -1575,13 +1565,13 @@ insight-agent-platform v0.1.0 (<workspace>)
 │               ├── rustls v0.23.41 (*)
 │               └── rustls feature "aws_lc_rs" (*)
 ├── aws-sdk-s3 feature "rt-tokio"
-│   ├── aws-sdk-s3 v1.140.0 (*)
+│   ├── aws-sdk-s3 v1.144.0 (*)
 │   ├── aws-smithy-async feature "rt-tokio"
 │   │   ├── aws-smithy-async v1.3.0 (*)
 │   │   └── tokio feature "time" (*)
 │   ├── aws-smithy-types feature "http-body-1-x" (*)
 │   └── aws-smithy-types feature "rt-tokio"
-│       ├── aws-smithy-types v1.6.1 (*)
+│       ├── aws-smithy-types v1.6.2 (*)
 │       ├── tokio feature "fs" (*)
 │       ├── tokio feature "io-util" (*)
 │       ├── tokio feature "rt" (*)
@@ -2772,7 +2762,6 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       ├── base64 feature "alloc" (*)
 │   │   │       ├── rustls feature "std" (*)
 │   │   │       ├── rustls feature "tls12" (*)
-│   │   │       ├── hashbrown feature "default" (*)
 │   │   │       ├── url feature "default" (*)
 │   │   │       ├── serde_json feature "default" (*)
 │   │   │       ├── serde_json feature "raw_value" (*)
@@ -2780,6 +2769,17 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       ├── chrono feature "std" (*)
 │   │   │       ├── thiserror feature "std" (*)
 │   │   │       ├── hashlink feature "default" (*)
+│   │   │       ├── hashbrown feature "default"
+│   │   │       │   ├── hashbrown v0.16.1 (*)
+│   │   │       │   ├── hashbrown feature "allocator-api2"
+│   │   │       │   │   └── hashbrown v0.16.1 (*)
+│   │   │       │   ├── hashbrown feature "default-hasher" (*)
+│   │   │       │   ├── hashbrown feature "equivalent"
+│   │   │       │   │   └── hashbrown v0.16.1 (*)
+│   │   │       │   ├── hashbrown feature "inline-more"
+│   │   │       │   │   └── hashbrown v0.16.1 (*)
+│   │   │       │   └── hashbrown feature "raw-entry"
+│   │   │       │       └── hashbrown v0.16.1 (*)
 │   │   │       ├── tokio-stream feature "default" (*)
 │   │   │       ├── tokio-stream feature "fs"
 │   │   │       │   ├── tokio-stream v0.1.18 (*)
@@ -2798,18 +2798,14 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       │       └── crossbeam-utils feature "std"
 │   │   │       │           └── crossbeam-utils v0.8.22
 │   │   │       ├── event-listener feature "default"
-│   │   │       │   ├── event-listener v5.4.1
-│   │   │       │   │   ├── concurrent-queue v2.5.0
-│   │   │       │   │   │   └── crossbeam-utils v0.8.22
+│   │   │       │   ├── event-listener v5.4.2
 │   │   │       │   │   ├── pin-project-lite feature "default" (*)
 │   │   │       │   │   └── parking feature "default"
 │   │   │       │   │       └── parking v2.2.1
 │   │   │       │   └── event-listener feature "std"
-│   │   │       │       ├── event-listener v5.4.1 (*)
-│   │   │       │       ├── event-listener feature "parking"
-│   │   │       │       │   └── event-listener v5.4.1 (*)
-│   │   │       │       └── concurrent-queue feature "std"
-│   │   │       │           └── concurrent-queue v2.5.0 (*)
+│   │   │       │       ├── event-listener v5.4.2 (*)
+│   │   │       │       └── event-listener feature "parking"
+│   │   │       │           └── event-listener v5.4.2 (*)
 │   │   │       ├── futures-intrusive feature "default"
 │   │   │       │   ├── futures-intrusive v0.5.0
 │   │   │       │   │   ├── futures-core v0.3.32
@@ -2852,9 +2848,9 @@ insight-agent-platform v0.1.0 (<workspace>)
 │   │   │       │       ├── cfg-if feature "default" (*)
 │   │   │       │       ├── percent-encoding feature "default" (*)
 │   │   │       │       ├── indexmap feature "default" (*)
-│   │   │       │       ├── hashbrown feature "default" (*)
 │   │   │       │       ├── url feature "default" (*)
 │   │   │       │       ├── hashlink feature "default" (*)
+│   │   │       │       ├── hashbrown feature "default" (*)
 │   │   │       │       ├── either feature "default"
 │   │   │       │       │   ├── either v1.16.0
 │   │   │       │       │   │   ├── serde feature "alloc" (*)
@@ -4076,10 +4072,10 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │       ├── aws-credential-types feature "test-util"
 │       │       │       │   ├── aws-credential-types v1.3.0 (*)
 │       │       │       │   └── aws-smithy-runtime-api feature "test-util"
-│       │       │       │       ├── aws-smithy-runtime-api v1.14.0 (*)
+│       │       │       │       ├── aws-smithy-runtime-api v1.15.0 (*)
 │       │       │       │       ├── aws-smithy-runtime-api feature "http-1x" (*)
 │       │       │       │       └── aws-smithy-types feature "test-util"
-│       │       │       │           └── aws-smithy-types v1.6.1 (*)
+│       │       │       │           └── aws-smithy-types v1.6.2 (*)
 │       │       │       ├── aws-smithy-async feature "default" (*)
 │       │       │       ├── tokio feature "default" (*)
 │       │       │       ├── tokio feature "sync" (*)
@@ -4108,7 +4104,7 @@ insight-agent-platform v0.1.0 (<workspace>)
 │       │       │   ├── aws-smithy-async feature "rt-tokio" (*)
 │       │       │   ├── tokio feature "rt" (*)
 │       │       │   └── aws-smithy-runtime feature "rt-tokio"
-│       │       │       ├── aws-smithy-runtime v1.12.1 (*)
+│       │       │       ├── aws-smithy-runtime v1.14.0 (*)
 │       │       │       └── tokio feature "rt" (*)
 │       │       ├── aws-sdk-kms feature "behavior-version-latest"
 │       │       │   └── aws-sdk-kms v1.114.0

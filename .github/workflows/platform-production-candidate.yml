@@ -35,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: platform-production-candidate
     steps:
+      - name: Reject non-main application revision
+        run: test "$GITHUB_REF" = "refs/heads/main"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
@@ -114,8 +116,8 @@ jobs:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
           SANDBOX_RUNNER_DIGEST: ${{ steps.sandbox_runner.outputs.digest }}
         run: |
-          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
-          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}"
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}"
       - name: Generate exact SPDX SBOM files
         timeout-minutes: 20
         env:
@@ -185,10 +187,10 @@ jobs:
       - name: Sign candidate and transitive artifact closure
         run: |
           cosign sign-blob --yes --bundle target/platform-candidate/candidate-manifest.sigstore.json target/platform-candidate/candidate-manifest.json
-          cosign verify-blob --bundle target/platform-candidate/candidate-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/candidate-manifest.json
+          cosign verify-blob --bundle target/platform-candidate/candidate-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/candidate-manifest.json
           python3 scripts/build-platform-release-bundle.py target/platform-candidate
           cosign sign-blob --yes --bundle target/platform-candidate/release-bundle-manifest.sigstore.json target/platform-candidate/release-bundle-manifest.json
-          cosign verify-blob --bundle target/platform-candidate/release-bundle-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/release-bundle-manifest.json
+          cosign verify-blob --bundle target/platform-candidate/release-bundle-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/release-bundle-manifest.json
       - name: Preserve content-addressed candidate bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

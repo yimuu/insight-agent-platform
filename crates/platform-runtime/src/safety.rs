@@ -665,8 +665,8 @@ where
             .store
             .drive_child_cancellations(command)
             .await
-            .map_err(|failure| {
-                tracing::warn!(error = %failure, "child Run cancellation safety scan failed");
+            .map_err(|_failure| {
+                tracing::warn!("child Run cancellation safety scan failed");
                 SafetyDriveFailure::StoreUnavailable
             })?;
         metrics

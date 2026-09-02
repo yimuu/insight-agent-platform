@@ -4,7 +4,6 @@
 import pathlib
 import re
 
-root = pathlib.Path(__file__).resolve().parents[1]
 forbidden_fields = (
     "tenant_id",
     "principal_id",
@@ -38,28 +37,56 @@ forbidden_format_fragments = (
     "secret={",
 )
 macro = re.compile(r"tracing::(?:trace|debug|info|warn|error)!\((.*?)\);", re.DOTALL)
-failures = []
+generic_error_field = re.compile(r"\b(?:error|failure|repository_error)\b\s*=\s*[?%]")
 
-for path in sorted((root / "crates").rglob("*.rs")):
-    if "tests" in path.parts or "examples" in path.parts or path.name in {"tests.rs", "build.rs"}:
-        continue
-    source = path.read_text(encoding="utf-8")
-    production = source.split("#[cfg(test)]", 1)[0]
-    for match in macro.finditer(production):
-        body = match.group(1)
-        fields = [
-            field
-            for field in forbidden_fields
-            if re.search(rf"\b{re.escape(field)}\b\s*(?:=|,)", body)
-        ]
-        if fields:
+
+def check(root: pathlib.Path) -> list[str]:
+    failures: list[str] = []
+    for path in sorted((root / "crates").rglob("*.rs")):
+        if "tests" in path.parts or "examples" in path.parts or path.name in {
+            "tests.rs",
+            "build.rs",
+        }:
+            continue
+        source = path.read_text(encoding="utf-8")
+        # Item-level test helpers can precede production items. Scanning only the prefix before the
+        # first #[cfg(test)] silently dropped most of several production binaries. Test-only code is
+        # held to the same field policy so this textual gate never has to guess Rust item boundaries.
+        production = source
+        for match in macro.finditer(production):
+            body = match.group(1)
+            fields = [
+                field
+                for field in forbidden_fields
+                if re.search(rf"\b{re.escape(field)}\b\s*(?:=|,)", body)
+            ]
             line = production.count("\n", 0, match.start()) + 1
-            failures.append(f"{path.relative_to(root)}:{line} forbidden tracing fields {fields}")
-    for fragment in forbidden_format_fragments:
-        if fragment in production:
-            line = production.count("\n", 0, production.index(fragment)) + 1
-            failures.append(f"{path.relative_to(root)}:{line} forbidden diagnostic fragment {fragment}")
+            if fields:
+                failures.append(
+                    f"{path.relative_to(root)}:{line} forbidden tracing fields {fields}"
+                )
+            if generic_error_field.search(body):
+                failures.append(
+                    f"{path.relative_to(root)}:{line} raw generic error in tracing field"
+                )
+        for fragment in forbidden_format_fragments:
+            if fragment in production:
+                line = production.count("\n", 0, production.index(fragment)) + 1
+                failures.append(
+                    f"{path.relative_to(root)}:{line} forbidden diagnostic fragment {fragment}"
+                )
+    return failures
 
-if failures:
-    raise SystemExit("\n".join(f"observability redaction: {failure}" for failure in failures))
-print("Platform production tracing redaction contract passed.")
+
+def main() -> None:
+    root = pathlib.Path(__file__).resolve().parents[1]
+    failures = check(root)
+    if failures:
+        raise SystemExit(
+            "\n".join(f"observability redaction: {failure}" for failure in failures)
+        )
+    print("Platform production tracing redaction contract passed.")
+
+
+if __name__ == "__main__":
+    main()

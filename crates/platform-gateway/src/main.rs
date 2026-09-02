@@ -515,7 +515,6 @@ struct MtlsArtifactMutationForwarder {
 
 fn map_artifact_transport_failure(failure: reqwest::Error) -> ArtifactApplicationError {
     tracing::error!(
-        error = %failure,
         connect = failure.is_connect(),
         timeout = failure.is_timeout(),
         request = failure.is_request(),

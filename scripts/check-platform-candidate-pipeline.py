@@ -24,6 +24,8 @@ required_workflow = (
     "environment_repository", "environment_commit", "ENVIRONMENT_REPOSITORY_READ_SSH_KEY",
     "validate-platform-gitops-environment.py", "--environment-closure", "rev-parse HEAD",
     "actions/upload-artifact@", "environment: platform-production-candidate",
+    "Reject non-main application revision", 'test "$GITHUB_REF" = "refs/heads/main"',
+    "platform-production-candidate.yml@refs/heads/main$",
 )
 for marker in required_workflow:
     if marker not in workflow:
@@ -36,6 +38,20 @@ for forbidden in ("docker build ", ":latest", "kubectl apply", "helm upgrade", "
 for redundant in ("cosign attest --yes", "cosign verify-attestation"):
     if redundant in workflow:
         failures.append(f"candidate workflow duplicates GitHub SBOM attestation with {redundant!r}")
+
+expected_identity = (
+    "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/"
+    "platform-production-candidate.yml@refs/heads/main$"
+)
+certificate_identities = re.findall(
+    r'--certificate-identity-regexp\s+"([^"]+)"', workflow
+)
+if len(certificate_identities) != 4 or any(
+    identity != expected_identity for identity in certificate_identities
+):
+    failures.append(
+        "candidate signature verification must bind all four subjects to the main workflow identity"
+    )
 
 if workflow.count("cache-from: type=gha,scope=platform-production-candidate") < 2:
     failures.append("both candidate image builds must restore the shared BuildKit cache")

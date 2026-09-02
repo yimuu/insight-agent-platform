@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Fail closed when Productization CI loses its path-aware lane boundaries."""
 
+import json
+import re
 from pathlib import Path
 
 
@@ -16,6 +18,9 @@ journey_runner = (ROOT / "scripts/run-productization-journey.sh").read_text(
     encoding="utf-8"
 )
 dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+development_profile = json.loads(
+    (ROOT / "release/development-profile-v1.json").read_text(encoding="utf-8")
+)
 failures: list[str] = []
 
 for marker in (
@@ -28,7 +33,10 @@ for marker in (
     "Required CI summary",
     "scripts/classify-ci-paths.py",
     "scripts/check-product-release.py",
+    "scripts/check-required-ci-results.py",
     "scripts/tests/test_product_release.py",
+    "scripts/tests/test_platform_observability_redaction.py",
+    "scripts/tests/test_required_ci_results.py",
     "needs.changes.outputs.runtime == 'true'",
     "needs.changes.outputs.cli == 'true'",
     "needs.changes.outputs.console == 'true'",
@@ -51,9 +59,58 @@ for forbidden in (
     "docker push",
     "cosign sign",
     "actions/attest@",
+    "image: postgres:",
+    "image: nats:",
 ):
     if forbidden in ci:
         failures.append(f"ordinary CI contains candidate-only operation {forbidden!r}")
+
+profile_images = {
+    dependency["name"]: dependency["image"]
+    for dependency in development_profile["dependencies"]
+}
+for profile_name, workflow_name in (("postgresql", "postgres"), ("nats", "nats")):
+    image = profile_images.get(profile_name)
+    if not isinstance(image, str) or not re.fullmatch(
+        rf"{workflow_name}@sha256:[0-9a-f]{{64}}", image
+    ):
+        failures.append(
+            f"development profile {profile_name} image is not digest-pinned: {image!r}"
+        )
+    elif f"image: {image}" not in ci:
+        failures.append(
+            f"ordinary CI {workflow_name} service does not reuse development profile image {image!r}"
+        )
+
+for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", ci, flags=re.MULTILINE):
+    revision = action.rsplit("@", 1)[-1]
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        failures.append(f"ordinary CI action is not pinned to a commit: {action}")
+
+for marker in (
+    "RUNTIME_SELECTED: ${{ needs.changes.outputs.runtime }}",
+    "CLI_SELECTED: ${{ needs.changes.outputs.cli }}",
+    "CONSOLE_SELECTED: ${{ needs.changes.outputs.console }}",
+    "MCP_SELECTED: ${{ needs.changes.outputs.mcp_interop }}",
+    "POLICY_SELECTED: ${{ needs.changes.outputs.policy }}",
+    "steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - name: Reject any selected lane failure",
+    "python3 scripts/check-required-ci-results.py",
+    '--runtime-selected "$RUNTIME_SELECTED"',
+    '--cli-selected "$CLI_SELECTED"',
+    '--console-selected "$CONSOLE_SELECTED"',
+    '--mcp-interop-selected "$MCP_SELECTED"',
+    '--policy-selected "$POLICY_SELECTED"',
+    '--changes-result "$CHANGES_RESULT"',
+    '--quick-result "$QUICK_RESULT"',
+    '--lint-result "$LINT_RESULT"',
+    '--test-result "$TEST_RESULT"',
+    '--cli-result "$CLI_RESULT"',
+    '--console-result "$CONSOLE_RESULT"',
+    '--mcp-interop-result "$MCP_RESULT"',
+    '--policy-result "$POLICY_RESULT"',
+):
+    if marker not in ci:
+        failures.append(f"required CI summary misses fail-closed marker {marker!r}")
 
 trigger_block = candidate.split("permissions:", 1)[0]
 if "workflow_dispatch:" not in trigger_block:

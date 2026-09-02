@@ -63,8 +63,9 @@ scripts/run-productization-journey.sh --console-browser
 - [架构](docs/current/architecture.md)：Control、durable orchestration 与 Sandbox execution plane；
 - [运维](docs/current/operations.md)：starter/features、签名发行物、生命周期与资格边界。
 
-本地 profile 始终声明 `single-node-development`、`production=false`；真实多节点 Kubernetes、runsc、容量、混沌、
-restore、soak 与 production GitOps promotion 仍是外部 L4～L6 门禁，当前为 **Not run**。
+本地 profile 始终声明 `single-node-development`、`production=false`；真实多节点 Kubernetes、固定的
+containerd/runc 与 CNI 闭包、容量、混沌、restore、soak 和 production GitOps promotion 仍是外部 L4～L6 门禁，
+当前为 **Not run**。
 
 ## License
 
