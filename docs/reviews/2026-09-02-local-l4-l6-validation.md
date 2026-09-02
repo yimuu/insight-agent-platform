@@ -7,8 +7,9 @@
 - 原始本地证据：`target/local-l4-l6-validation-fdc4311a/`（gitignored，不是可发布资格证据）
 - 修复复验：**CR-217 已关闭 LV-P1-01～06 的已复现绕过；Sandbox LV-P1-07 未改，L4～L6 仍为 Not run**
 
-> 后续已使用三节点 Kind 补做真实 containerd、NetworkPolicy、CRD、准入和 OpenSandbox 物理链路验证；见
-> [Kind 本地 L4 跟进验证报告](2026-09-02-kind-local-l4-validation.md)。Platform-wide L4～L6 状态仍为 Not run。
+> 后续已使用三节点 Kind 补做真实 containerd、NetworkPolicy、CRD、准入和 OpenSandbox 物理链路，并部署
+> 完整 Platform 16 个 ComponentRole / 25 个隔离 pool，通过最终 live topology/workload preflight；见
+> [Kind 本地验证与修复报告](2026-09-02-kind-local-l4-validation.md)。正式 L4～L6 状态仍为 Not run。
 
 ## 1. 结论
 
