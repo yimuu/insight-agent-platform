@@ -59,8 +59,10 @@ except (FileNotFoundError, subprocess.CalledProcessError) as error:
     failures.append(f"callback Helm contract did not render: {error}")
     rendered = ""
 
-if rendered.count("kind: Deployment") != 1:
+if len(re.findall(r"^kind: Deployment$", rendered, flags=re.MULTILINE)) != 1:
     failures.append("callback chart must render exactly one Deployment")
+if len(re.findall(r"^kind: HorizontalPodAutoscaler$", rendered, flags=re.MULTILINE)) != 1:
+    failures.append("callback chart must render exactly one HorizontalPodAutoscaler")
 if rendered.count("kind: Ingress") != 1 or "path: /v1/mcp/oauth/callback" not in rendered or "pathType: Exact" not in rendered:
     failures.append("callback chart must publish only the exact /v1/mcp/oauth/callback ingress path")
 if rendered.count("name: default-deny") != 1:
@@ -69,6 +71,13 @@ if "/etc/insight/oauth-state-keys" not in rendered:
     failures.append("callback Deployment must mount the OAuth state-key Secret")
 if "PLATFORM_CALLBACK_API_DATABASE_URL" not in rendered:
     failures.append("callback Deployment is missing its database authority credential")
+for required in (
+    "insight.platform/component-role: mcp_host",
+    "insight.platform/deployment-config-digest:",
+    "ephemeral-storage:",
+):
+    if required not in rendered:
+        failures.append(f"callback candidate closure is missing {required}")
 for required in (
     "kind: ServiceMonitor",
     "path: /metrics",

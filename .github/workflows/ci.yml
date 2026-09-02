@@ -110,6 +110,7 @@ jobs:
         run: |
           python3 -m unittest \
             scripts/tests/test_platform_production_topology.py \
+            scripts/tests/test_platform_production_workloads.py \
             scripts/tests/test_platform_candidate_pipeline.py
           bash -n scripts/preflight-platform-production-qualification.sh
       - name: Check signed candidate pipeline contract

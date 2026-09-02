@@ -5,12 +5,13 @@ workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 insight_bin=""
 output=""
 release_root=""
+release_assets=""
 network_mbps="100"
 stabilization_seconds="300"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/qualify-development-profile.sh --insight-bin <official-binary> --release-root <https-url> --output <report.json>
+Usage: scripts/qualify-development-profile.sh --insight-bin <official-binary> (--release-root <https-url> | --release-assets <directory>) --output <report.json>
 
 Runs the prebuilt starter closure on an otherwise disposable Linux Docker runner. The runner must
 provide at least 4 CPUs, 8 GiB memory and 100 Mbps equivalent network capacity. This script removes
@@ -22,6 +23,7 @@ while (($# > 0)); do
   case "$1" in
     --insight-bin) insight_bin=${2:-}; shift 2 ;;
     --release-root) release_root=${2:-}; shift 2 ;;
+    --release-assets) release_assets=${2:-}; shift 2 ;;
     --output) output=${2:-}; shift 2 ;;
     --network-mbps) network_mbps=${2:-}; shift 2 ;;
     --stabilization-seconds) stabilization_seconds=${2:-}; shift 2 ;;
@@ -34,9 +36,22 @@ if [[ "$(uname -s)" != "Linux" || -z "$insight_bin" || ! -x "$insight_bin" || -z
   echo "qualification requires Linux, an executable official CLI, and --output" >&2
   exit 2
 fi
-if [[ ! "$release_root" =~ ^https://[^[:space:]]+$ ]]; then
+if [[ -n "$release_root" && -n "$release_assets" ]] || [[ -z "$release_root" && -z "$release_assets" ]]; then
+  echo "exactly one of --release-root or --release-assets is required" >&2
+  exit 2
+fi
+if [[ -n "$release_root" && ! "$release_root" =~ ^https://[^[:space:]]+$ ]]; then
   echo "--release-root must be an absolute HTTPS release root" >&2
   exit 2
+fi
+if [[ -n "$release_assets" ]]; then
+  release_assets="$(cd "$release_assets" && pwd -P)"
+  for name in release-bundle.json release-bundle.signature.json; do
+    if [[ ! -f "$release_assets/$name" || -L "$release_assets/$name" ]]; then
+      echo "candidate release asset is missing or not a regular file: $name" >&2
+      exit 2
+    fi
+  done
 fi
 if [[ ! "$network_mbps" =~ ^[0-9]+$ || ! "$stabilization_seconds" =~ ^[0-9]+$ ]]; then
   echo "network and stabilization values must be positive integers" >&2
@@ -45,12 +60,14 @@ fi
 
 project="$(mktemp -d /tmp/insight-dev-qualification.XXXXXX)"
 project_name="performance"
+bundle_temp=""
 cleanup() {
   set +e
   if [[ -d "$project/.insight" ]]; then
     "$insight_bin" stop --path "$project" >/dev/null 2>&1
     "$insight_bin" reset --path "$project" --confirm "$project_name" >/dev/null 2>&1
   fi
+  [[ -z "$bundle_temp" ]] || rm -f "$bundle_temp"
   rmdir "$project" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -67,14 +84,20 @@ print(value["version"], value["git_commit"], value["target"])
 PY
 )
 
-bundle_url="${release_root%/}/download/v${version}/release-bundle.json"
-bundle="$(mktemp /tmp/insight-release-bundle.XXXXXX)"
-trap 'rm -f "$bundle"; cleanup' EXIT
-curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$bundle_url" --output "$bundle"
-mapfile -t images < <(python3 - "$bundle" "$workspace/release/development-profile-v1.json" <<'PY'
+if [[ -n "$release_assets" ]]; then
+  bundle="$release_assets/release-bundle.json"
+else
+  bundle_url="${release_root%/}/download/v${version}/release-bundle.json"
+  bundle_temp="$(mktemp /tmp/insight-release-bundle.XXXXXX)"
+  bundle="$bundle_temp"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$bundle_url" --output "$bundle"
+fi
+mapfile -t images < <(python3 - "$bundle" "$workspace/release/development-profile-v1.json" "$version" "$revision" <<'PY'
 import json, pathlib, sys
 bundle = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
 registry = json.loads(pathlib.Path(sys.argv[2]).read_bytes())
+if bundle.get("version") != sys.argv[3] or bundle.get("git_commit") != sys.argv[4]:
+    raise SystemExit("candidate ReleaseBundle does not match the official CLI version/revision")
 runtime = next(image for image in bundle["images"] if image["name"] == "runtime")
 print(f'{runtime["subject"]}@{runtime["index_digest"]}')
 for dependency in registry["dependencies"]:
@@ -90,13 +113,23 @@ for image in "${images[@]}"; do
   docker image rm "$image" >/dev/null 2>&1 || true
 done
 "$insight_bin" init --path "$project" --name "$project_name"
+if [[ -n "$release_assets" ]]; then
+  release_cache="$project/.insight/cache/releases/$version"
+  mkdir -p "$release_cache"
+  cp "$release_assets/release-bundle.json" "$release_cache/release-bundle.json"
+  cp "$release_assets/release-bundle.signature.json" "$release_cache/release-bundle.signature.json"
+fi
 cold_started="$(date +%s%N)"
 download_started="$cold_started"
 for image in "${images[@]}"; do
   docker pull "$image"
 done
 download_finished="$(date +%s%N)"
-INSIGHT_UPDATE_BASE_URL="${release_root%/}" "$insight_bin" dev --path "$project"
+if [[ -n "$release_assets" ]]; then
+  "$insight_bin" dev --path "$project" --offline
+else
+  INSIGHT_UPDATE_BASE_URL="${release_root%/}" "$insight_bin" dev --path "$project"
+fi
 cold_finished="$(date +%s%N)"
 "$insight_bin" status --path "$project"
 
@@ -116,7 +149,7 @@ fi
 
 "$insight_bin" stop --path "$project"
 warm_started="$(date +%s%N)"
-INSIGHT_UPDATE_BASE_URL="${release_root%/}" "$insight_bin" start --path "$project"
+"$insight_bin" start --path "$project"
 warm_finished="$(date +%s%N)"
 sleep "$stabilization_seconds"
 

@@ -4,6 +4,7 @@ metadata:
   name: {{ .Values.namespaces.control }}
   labels:
     kubernetes.io/metadata.name: {{ .Values.namespaces.control }}
+    insight.platform/workload-namespace: sandbox-control
     insight.platform/sandbox-control-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest

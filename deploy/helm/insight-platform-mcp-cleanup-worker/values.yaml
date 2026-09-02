@@ -3,6 +3,8 @@ image:
   digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   pullPolicy: IfNotPresent
 imagePullSecrets: []
+candidate:
+  deploymentConfigDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 
 namespace: platform-mcp-cleanup
 replicas: 2
@@ -31,8 +33,9 @@ networkPolicy:
   postgresCidrs: [10.10.0.0/24]
 
 resources:
-  requests: {cpu: 100m, memory: 128Mi}
-  limits: {cpu: "1", memory: 512Mi}
+  requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+  limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
 
 podDisruptionBudget: {enabled: true, minAvailable: 1}
+autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
 monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}

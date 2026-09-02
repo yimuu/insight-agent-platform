@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-207；L1～L3 passed，发行环境资格 Not run |
-| 日期 | 2026-08-31 |
+| 状态 | Implemented / CR-217 release ordering hardening；L1～L3 passed，发行环境资格 Not run |
+| 日期 | 2026-09-02 |
 | 发行authority | GitHub Release + OCI registry + signed release bundle |
 
 ## 1. 目标
@@ -44,6 +44,9 @@ archive只包含`insight`、license和最小版本说明。不得捆绑credentia
 - PR默认只运行受影响的check/test，不构建和签名production image；
 - main可生成未promotion candidate，但同一commit相同输入不得为每个journey重复build；
 - tag/release workflow执行一次locked release build，并从同一Cargo invocation产出所需binaries；
+- workflow先组装并签名exact candidate ReleaseBundle；starter cold/warm/idle资格通过后，才可创建不可变GitHub Release和release OCI tag；
+- pre-publish资格从只读本地candidate asset目录预置CLI exact cache并以offline模式运行，不得依赖一个已经公开的GitHub Release；
+- qualification成功后重建并重新签名final ReleaseBundle，把development performance evidence作为content-addressed metadata纳入最终发布权威；
 - Docker BuildKit缓存Cargo registry/git/target和image layer，cache key绑定toolchain、lockfile、target和build flags；
 - Sandbox runner或OpenSandbox BOM变化只重建受影响image/index；普通文档/Console变化不重编译全部Rust binary；
 - 签名步骤设置bounded timeout和可重试网络边界；超时保持release未发布，不能跳过签名后标记成功。
@@ -96,6 +99,7 @@ release报告必须分别记录：
 - fresh机器不安装Rust/Node即可启动Spec 06 starter并完成first Run；
 - archive、image、SBOM、provenance和ReleaseBundle签名可离线重验；
 - 相同release中的CLI/profile/image/schema digest完全闭合；
+- starter资格失败时不存在GitHub Release或release OCI tag；candidate digest资产可以保留用于诊断，但不得冒充已发布版本；
 - PR journey复用candidate，不重复构建和签名相同image；
 - cosign超时、registry部分push、错误架构、mutable tag和cache poisoning均fail closed；
 - 源码模式和预构建模式通过相同L1～L3及北极星旅程。

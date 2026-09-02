@@ -105,7 +105,9 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             let digest = evidence
                 .canonical_digest(&profile, &candidate)
                 .map_err(|failure| failure.to_string())?;
-            println!("production release evidence valid and passed ({digest})");
+            println!(
+                "production release evidence manifest is structurally valid and all declared gates passed ({digest})"
+            );
             Ok(())
         }
         _ => Err(

@@ -15,6 +15,8 @@ CHARTS = %w[
   insight-platform-context-worker
   insight-platform-remote-context-worker
   insight-platform-mcp-host
+  insight-platform-callback-api
+  insight-platform-mcp-cleanup-worker
   insight-platform-sandbox
   insight-platform-artifact
   insight-platform-security-egress
@@ -27,9 +29,8 @@ EXPECTED_COUNTS = {
   "capability_native_worker" => 1,
   "capability_remote_worker" => 1,
   "registry_validation_worker" => 1,
-  "context_worker" => 3,
-  "context_dataset_worker" => 1,
-  "mcp_host" => 4,
+  "context_worker" => 4,
+  "mcp_host" => 6,
   "sandbox_dispatcher" => 1,
   "opensandbox_server" => 1,
   "opensandbox_controller" => 1,
@@ -50,8 +51,20 @@ documents = CHARTS.flat_map do |chart|
   YAML.load_stream(rendered).compact
 end
 failures = []
-workloads = documents.select { |item| %w[Deployment DaemonSet].include?(item["kind"]) }
-workloads = workloads.select do |item|
+platform_namespaces = documents.select do |item|
+  item["kind"] == "Namespace" && item.dig("metadata", "labels", "insight.platform/workload-namespace")
+end.map { |item| item.dig("metadata", "name") }.uniq
+all_workloads = documents.select { |item| %w[Deployment DaemonSet].include?(item["kind"]) }
+all_workloads.each do |item|
+  namespace = item.dig("metadata", "namespace")
+  role = item.dig("spec", "template", "metadata", "labels", "insight.platform/component-role")
+  if platform_namespaces.include?(namespace) && !role
+    failures << "#{item['kind']}/#{namespace}/#{item.dig('metadata', 'name')} has no component role"
+  elsif role && !platform_namespaces.include?(namespace)
+    failures << "#{item['kind']}/#{namespace}/#{item.dig('metadata', 'name')} is outside a Platform workload namespace"
+  end
+end
+workloads = all_workloads.select do |item|
   item.dig("spec", "template", "metadata", "labels", "insight.platform/component-role")
 end
 by_role = workloads.group_by do |item|
@@ -124,6 +137,9 @@ failures << "workload pools do not share one CandidateManifest deployment config
 
 workload_namespaces = workloads.map { |item| item.dig("metadata", "namespace") }.uniq
 workload_namespaces.each do |namespace|
+  namespace_policies = documents.select do |item|
+    item["kind"] == "NetworkPolicy" && item.dig("metadata", "namespace") == namespace
+  end
   defaults = documents.select do |item|
     item["kind"] == "NetworkPolicy" && item.dig("metadata", "namespace") == namespace &&
       item.dig("metadata", "name") == "default-deny" && item.dig("spec", "podSelector") == {} &&
@@ -131,8 +147,29 @@ workload_namespaces.each do |namespace|
       !item.dig("spec", "ingress") && !item.dig("spec", "egress")
   end
   failures << "#{namespace} requires exactly one bidirectional default-deny" unless defaults.length == 1
+  namespace_policies.each do |policy|
+    next if defaults.include?(policy)
+
+    name = policy.dig("metadata", "name")
+    spec = policy["spec"] || {}
+    failures << "#{namespace}/#{name} selects the entire namespace" if spec["podSelector"] == {}
+    {"ingress" => "from", "egress" => "to"}.each do |direction, peers_key|
+      rules = spec[direction] || []
+      unbounded = !rules.is_a?(Array) || rules.any? do |rule|
+        next true unless rule.is_a?(Hash)
+
+        peers = rule[peers_key]
+        ports = rule["ports"]
+        !peers.is_a?(Array) || peers.empty? || peers.any? { |peer| !peer.is_a?(Hash) || peer.empty? } ||
+          !ports.is_a?(Array) || ports.empty?
+      end
+      if unbounded
+        failures << "#{namespace}/#{name} contains an unbounded #{direction} allow rule"
+      end
+    end
+  end
 end
 
 abort(failures.map { |failure| "component workload closure: #{failure}" }.join("\n")) unless failures.empty?
 
-puts "Platform ComponentRole workload closure passed (16 roles, #{workloads.length} isolated pools)."
+puts "Platform ComponentRole workload closure passed (#{EXPECTED_COUNTS.length} roles, #{workloads.length} isolated pools)."

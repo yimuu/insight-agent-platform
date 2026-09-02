@@ -1,10 +1,32 @@
-# Platform v2 00～18 Cross-review（CR-216）
+# Platform v2 00～18 Cross-review（CR-217）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 final implementation review |
+| 状态 | Accepted / CR-217 qualification fail-closed review |
 | 日期 | 2026-09-02 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
+
+### CR-217 qualification fail-closed cross-review
+
+本轮只收紧CI/GitOps资格证据边界，不改变Platform业务状态机。ownership保持：PostgreSQL仍是业务current state authority；
+live Kubernetes/CRD/NetworkPolicy只形成部署观测，CI artifact store保存qualification evidence，GitHub/OCI/GitOps仍是release authority。
+不新增表、aggregate、public/internal API、ID、Event/Receipt/Job kind、WorkClass、ComponentRole或第二current-state projection。
+
+身份与schema复核：`mcp-callback-api`和`mcp-cleanup-worker`是既有`mcp_host`下独立pool，Context dataset是既有
+`context_worker` pool；Candidate/Capacity closed key set不变。Evidence wire version不变，但Rust语义新增production至少86,400秒、
+manifest elapsed time、每gate专属digest及artifact exact closure；JSON Schema继续表达可静态描述的边界，跨字段专属/时间约束由Rust owner执行。
+
+安全与恢复复核：L4从带Platform workload namespace标签的Namespace建立完整Deployment/DaemonSet闭包；未标注或unknown role fail closed。
+live BatchSandbox CRD对完整规范化spec计算并比对reviewed digest；Sandbox ServiceAccount、Role/ClusterRole binding与三组fail-closed
+ValidatingAdmissionPolicy/Binding逐项核验；NetworkPolicy摘要纳入全部策略并拒绝namespace-wide/unbounded allow，
+因此额外对象不能被过滤掉。结构validator仍不声称真实执行，production promotion还必须验证受保护producer、artifact bytes/signature和
+GitOps history。starter release DAG改为candidate build/sign → offline exact-cache qualification → 含资格evidence的final bundle重签 →
+release tag/GitHub Release，失败只保留诊断candidate，不存在不可变release。事务、错误、业务Event、安全credential、capacity authority和
+Sandbox recovery语义均不变。
+
+测试证据要求覆盖：1秒production soak拒绝、跨gate复用单artifact拒绝、CRD schema drift、标记namespace中的无role workload、额外
+allow-all NetworkPolicy、callback/cleanup/dataset ComponentRole闭包，以及publish依赖qualification的workflow静态负向。该修复本身不执行
+真实multi-node、24小时soak、restore或promotion，故L4～L6继续Not run。
 
 ### CR-216 OpenSandbox-only execution cross-review
 

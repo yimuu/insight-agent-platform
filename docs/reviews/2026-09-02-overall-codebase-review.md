@@ -11,12 +11,12 @@
 测试、strict Clippy、doc tests、RustSec、cargo-deny 与依赖边界检查均通过。PostgreSQL fence、terminal
 transaction 和保守 orphan cleanup 等关键正向边界也实现得较扎实。
 
-但当前仍**不能声明 production-ready**。本次 review 没有发现 P0，确认 8 项 P1 和 7 项 P2。P1 主要集中在：
+但当前仍**不能声明 production-ready**。本次 review 没有发现 P0，最初确认 8 项 P1 和 7 项 P2；随后 CR-217
+关闭了 P1-07、P1-08 以及 P1-06 中已复现的 CRD/NetworkPolicy/workload/RBAC/admission 假通过路径。剩余 P1 主要集中在：
 
 1. Sandbox cancel/timeout 与 runner boot rollover 无法可靠收敛；
 2. 不可信 Package 与 runner authority 的进程、UID 和可写状态边界不足；
-3. OpenSandbox readiness、L4 preflight 和 ComponentRole closure 可产生错误的通过证据；
-4. Product Release 在 starter qualification 前已经公开不可变发行物。
+3. OpenSandbox readiness 仍可能在 create/controller/runner/delete 路径失效时假 Ready。
 
 这些问题跨越 Accepted 合同、状态机、权限和部署拓扑。依照仓库的 contract workflow，本次没有直接重写
 Sandbox 运行时语义，而是落地了边界清晰、无需架构扩权的供应链、CI、依赖安全、日志脱敏和文档修复。
@@ -86,7 +86,18 @@ RustFS/S3 fixture；因此报告不会把静态检查或单节点测试描述为
 `README.md` 删除已被 CR-216 clean-cut 淘汰的 runsc L4 门禁说法，改为当前 containerd/runc + CNI exact
 closure，并继续明确 L4～L6 为 `Not run`。
 
-## 4. 未解决 P1
+### F-06 CR-217 关闭本地资格假通过与发布顺序
+
+- production soak 固定至少 86,400 秒，Evidence 时间窗口必须覆盖 profile；每个 gate 至少有一个专属 artifact digest，
+  artifact 闭包无别名、无悬空项，CLI 不再把结构校验措辞成真实 production 通过；
+- live preflight 对 BatchSandbox CRD 规范化 spec、Platform workload namespace、完整 NetworkPolicy、Sandbox
+  ServiceAccount/RBAC 与三组 fail-closed AdmissionPolicy/Binding 取证并 fail closed；
+- Callback/Cleanup/Dataset pool 映射回既有 `mcp_host/context_worker`，全部 production chart 形成 16-role、25-pool 闭包；
+- Product Release 改为 candidate build/sign → offline starter qualification → 含资格 evidence 的 final bundle 重签 → final OCI tag/GitHub Release，静态 checker
+  冻结真实 job dependencies；
+- 定向 Rust qualification、17 项 topology/workload、Helm closure/lint、product release 与生成合同测试通过。
+
+## 4. P1 跟踪
 
 ### P1-01 Sandbox cancel/timeout durable intent 没有生产消费者
 
@@ -171,20 +182,27 @@ quiescence；以 `pids.max` 为权威，RLIMIT 仅作纵深防御；状态文件
 
 ### P1-06 L4 live preflight 可为漂移安全闭包生成“通过”证据
 
-证据：
+状态：**CR-217 已关闭。** preflight 现采集并验证 SA/RBAC/VAP/Binding，live CRD 使用规范化 observed digest，
+NetworkPolicy 和标记 namespace 内的所有 Deployment/DaemonSet 进入 exact inventory；对应扩权、漂移、allow-all 和无 role
+负向测试均已加入。正式 L4 仍需在真实多节点环境运行。
+
+修复前证据：
 
 - `scripts/check-platform-production-workloads.py:303-318` 只确认 default-deny 存在，未拒绝额外 allow-all policy；
 - `scripts/preflight-platform-production-qualification.sh:46-63` 未采集 SA/RBAC/VAP/Binding；
 - `scripts/check-platform-production-topology.py:82-111,194` 不校验 live CRD schema，却输出 hard-coded CRD digest。
 
-影响：过宽网络、缺失 admission/RBAC 或漂移 CRD 可被归档为 L4 topology passed，破坏 qualification authority。
+修复前影响：过宽网络、缺失 admission/RBAC 或漂移 CRD 可被归档为 L4 topology passed，破坏 qualification authority。
 
-建议：采集并验证 closed SA/RBAC/VAP/Binding；拒绝任何匹配 Platform Pod 的未登记/过宽 policy；规范化 live CRD
-后计算 digest，与 reviewed render 比较。加入 allow-all、过宽 RBAC、VAP 无 binding、CRD schema/subresource drift 负向测试。
+落实：已采集并验证 closed SA/RBAC/VAP/Binding，拒绝未登记 workload 与过宽 policy，并对 live CRD 规范化后与 reviewed
+digest 比较；对应负向测试已加入。
 
 ### P1-07 ComponentRole、默认 Helm 与 live candidate closure 不闭合
 
-证据：
+状态：**CR-217 已关闭。** dataset pool 映射 `context_worker`，Callback/Cleanup 映射 `mcp_host` 并补 candidate config、
+resource/HPA；静态闭包覆盖全部 chart，当前为 16 roles / 25 isolated pools。
+
+修复前证据：
 
 - Rust/Candidate authority 只有 16 个 role：`crates/platform-contracts/src/qualification.rs:937-976`、
   `contracts/platform-v1/schemas/candidate-manifest.schema.json:15-32`；
@@ -193,24 +211,26 @@ quiescence；以 `pids.max` 为权威，RLIMIT 仅作纵深防御；状态文件
 - Callback API 与 MCP cleanup workload 没有 component-role/config-digest annotation，且不在静态 chart closure；
 - `scripts/check-platform-production-workloads.py:160-169` 跳过无 role 标签 workload，却拒绝未知 role。
 
-影响：默认 render 不能通过真实 preflight；同时 Callback/Cleanup 可逃逸 candidate image/config/readiness/capacity 校验。
+修复前影响：默认 render 不能通过真实 preflight；同时 Callback/Cleanup 可逃逸 candidate image/config/readiness/capacity 校验。
 
-建议：在不扩 role 合同的前提下，把 dataset 映射到 `context_worker`，Callback/Cleanup 映射到 owning reviewed role；所有
-production workload 必须有 role + candidate config digest，所有 chart 进入同一个 render closure。若要新增 role，先更新 owning
-spec 与 cross-review。
+落实：没有扩展 role 合同；dataset、Callback/Cleanup 已映射到 owning reviewed role，全部 production workload 带 role、
+candidate config digest 并进入同一个 render closure。
 
 ### P1-08 Product Release 在资格验证前已经公开不可变发行物
 
-证据：
+状态：**CR-217 已关闭已复现的 publish-before-qualification DAG。** signed candidate 先作为 CI artifact 供 offline
+exact-cache qualification 使用；只有 qualification 成功后 publish job 才创建正式 OCI tag 与 GitHub Release。
+
+修复前证据：
 
 - `.github/workflows/product-release.yml:317-399` 的 `publish` 只依赖 CLI/images，并创建不可覆盖 GitHub Release；
 - starter qualification 位于 `:401-435`，反向依赖 `publish`；
 - qualification 结果没有进入 `scripts/build-product-release.py:21-29` 的 ReleaseBundle metadata。
 
-影响：一个无法完成 first Run 的版本可能已经拥有公开 tag、镜像、签名、attestation 和不可变 Release authority。
+修复前影响：一个无法完成 first Run 的版本可能已经拥有公开 tag、镜像、签名、attestation 和不可变 Release authority。
 
-建议：以 staging digest/artifact 先完成 qualification；`publish` 依赖其成功；最终 tag、signature、ReleaseBundle 和 GitHub
-Release 只在通过后产生，并把 qualification evidence 纳入 bundle。负向测试必须断言 qualifier 失败时没有任何发布态副作用。
+落实：CLI/image 先形成 commit-scoped candidate；candidate ReleaseBundle 先签名并作为 CI artifact 输入 offline qualification；成功后
+重建并签名纳入 performance evidence digest 的 final ReleaseBundle，正式 image tag 与 GitHub Release 只存在于依赖 qualification 的 publish job。
 
 ## 5. 未解决 P2
 

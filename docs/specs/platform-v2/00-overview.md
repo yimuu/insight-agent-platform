@@ -2,11 +2,18 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-216 repository L1～L3 passed; L4～L6 Not run |
+| 状态 | Implemented / CR-217 qualification fail-closed hardening; L4～L6 Not run |
 | 日期 | 2026-09-02 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | OpenSandbox-only；以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-09-02 qualification hardening（CR-217）：production profile固定至少24小时持续soak，Evidence manifest的
+> 实际起止时间必须覆盖该声明；每个gate至少绑定一个未被其他gate复用的专属artifact digest，artifact闭包禁止别名和未引用项。
+> L4 preflight对live BatchSandbox CRD完整规范化contract、Platform workload namespace及NetworkPolicy闭包取证，不能以
+> source常量、未标注workload或额外allow-all policy绕过。MCP callback/cleanup仍映射既有`mcp_host`，Context dataset仍映射
+> `context_worker`，不新增ComponentRole。产品release先组装并签名candidate，在本地exact cache完成starter资格后重签包含资格
+> evidence的final ReleaseBundle，才创建不可变GitHub Release和release tag。上述门禁修复不产生L4～L6 passed evidence，当前状态仍为Not run。
 
 > 2026-09-01 architecture revision（CR-216 revision 1）：首版 Sandbox 物理实现 clean-cut 为 OpenSandbox Kubernetes provider、
 > BatchSandbox Controller 与 containerd/runc。create 只产生 inert Armed candidates，PostgreSQL 选择唯一 candidate，fixed runner

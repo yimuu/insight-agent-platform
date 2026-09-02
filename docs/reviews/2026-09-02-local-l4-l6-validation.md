@@ -5,11 +5,12 @@
 - 验证类型：本地真实 preflight + adversarial logical validation
 - 生产资格结论：**Failed / L4～L6 仍为 Not run**
 - 原始本地证据：`target/local-l4-l6-validation-fdc4311a/`（gitignored，不是可发布资格证据）
+- 修复复验：**CR-217 已关闭 LV-P1-01～06 的已复现绕过；Sandbox LV-P1-07 未改，L4～L6 仍为 Not run**
 
 ## 1. 结论
 
-本地验证确认：多节点、工作负载和 release evidence 的数据结构可以在单机覆盖，但当前门禁存在可执行复现的
-false-positive，不能据此生成 production-ready 结论。
+本地验证确认：多节点、工作负载和 release evidence 的数据结构可以在单机覆盖。下文保留修复前的可执行
+false-positive 证据；CR-217 随后对这些输入完成 fail-closed 修复，但这不等于真实 L4～L6 已运行。
 
 最严重的问题是 `platform-qualification validate-release-evidence` 接受了以下 adversarial evidence，并输出
 `production release evidence valid and passed`：
@@ -19,7 +20,7 @@ false-positive，不能据此生成 production-ready 结论。
 - `signed_supply_chain`、`backup_restore`、`gitops_rollout_rollback` 等 gate 没有各自的可辨识证据；
 - topology digest 只是任意格式正确的 SHA-256 字符串。
 
-因此当前 release evidence validator 只能证明 JSON、digest 和文件完整性闭合，不能证明 L4～L6 已实际完成。
+因此修复前的 release evidence validator 只能证明 JSON、digest 和文件完整性闭合，不能证明 L4～L6 已实际完成。
 
 ## 2. 本机真实环境结果
 
@@ -36,7 +37,7 @@ false-positive，不能据此生成 production-ready 结论。
 `scripts/preflight-platform-production-qualification.sh` 后，脚本在读取 BatchSandbox CRD 时 fail closed。它没有生成
 `topology.json` 或伪造本机 L4 通过结果。这一部分行为正确。
 
-## 3. 执行结果
+## 3. 修复前执行结果
 
 | 验证 | 结果 |
 |---|---|
@@ -143,7 +144,7 @@ evidence 纳入最终 ReleaseBundle。
 - artifact byte length、SHA-256 与普通文件/符号链接边界是 fail closed 的；
 - CandidateManifest 与 CapacityProfile 的结构、完整 role/pool/work-class/SLO 集合及 deployment digest binding 可以校验。
 
-## 6. 最终判定
+## 6. 原始判定
 
 | 层级 | 本地逻辑判定 | 真实资格状态 |
 |---|---|---|
@@ -151,5 +152,24 @@ evidence 纳入最终 ReleaseBundle。
 | L5 capacity / soak | **Failed**：1 秒 evidence 可通过 86,400 秒门禁 | Not run |
 | L6 supply chain / restore / promotion | **Failed**：单一无关 artifact 可覆盖全部 gate，且 publish 顺序错误 | Not run |
 
-本次结果证明“单机可以覆盖逻辑层面”，而且这种覆盖已经发现了阻止真实验证的门禁缺陷。修复 LV-P1-01～06 之前，
-不应花费云资源运行正式 L4～L6；否则即使环境测试完成，现有 validator 也无法形成可信的 release authority。
+本次结果证明“单机可以覆盖逻辑层面”，而且这种覆盖发现了阻止真实验证的门禁缺陷。CR-217 已先修复
+LV-P1-01～06；真实环境投入仍应等待 Sandbox LV-P1-07 的状态机与隔离缺口关闭。
+
+## 7. CR-217 修复与复验
+
+| 原发现 | 修复 | 本地复验 |
+|---|---|---|
+| LV-P1-01 | production profile 至少 86,400 秒；Evidence elapsed time 必须覆盖 profile | 1 秒 evidence 在 CLI 入口被 `completed_at` 拒绝；10 个定向 Rust qualification tests 通过 |
+| LV-P1-02 | 每个 gate 至少一个专属 digest；artifact digest 禁止别名，禁止未引用项；CLI 输出明确仅为 structural validity | 单 artifact 跨 26 gate 回归被拒绝；真实执行仍须受保护 CI producer、签名与 GitOps 证据 |
+| LV-P1-03 | 从 live BatchSandbox CRD 完整规范化 spec 计算 digest，并与 reviewed render digest 比较 | CRD schema drift 负向测试通过，摘要使用 observed digest |
+| LV-P1-04 | 以带标签 Namespace 建立 workload 全闭包；拒绝无 role workload、namespace-wide/unbounded allow；全部 policy 进入摘要 | allow-all 与 privileged unlabelled Deployment 两项负向测试均通过 |
+| LV-P1-05 | callback/cleanup 纳入闭包并映射 `mcp_host`；dataset 映射 `context_worker`；计数动态输出 | Helm 静态闭包通过：16 roles / 25 isolated pools |
+| LV-P1-06 | workflow 改为 signed candidate → offline exact-cache starter qualification → 重签包含资格 evidence 的 final ReleaseBundle → final OCI tag/GitHub Release | release checker 验证 publish 同时依赖 candidate 与 qualification；final bundle 纳入 development performance digest；workflow YAML 和 shell 语法通过 |
+| L4 SA/RBAC/VAP 缺口 | preflight 新增 ServiceAccount、Role/Binding、ClusterRole/Binding、ValidatingAdmissionPolicy/Binding live inventory 与最小权限核验 | RBAC 扩权和 Admission `Deny` 漂移负向测试通过 |
+
+定向复验合计：production topology/workload Python tests 17/17，通过；product release tests 5 项通过、1 项因本机
+OpenSSL 不支持 Ed25519 条件跳过；三个受影响 Helm chart 及 Sandbox/Artifact/Security chart lint 通过；生成合同与
+`contracts/platform-v1/manifest.json` 一致。没有重复执行全 workspace Rust 测试。
+
+CR-217 只关闭本地已复现的资格假通过和发布顺序问题。它没有生成受保护 CI 签名、24 小时连续运行、真实多节点、
+restore 或 promotion 记录，因此 L4、L5、L6 的正式状态保持 `Not run`。

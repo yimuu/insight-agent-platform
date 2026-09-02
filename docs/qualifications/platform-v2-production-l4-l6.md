@@ -1,6 +1,6 @@
 # Platform v2 Production L4～L6资格运行手册
 
-状态：Not run / optional deployment release gate after CR-216
+状态：Not run / optional deployment release gate after CR-217
 
 仓库内CR-216的L1、真实PostgreSQL L2与单节点真实OpenSandbox/Kubernetes/containerd-runc L3已经通过；这些证据不等于
 production topology、容量、HA、恢复或promotion资格。本手册只供未来部署方在需要production-ready声明时执行，未产生exact
@@ -36,7 +36,8 @@ bash scripts/preflight-platform-production-qualification.sh
 ```
 
 预检先用`platform-qualification validate-production-candidate`和`validate-production-capacity`验证Candidate/Profile闭包，再采集
-Kubernetes版本、Ready node、BatchSandbox CRD、Deployment/DaemonSet、Service、Ingress、NetworkPolicy、PDB与HPA inventory。
+Kubernetes版本、Ready node、BatchSandbox CRD、Namespace、Deployment/DaemonSet、Service、Ingress、NetworkPolicy、PDB、HPA、
+ServiceAccount、Role/RoleBinding、ClusterRole/ClusterRoleBinding及ValidatingAdmissionPolicy/Binding inventory。
 `scripts/check-platform-production-topology.py`与`scripts/check-platform-production-workloads.py`把live inventory与exact digest、配置、
 identity、安全和容量闭包比较。输出只保存版本、计数、closed identity和canonical digest，不保存credential、Secret、Pod环境、
 外部URL或对象key；失败运行不得在同一路径覆盖重跑。
@@ -71,7 +72,8 @@ L4必须使用production-equivalent多节点拓扑；仓库的单节点L3不能�
 
 1. 验证全部image、SBOM、provenance、chart/CRD/config digest与CandidateManifest闭包；
 2. 完成upgrade/rollback rehearsal、PostgreSQL PITR、Artifact一致性恢复、NATS重建和Secret/KMS轮换；
-3. 为每个required gate生成content-addressed artifact并构造QualificationEvidenceManifest；
+3. 为每个required gate生成至少一个不被其他gate复用的专属content-addressed summary artifact，并构造无digest别名、无未引用项的
+   QualificationEvidenceManifest；共享原始观测可以作为额外输入，但不能成为某个gate唯一的证据；
 4. 运行：
 
 ```bash
@@ -85,9 +87,10 @@ cargo run --locked -p insight-platform-contracts --bin platform-qualification --
 ```
 
 `artifact_links[].name`必须逐一解析为artifact root下同名普通文件；validator流式重算byte length和SHA-256，拒绝缺失、符号链接、
-长度或digest漂移。只有validator通过、GitOps environment repository收到同一exact digest、rollout/rollback observation完整且人工批准
-promotion后，才可归档通过报告并声明该environment production-ready。
+长度或digest漂移，并核对manifest时间跨度至少86,400秒。命令成功只表示manifest结构和声明结果闭合；运行人员还必须验证Evidence
+来自受保护CI producer、artifact store与组织批准的签名identity。只有这些验证通过、GitOps environment repository收到同一exact digest、
+rollout/rollback observation完整且人工批准promotion后，才可归档通过报告并声明该environment production-ready。
 
 依赖故障和恢复按照[`platform-v2-dependency-recovery.md`](../runbooks/platform-v2-dependency-recovery.md)执行；signed supply chain、
 upgrade/rollback、监视和GitOps切换按照[`platform-v2-clean-cut.md`](../runbooks/platform-v2-clean-cut.md)执行。手册与静态检查不能替代目标
-环境实际证据。CR-216当前结论是：L4 Not run、L5 Not run、L6 Not run，系统不声明production-ready。
+环境实际证据。CR-217当前结论是：L4 Not run、L5 Not run、L6 Not run，系统不声明production-ready。

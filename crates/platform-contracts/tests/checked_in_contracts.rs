@@ -230,19 +230,26 @@ fn qualification_profile_and_evidence_schemas_match_rust_semantics() {
             .required_gates
             .iter()
             .copied()
-            .map(|gate| QualificationGateEvidence {
+            .enumerate()
+            .map(|(index, gate)| QualificationGateEvidence {
                 gate,
                 layer: gate.layer(),
                 outcome: QualificationOutcome::Passed,
-                evidence_digests: vec![sha('7')],
+                evidence_digests: vec![indexed_sha(index + 1)],
             })
             .collect(),
-        artifact_links: vec![QualificationArtifactLink {
-            name: "qualification-bundle".to_owned(),
-            content_digest: sha('7'),
-            media_type: "application/zstd".to_owned(),
-            byte_length: 4096,
-        }],
+        artifact_links: profile
+            .required_gates
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, gate)| QualificationArtifactLink {
+                name: gate.as_str().to_owned(),
+                content_digest: indexed_sha(index + 1),
+                media_type: "application/json".to_owned(),
+                byte_length: 4096,
+            })
+            .collect(),
     };
     let evidence_value = serde_json::to_value(&evidence).unwrap();
     assert!(evidence_validator.is_valid(&evidence_value));
@@ -255,6 +262,10 @@ fn qualification_profile_and_evidence_schemas_match_rust_semantics() {
 
 fn sha(character: char) -> Sha256Digest {
     Sha256Digest::from_str(&format!("sha256:{}", character.to_string().repeat(64))).unwrap()
+}
+
+fn indexed_sha(index: usize) -> Sha256Digest {
+    Sha256Digest::from_str(&format!("sha256:{index:064x}")).unwrap()
 }
 
 fn lowercase_sha256(bytes: &[u8]) -> String {

@@ -14,7 +14,33 @@ EXECUTION_ARCHITECTURES = {"amd64", "arm64"}
 CONTROL_NAMESPACE = "platform-sandbox"
 WORKLOAD_NAMESPACE = "platform-sandbox-workloads"
 SOURCE_COMMIT = "c39b814f36ded4c61d5ac6f9332ee4dfbab86c00"
-CRD_DIGEST = "sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4"
+CRD_DIGEST = "sha256:176f3ccba68f75fc8311d34a49551b78e9743659a28d794ecb7f24605675d1af"
+EXPECTED_SERVER_RULES = [
+    {"apiGroups": ["sandbox.opensandbox.io"], "resources": ["batchsandboxes"], "verbs": ["create", "delete", "get", "list"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+    {"apiGroups": [""], "resources": ["events"], "verbs": ["get", "list"]},
+]
+EXPECTED_SERVER_NAMESPACE_RULES = [{
+    "apiGroups": [""],
+    "resourceNames": [WORKLOAD_NAMESPACE],
+    "resources": ["namespaces"],
+    "verbs": ["get"],
+}]
+EXPECTED_CONTROLLER_LEADER_RULES = [
+    {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]},
+    {"apiGroups": [""], "resources": ["events"], "verbs": ["create", "patch"]},
+]
+EXPECTED_CONTROLLER_RULES = [
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["create", "delete", "get", "list", "patch", "update", "watch"]},
+    {"apiGroups": [""], "resources": ["pods/status"], "verbs": ["get", "patch", "update"]},
+    {"apiGroups": [""], "resources": ["events"], "verbs": ["create", "patch"]},
+    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["delete", "get", "list", "patch", "update", "watch"]},
+    {"apiGroups": ["batch"], "resources": ["jobs/status"], "verbs": ["get", "patch", "update"]},
+    {"apiGroups": ["sandbox.opensandbox.io"], "resources": ["batchsandboxes"], "verbs": ["delete", "get", "list", "patch", "update", "watch"]},
+    {"apiGroups": ["sandbox.opensandbox.io"], "resources": ["pools", "sandboxsnapshots"], "verbs": ["delete", "get", "list", "patch", "update", "watch"]},
+    {"apiGroups": ["sandbox.opensandbox.io"], "resources": ["batchsandboxes/finalizers", "pools/finalizers", "sandboxsnapshots/finalizers"], "verbs": ["update"]},
+    {"apiGroups": ["sandbox.opensandbox.io"], "resources": ["batchsandboxes/status", "pools/status", "sandboxsnapshots/status"], "verbs": ["get", "patch", "update"]},
+]
 
 
 class DuplicateKey(ValueError):
@@ -79,7 +105,39 @@ def validate_version(version, failures):
     return client, server
 
 
-def validate_batchsandbox_crd(crd, failures):
+def batchsandbox_crd_digest(crd):
+    """Digest the reviewed CRD contract while excluding API-server metadata/status/defaults."""
+    spec = crd.get("spec", {})
+    if not isinstance(spec, dict):
+        raise ValueError("BatchSandbox CRD spec is malformed")
+    names = spec.get("names", {})
+    versions = spec.get("versions", [])
+    if not isinstance(names, dict) or not isinstance(versions, list):
+        raise ValueError("BatchSandbox CRD spec is malformed")
+    normalized_versions = []
+    for version in versions:
+        if not isinstance(version, dict):
+            raise ValueError("BatchSandbox CRD version is malformed")
+        normalized_versions.append({
+            key: version[key]
+            for key in (
+                "additionalPrinterColumns", "name", "schema", "served", "storage", "subresources"
+            )
+            if key in version
+        })
+    contract = {
+        "group": spec.get("group"),
+        "names": names,
+        "scope": spec.get("scope"),
+        "versions": normalized_versions,
+    }
+    canonical = json.dumps(
+        contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def validate_batchsandbox_crd(crd, failures, expected_digest=CRD_DIGEST):
     if crd.get("apiVersion") != "apiextensions.k8s.io/v1" or crd.get("kind") != "CustomResourceDefinition":
         failures.append("BatchSandbox CRD must use apiextensions.k8s.io/v1")
     metadata = crd.get("metadata", {})
@@ -103,12 +161,16 @@ def validate_batchsandbox_crd(crd, failures):
     ]
     if len(selected) != 1:
         failures.append("BatchSandbox CRD must serve exactly one storage v1alpha1 contract")
+    observed_digest = batchsandbox_crd_digest(crd)
+    if observed_digest != expected_digest:
+        failures.append("BatchSandbox CRD normalized contract digest drifted")
     established = any(
         condition.get("type") == "Established" and condition.get("status") == "True"
         for condition in crd.get("status", {}).get("conditions", [])
     )
     if not established:
         failures.append("BatchSandbox CRD is not Established")
+    return observed_digest
 
 
 def validate_services(services, failures):
@@ -148,7 +210,194 @@ def validate_ingresses(ingresses, failures):
             failures.append("sandbox namespaces must not contain any public Ingress")
 
 
-def validate_topology(version, nodes, crd, services, ingresses):
+def metadata_identity(resource):
+    metadata = resource.get("metadata", {})
+    name = metadata.get("name")
+    namespace = metadata.get("namespace")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{resource.get('kind', 'resource')} is missing metadata.name")
+    return namespace, name
+
+
+def exact_subject(binding, namespace, name):
+    return binding.get("subjects") == [{
+        "kind": "ServiceAccount",
+        "name": name,
+        "namespace": namespace,
+    }]
+
+
+def validate_sandbox_security(
+    service_accounts,
+    roles,
+    role_bindings,
+    cluster_roles,
+    cluster_role_bindings,
+    admissions,
+    admission_bindings,
+    failures,
+):
+    account_items = list_items(service_accounts, "ServiceAccount")
+    expected_accounts = {
+        (CONTROL_NAMESPACE, "sandbox-dispatcher"): False,
+        (CONTROL_NAMESPACE, "opensandbox-server"): True,
+        (CONTROL_NAMESPACE, "opensandbox-controller"): True,
+        (WORKLOAD_NAMESPACE, "sandbox-workload"): False,
+    }
+    for account, expected_automount in expected_accounts.items():
+        matches = [item for item in account_items if metadata_identity(item) == account]
+        if len(matches) != 1 or matches[0].get("automountServiceAccountToken") is not expected_automount:
+            failures.append(f"Sandbox ServiceAccount authority drifted: {account[0]}/{account[1]}")
+
+    role_items = list_items(roles, "Role")
+    server_roles = [
+        item for item in role_items
+        if metadata_identity(item) == (WORKLOAD_NAMESPACE, "opensandbox-server")
+    ]
+    if len(server_roles) != 1 or server_roles[0].get("rules") != EXPECTED_SERVER_RULES:
+        failures.append("OpenSandbox Server workload Role drifted")
+
+    leader_roles = [
+        item for item in role_items
+        if metadata_identity(item) == (CONTROL_NAMESPACE, "opensandbox-controller-leader-election")
+    ]
+    if len(leader_roles) != 1 or leader_roles[0].get("rules") != EXPECTED_CONTROLLER_LEADER_RULES:
+        failures.append("OpenSandbox Controller leader-election Role drifted")
+
+    cluster_role_items = list_items(cluster_roles, "ClusterRole")
+    controller_roles = [
+        item for item in cluster_role_items
+        if metadata_identity(item)[1].endswith("-opensandbox-controller")
+    ]
+    if len(controller_roles) != 1 or controller_roles[0].get("rules") != EXPECTED_CONTROLLER_RULES:
+        failures.append("OpenSandbox Controller ClusterRole drifted")
+    server_namespace_roles = [
+        item for item in cluster_role_items
+        if metadata_identity(item)[1].endswith("-opensandbox-server-namespace")
+    ]
+    if (
+        len(server_namespace_roles) != 1
+        or server_namespace_roles[0].get("rules") != EXPECTED_SERVER_NAMESPACE_RULES
+    ):
+        failures.append("OpenSandbox Server namespace ClusterRole drifted")
+
+    role_binding_items = list_items(role_bindings, "RoleBinding")
+    cluster_binding_items = list_items(cluster_role_bindings, "ClusterRoleBinding")
+    relevant_bindings = []
+    for binding in role_binding_items + cluster_binding_items:
+        for subject in binding.get("subjects", []):
+            identity = (subject.get("namespace"), subject.get("name"))
+            if identity in {
+                (CONTROL_NAMESPACE, "opensandbox-server"),
+                (CONTROL_NAMESPACE, "opensandbox-controller"),
+            }:
+                relevant_bindings.append(binding)
+    expected_binding_shapes = {
+        ("RoleBinding", WORKLOAD_NAMESPACE, "opensandbox-server", "Role", "opensandbox-server", "opensandbox-server"),
+        ("RoleBinding", CONTROL_NAMESPACE, "opensandbox-controller-leader-election", "Role", "opensandbox-controller-leader-election", "opensandbox-controller"),
+    }
+    observed_binding_shapes = set()
+    for binding in relevant_bindings:
+        namespace, name = metadata_identity(binding)
+        role_ref = binding.get("roleRef", {})
+        subject = binding.get("subjects", [{}])[0]
+        if binding.get("kind") == "RoleBinding":
+            if exact_subject(binding, CONTROL_NAMESPACE, subject.get("name")):
+                observed_binding_shapes.add((
+                    "RoleBinding", namespace, name, role_ref.get("kind"), role_ref.get("name"), subject.get("name")
+                ))
+            else:
+                observed_binding_shapes.add(("RoleBinding", namespace, name, None, None, None))
+        elif (
+            name.endswith("-opensandbox-controller")
+            and role_ref.get("kind") == "ClusterRole"
+            and str(role_ref.get("name", "")).endswith("-opensandbox-controller")
+            and exact_subject(
+            binding, CONTROL_NAMESPACE, "opensandbox-controller"
+            )
+        ):
+            observed_binding_shapes.add((
+                "ClusterRoleBinding", None, "opensandbox-controller", role_ref.get("kind"), "opensandbox-controller", "opensandbox-controller"
+            ))
+        elif (
+            name.endswith("-opensandbox-server-namespace")
+            and role_ref.get("kind") == "ClusterRole"
+            and str(role_ref.get("name", "")).endswith("-opensandbox-server-namespace")
+            and exact_subject(
+            binding, CONTROL_NAMESPACE, "opensandbox-server"
+            )
+        ):
+            observed_binding_shapes.add((
+                "ClusterRoleBinding", None, "opensandbox-server-namespace", role_ref.get("kind"), "opensandbox-server-namespace", "opensandbox-server"
+            ))
+        else:
+            observed_binding_shapes.add((binding.get("kind"), namespace, name, None, None, subject.get("name")))
+    expected_binding_shapes.update({
+        ("ClusterRoleBinding", None, "opensandbox-controller", "ClusterRole", "opensandbox-controller", "opensandbox-controller"),
+        ("ClusterRoleBinding", None, "opensandbox-server-namespace", "ClusterRole", "opensandbox-server-namespace", "opensandbox-server"),
+    })
+    if len(relevant_bindings) != 4 or observed_binding_shapes != expected_binding_shapes:
+        failures.append("OpenSandbox Server/Controller RBAC binding closure drifted")
+
+    policy_items = list_items(admissions, "ValidatingAdmissionPolicy")
+    binding_items = list_items(admission_bindings, "ValidatingAdmissionPolicyBinding")
+    requirements = {
+        "opensandbox-inactive-surfaces": ["false"],
+        "opensandbox-batchsandbox": [
+            f"system:serviceaccount:{CONTROL_NAMESPACE}:opensandbox-server",
+            f"system:serviceaccount:{CONTROL_NAMESPACE}:opensandbox-controller",
+            "armed-runner-v1",
+            "execd-installer",
+        ],
+        "opensandbox-pods": [
+            f"system:serviceaccount:{CONTROL_NAMESPACE}:opensandbox-controller",
+            "sandbox-workload",
+            "platform-sandbox-runner",
+            "persistentVolumeClaim",
+        ],
+    }
+    for suffix, required_terms in requirements.items():
+        matching_policies = [
+            item for item in policy_items if metadata_identity(item)[1].endswith(suffix)
+        ]
+        if len(matching_policies) != 1 or matching_policies[0].get("spec", {}).get("failurePolicy") != "Fail":
+            failures.append(f"fail-closed {suffix} admission policy is missing")
+            continue
+        policy = matching_policies[0]
+        policy_name = metadata_identity(policy)[1]
+        expressions = "\n".join(
+            validation.get("expression", "")
+            for validation in policy.get("spec", {}).get("validations", [])
+        )
+        if any(term not in expressions for term in required_terms):
+            failures.append(f"{suffix} admission validation closure drifted")
+        matching_bindings = [
+            item for item in binding_items
+            if item.get("spec", {}).get("policyName") == policy_name
+            and item.get("spec", {}).get("validationActions") == ["Deny"]
+            and item.get("spec", {}).get("matchResources", {}).get("namespaceSelector", {}).get("matchLabels", {}).get(
+                "insight.platform/sandbox-workload-namespace"
+            ) == "true"
+        ]
+        if len(matching_bindings) != 1:
+            failures.append(f"{suffix} admission binding is missing or does not deny")
+
+
+def validate_topology(
+    version,
+    nodes,
+    crd,
+    services,
+    ingresses,
+    service_accounts,
+    roles,
+    role_bindings,
+    cluster_roles,
+    cluster_role_bindings,
+    admissions,
+    admission_bindings,
+    expected_crd_digest=CRD_DIGEST,
+):
     failures = []
     client_version, server_version = validate_version(version, failures)
     ready_nodes = ready_schedulable_nodes(nodes)
@@ -176,9 +425,19 @@ def validate_topology(version, nodes, crd, services, ingresses):
         else:
             runtime_versions.add(runtime)
 
-    validate_batchsandbox_crd(crd, failures)
+    observed_crd_digest = validate_batchsandbox_crd(crd, failures, expected_crd_digest)
     validate_services(services, failures)
     validate_ingresses(ingresses, failures)
+    validate_sandbox_security(
+        service_accounts,
+        roles,
+        role_bindings,
+        cluster_roles,
+        cluster_role_bindings,
+        admissions,
+        admission_bindings,
+        failures,
+    )
     if failures:
         raise ValueError("\n".join(failures))
 
@@ -191,7 +450,7 @@ def validate_topology(version, nodes, crd, services, ingresses):
         "container_runtime_versions": sorted(runtime_versions),
         "provider": "opensandbox_kubernetes",
         "physical_store": "batchsandbox_crd",
-        "batchsandbox_crd_digest": CRD_DIGEST,
+        "batchsandbox_crd_digest": observed_crd_digest,
         "public_ingress": False,
     }
     canonical = json.dumps(summary, sort_keys=True, separators=(",", ":")).encode()
@@ -205,6 +464,13 @@ def main():
     parser.add_argument("--batchsandbox-crd", required=True)
     parser.add_argument("--services", required=True)
     parser.add_argument("--ingresses", required=True)
+    parser.add_argument("--service-accounts", required=True)
+    parser.add_argument("--roles", required=True)
+    parser.add_argument("--role-bindings", required=True)
+    parser.add_argument("--cluster-roles", required=True)
+    parser.add_argument("--cluster-role-bindings", required=True)
+    parser.add_argument("--validating-admission-policies", required=True)
+    parser.add_argument("--validating-admission-policy-bindings", required=True)
     parser.add_argument("--output")
     arguments = parser.parse_args()
     try:
@@ -214,6 +480,13 @@ def main():
             load(arguments.batchsandbox_crd),
             load(arguments.services),
             load(arguments.ingresses),
+            load(arguments.service_accounts),
+            load(arguments.roles),
+            load(arguments.role_bindings),
+            load(arguments.cluster_roles),
+            load(arguments.cluster_role_bindings),
+            load(arguments.validating_admission_policies),
+            load(arguments.validating_admission_policy_bindings),
         )
     except (OSError, ValueError, json.JSONDecodeError, DuplicateKey) as failure:
         print(f"production topology rejected: {failure}", file=sys.stderr)

@@ -1,6 +1,7 @@
 use crate::{
     canonical_digest, HardLimitProfile, Sha256Digest, UtcTimestamp, WorkClass, WorkerManifest,
 };
+use chrono::DateTime;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,6 +20,7 @@ pub const MAX_QUALIFICATION_TOOL_VERSIONS: usize = 64;
 pub const MAX_QUALIFICATION_ARTIFACTS: usize = 256;
 pub const MAX_QUALIFICATION_NAME_BYTES: usize = 128;
 pub const MAX_QUALIFICATION_VERSION_BYTES: usize = 256;
+pub const PRODUCTION_MINIMUM_SOAK_SECONDS: u32 = 86_400;
 
 /// Qualification layers are evidence strengths, not runtime state or promotion gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -616,6 +618,12 @@ impl QualificationProfile {
                 "production release profile must require the complete L1-L6 closure",
             ));
         }
+        if self.minimum_soak_seconds < PRODUCTION_MINIMUM_SOAK_SECONDS {
+            return Err(qualification_invalid(
+                "minimum_soak_seconds",
+                "production release profile must require at least 86,400 seconds of sustained soak",
+            ));
+        }
         Ok(())
     }
 
@@ -734,6 +742,18 @@ impl QualificationEvidenceManifest {
                 "completion precedes start",
             ));
         }
+        let started_at = DateTime::parse_from_rfc3339(self.started_at.as_str())
+            .expect("UtcTimestamp always contains valid RFC 3339");
+        let completed_at = DateTime::parse_from_rfc3339(self.completed_at.as_str())
+            .expect("UtcTimestamp always contains valid RFC 3339");
+        if completed_at.signed_duration_since(started_at).num_seconds()
+            < i64::from(profile.minimum_soak_seconds)
+        {
+            return Err(qualification_invalid(
+                "completed_at",
+                "evidence elapsed time is shorter than the qualification profile soak duration",
+            ));
+        }
         if self.seed > crate::MAX_SAFE_JSON_INTEGER {
             return Err(qualification_invalid(
                 "seed",
@@ -800,6 +820,12 @@ impl QualificationEvidenceManifest {
             .iter()
             .map(|artifact| &artifact.content_digest)
             .collect::<BTreeSet<_>>();
+        if artifact_digests.len() != self.artifact_links.len() {
+            return Err(qualification_invalid(
+                "artifact_links",
+                "artifact content digests must be unique",
+            ));
+        }
         if self.results.iter().any(|result| {
             result
                 .evidence_digests
@@ -809,6 +835,30 @@ impl QualificationEvidenceManifest {
             return Err(qualification_invalid(
                 "results",
                 "every gate evidence digest must resolve to a listed artifact",
+            ));
+        }
+        let mut digest_gate_counts = BTreeMap::new();
+        for result in &self.results {
+            for digest in &result.evidence_digests {
+                *digest_gate_counts.entry(digest).or_insert(0usize) += 1;
+            }
+        }
+        if self.results.iter().any(|result| {
+            !result
+                .evidence_digests
+                .iter()
+                .any(|digest| digest_gate_counts.get(digest) == Some(&1))
+        }) {
+            return Err(qualification_invalid(
+                "results",
+                "every gate must reference at least one dedicated evidence digest",
+            ));
+        }
+        let referenced_digests = digest_gate_counts.keys().copied().collect::<BTreeSet<_>>();
+        if artifact_digests != referenced_digests {
+            return Err(qualification_invalid(
+                "artifact_links",
+                "artifact links must be the exact referenced evidence closure",
             ));
         }
         Ok(())
@@ -1550,20 +1600,31 @@ mod tests {
                 .required_gates
                 .iter()
                 .copied()
-                .map(|gate| QualificationGateEvidence {
+                .enumerate()
+                .map(|(index, gate)| QualificationGateEvidence {
                     gate,
                     layer: gate.layer(),
                     outcome: QualificationOutcome::Passed,
-                    evidence_digests: vec![sha('7')],
+                    evidence_digests: vec![indexed_sha(index + 1)],
                 })
                 .collect(),
-            artifact_links: vec![QualificationArtifactLink {
-                name: "qualification-bundle".to_owned(),
-                content_digest: sha('7'),
-                media_type: "application/zstd".to_owned(),
-                byte_length: 4096,
-            }],
+            artifact_links: profile
+                .required_gates
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, gate)| QualificationArtifactLink {
+                    name: gate.as_str().to_owned(),
+                    content_digest: indexed_sha(index + 1),
+                    media_type: "application/json".to_owned(),
+                    byte_length: 4096,
+                })
+                .collect(),
         }
+    }
+
+    fn indexed_sha(index: usize) -> Sha256Digest {
+        format!("sha256:{index:064x}").parse().unwrap()
     }
 
     #[test]
@@ -1686,6 +1747,16 @@ mod tests {
         missing_gate.required_gates.pop();
         assert!(missing_gate.validate_for_production_release().is_err());
 
+        let mut short_soak = profile.clone();
+        short_soak.minimum_soak_seconds = 1;
+        assert_eq!(
+            short_soak
+                .validate_for_production_release()
+                .unwrap_err()
+                .field,
+            "minimum_soak_seconds"
+        );
+
         let mut unordered = profile;
         unordered.required_gates.swap(0, 1);
         assert_eq!(unordered.validate().unwrap_err().field, "required_gates");
@@ -1752,15 +1823,15 @@ mod tests {
         let capacity = production_capacity_profile();
         let mut evidence = evidence(&qualification, &candidate);
         let capacity_digest = capacity.canonical_digest().unwrap();
-        evidence.artifact_links.insert(
-            0,
-            QualificationArtifactLink {
-                name: "capacity-profile".to_owned(),
-                content_digest: capacity_digest.clone(),
-                media_type: "application/json".to_owned(),
-                byte_length: 4096,
-            },
-        );
+        evidence.artifact_links.push(QualificationArtifactLink {
+            name: "capacity-profile".to_owned(),
+            content_digest: capacity_digest.clone(),
+            media_type: "application/json".to_owned(),
+            byte_length: 4096,
+        });
+        evidence
+            .artifact_links
+            .sort_by(|left, right| left.name.cmp(&right.name));
         let capacity_result = evidence
             .results
             .iter_mut()
@@ -1780,6 +1851,9 @@ mod tests {
         capacity_result
             .evidence_digests
             .retain(|digest| digest != &capacity.canonical_digest().unwrap());
+        evidence
+            .artifact_links
+            .retain(|artifact| artifact.content_digest != capacity.canonical_digest().unwrap());
         assert_eq!(
             evidence
                 .validate_with_capacity(&qualification, &capacity, &candidate)
@@ -1847,6 +1921,30 @@ mod tests {
         unlinked.results[0].evidence_digests = vec![sha('5')];
         assert_eq!(
             unlinked
+                .validate_against(&profile, &candidate)
+                .unwrap_err()
+                .field,
+            "results"
+        );
+
+        let mut too_short = evidence.clone();
+        too_short.completed_at = "2026-08-23T00:00:01.000000Z".parse().unwrap();
+        assert_eq!(
+            too_short
+                .validate_against(&profile, &candidate)
+                .unwrap_err()
+                .field,
+            "completed_at"
+        );
+
+        let mut reused = evidence.clone();
+        let shared = reused.results[0].evidence_digests[0].clone();
+        reused.results[1].evidence_digests = vec![shared.clone()];
+        reused.artifact_links.retain(|artifact| {
+            artifact.content_digest != indexed_sha(2) || artifact.content_digest == shared
+        });
+        assert_eq!(
+            reused
                 .validate_against(&profile, &candidate)
                 .unwrap_err()
                 .field,

@@ -3,6 +3,7 @@ kind: Namespace
 metadata:
   name: {{ .Values.namespaces.egress }}
   labels:
+    insight.platform/workload-namespace: egress
     insight.platform/egress-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
@@ -12,6 +13,7 @@ kind: Namespace
 metadata:
   name: {{ .Values.namespaces.securityAuthority }}
   labels:
+    insight.platform/workload-namespace: security-authority
     insight.platform/security-authority-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest

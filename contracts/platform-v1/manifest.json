@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:5e7c304148529cb2dc628546510f5b7bb4a4f850d0466b96ca6c8b86dfc921ff",
+  "contract_digest": "sha256:a75d293e40c13039461c625a29ce1c6d417a30154ee05e3ebfc1a94863913293",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -87,16 +87,16 @@
       "sha256": "3c62ad9c2bc1d948cd1d3cc147630bd517042fa9eba62fc4856350720029f360"
     },
     {
-      "bytes": 2534,
+      "bytes": 2580,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/qualification-profile.schema.json",
-      "sha256": "19fefbcc8a027dc1d9946c69e86f711d016d24ec370c62ed6c2eb795dc4e54f5"
+      "sha256": "060aec5e7a227428c114866233fb8ff93b87e34f76c9798570ddc97c3b486e01"
     },
     {
-      "bytes": 4850,
+      "bytes": 4954,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/qualification-evidence-manifest.schema.json",
-      "sha256": "e0dd9a4b57d877c3a67d17fa3b99c81a79af11d8de08636d9fc0f5318c2a5405"
+      "sha256": "2cace886fd8d793cf6854219bc825f5b191ea9039a6d8a70d5d8474225d3eb28"
     },
     {
       "bytes": 1012,

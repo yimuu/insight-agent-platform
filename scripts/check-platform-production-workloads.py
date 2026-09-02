@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 ROLE_LABEL = "insight.platform/component-role"
 CONFIG_DIGEST_ANNOTATION = "insight.platform/deployment-config-digest"
+WORKLOAD_NAMESPACE_LABEL = "insight.platform/workload-namespace"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 DIGEST_IMAGE = re.compile(r"^[^@\s]+@(?P<digest>sha256:[0-9a-f]{64})$")
 COMPONENT_ROLES = {
@@ -90,6 +92,81 @@ def selector_matches(selector, labels):
     return isinstance(expected, dict) and expected and all(labels.get(k) == v for k, v in expected.items())
 
 
+def valid_network_selector(selector):
+    if not isinstance(selector, dict) or set(selector) - {"matchLabels", "matchExpressions"}:
+        return False
+    match_labels = selector.get("matchLabels", {})
+    match_expressions = selector.get("matchExpressions", [])
+    return isinstance(match_labels, dict) and isinstance(match_expressions, list) and all(
+        isinstance(expression, dict) and expression.get("key") and expression.get("operator")
+        for expression in match_expressions
+    )
+
+
+def selector_is_universal(selector):
+    return (
+        valid_network_selector(selector)
+        and not selector.get("matchLabels", {})
+        and not selector.get("matchExpressions", [])
+    )
+
+
+def valid_ip_block(ip_block):
+    if not isinstance(ip_block, dict) or set(ip_block) - {"cidr", "except"}:
+        return False, None, []
+    excluded = ip_block.get("except", [])
+    if not isinstance(excluded, list):
+        return False, None, []
+    try:
+        network = ipaddress.ip_network(ip_block.get("cidr"), strict=False)
+        excluded_networks = [ipaddress.ip_network(value, strict=False) for value in excluded]
+    except (TypeError, ValueError):
+        return False, None, []
+    return (
+        all(value.version == network.version and value.subnet_of(network) for value in excluded_networks),
+        network,
+        excluded_networks,
+    )
+
+
+def bounded_network_peer(peer):
+    if not isinstance(peer, dict) or not peer:
+        return False
+    if set(peer) - {"ipBlock", "namespaceSelector", "podSelector"}:
+        return False
+    if "ipBlock" in peer:
+        if set(peer) != {"ipBlock"}:
+            return False
+        valid, network, excluded = valid_ip_block(peer["ipBlock"])
+        return valid and (network.prefixlen > 0 or bool(excluded))
+    selectors = [peer[key] for key in ("namespaceSelector", "podSelector") if key in peer]
+    return (
+        bool(selectors)
+        and all(valid_network_selector(selector) for selector in selectors)
+        and any(not selector_is_universal(selector) for selector in selectors)
+    )
+
+
+def bounded_network_port(port):
+    if not isinstance(port, dict) or set(port) - {"protocol", "port", "endPort"}:
+        return False
+    value = port.get("port")
+    if isinstance(value, int):
+        if isinstance(value, bool) or not 1 <= value <= 65_535:
+            return False
+    elif not isinstance(value, str) or not value:
+        return False
+    if port.get("protocol", "TCP") not in {"TCP", "UDP", "SCTP"}:
+        return False
+    end = port.get("endPort")
+    return end is None or (
+        isinstance(value, int)
+        and isinstance(end, int)
+        and not isinstance(end, bool)
+        and value <= end <= 65_535
+    )
+
+
 def validate_pod_security(role, pod_spec, failures):
     if pod_spec.get("serviceAccountName") in (None, "", "default"):
         failures.append(f"{role} must use a non-default ServiceAccount")
@@ -137,7 +214,7 @@ def validate_pod_security(role, pod_spec, failures):
     return images
 
 
-def validate_workloads(candidate, capacity, deployments, daemonsets, policies, pdbs, hpas):
+def validate_workloads(candidate, capacity, namespaces, service_accounts, deployments, daemonsets, policies, pdbs, hpas):
     failures = []
     candidate_images = candidate.get("component_images")
     replica_targets = capacity.get("replicas")
@@ -157,12 +234,34 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
     if capacity.get("deployment_config_digest") != expected_config_digest:
         failures.append("capacity and candidate deployment configuration digests differ")
 
+    platform_namespaces = set()
+    for namespace in items(namespaces, "Namespace"):
+        metadata = namespace.get("metadata", {})
+        name = metadata.get("name")
+        marker = metadata.get("labels", {}).get(WORKLOAD_NAMESPACE_LABEL)
+        if marker is not None:
+            if not isinstance(name, str) or not name or not isinstance(marker, str) or not marker:
+                failures.append("Platform workload Namespace label or identity is invalid")
+            else:
+                platform_namespaces.add(name)
+    if not platform_namespaces:
+        failures.append("no Platform workload Namespace is marked for closure validation")
+
     workloads = items(deployments, "Deployment") + items(daemonsets, "DaemonSet")
     by_role = {}
     for workload in workloads:
+        namespace, name = identity(workload)
         role = role_of(workload)
         if role is None:
+            if namespace in platform_namespaces:
+                failures.append(
+                    f"workload {workload.get('kind')}/{namespace}/{name} in a Platform namespace has no component role"
+                )
             continue
+        if namespace not in platform_namespaces:
+            failures.append(
+                f"workload {workload.get('kind')}/{namespace}/{name} declares a component role outside a Platform namespace"
+            )
         if role not in COMPONENT_ROLES:
             failures.append(f"workload declares unknown component role {role}")
             continue
@@ -175,9 +274,10 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
     policy_items = items(policies, "NetworkPolicy")
     pdb_items = items(pdbs, "PodDisruptionBudget")
     hpa_items = items(hpas, "HorizontalPodAutoscaler")
-    service_accounts = {}
+    service_account_items = items(service_accounts, "ServiceAccount")
+    service_account_owners = {}
     summary_roles = {}
-    namespaces = set()
+    observed_workload_namespaces = set()
     for role, matches in sorted(by_role.items()):
         expected_image = candidate_images.get(role)
         target = replica_targets.get(role, {})
@@ -190,7 +290,7 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
         role_workloads = []
         for workload in matches:
             namespace, name = identity(workload)
-            namespaces.add(namespace)
+            observed_workload_namespaces.add(namespace)
             spec = workload.get("spec", {})
             template = spec.get("template", {})
             live_config_digest = deployment_config_digest_of(workload)
@@ -203,12 +303,25 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
             service_account = pod_spec.get("serviceAccountName")
             if isinstance(service_account, str) and service_account:
                 workload_identity = f"{workload.get('kind')}/{namespace}/{name}"
-                owner = service_accounts.setdefault(
+                owner = service_account_owners.setdefault(
                     (namespace, service_account), workload_identity
                 )
                 if owner != workload_identity:
                     failures.append(
                         f"{role} shares ServiceAccount {service_account} with {owner}"
+                    )
+                matching_accounts = [
+                    account
+                    for account in service_account_items
+                    if identity(account) == (namespace, service_account)
+                ]
+                expected_automount = role in {"opensandbox_server", "opensandbox_controller"}
+                if (
+                    len(matching_accounts) != 1
+                    or matching_accounts[0].get("automountServiceAccountToken") is not expected_automount
+                ):
+                    failures.append(
+                        f"{role}/{name} live ServiceAccount authority is missing or drifted"
                     )
 
             images = validate_pod_security(role, pod_spec, failures)
@@ -300,28 +413,70 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
             ),
         }
 
-    for namespace in sorted(namespaces):
+    policy_summary = []
+    for namespace in sorted(platform_namespaces):
         defaults = []
         for policy in policy_items:
             policy_namespace, policy_name = identity(policy)
             spec = policy.get("spec", {})
+            if policy_namespace != namespace:
+                continue
+            policy_summary.append({
+                "namespace": policy_namespace,
+                "name": policy_name,
+                "spec": spec,
+            })
             if (
-                policy_namespace == namespace
-                and policy_name == "default-deny"
+                policy_name == "default-deny"
                 and spec.get("podSelector") == {}
                 and set(spec.get("policyTypes", [])) == {"Ingress", "Egress"}
                 and not spec.get("ingress")
                 and not spec.get("egress")
             ):
                 defaults.append(policy)
+                continue
+            selector = spec.get("podSelector")
+            if not isinstance(selector, dict) or selector_is_universal(selector):
+                failures.append(
+                    f"NetworkPolicy {namespace}/{policy_name} selects the entire namespace"
+                )
+            for direction, peers_key in (("ingress", "from"), ("egress", "to")):
+                rules = spec.get(direction, [])
+                if rules is None:
+                    rules = []
+                if not isinstance(rules, list):
+                    failures.append(
+                        f"NetworkPolicy {namespace}/{policy_name} has malformed {direction} rules"
+                    )
+                    continue
+                for rule in rules:
+                    peers = rule.get(peers_key) if isinstance(rule, dict) else None
+                    ports = rule.get("ports") if isinstance(rule, dict) else None
+                    if (
+                        not isinstance(peers, list)
+                        or not peers
+                        or any(not bounded_network_peer(peer) for peer in peers)
+                        or not isinstance(ports, list)
+                        or not ports
+                        or any(not bounded_network_port(port) for port in ports)
+                    ):
+                        failures.append(
+                            f"NetworkPolicy {namespace}/{policy_name} contains an unbounded {direction} allow rule"
+                        )
         if len(defaults) != 1:
             failures.append(f"namespace {namespace} must have one exact default-deny NetworkPolicy")
+
+    if observed_workload_namespaces != platform_namespaces:
+        failures.append("Platform workload Namespace closure contains a namespace without a component workload")
 
     if failures:
         raise ValueError("\n".join(failures))
     summary = {
         "schema_version": 1,
         "deployment_config_digest": expected_config_digest,
+        "network_policies": sorted(
+            policy_summary, key=lambda item: (item["namespace"], item["name"])
+        ),
         "roles": summary_roles,
     }
     canonical = json.dumps(summary, sort_keys=True, separators=(",", ":")).encode()
@@ -330,7 +485,7 @@ def validate_workloads(candidate, capacity, deployments, daemonsets, policies, p
 
 def main():
     parser = argparse.ArgumentParser()
-    for argument in ("candidate", "capacity", "deployments", "daemonsets", "networkpolicies", "pdbs", "hpas"):
+    for argument in ("candidate", "capacity", "namespaces", "service_accounts", "deployments", "daemonsets", "networkpolicies", "pdbs", "hpas"):
         parser.add_argument(f"--{argument.replace('_', '-')}", required=True)
     parser.add_argument("--output")
     arguments = parser.parse_args()
@@ -338,6 +493,8 @@ def main():
         summary, digest = validate_workloads(
             load(arguments.candidate),
             load(arguments.capacity),
+            load(arguments.namespaces),
+            load(arguments.service_accounts),
             load(arguments.deployments),
             load(arguments.daemonsets),
             load(arguments.networkpolicies),

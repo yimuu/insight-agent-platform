@@ -25,7 +25,7 @@
       "x-platform-max-bytes": 128
     },
     "required_gates": {
-      "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure.",
+      "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure and at least 86,400 seconds of sustained soak.",
       "items": {
         "enum": [
           "artifact_role_isolation",

@@ -49,6 +49,14 @@ cp "$capacity" "$output/capacity-profile.json"
   >"$output/raw/batchsandbox-crd.json"
 "$kubectl_bin" get services --all-namespaces -o json >"$output/raw/services.json"
 "$kubectl_bin" get ingresses --all-namespaces -o json >"$output/raw/ingresses.json"
+"$kubectl_bin" get serviceaccounts --all-namespaces -o json >"$output/raw/serviceaccounts.json"
+"$kubectl_bin" get roles --all-namespaces -o json >"$output/raw/roles.json"
+"$kubectl_bin" get rolebindings --all-namespaces -o json >"$output/raw/rolebindings.json"
+"$kubectl_bin" get clusterroles -o json >"$output/raw/clusterroles.json"
+"$kubectl_bin" get clusterrolebindings -o json >"$output/raw/clusterrolebindings.json"
+"$kubectl_bin" get validatingadmissionpolicies -o json >"$output/raw/validatingadmissionpolicies.json"
+"$kubectl_bin" get validatingadmissionpolicybindings -o json >"$output/raw/validatingadmissionpolicybindings.json"
+"$kubectl_bin" get namespaces -o json >"$output/raw/namespaces.json"
 "$kubectl_bin" get deployments --all-namespaces -o json >"$output/raw/deployments.json"
 "$kubectl_bin" get daemonsets --all-namespaces -o json >"$output/raw/daemonsets.json"
 "$kubectl_bin" get networkpolicies --all-namespaces -o json >"$output/raw/networkpolicies.json"
@@ -68,11 +76,20 @@ python3 "$root/scripts/check-platform-production-topology.py" \
   --batchsandbox-crd "$output/raw/batchsandbox-crd.json" \
   --services "$output/raw/services.json" \
   --ingresses "$output/raw/ingresses.json" \
+  --service-accounts "$output/raw/serviceaccounts.json" \
+  --roles "$output/raw/roles.json" \
+  --role-bindings "$output/raw/rolebindings.json" \
+  --cluster-roles "$output/raw/clusterroles.json" \
+  --cluster-role-bindings "$output/raw/clusterrolebindings.json" \
+  --validating-admission-policies "$output/raw/validatingadmissionpolicies.json" \
+  --validating-admission-policy-bindings "$output/raw/validatingadmissionpolicybindings.json" \
   --output "$output/topology.json"
 
 python3 "$root/scripts/check-platform-production-workloads.py" \
   --candidate "$candidate" \
   --capacity "$capacity" \
+  --namespaces "$output/raw/namespaces.json" \
+  --service-accounts "$output/raw/serviceaccounts.json" \
   --deployments "$output/raw/deployments.json" \
   --daemonsets "$output/raw/daemonsets.json" \
   --networkpolicies "$output/raw/networkpolicies.json" \

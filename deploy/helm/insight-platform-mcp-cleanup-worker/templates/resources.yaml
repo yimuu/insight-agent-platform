@@ -34,6 +34,9 @@ spec:
       labels:
         {{- include "insight-platform-mcp-cleanup-worker.labels" . | nindent 8 }}
         insight.platform/workload-role: mcp-cleanup-worker
+        insight.platform/component-role: mcp_host
+      annotations:
+        insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
     spec:
       serviceAccountName: {{ include "insight-platform-mcp-cleanup-worker.name" . }}
       automountServiceAccountToken: false
@@ -104,6 +107,23 @@ spec:
   selector:
     matchLabels:
       {{- include "insight-platform-mcp-cleanup-worker.labels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "insight-platform-mcp-cleanup-worker.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "insight-platform-mcp-cleanup-worker.name" . }}}
+  minReplicas: {{ int .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ int .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ int .Values.autoscaling.targetCPUUtilizationPercentage }}}
 {{- end }}
 {{- if .Values.monitoring.enabled }}
 ---

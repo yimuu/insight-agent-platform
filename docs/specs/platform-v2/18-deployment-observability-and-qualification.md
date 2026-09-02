@@ -2,10 +2,19 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 1 |
-| 日期 | 2026-09-01 |
+| 状态 | Accepted / CR-217 qualification fail-closed revision |
+| 日期 | 2026-09-02 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-217 impact：production资格至少执行86,400秒持续soak，manifest起止时间必须覆盖profile声明；每个gate至少有一个
+> 不被其他gate复用的专属content digest，artifact list为无别名、无悬空项的exact closure。该结构合同只证明声明闭包，
+> 仍必须由受保护CI producer、artifact store和签名/GitOps链证明真实执行，手写JSON不能成为production-ready证据。
+> L4 topology绑定live BatchSandbox CRD规范化spec digest，workload门禁关闭所有标记Platform namespace中的Deployment/DaemonSet，
+> 采集并核验Sandbox ServiceAccount、Role/Binding、ClusterRole/Binding和ValidatingAdmissionPolicy/Binding，并把完整NetworkPolicy
+> inventory纳入摘要且拒绝namespace-wide或unbounded allow规则。callback/cleanup归入既有`mcp_host`，
+> dataset pool归入既有`context_worker`。不可变release只能在candidate资格通过、final ReleaseBundle纳入资格evidence并重签后创建；
+> 这些修复本身不改变L4～L6 Not run状态。
 
 > CR-216 revision 1 impact：首版 Sandbox deployment/qualification clean-cut 为 Sandbox Dispatcher、OpenSandbox Kubernetes Server、
 > BatchSandbox Controller 与 containerd/runc；不修改 OpenSandbox 源码。删除 WASI/gVisor/attestor/Docker-provider target topology；增加
@@ -289,9 +298,14 @@ orphan reconciliation和新环境workload identity。RPO/RTO由CapacityProfile�
 | L5 Capacity | load、saturation、soak、SLO/error budget | approved CapacityProfile run |
 | L6 Release | supply chain、upgrade/rollback、restore | signed CI artifacts + GitOps evidence |
 
-一个test可以产生多个观测，但不在每个文档/层级复制为独立proof。fixture manifest只记录输入profile、
-code/image/schema digest、seed、topology、start/end time、tool version、result和artifact links，由CI artifact store保留，
-不写入运行时GateResult表。
+一个test可以产生多个观测，但不在每个文档/层级复制为独立proof。共享原始观测可以被多个gate消费；每个gate还必须至少
+生成一个只绑定该gate的专属summary artifact digest，防止一个任意文件被声明为全部L1～L6证据。artifact links按name规范排序，
+content digest不得别名，且每一项都必须被result引用。fixture manifest只记录输入profile、code/image/schema digest、seed、topology、
+start/end time、tool version、result和artifact links，由CI artifact store保留，不写入运行时GateResult表。manifest validator只验证
+结构、digest与时间闭包；受保护producer身份、真实执行日志、签名和GitOps rollout history仍由CI/release authority验证。
+
+production profile的`sustained_soak`固定要求至少86,400秒；Evidence manifest的`completed_at - started_at`不得小于
+`minimum_soak_seconds`。缩短profile数值或只修改时间戳均不能替代由受保护producer保存的连续运行证据。
 
 CR-201将“spec qualification”和“environment qualification”分开：L1～L3、机器合同、部署静态闭包及candidate producer属于仓库spec证据；
 需要目标集群或外部服务的L4～L6属于environment release evidence。后者未执行不阻塞spec关闭，但任何production发布声明仍必须明确列出
@@ -312,6 +326,13 @@ CR-216 Sandbox target矩阵：
   socket/device/Platform credential，wrong Dispatcher API key/source 零 create，OpenSandbox/Controller/runner 无 Platform DB/NATS/业务 RPC；
 - L4～L6：强隔离、OpenSandbox HA、production capacity/chaos/soak/restore/promotion 全部 Not run。不得用 Docker provider/本机流程、静态 manifest 或
   既有WASI/gVisor历史fixture冒充通过。
+
+L4 rollout inventory必须以带`insight.platform/workload-namespace`标签的Namespace为边界：其中每个Deployment/DaemonSet都必须映射
+closed ComponentRole并进入Candidate/Capacity、安全、PDB/HPA与identity校验。Sandbox ServiceAccount及其Role/ClusterRole binding必须
+与reviewed最小权限逐项相等，三项fail-closed ValidatingAdmissionPolicy必须各有`Deny` binding。BatchSandbox CRD证据必须从live完整spec规范化计算digest，
+不得回填source文件常量；NetworkPolicy inventory完整进入content-addressed summary，除唯一双向default-deny外不得出现选择全namespace
+或缺少bounded peer/port的allow规则。`mcp-callback-api`与`mcp-cleanup-worker`是`mcp_host`的隔离pool，Context dataset pool是
+`context_worker`，不得为物理pool另造ComponentRole。
 
 下文既有跨领域矩阵继续适用；其中任何WASI、gVisor、runsc、Launcher、attestor或旧Sandbox Controller/Executor记录只说明
 CR-216之前的历史实现证据，不再是目标Sandbox验收项，也不能抵扣上述OpenSandbox门禁。

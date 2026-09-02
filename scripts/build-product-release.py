@@ -27,6 +27,7 @@ REQUIRED_METADATA = (
     "runtime.spdx.json",
     "sandbox-runner.spdx.json",
 )
+DEVELOPMENT_QUALIFICATION_METADATA = "development-profile-performance.json"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -109,6 +110,7 @@ def main() -> None:
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--images", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--include-development-qualification", action="store_true")
     args = parser.parse_args()
     if not VERSION.fullmatch(args.version):
         raise ValueError("version must be normalized major.minor.patch")
@@ -133,6 +135,9 @@ def main() -> None:
     for target in TARGETS:
         archive, binary = validate_cli_archive(root, args.version, target)
         cli.append({"target": target, "archive": archive, "binary": binary})
+    metadata_names = list(REQUIRED_METADATA)
+    if args.include_development_qualification:
+        metadata_names.append(DEVELOPMENT_QUALIFICATION_METADATA)
     bundle = {
         "schema_version": 1,
         "version": args.version,
@@ -144,7 +149,7 @@ def main() -> None:
         "console": artifact(root, f"console-{args.version}.tar.gz"),
         "cli": cli,
         "images": [validate_image(name, images[name]) for name in sorted(images)],
-        "metadata": [artifact(root, name) for name in REQUIRED_METADATA],
+        "metadata": [artifact(root, name) for name in metadata_names],
     }
     encoded = canonical(bundle)
     args.output.write_bytes(encoded)

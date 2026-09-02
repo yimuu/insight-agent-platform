@@ -3,6 +3,7 @@ set -euo pipefail
 
 python3 - <<'PY'
 import pathlib
+import re
 import subprocess
 
 root = pathlib.Path.cwd()
@@ -33,7 +34,11 @@ except (FileNotFoundError, subprocess.CalledProcessError) as error:
     failures.append(f"cleanup Helm contract did not render: {error}")
     rendered = ""
 
-for required in ("kind: Deployment", "kind: PodDisruptionBudget", "kind: ServiceMonitor", "name: default-deny", "insight.platform/workload-role: mcp-cleanup-worker", "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST", "PLATFORM_MCP_CLEANUP_DATABASE_URL", "PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH", "app.kubernetes.io/component: egress-broker", "path: /readyz", "path: /metrics", "name: observability"):
+if len(re.findall(r"^kind: Deployment$", rendered, flags=re.MULTILINE)) != 1:
+    failures.append("cleanup chart must render exactly one Deployment")
+if len(re.findall(r"^kind: HorizontalPodAutoscaler$", rendered, flags=re.MULTILINE)) != 1:
+    failures.append("cleanup chart must render exactly one HorizontalPodAutoscaler")
+for required in ("kind: PodDisruptionBudget", "kind: ServiceMonitor", "name: default-deny", "insight.platform/workload-role: mcp-cleanup-worker", "insight.platform/component-role: mcp_host", "insight.platform/deployment-config-digest:", "ephemeral-storage:", "PLATFORM_MCP_CLEANUP_CONFIG_DIGEST", "PLATFORM_MCP_CLEANUP_DATABASE_URL", "PLATFORM_MCP_CLEANUP_EGRESS_CA_PATH", "app.kubernetes.io/component: egress-broker", "path: /readyz", "path: /metrics", "name: observability"):
     if required not in rendered:
         failures.append(f"cleanup render is missing {required}")
 for forbidden in ("AWS_ACCESS_KEY", "AWS_SECRET", "SECRET_MANAGER", "KMS_ENDPOINT"):

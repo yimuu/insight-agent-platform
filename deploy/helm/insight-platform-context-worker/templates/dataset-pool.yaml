@@ -28,7 +28,7 @@ spec:
       labels:
         {{- include "insight-platform-context-worker.datasetLabels" . | nindent 8 }}
         insight.platform/workload-role: context-dataset-worker
-        insight.platform/component-role: context_dataset_worker
+        insight.platform/component-role: context_worker
       annotations:
         insight.platform/deployment-config-digest: {{ .Values.candidate.deploymentConfigDigest | quote }}
     spec:

@@ -4,6 +4,7 @@ kind: Namespace
 metadata:
   name: {{ .Values.namespace }}
   labels:
+    insight.platform/workload-namespace: artifact
     insight.platform/artifact-namespace: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest

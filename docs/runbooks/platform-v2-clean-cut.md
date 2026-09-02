@@ -26,11 +26,13 @@ promotion请求必须只引用不可变输入：
 
 ## 2. 预检
 
-1. 在全新的evidence root运行 `scripts/preflight-platform-production-qualification.sh`，确认多节点、Established BatchSandbox CRD、
-   exact OpenSandbox/Controller/execd/runner digest、containerd-runc、Direct/Disabled NetworkPolicy、internal-only Service和版本偏差均合格。
+1. 在全新的evidence root运行 `scripts/preflight-platform-production-qualification.sh`，确认多节点、Established且规范化digest一致的
+   BatchSandbox CRD、exact OpenSandbox/Controller/execd/runner digest、containerd-runc、closed workload namespace、
+   Direct/Disabled NetworkPolicy、Sandbox SA/RBAC/Admission binding、internal-only Service和版本偏差均合格。
 2. 验证镜像签名、SBOM和provenance的subject均为CandidateManifest中的exact digest，builder/source/material闭包符合组织policy。
-3. 运行 `platform-qualification validate-release-evidence`并传入只读artifact root，确认26个required gate恰有一个通过结果；命令必须逐一读取
-   `artifact_links[].name`对应的普通文件并重算长度和SHA-256，禁止只验证manifest内自洽引用或接受符号链接。
+3. 运行 `platform-qualification validate-release-evidence`并传入只读artifact root，确认26个required gate各有一个结果且每个gate至少
+   绑定一个专属digest；命令必须逐一读取`artifact_links[].name`对应的普通文件并重算长度和SHA-256，拒绝短于profile的soak窗口、
+   digest别名、未引用项与符号链接。该命令只确认结构和声明闭包，还必须独立验证受保护CI producer及Evidence签名identity。
 4. 验证生产数据库部署状态。首次clean cut只允许经确认未发布的candidate schema使用唯一baseline；baseline一旦发布，
    后续只允许immutable forward migration，禁止重放或替换`0001`。
 5. 确认backup/PITR、Artifact versioning、KMS/Secret恢复、流量切换和上一闭包回滚路径在当前窗口可用。

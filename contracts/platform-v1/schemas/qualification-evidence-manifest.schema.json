@@ -2,7 +2,7 @@
   "$id": "urn:insight:platform:v1:qualification-evidence-manifest",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates cannot be represented as success.",
+  "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates, insufficient elapsed soak time, cross-gate-only artifacts, aliases and unreferenced artifacts are rejected by the Rust owner validation.",
   "properties": {
     "artifact_links": {
       "items": {

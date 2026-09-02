@@ -3566,7 +3566,7 @@ fn qualification_profile_schema() -> Value {
                     "type": "string",
                     "enum": crate::QualificationGate::ALL.iter().map(|gate| gate.as_str()).collect::<Vec<_>>()
                 },
-                "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure."
+                "description": "Canonical ascending gate set; production Rust validation requires the complete L1-L6 closure and at least 86,400 seconds of sustained soak."
             },
             "minimum_soak_seconds": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
             "requires_opensandbox_kubernetes": {"type": "boolean"},
@@ -3601,7 +3601,7 @@ fn qualification_evidence_manifest_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:insight:platform:v1:qualification-evidence-manifest",
         "title": "QualificationEvidenceManifest",
-        "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates cannot be represented as success.",
+        "description": "Content-addressed result closure for one exact candidate, qualification profile, topology and tool set. Missing gates, insufficient elapsed soak time, cross-gate-only artifacts, aliases and unreferenced artifacts are rejected by the Rust owner validation.",
         "type": "object",
         "additionalProperties": false,
         "required": [

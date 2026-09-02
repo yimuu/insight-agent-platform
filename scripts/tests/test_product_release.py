@@ -66,12 +66,17 @@ class ProductReleaseTests(unittest.TestCase):
         image_path.write_text(json.dumps(images), encoding="utf-8")
         return image_path
 
-    def run_generator(self, root: pathlib.Path, images: pathlib.Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([
+    def run_generator(
+        self, root: pathlib.Path, images: pathlib.Path, *, include_qualification: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        arguments = [
             "python3", str(SCRIPT), "--version", "1.2.3", "--git-commit", "a" * 40,
             "--created-at", "2026-09-01T00:00:00.000000Z", "--artifacts", str(root),
             "--images", str(images), "--output", str(root / "release-bundle.json"),
-        ], cwd=ROOT, capture_output=True, text=True)
+        ]
+        if include_qualification:
+            arguments.append("--include-development-qualification")
+        return subprocess.run(arguments, cwd=ROOT, capture_output=True, text=True)
 
     def test_builds_canonical_closed_bundle_and_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -84,6 +89,21 @@ class ProductReleaseTests(unittest.TestCase):
             self.assertEqual(list(TARGETS), [item["target"] for item in bundle["cli"]])
             self.assertEqual(["console", "runtime", "sandbox_runner"], [item["name"] for item in bundle["images"]])
             self.assertIn("release-bundle.json", (root / "checksums.txt").read_text())
+
+    def test_final_bundle_binds_development_qualification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            images = self.fixture(root)
+            evidence = root / "development-profile-performance.json"
+            evidence.write_text('{"schema_version":1}\n', encoding="utf-8")
+            result = self.run_generator(root, images, include_qualification=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            metadata = {
+                item["path"]: item for item in json.loads((root / "release-bundle.json").read_bytes())["metadata"]
+            }
+            self.assertEqual(
+                digest(evidence.read_text()), metadata["development-profile-performance.json"]["sha256"]
+            )
 
     def test_missing_arch_partial_image_and_archive_extra_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
