@@ -52,7 +52,7 @@ datasetPool:
     existingSecret: insight-platform-context-dataset-worker-database
     urlKey: database-url
   artifactDataWorker:
-    namespace: platform-artifact
+    namespace: platform-artifacts
     podSelector: {app.kubernetes.io/component: artifact-data-worker}
     port: 9443
   artifactTls:

@@ -62,9 +62,11 @@ networkPolicy:
   monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
   monitoringPodSelector: {app.kubernetes.io/name: prometheus}
   publicGatewayNamespaceSelector: {insight.platform/public-gateway-namespace: "true"}
-  publicGatewayPodSelector: {insight.platform/workload-role: public-gateway}
-  schedulerNamespaceSelector: {insight.platform/workload-namespace: scheduler}
-  schedulerPodSelector: {insight.platform/workload-role: scheduler}
+  publicGatewayPodSelector: {insight.platform/workload-role: runtime-api}
+  orchestrationNamespaceSelector: {insight.platform/workload-namespace: orchestration-worker}
+  orchestrationPodSelector: {insight.platform/workload-role: orchestration-worker}
+  contextDatasetNamespaceSelector: {insight.platform/workload-namespace: context-worker}
+  contextDatasetPodSelector: {insight.platform/workload-role: context-dataset-worker}
   mcpDiscoveryNamespaceSelector: {insight.platform/workload-namespace: mcp-host}
   mcpDiscoveryPodSelector: {insight.platform/workload-role: mcp-discovery-worker}
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}

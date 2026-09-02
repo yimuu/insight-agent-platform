@@ -27,9 +27,9 @@ artifactTls:
 
 networkPolicy:
   enabled: true
-  artifactNamespace: platform-artifact
-  artifactPodSelector: {app.kubernetes.io/component: data-worker}
-  artifactPort: 8443
+  artifactNamespace: platform-artifacts
+  artifactPodSelector: {app.kubernetes.io/component: artifact-data-worker}
+  artifactPort: 9443
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
   dnsPodSelector: {k8s-app: kube-dns}
   postgresCidrs: [10.10.0.0/24]

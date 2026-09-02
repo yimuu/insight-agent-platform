@@ -99,7 +99,7 @@ discoveryPool:
   postgresCidrs: [10.10.0.0/24]
   artifactNamespace: platform-artifacts
   artifactPodSelector: {app.kubernetes.io/component: artifact-data-worker}
-  artifactPort: 8443
+  artifactPort: 9443
 subscriptionPool:
   enabled: true
   replicas: 2

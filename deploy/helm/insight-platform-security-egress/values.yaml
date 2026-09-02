@@ -73,8 +73,10 @@ networkPolicy:
   workerCallers:
     - namespaceSelector: {insight.platform/workload-namespace: model-worker}
       podSelector: {insight.platform/workload-role: model-worker}
-    - namespaceSelector: {insight.platform/workload-namespace: capability-worker}
-      podSelector: {insight.platform/workload-role: capability-worker}
+    - namespaceSelector: {insight.platform/workload-namespace: capability-remote-worker}
+      podSelector: {insight.platform/workload-role: capability-remote-worker}
+    - namespaceSelector: {insight.platform/workload-namespace: remote-context-worker}
+      podSelector: {insight.platform/workload-role: context-worker}
     - namespaceSelector: {insight.platform/workload-namespace: mcp-host}
       podSelector: {insight.platform/workload-role: mcp-host}
     - namespaceSelector: {insight.platform/workload-namespace: mcp-host}
