@@ -140,7 +140,34 @@ worker_b=$(printf '%s\n' "$worker_names" | sed -n '2p')
 "$kubectl_bin" label node "$worker_a" topology.kubernetes.io/zone=local-a --overwrite
 "$kubectl_bin" label node "$worker_b" topology.kubernetes.io/zone=local-b --overwrite
 
-"$kind_bin" load docker-image --name "$cluster_name" \
+docker_os=$(docker version --format '{{.Server.Os}}')
+docker_arch=$(docker version --format '{{.Server.Arch}}')
+docker_platform="$docker_os/$docker_arch"
+case "$docker_platform" in
+  linux/amd64 | linux/arm64) ;;
+  *)
+    printf 'unsupported Kind image platform: %s\n' "$docker_platform" >&2
+    exit 1
+    ;;
+esac
+
+# Docker 29/OrbStack exports a partial multi-architecture OCI index when Kind calls `docker save`
+# without a platform. Import one complete host-platform archive per image instead. This also keeps
+# every node offline during workload startup, so registry availability cannot change the result.
+image_archive="$output/kind-image.tar"
+load_image_into_kind() {
+  local image=$1
+  local node
+  printf 'loading %s for %s\n' "$image" "$docker_platform"
+  docker image save --platform "$docker_platform" "$image" -o "$image_archive"
+  for node in $("$kind_bin" get nodes --name "$cluster_name"); do
+    docker exec --privileged -i "$node" ctr --namespace=k8s.io images import \
+      --digests --snapshotter=overlayfs - <"$image_archive" >/dev/null
+  done
+  rm -f "$image_archive"
+}
+
+for image in \
   "$platform_image" "$sandbox_package_image" \
   insight-kind/postgres:57c72fd2a128 insight-kind/nats:b83efabe3e7d \
   insight-kind/localstack:b279c01f4cfb \
@@ -148,7 +175,9 @@ worker_b=$(printf '%s\n' "$worker_names" | sed -n '2p')
   opensandbox/controller:insight-local-a9a5f73c \
   opensandbox/execd:insight-local-0d8f44cf \
   registry.k8s.io/metrics-server/metrics-server:v0.8.1 \
-  busybox:1.37.0 curlimages/curl:8.17.0
+  busybox:1.37.0 curlimages/curl:8.17.0; do
+  load_image_into_kind "$image"
+done
 
 "$kubectl_bin" apply --server-side -f "$download_cache/servicemonitors-v0.93.0.yaml"
 "$kubectl_bin" apply --server-side -f "$download_cache/prometheusrules-v0.93.0.yaml"
