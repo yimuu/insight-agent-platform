@@ -8,6 +8,9 @@ workload、NetworkPolicy、mTLS、RBAC、准入、配置/镜像漂移、Pod/Node
 真实云 Provider、gVisor、容量 soak、备份恢复或 GitOps 供应链。因此脚本输出固定标记 `production: false`，不能将
 结果用于把正式 L4～L6 状态改为 Passed。
 
+LocalStack 路径在 live Deployment 上使用固定的 `test` AWS 凭据，因为本地 Kind 没有生产 workload identity。
+该覆盖只由引导脚本在 Helm 创建资源后注入，不进入生产 chart，也不代表生产凭据或身份配置。
+
 ## 前置条件
 
 - Docker、Kind、Helm、Ruby、Python 3、`jq`、OpenSSL 和与 server 相差不超过一个 minor 的 `kubectl`；

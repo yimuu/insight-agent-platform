@@ -515,13 +515,28 @@ install_chart() {
   local namespace=$2
   local chart=$3
   local values=$4
+  local localstack_credentials=${5:-false}
+  local deployment_names deployment
   "$helm_bin" upgrade --install "$release" "$root/deploy/helm/$chart" \
     --namespace "$namespace" --create-namespace --values "$output/generated/helm-values/$values.yaml" \
-    --wait --timeout 5m
+    --timeout 5m
+  if [[ "$localstack_credentials" == true ]]; then
+    "$kubectl_bin" -n "$namespace" set env deployment \
+      -l "app.kubernetes.io/instance=$release" \
+      AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+      AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 >/dev/null
+  fi
+  deployment_names=$(
+    "$kubectl_bin" -n "$namespace" get deployment \
+      -l "app.kubernetes.io/instance=$release" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+  )
+  for deployment in $deployment_names; do
+    "$kubectl_bin" -n "$namespace" rollout status "deployment/$deployment" --timeout=5m
+  done
 }
 
-install_chart l4-security platform-egress insight-platform-security-egress security
-install_chart l4-artifact platform-artifacts insight-platform-artifact artifact
+install_chart l4-security platform-egress insight-platform-security-egress security true
+install_chart l4-artifact platform-artifacts insight-platform-artifact artifact true
 install_chart l4-mcp platform-mcp-host insight-platform-mcp-host mcp
 install_chart l4-gateway platform-public insight-platform-gateway gateway
 install_chart l4-context-native platform-context-worker insight-platform-context-worker context
