@@ -520,16 +520,17 @@ install_chart() {
   "$helm_bin" upgrade --install "$release" "$root/deploy/helm/$chart" \
     --namespace "$namespace" --create-namespace --values "$output/generated/helm-values/$values.yaml" \
     --timeout 5m
-  if [[ "$localstack_credentials" == true ]]; then
-    "$kubectl_bin" -n "$namespace" set env deployment \
-      -l "app.kubernetes.io/instance=$release" \
-      AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
-      AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 >/dev/null
-  fi
   deployment_names=$(
     "$kubectl_bin" -n "$namespace" get deployment \
-      -l "app.kubernetes.io/instance=$release" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
   )
+  if [[ "$localstack_credentials" == true ]]; then
+    for deployment in $deployment_names; do
+      "$kubectl_bin" -n "$namespace" set env "deployment/$deployment" \
+        AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
+        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 >/dev/null
+    done
+  fi
   for deployment in $deployment_names; do
     "$kubectl_bin" -n "$namespace" rollout status "deployment/$deployment" --timeout=5m
   done

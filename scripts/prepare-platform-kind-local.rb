@@ -327,7 +327,6 @@ values = {
   ),
   "gateway" => common.merge(
     "ingress" => {"enabled" => false},
-    "monitoring" => {"enabled" => false},
     "networkPolicy" => {"postgresCidrs" => postgres},
     "runEventCursorKey" => {
       "digest" => "sha256:#{Digest::SHA256.file(File.join(options[:seed_runtime], 'run-event-cursor-key')).hexdigest}"
