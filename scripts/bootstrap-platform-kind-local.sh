@@ -179,6 +179,38 @@ for image in \
   load_image_into_kind "$image"
 done
 
+# `ctr images import` retains the tagged reference, while kubelet looks up the exact
+# repository@digest name before deciding whether a pull is needed. Bind both names to the same
+# imported descriptor so every digest-pinned workload starts without registry access.
+alias_kind_image() {
+  local tagged_reference=$1
+  local digest_reference=$2
+  local node
+  for node in $("$kind_bin" get nodes --name "$cluster_name"); do
+    docker exec "$node" ctr --namespace=k8s.io images tag \
+      "$tagged_reference" "$digest_reference" >/dev/null
+  done
+}
+alias_kind_image \
+  "docker.io/library/$platform_image" "docker.io/library/insight-agent-platform@$platform_digest"
+alias_kind_image \
+  "docker.io/library/$sandbox_package_image" "docker.io/library/insight-agent-platform@$sandbox_package_digest"
+alias_kind_image \
+  docker.io/opensandbox/server:insight-local-ae8dfbb2 \
+  docker.io/opensandbox/server@sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778
+alias_kind_image \
+  docker.io/opensandbox/controller:insight-local-a9a5f73c \
+  docker.io/opensandbox/controller@sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a
+alias_kind_image \
+  docker.io/opensandbox/execd:insight-local-0d8f44cf \
+  docker.io/opensandbox/execd@sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684
+alias_kind_image \
+  docker.io/library/busybox:1.37.0 \
+  docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+alias_kind_image \
+  docker.io/curlimages/curl:8.17.0 \
+  docker.io/curlimages/curl@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+
 "$kubectl_bin" apply --server-side -f "$download_cache/servicemonitors-v0.93.0.yaml"
 "$kubectl_bin" apply --server-side -f "$download_cache/prometheusrules-v0.93.0.yaml"
 "$kubectl_bin" apply -f "$download_cache/metrics-server-v0.8.1.yaml"
