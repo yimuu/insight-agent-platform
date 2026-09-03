@@ -1,0 +1,167 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-deps
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: platform-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: postgres
+          image: insight-kind/postgres:57c72fd2a128
+          imagePullPolicy: Never
+          args: ["-c", "max_connections=400"]
+          env:
+            - {name: POSTGRES_USER, value: insight}
+            - {name: POSTGRES_PASSWORD, value: insight-local-only}
+            - {name: POSTGRES_DB, value: insight}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "insight", "-d", "insight"]
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: platform-deps
+spec:
+  selector: {app: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: platform-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: localstack}
+  template:
+    metadata:
+      labels: {app: localstack}
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: localstack
+          image: insight-kind/localstack:b279c01f4cfb
+          imagePullPolicy: Never
+          env:
+            - {name: AWS_DEFAULT_REGION, value: us-east-1}
+            - {name: EAGER_SERVICE_LOADING, value: "1"}
+            - {name: SERVICES, value: "s3,kms,secretsmanager"}
+          ports:
+            - {name: edge, containerPort: 4566}
+          readinessProbe:
+            httpGet: {path: /_localstack/health, port: edge}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: platform-deps
+spec:
+  selector: {app: localstack}
+  ports:
+    - {name: edge, port: 4566, targetPort: edge}
+    - {name: provider, port: 443, targetPort: edge}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: platform-deps
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: nats}
+  template:
+    metadata:
+      labels: {app: nats}
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      containers:
+        - name: nats
+          image: insight-kind/nats:b83efabe3e7d
+          imagePullPolicy: Never
+          args:
+            - --jetstream
+            - --store_dir=/data
+            - --tls
+            - --tlscert=/etc/nats/tls/server.pem
+            - --tlskey=/etc/nats/tls/server-key.pem
+            - --tlscacert=/etc/nats/tls/ca.pem
+            - --tlsverify
+          ports:
+            - {name: client, containerPort: 4222}
+          readinessProbe:
+            tcpSocket: {port: client}
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/nats/tls, readOnly: true}
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: tls
+          secret: {secretName: nats-tls, defaultMode: 288}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: platform-deps
+spec:
+  selector: {app: nats}
+  ports:
+    - {name: client, port: 4222, targetPort: client}

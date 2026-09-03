@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: insight-kind-netpol-probe
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: insight-kind-netpol-probe
+  labels: {app: netpol-server}
+spec:
+  nodeSelector: {topology.kubernetes.io/zone: local-b}
+  automountServiceAccountToken: false
+  containers:
+    - name: server
+      image: docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "mkdir -p /tmp/www && printf ok >/tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: insight-kind-netpol-probe
+spec:
+  selector: {app: netpol-server}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: insight-kind-netpol-probe
+  labels: {access: allowed}
+spec:
+  nodeSelector: {topology.kubernetes.io/zone: local-a}
+  automountServiceAccountToken: false
+  containers:
+    - name: client
+      image: docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}

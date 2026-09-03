@@ -1,0 +1,40 @@
+# Kind's NetworkPolicy implementation evaluates this Service path after DNAT. These additional
+# policies admit only the LocalStack Pod and its real targetPort; production charts remain bound
+# to the reviewed HTTPS provider port 443.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kind-local-localstack-target-port
+  namespace: platform-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: insight-platform-security-egress
+      app.kubernetes.io/instance: l4-security
+      app.kubernetes.io/component: egress-broker
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: platform-deps}
+          podSelector:
+            matchLabels: {app: localstack}
+      ports: [{protocol: TCP, port: 4566}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kind-local-localstack-target-port
+  namespace: platform-artifacts
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: insight-platform-artifact
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: platform-deps}
+          podSelector:
+            matchLabels: {app: localstack}
+      ports: [{protocol: TCP, port: 4566}]

@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-labelled-client
+  namespace: insight-kind-netpol-probe
+spec:
+  podSelector:
+    matchLabels: {app: netpol-server}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {access: allowed}
+      ports: [{protocol: TCP, port: 8080}]

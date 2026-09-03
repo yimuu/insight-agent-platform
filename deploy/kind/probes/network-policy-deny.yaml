@@ -1,0 +1,9 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-server-ingress
+  namespace: insight-kind-netpol-probe
+spec:
+  podSelector:
+    matchLabels: {app: netpol-server}
+  policyTypes: [Ingress]
