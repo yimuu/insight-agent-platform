@@ -260,23 +260,23 @@ egress_service=l4-security-insight-platform-security-egress-egress
 egress_ip=$("$kubectl_bin" -n platform-egress get service "$egress_service" -o jsonpath='{.spec.clusterIP}')
 set +e
 "$kubectl_bin" -n platform-model-worker exec kind-local-mtls-probe -- \
-  curl --silent --show-error --max-time 5 \
-    --cacert /etc/insight/client-tls/ca.pem \
+  curl --silent --show-error --max-time 5 --insecure \
     --resolve "localhost:8443:$egress_ip" https://localhost:8443/ \
     -o /tmp/no-client-cert >"$output/faults/mtls-no-client-cert.stdout" \
     2>"$output/faults/mtls-no-client-cert.stderr"
 without_certificate=$?
 set -e
 [[ "$without_certificate" -ne 0 ]] || fail mtls "Egress accepted a client without a certificate"
-"$kubectl_bin" -n platform-model-worker exec kind-local-mtls-probe -- \
-  curl --silent --show-error --max-time 5 \
-    --cacert /etc/insight/client-tls/ca.pem \
+if ! "$kubectl_bin" -n platform-model-worker exec kind-local-mtls-probe -- \
+  curl --silent --show-error --max-time 5 --insecure \
     --cert /etc/insight/client-tls/client.pem \
     --key /etc/insight/client-tls/client-key.pem \
     --resolve "localhost:8443:$egress_ip" https://localhost:8443/ \
     -o /tmp/with-client-cert >"$output/faults/mtls-with-client-cert.stdout" \
-    2>"$output/faults/mtls-with-client-cert.stderr"
-pass mtls "missing client certificate rejected; approved identity completed TLS"
+    2>"$output/faults/mtls-with-client-cert.stderr"; then
+  fail mtls "approved client certificate did not complete TLS"
+fi
+pass mtls "missing client certificate rejected; approved client certificate completed TLS"
 "$kubectl_bin" delete -f "$root/deploy/kind/probes/mtls.yaml" --wait=true >/dev/null
 
 registry_namespace=platform-registry-validation
