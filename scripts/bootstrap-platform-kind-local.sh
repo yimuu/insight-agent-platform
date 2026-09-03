@@ -315,7 +315,7 @@ readiness_secret_arn=$(
   awslocal s3api create-bucket --bucket insight-platform-artifacts >/dev/null
 
 "$kubectl_bin" -n kube-system get configmap coredns -o json | jq \
-  '.data.Corefile |= sub("    forward \\. /etc/resolv.conf"; "    rewrite name regex ^localhost\\\\.localstack\\\\.cloud(\\\\..*)?$ localstack.platform-deps.svc.cluster.local answer auto\n    forward . /etc/resolv.conf")' | \
+  '.data.Corefile |= sub("    forward \\. /etc/resolv.conf"; "    rewrite name regex ^localhost\\.localstack\\.cloud(\\..*)?$ localstack.platform-deps.svc.cluster.local answer auto\n    forward . /etc/resolv.conf")' | \
   "$kubectl_bin" apply -f - >/dev/null
 "$kubectl_bin" -n kube-system rollout restart deployment/coredns >/dev/null
 "$kubectl_bin" -n kube-system rollout status deployment/coredns --timeout=180s
