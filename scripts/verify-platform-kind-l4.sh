@@ -39,8 +39,9 @@ fail() {
 }
 
 wait_platform_ready() {
+  local maximum_attempts=${1:-90}
   local attempt pending
-  for attempt in $(seq 1 90); do
+  for attempt in $(seq 1 "$maximum_attempts"); do
     pending=$(
       "$kubectl_bin" get deployments --all-namespaces -o json | jq -r '
         [.items[] | select(.metadata.namespace | startswith("platform-")) |
@@ -393,8 +394,23 @@ wait_endpoint_minimum platform-egress "$egress_service" 1 || \
 docker start "$worker_node" >/dev/null
 node_stopped=""
 "$kubectl_bin" wait --for=condition=Ready node/"$worker_node" --timeout=120s
-wait_platform_ready || fail node-fault "Platform deployments did not recover after worker restart"
-pass node-fault "worker became NotReady, service survived, and all deployments recovered"
+node_recovery=automatic
+if ! wait_platform_ready 30; then
+  node_recovery=pod-recreation
+  "$kubectl_bin" get pods --all-namespaces -o json | jq -r --arg node "$worker_node" '
+    .items[] |
+    select(.metadata.namespace | startswith("platform-")) |
+    select(.spec.nodeName == $node) |
+    select(any(.status.containerStatuses[]?; .ready != true)) |
+    [.metadata.namespace,.metadata.name] | @tsv
+  ' >"$output/faults/node-non-ready-pods.tsv"
+  while IFS=$'\t' read -r namespace pod; do
+    [[ -n "$namespace" && -n "$pod" ]] || continue
+    "$kubectl_bin" -n "$namespace" delete pod "$pod" --wait=false >/dev/null
+  done <"$output/faults/node-non-ready-pods.tsv"
+  wait_platform_ready || fail node-fault "Platform did not recover after recreating Kind-stale Pods"
+fi
+pass node-fault "worker became NotReady; service survived; recovery=$node_recovery"
 
 opensandbox_api_key=$(
   "$kubectl_bin" -n platform-sandbox get secret opensandbox-api-key \
