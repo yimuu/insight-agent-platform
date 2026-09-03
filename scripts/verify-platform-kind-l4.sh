@@ -228,7 +228,7 @@ expect_can() {
 }
 expect_cannot() {
   local identity=$1 verb=$2 resource=$3 namespace=$4 observed
-  observed=$("$kubectl_bin" auth can-i "$verb" "$resource" -n "$namespace" --as "$identity")
+  observed=$("$kubectl_bin" auth can-i "$verb" "$resource" -n "$namespace" --as "$identity" || true)
   [[ "$observed" == no ]] || fail rbac "$identity can unexpectedly $verb $resource in $namespace"
 }
 server_identity=system:serviceaccount:platform-sandbox:opensandbox-server
