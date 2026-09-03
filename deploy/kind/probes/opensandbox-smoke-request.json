@@ -14,8 +14,8 @@
     "ephemeral-storage": "67108864"
   },
   "env": {
-    "INSIGHT_SANDBOX_RUNNER_CONFIG": "{}",
-    "INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    "INSIGHT_SANDBOX_RUNNER_CONFIG": "{\"activation_token_digest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"execution_request_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"input_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"input_schema_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"maximum_diagnostic_bytes\":1024,\"maximum_input_bytes\":1024,\"maximum_output_bytes\":1024,\"maximum_processes\":1,\"output_schema_digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"package_argv\":[\"/bin/true\"],\"schema_version\":1,\"wall_milliseconds\":60000}",
+    "INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST": "sha256:23e0722b08571b13285cd22799e1f425fe3b95bd583988b1e40d1ea2b484e4ad"
   },
   "metadata": {
     "platform.insight.dev/schema": "v1",
