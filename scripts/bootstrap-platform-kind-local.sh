@@ -190,6 +190,8 @@ ensure_namespace() {
   local namespace=$1
   local workload_label=${2:-}
   local security_level=${3:-restricted}
+  local helm_release=${4:-}
+  local helm_release_namespace=${5:-}
   "$kubectl_bin" create namespace "$namespace" --dry-run=client -o yaml | "$kubectl_bin" apply -f - >/dev/null
   "$kubectl_bin" label namespace "$namespace" \
     kubernetes.io/metadata.name="$namespace" \
@@ -199,30 +201,37 @@ ensure_namespace() {
     "$kubectl_bin" label namespace "$namespace" \
       insight.platform/workload-namespace="$workload_label" --overwrite >/dev/null
   fi
+  if [[ -n "$helm_release" ]]; then
+    "$kubectl_bin" label namespace "$namespace" app.kubernetes.io/managed-by=Helm \
+      --overwrite >/dev/null
+    "$kubectl_bin" annotate namespace "$namespace" \
+      meta.helm.sh/release-name="$helm_release" \
+      meta.helm.sh/release-namespace="$helm_release_namespace" --overwrite >/dev/null
+  fi
 }
 
 ensure_namespace platform-deps "" privileged
-ensure_namespace platform-artifacts artifact
+ensure_namespace platform-artifacts artifact restricted l4-artifact platform-artifacts
 "$kubectl_bin" label namespace platform-artifacts insight.platform/artifact-namespace=true --overwrite >/dev/null
-ensure_namespace platform-capability-native capability-native-worker
-ensure_namespace platform-capability-remote capability-remote-worker
-ensure_namespace platform-context-worker context-worker
-ensure_namespace platform-control callback-api
-ensure_namespace platform-egress egress
+ensure_namespace platform-capability-native capability-native-worker restricted l4-capability-native platform-capability-native
+ensure_namespace platform-capability-remote capability-remote-worker restricted l4-capability-remote platform-capability-remote
+ensure_namespace platform-context-worker context-worker restricted l4-context-native platform-context-worker
+ensure_namespace platform-control callback-api restricted l4-callback platform-control
+ensure_namespace platform-egress egress restricted l4-security platform-egress
 "$kubectl_bin" label namespace platform-egress insight.platform/egress-namespace=true --overwrite >/dev/null
-ensure_namespace platform-mcp-cleanup mcp-cleanup-worker
-ensure_namespace platform-mcp-host mcp-host
-ensure_namespace platform-model-worker model-worker
-ensure_namespace platform-orchestration-worker orchestration-worker
-ensure_namespace platform-public public-api
+ensure_namespace platform-mcp-cleanup mcp-cleanup-worker restricted l4-mcp-cleanup platform-mcp-cleanup
+ensure_namespace platform-mcp-host mcp-host restricted l4-mcp platform-mcp-host
+ensure_namespace platform-model-worker model-worker restricted l4-model platform-model-worker
+ensure_namespace platform-orchestration-worker orchestration-worker restricted l4-orchestration platform-orchestration-worker
+ensure_namespace platform-public public-api restricted l4-gateway platform-public
 "$kubectl_bin" label namespace platform-public insight.platform/public-gateway-namespace=true --overwrite >/dev/null
-ensure_namespace platform-registry-validation registry-validation-worker
-ensure_namespace platform-remote-context-worker remote-context-worker
-ensure_namespace platform-sandbox sandbox-control
+ensure_namespace platform-registry-validation registry-validation-worker restricted l4-registry-validation platform-registry-validation
+ensure_namespace platform-remote-context-worker remote-context-worker restricted l4-remote-context platform-remote-context-worker
+ensure_namespace platform-sandbox sandbox-control restricted insight-sandbox platform-sandbox
 "$kubectl_bin" label namespace platform-sandbox insight.platform/sandbox-control-namespace=true --overwrite >/dev/null
-ensure_namespace platform-sandbox-workloads "" baseline
+ensure_namespace platform-sandbox-workloads "" baseline insight-sandbox platform-sandbox
 "$kubectl_bin" label namespace platform-sandbox-workloads insight.platform/sandbox-workload-namespace=true --overwrite >/dev/null
-ensure_namespace platform-security-authority security-authority
+ensure_namespace platform-security-authority security-authority restricted l4-security platform-egress
 "$kubectl_bin" label namespace platform-security-authority insight.platform/security-authority-namespace=true --overwrite >/dev/null
 
 tls_output="$output/tls"
