@@ -1,17 +1,19 @@
 # Platform v2 Kind 本地验证与修复报告
 
 - 执行时间：2026-09-02～2026-09-03
-- 最终代码基线：`fd3e636d00e8cee5c750b04df2bd89e24ca4bf39`
-- 集群：`insight-l4-local`
-- 最终 preflight 证据：`target/local-kind-l4-complete-fd3e636d-final-preflight/`（gitignored，仅限本机诊断）
-- 最终结论：**完整 Platform workload/preflight 与部分 L4 机制在本机通过；正式 L4～L6 仍为 Not run**
+- fresh rebuild 代码基线：`41e9995830d552314cec9b796d6f4f30be7d94e0`
+- 最终动态验证器基线：`8c2cf06f`
+- 集群：`insight-l4-repro`
+- 最终本机证据：`/private/tmp/insight-l4-repro-run/evidence/`（不入库，仅限本机诊断）
+- 最终结论：**完整 Platform workload/preflight 与 12 项本机 L4 机制检查通过；正式 L4～L6 仍为 Not run**
 
 ## 1. 执行摘要
 
 本轮把验证从“仅 Sandbox 三个角色”推进到了完整 Platform：三节点 Kind 集群中，CandidateManifest 登记的
 16 个 `ComponentRole`、25 个隔离 workload pool 全部部署，47 个角色副本全部 Ready；production topology/workload
 preflight 在最终 live inventory 上通过。验证还真实覆盖了 containerd、BatchSandbox CRD、准入、跨节点
-NetworkPolicy、OpenSandbox 最小物理生命周期，以及 Egress 副本删除后的 Service endpoint 保留和副本恢复。
+NetworkPolicy、客户端证书强制、RBAC、配置/镜像漂移、滚动升级、Pod/Node 故障，以及 OpenSandbox
+Server/Controller 重启后的物理对象恢复。
 
 验证过程中复现并修复了三类仓库问题：Registry NetworkPolicy 渲染无效、若干 Platform 内部调用的
 NetworkPolicy selector/namespace/port 不闭合，以及 full profile 对部分配置集合越界并遗漏 Management API cursor key。
@@ -53,7 +55,7 @@ production L4、L5 或 L6 的 passed evidence。
 | 角色期望/Ready 副本 | 47/47 |
 | NetworkPolicy | 40 |
 | 平台 runtime image | `sha256:c7aeb3c8010fcfa6f5e6f0ddace7622a02dde9de8572eb6d04ca695c30e8c40f` |
-| deployment config digest | `sha256:fd0d83ac05be51cd3d995de271286c14135386bbd1a2b17206233851d13336bf` |
+| deployment config digest | `sha256:2fcdc63fd0116fc5d69588da687c149084f16019883c52daaed4f59297dfed93` |
 | Helm release | 14 个，最终均为 `deployed` |
 | 非 Ready Pod | 0 |
 
@@ -96,7 +98,7 @@ live patch，后续若重建本地环境应在本地 values/render 中显式重�
 Sandbox 到 Kubernetes API 也有同类 CNI 差异：本地 release 同时放行 Service VIP `10.96.0.1:443` 和 DNAT 后
 control-plane endpoint `192.168.97.3:6443`。覆盖后 authenticated BatchSandbox list 返回 HTTP 200。
 
-## 6. 故障注入结果
+## 6. 故障注入与动态隔离结果
 
 在 Egress 两个副本分别位于 `worker` 与 `worker2`、Service 有两个 endpoint 时，删除 `worker` 上的 Ready Pod：
 
@@ -105,8 +107,14 @@ control-plane endpoint `192.168.97.3:6443`。覆盖后 authenticated BatchSandbo
 3. 应用本地端口覆盖并重新创建后，替代 Pod 在 `worker` 上恢复，restart count 为 0；
 4. Egress Service 最终重新拥有 `10.244.1.49` 与 `10.244.2.56` 两个 Ready endpoint。
 
-这证明单副本删除期间的 endpoint 收敛和基本可用性，但不是独立主机故障、node-loss、连接排空、长时间 chaos 或
-完整 rolling-fault recovery gate。
+自动化动态矩阵最终通过 12 项检查：exact inventory、跨节点 NetworkPolicy allow/deny/allow、Sandbox RBAC、
+workload Namespace 准入、Egress 客户端证书强制、配置摘要漂移、镜像摘要漂移、Runtime API rolling restart、
+Egress Pod 故障、worker Node 故障、OpenSandbox Server/Controller 重启恢复，以及最终全量 readiness。
+
+Node 故障中，停止 `local-a` worker 后另一 Egress endpoint 始终 Ready。节点重新 Ready 后，大多数 Pod 自动恢复，
+但一个 Security Authority Pod 的旧 network sandbox 在 Kind CNI 中持续无法访问 PostgreSQL；验证器等待 60 秒后
+删除该非 Ready Pod，Deployment 随即恢复。因此证据明确记录为 `recovery=pod-recreation`，不能表述为无干预自动恢复，
+也不能替代独立主机、连接排空、长时间 chaos 或 production rolling-fault gate。
 
 ## 7. PostgreSQL 连接上限发现
 
@@ -117,19 +125,18 @@ control-plane endpoint `192.168.97.3:6443`。覆盖后 authenticated BatchSandbo
 这是本地依赖容量不足，不是把 400 固化为生产建议。它说明 CapacityProfile 不能只声明应用副本数，还必须用 L5
 mixed-load/soak 实测冻结数据库连接预算、pool 隔舱和 headroom。
 
-## 8. 正式 preflight 结果
+## 8. 最终本机 preflight 结果
 
-最终使用已构建的 `target/debug/platform-qualification` 执行
-`scripts/preflight-platform-production-qualification.sh`，没有通过 `cargo run` 重编译或重复执行 Rust test。
+最终直接对 fresh Kind live inventory 执行 `check-platform-production-topology.py` 与
+`check-platform-production-workloads.py`。输入是生成器产生的 Kind-only exact candidate/capacity，不是生产发布输入；
+没有通过 `cargo run` 重编译或重复执行 Rust test。
 
 | 证据 | 摘要/结果 |
 |---|---|
-| Candidate closure | `sha256:b10ddba2a22bcc1a9b264f90562bf6500038c6fad1849a3388b4f10829b16693` |
-| Capacity input closure | `sha256:1d807af5961a0748c23ee3c144cdf20e55931c934fcbeec51a0dfd87ea3ab571`；仅结构有效，尚未获得容量资格 |
 | Topology | `sha256:ab55efaece7a3b7665dad9c96159c3818dc88c7dda18c8a6f9a339c6b2ea584d` |
-| Workloads | `sha256:a0bdc181e2b76a5142b090297474fb0e0e13ee4c12b76497d5d0db2995eccd10` |
+| Workloads | `sha256:7a86150637d8b538ab45fe3140865e45e44c49b733fc73fe8f3ce8026f24555c` |
 | BatchSandbox CRD | `sha256:176f3ccba68f75fc8311d34a49551b78e9743659a28d794ecb7f24605675d1af` |
-| topology/workload preflight | 通过 |
+| 动态检查 | 12/12 通过，其中 Node 恢复明确包含 Pod recreation |
 
 本地输入是为此次现场构造的 exact live candidate 和副本闭包，不是由受保护 CI、签名 registry、批准的
 CapacityProfile 与真实生产环境共同产生的 release authority。
@@ -142,15 +149,16 @@ CapacityProfile 与真实生产环境共同产生的 release authority。
 | 6 个相关 Helm chart（含 Registry）lint | 通过：0 failed |
 | `cargo fmt --check` | 通过 |
 | 完整 Platform live readiness | 通过：全部 Deployment 达到期望副本，非 Ready Pod 为 0 |
-| Egress 故障注入与恢复 | 通过本地机制验证 |
+| `scripts/bootstrap-platform-kind-local.sh` | 从不存在的集群开始完整通过 |
+| `scripts/verify-platform-kind-l4.sh` | 12/12 本地动态检查通过 |
 | Rust tests | 按要求未重复执行 |
-| 临时诊断资源 | `egress-policy-diag` 已删除，无测试 Pod 残留 |
+| 临时诊断资源 | NetworkPolicy/mTLS/OpenSandbox 探针已删除，无 BatchSandbox 残留 |
 
 ## 10. 分层判定与下一步
 
 | 层级 | 本地已获得证据 | 正式资格状态 |
 |---|---|---|
-| L4 Topology / isolation / recovery | 三节点、containerd、CRD、准入、跨节点策略、完整 live inventory、一个 Egress 副本故障恢复 | **Not run**：同宿主节点、无 gVisor/生产 Prometheus/真实 Provider，动态 mTLS/RBAC/租户隔离与完整 fault matrix 未完成 |
+| L4 Topology / isolation / recovery | 三节点、containerd、CRD、准入、跨节点策略、客户端证书、RBAC、漂移、Pod/Node 与 OpenSandbox 恢复 | **Not run**：同宿主节点、Node 恢复需 Pod recreation、无 gVisor/生产 Prometheus/真实 Provider、租户并发与完整 production fault matrix |
 | L5 Capacity | Metrics API 可用；发现并修正本地 PostgreSQL 连接上限 | **Not run**：无批准的 CapacityProfile、mixed load、饱和验证和至少 86,400 秒 soak |
 | L6 Release | 仓库内 fail-closed validator 已存在 | **Not run**：无受保护 CI 签名供应链、backup/restore、upgrade/rollback 和 GitOps promotion 证据 |
 
@@ -158,4 +166,8 @@ CapacityProfile 与真实生产环境共同产生的 release authority。
 接入真实 Prometheus、gVisor 和适用 Provider，执行完整 L4 动态隔离/故障矩阵；随后按批准的 CapacityProfile 运行至少
 24 小时 L5 soak，最后由受保护 CI/GitOps 完成 L6 签名、restore、rollback 和人工 promotion。
 
-当前 Kind 集群与平台 workload 保持运行，便于继续检查；只删除了本轮临时诊断 Pod。
+本轮新增 `deploy/kind/`、`scripts/bootstrap-platform-kind-local.sh`、
+`scripts/prepare-platform-kind-local.rb` 与 `scripts/verify-platform-kind-l4.sh`，固化三节点拓扑、精确镜像、依赖、
+LocalStack Kind-only 覆盖、完整 Helm 安装和动态矩阵。所有证据均标记 `production: false`。
+
+当前 `insight-l4-repro` 集群与平台 workload 保持运行，便于继续检查；动态探针和 BatchSandbox 已清理。
