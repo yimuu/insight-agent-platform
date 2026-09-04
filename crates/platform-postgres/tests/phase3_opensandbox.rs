@@ -35,8 +35,8 @@ use insight_platform_sandbox::opensandbox::{
     AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CommitSandboxTerminalV1,
     OpaqueActivationToken, OpenSandboxId, PhysicalDecision, ReconcileSandboxControlsV1,
     RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1, RecordSandboxObservationV1,
-    RunnerBootId, SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxClaimV1,
-    SandboxCleanupClaimV1, SandboxCleanupObservationV1, SandboxControlKindV1,
+    RunnerBootId, SandboxCandidateMetadataV1, SandboxCandidatePurposeV1, SandboxCandidateV1,
+    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1, SandboxControlKindV1,
     SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1, SandboxExecutionPlanV1,
     SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
     SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1, SandboxPhysicalPhaseV1,
@@ -2401,6 +2401,7 @@ fn candidate(request: &SandboxExecutionRequestV1, sandbox_id: &str) -> SandboxCa
         sandbox_id: OpenSandboxId::parse(sandbox_id).unwrap(),
         metadata: SandboxCandidateMetadataV1 {
             schema_version: 1,
+            purpose: SandboxCandidatePurposeV1::Job,
             tenant_id: request.tenant_id.clone(),
             job_id: request.job_id.clone(),
             physical_attempt: request.physical_attempt,

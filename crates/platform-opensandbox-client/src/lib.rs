@@ -14,11 +14,11 @@ use insight_platform_contracts::{
 use insight_platform_sandbox::opensandbox::{
     BoundedCandidatePageV1, CandidateCursorV1, OpaqueActivationToken, OpenSandboxCreateV1,
     OpenSandboxId, OpenSandboxObservationV1, OpenSandboxProvider, SandboxActivationFrameV1,
-    SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxExecutionRequestV1, SandboxNetworkMode,
-    SandboxPhysicalEvidenceV1, SandboxProviderError, SandboxProvisioningLimitsV1,
-    SandboxResourceLimitsV1, SandboxRunnerPhaseV1, SandboxRunnerStateFrameV1,
-    MAX_SANDBOX_CANDIDATES, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS, MAX_SANDBOX_INPUT_BYTES,
-    MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    SandboxCandidateMetadataV1, SandboxCandidatePurposeV1, SandboxCandidateV1,
+    SandboxExecutionRequestV1, SandboxNetworkMode, SandboxPhysicalEvidenceV1, SandboxProviderError,
+    SandboxProvisioningLimitsV1, SandboxResourceLimitsV1, SandboxRunnerPhaseV1,
+    SandboxRunnerStateFrameV1, MAX_SANDBOX_CANDIDATES, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS,
+    MAX_SANDBOX_INPUT_BYTES, MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
     SANDBOX_RUNNER_CONFIG_DIGEST_ENV, SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PORT,
 };
 use reqwest::{header, Client, Method, RequestBuilder, StatusCode};
@@ -38,6 +38,7 @@ const METADATA_REQUEST: &str = "platform.insight.dev/request";
 const METADATA_RUNTIME: &str = "platform.insight.dev/runtime";
 const METADATA_PROFILE: &str = "platform.insight.dev/profile";
 const METADATA_NETWORK: &str = "platform.insight.dev/network";
+const METADATA_PURPOSE: &str = "platform.insight.dev/purpose";
 const METADATA_TEMPLATE: &str = "insight.platform/sandbox-template";
 const METADATA_SCHEMA_VALUE: &str = "v1";
 const METADATA_TEMPLATE_VALUE: &str = "armed-runner-v1";
@@ -207,9 +208,13 @@ impl OpenSandboxHttpClient {
             .map_err(|_| SandboxProviderError::InvalidResponse)?
             .into_inner();
         let token_digest = evidence.provisioning_token_digest.clone();
-        let create =
-            OpenSandboxCreateV1::from_authorization(&request, &evidence, 1, config.ttl_seconds)
-                .map_err(|_| SandboxProviderError::InvalidResponse)?;
+        let create = OpenSandboxCreateV1::from_readiness_authorization(
+            &request,
+            &evidence,
+            1,
+            config.ttl_seconds,
+        )
+        .map_err(|_| SandboxProviderError::InvalidResponse)?;
         let mut create_attempted = false;
         let mut created_id = None;
         let outcome = async {
@@ -881,6 +886,14 @@ fn encode_metadata(
             METADATA_TEMPLATE_VALUE.to_owned(),
         ),
         (METADATA_TENANT.to_owned(), metadata.tenant_id.to_string()),
+        (
+            METADATA_PURPOSE.to_owned(),
+            match metadata.purpose {
+                SandboxCandidatePurposeV1::Job => "job",
+                SandboxCandidatePurposeV1::Readiness => "readiness",
+            }
+            .to_owned(),
+        ),
         (METADATA_JOB.to_owned(), metadata.job_id.to_string()),
         (
             METADATA_ATTEMPT.to_owned(),
@@ -920,7 +933,7 @@ fn encode_metadata(
 fn decode_metadata(
     metadata: &BTreeMap<String, String>,
 ) -> Result<SandboxCandidateMetadataV1, SandboxProviderError> {
-    if metadata.len() != 11
+    if metadata.len() != 12
         || metadata.get(METADATA_SCHEMA).map(String::as_str) != Some(METADATA_SCHEMA_VALUE)
         || metadata.get(METADATA_TEMPLATE).map(String::as_str) != Some(METADATA_TEMPLATE_VALUE)
     {
@@ -937,8 +950,14 @@ fn decode_metadata(
         "direct" => SandboxNetworkMode::Direct,
         _ => return Err(SandboxProviderError::InvalidResponse),
     };
+    let purpose = match get(METADATA_PURPOSE)? {
+        "job" => SandboxCandidatePurposeV1::Job,
+        "readiness" => SandboxCandidatePurposeV1::Readiness,
+        _ => return Err(SandboxProviderError::InvalidResponse),
+    };
     let decoded = SandboxCandidateMetadataV1 {
         schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        purpose,
         tenant_id: get(METADATA_TENANT)?
             .parse::<ResourceId>()
             .map_err(|_| SandboxProviderError::InvalidResponse)?,
@@ -1538,6 +1557,7 @@ mod tests {
         .unwrap();
         let metadata = SandboxCandidateMetadataV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            purpose: SandboxCandidatePurposeV1::Job,
             tenant_id: request.tenant_id.clone(),
             job_id: request.job_id.clone(),
             physical_attempt: request.physical_attempt,
@@ -1684,6 +1704,10 @@ mod tests {
             body["metadata"][METADATA_TEMPLATE],
             Value::String(METADATA_TEMPLATE_VALUE.to_owned())
         );
+        assert_eq!(
+            body["metadata"][METADATA_PURPOSE],
+            Value::String("job".to_owned())
+        );
         let list_record = records
             .iter()
             .find(|record| {
@@ -1720,6 +1744,15 @@ mod tests {
         client.readiness_probe(&config).await.unwrap();
         assert!(!state.present.load(Ordering::SeqCst));
         let records = state.records.lock().await;
+        let create_record = records
+            .iter()
+            .find(|record| record.method == Method::POST && record.path == "/v1/sandboxes")
+            .unwrap();
+        let body: Value = serde_json::from_slice(&create_record.body).unwrap();
+        assert_eq!(
+            body["metadata"][METADATA_PURPOSE],
+            Value::String("readiness".to_owned())
+        );
         assert!(records
             .iter()
             .any(|record| record.method == Method::POST && record.path == "/v1/sandboxes"));
@@ -1804,6 +1837,22 @@ mod tests {
         .unwrap()
         .canonical_bytes()
         .unwrap()
+    }
+
+    #[test]
+    fn candidate_metadata_requires_closed_purpose() {
+        let (create, _) = create_request();
+        let mut metadata = encode_metadata(&create.metadata).unwrap();
+        metadata.remove(METADATA_PURPOSE);
+        assert_eq!(
+            decode_metadata(&metadata),
+            Err(SandboxProviderError::InvalidResponse)
+        );
+        metadata.insert(METADATA_PURPOSE.to_owned(), "unknown".to_owned());
+        assert_eq!(
+            decode_metadata(&metadata),
+            Err(SandboxProviderError::InvalidResponse)
+        );
     }
 
     #[tokio::test]

@@ -258,7 +258,7 @@ end
 failures << "admission policy count drifted" unless admissions.length == 3 && bindings.length == 3
 admission_text = admissions.flat_map { |doc| doc.dig("spec", "validations") || [] }
                            .map { |validation| validation["expression"] }.join("\n")
-%w[sandbox-workload armed-runner-v1 execd-installer platform-sandbox-runner runtimeClassName hostPath persistentVolumeClaim].each do |term|
+%w[sandbox-workload armed-runner-v1 execd-installer platform-sandbox-runner platform.insight.dev/purpose readiness runtimeClassName hostPath persistentVolumeClaim].each do |term|
   failures << "admission closure omits #{term}" unless admission_text.include?(term)
 end
 failures << "BatchSandbox admission does not bind Server identity" unless admission_text.include?("system:serviceaccount:#{control}:opensandbox-server")

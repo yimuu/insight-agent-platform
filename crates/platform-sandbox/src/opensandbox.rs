@@ -51,6 +51,13 @@ pub enum SandboxNetworkMode {
     Direct,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCandidatePurposeV1 {
+    Job,
+    Readiness,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxProvisioningLimitsV1 {
@@ -464,6 +471,7 @@ impl SandboxProvisioningTokenV1 {
 #[serde(deny_unknown_fields)]
 pub struct SandboxCandidateMetadataV1 {
     pub schema_version: u16,
+    pub purpose: SandboxCandidatePurposeV1,
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
     pub physical_attempt: u32,
@@ -494,7 +502,8 @@ impl SandboxCandidateMetadataV1 {
         token: &SandboxProvisioningTokenV1,
     ) -> Result<(), SandboxContractError> {
         self.validate_shape()?;
-        if self.tenant_id != request.tenant_id
+        if self.purpose != SandboxCandidatePurposeV1::Job
+            || self.tenant_id != request.tenant_id
             || self.job_id != request.job_id
             || self.physical_attempt != request.physical_attempt
             || self.provisioning_token_digest != token.digest()?
@@ -514,7 +523,8 @@ impl SandboxCandidateMetadataV1 {
         token: &SandboxProvisioningTokenV1,
     ) -> Result<(), SandboxContractError> {
         self.validate_shape()?;
-        if self.tenant_id != plan.tenant_id
+        if self.purpose != SandboxCandidatePurposeV1::Job
+            || self.tenant_id != plan.tenant_id
             || self.job_id != plan.job_id
             || self.physical_attempt != token.physical_attempt
             || self.provisioning_token_digest != token.digest()?
@@ -3135,6 +3145,37 @@ impl OpenSandboxCreateV1 {
         create_ordinal: u8,
         ttl_seconds: u32,
     ) -> Result<Self, SandboxContractError> {
+        Self::from_authorization_for(
+            request,
+            evidence,
+            create_ordinal,
+            ttl_seconds,
+            SandboxCandidatePurposeV1::Job,
+        )
+    }
+
+    pub fn from_readiness_authorization(
+        request: &SandboxExecutionRequestV1,
+        evidence: &SandboxPhysicalEvidenceV1,
+        create_ordinal: u8,
+        ttl_seconds: u32,
+    ) -> Result<Self, SandboxContractError> {
+        Self::from_authorization_for(
+            request,
+            evidence,
+            create_ordinal,
+            ttl_seconds,
+            SandboxCandidatePurposeV1::Readiness,
+        )
+    }
+
+    fn from_authorization_for(
+        request: &SandboxExecutionRequestV1,
+        evidence: &SandboxPhysicalEvidenceV1,
+        create_ordinal: u8,
+        ttl_seconds: u32,
+        purpose: SandboxCandidatePurposeV1,
+    ) -> Result<Self, SandboxContractError> {
         request.validate()?;
         evidence.validate_for(&SandboxExecutionPlanV1::from_request(request)?)?;
         if evidence.phase != SandboxPhysicalPhaseV1::Provisioning
@@ -3145,6 +3186,7 @@ impl OpenSandboxCreateV1 {
         }
         let metadata = SandboxCandidateMetadataV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            purpose,
             tenant_id: request.tenant_id.clone(),
             job_id: request.job_id.clone(),
             physical_attempt: request.physical_attempt,
@@ -3540,6 +3582,7 @@ mod tests {
             sandbox_id: OpenSandboxId::parse(sandbox_id).unwrap(),
             metadata: SandboxCandidateMetadataV1 {
                 schema_version: 1,
+                purpose: SandboxCandidatePurposeV1::Job,
                 tenant_id: request.tenant_id.clone(),
                 job_id: request.job_id.clone(),
                 physical_attempt: request.physical_attempt,
@@ -3643,11 +3686,25 @@ mod tests {
             .into_inner();
         let create = OpenSandboxCreateV1::from_authorization(&request, &first, 1, 60).unwrap();
         assert_eq!(create.metadata.create_ordinal, 1);
+        assert_eq!(create.metadata.purpose, SandboxCandidatePurposeV1::Job);
         assert_eq!(create.metadata.network_mode, SandboxNetworkMode::Direct);
         assert_eq!(create.entrypoint, request.runner_argv);
         assert_eq!(
             create.runner_config.activation_verifying_key,
             first.activation_token.verifying_key().unwrap()
+        );
+        let readiness =
+            OpenSandboxCreateV1::from_readiness_authorization(&request, &first, 1, 60).unwrap();
+        assert_eq!(
+            readiness.metadata.purpose,
+            SandboxCandidatePurposeV1::Readiness
+        );
+        assert_eq!(
+            readiness.metadata.validate_for(
+                &request,
+                &SandboxProvisioningTokenV1::from_request(&request)
+            ),
+            Err(SandboxContractError::InvalidCandidate)
         );
         assert!(matches!(
             first

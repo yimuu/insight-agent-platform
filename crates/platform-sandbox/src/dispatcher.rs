@@ -8,9 +8,9 @@ use crate::opensandbox::{
     BoundedCandidatePageV1, CandidateCursorV1, ClaimedSandboxCleanupV1, CommitSandboxTerminalV1,
     LeasedSandboxJobV1, OpaqueActivationToken, OpenSandboxCreateV1, OpenSandboxProvider,
     PhysicalDecision, RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1,
-    RecordSandboxObservationV1, SandboxCandidateV1, SandboxCleanupObservationV1,
-    SandboxContractError, SandboxDurableObservationV1, SandboxFencedIdentityV1,
-    SandboxJobRepository, SandboxPhysicalPhaseV1, SandboxProviderError,
+    RecordSandboxObservationV1, SandboxCandidatePurposeV1, SandboxCandidateV1,
+    SandboxCleanupObservationV1, SandboxContractError, SandboxDurableObservationV1,
+    SandboxFencedIdentityV1, SandboxJobRepository, SandboxPhysicalPhaseV1, SandboxProviderError,
     SandboxRepositoryDecisionV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
     SandboxTerminalOutcomeV1, SelectSandboxCandidateV1, SANDBOX_CONTRACT_SCHEMA_VERSION,
 };
@@ -441,6 +441,9 @@ where
         validate_page_shape(&page).map_err(SandboxDispatchError::Contract)?;
         let mut deleted = 0_u16;
         for candidate in &page.items {
+            if candidate.metadata.purpose == SandboxCandidatePurposeV1::Readiness {
+                continue;
+            }
             let decision = self
                 .repository
                 .decide_orphan(candidate.clone())
@@ -942,6 +945,87 @@ mod tests {
         }
     }
 
+    struct ReadinessCandidateProvider {
+        candidate: SandboxCandidateV1,
+        terminate_calls: AtomicUsize,
+        absence_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OpenSandboxProvider for ReadinessCandidateProvider {
+        async fn create_candidate(
+            &self,
+            _request: OpenSandboxCreateV1,
+        ) -> Result<SandboxCandidateV1, SandboxProviderError> {
+            panic!("create is not reached by orphan sweep")
+        }
+
+        async fn list_candidates(
+            &self,
+            _token_digest: Sha256Digest,
+            _cursor: CandidateCursorV1,
+        ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+            panic!("token-scoped list is not reached by orphan sweep")
+        }
+
+        async fn list_operator_candidates(
+            &self,
+            _cursor: CandidateCursorV1,
+        ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+            Ok(BoundedCandidatePageV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                items: vec![self.candidate.clone()],
+                next: None,
+            })
+        }
+
+        async fn observe(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            panic!("observe is not reached by orphan sweep")
+        }
+
+        async fn runner_state(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
+            panic!("runner state is not reached by orphan sweep")
+        }
+
+        async fn activate(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+            _frame: crate::opensandbox::SandboxActivationFrameV1,
+        ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
+            panic!("activation is not reached by orphan sweep")
+        }
+
+        async fn read_result(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+            _maximum_bytes: u64,
+        ) -> Result<Vec<u8>, SandboxProviderError> {
+            panic!("result is not reached by orphan sweep")
+        }
+
+        async fn terminate(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            self.terminate_calls.fetch_add(1, Ordering::SeqCst);
+            Err(SandboxProviderError::Unavailable)
+        }
+
+        async fn prove_absent(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            self.absence_calls.fetch_add(1, Ordering::SeqCst);
+            Err(SandboxProviderError::Unavailable)
+        }
+    }
+
     #[tokio::test]
     async fn replayed_create_authorization_never_calls_provider() {
         let (leased, authorization) = fixture();
@@ -976,6 +1060,44 @@ mod tests {
             ))
         ));
         assert_eq!(provider.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_skips_readiness_before_repository_or_delete() {
+        let (leased, authorization) = fixture();
+        let physical = authorization.decision.payload.physical.as_deref().unwrap();
+        let create =
+            OpenSandboxCreateV1::from_readiness_authorization(&leased.request, physical, 1, 60)
+                .unwrap();
+        let candidate = SandboxCandidateV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            sandbox_id: OpenSandboxId::parse("readiness-candidate").unwrap(),
+            metadata: create.metadata,
+            observed_at: Utc::now(),
+        };
+        let repository = Arc::new(AuthorizationRepository {
+            authorization: PhysicalDecision::Replayed(authorization),
+        });
+        let provider = Arc::new(ReadinessCandidateProvider {
+            candidate,
+            terminate_calls: AtomicUsize::new(0),
+            absence_calls: AtomicUsize::new(0),
+        });
+        let dispatcher = OpenSandboxDispatcher::new(repository, Arc::clone(&provider));
+
+        let progress = dispatcher
+            .sweep_orphan_page(CandidateCursorV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                opaque: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(progress.examined, 1);
+        assert_eq!(progress.deleted, 0);
+        assert!(progress.next.is_none());
+        assert_eq!(provider.terminate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.absence_calls.load(Ordering::SeqCst), 0);
     }
 
     struct RolloverRepository {
@@ -1227,6 +1349,7 @@ mod tests {
             sandbox_id: OpenSandboxId::parse("sandbox-rollover").unwrap(),
             metadata: crate::opensandbox::SandboxCandidateMetadataV1 {
                 schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                purpose: crate::opensandbox::SandboxCandidatePurposeV1::Job,
                 tenant_id: request.tenant_id.clone(),
                 job_id: request.job_id.clone(),
                 physical_attempt: request.physical_attempt,

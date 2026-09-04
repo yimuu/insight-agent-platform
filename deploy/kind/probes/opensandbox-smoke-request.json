@@ -19,6 +19,7 @@
   },
   "metadata": {
     "platform.insight.dev/schema": "v1",
+    "platform.insight.dev/purpose": "job",
     "platform.insight.dev/network": "disabled",
     "insight.platform/sandbox-template": "armed-runner-v1"
   },

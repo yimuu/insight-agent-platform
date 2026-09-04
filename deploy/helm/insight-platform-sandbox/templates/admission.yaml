@@ -69,6 +69,7 @@ spec:
       message: BatchSandbox must be one non-pooled, expiring, non-task, non-snapshot candidate
     - expression: >-
         has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
+        object.metadata.labels['platform.insight.dev/purpose'] in ['job', 'readiness'] &&
         object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
         object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
       message: BatchSandbox must carry the closed Platform operator labels
@@ -153,6 +154,7 @@ spec:
       message: only the source-pinned BatchSandbox Controller may create workload Pods
     - expression: >-
         has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
+        object.metadata.labels['platform.insight.dev/purpose'] in ['job', 'readiness'] &&
         object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
         object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
       message: workload Pod lacks the closed Platform labels

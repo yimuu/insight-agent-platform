@@ -34,8 +34,8 @@ use insight_platform_sandbox::opensandbox::{
     AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CandidateCreateAuthorizationV1,
     ClaimedSandboxCleanupV1, CommitSandboxTerminalV1, HeartbeatSandboxJobV1, LeasedSandboxJobV1,
     PhysicalDecision, ReconcileSandboxControlsV1, RecordProvisioningIntentV1,
-    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxCandidateV1,
-    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
+    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxCandidatePurposeV1,
+    SandboxCandidateV1, SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
     SandboxContractError as OpenSandboxContractError, SandboxControlKindV1,
     SandboxDispatcherJobPayloadV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
     SandboxFencedIdentityV1, SandboxJobRepository, SandboxOrphanDecisionV1,
@@ -1087,6 +1087,11 @@ impl SandboxJobRepository for PgRepository {
         candidate: SandboxCandidateV1,
     ) -> Result<SandboxOrphanDecisionV1, Self::Error> {
         candidate.validate_shape()?;
+        if candidate.metadata.purpose != SandboxCandidatePurposeV1::Job {
+            return Err(RepositoryError::InvalidInput(
+                "readiness candidates are not business orphans".to_owned(),
+            ));
+        }
         let mut transaction = self.pool().begin().await?;
         let row =
             sqlx::query("SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2")
