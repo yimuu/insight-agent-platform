@@ -778,6 +778,13 @@ mod tests {
             panic!("claim is not used by this driver fixture")
         }
 
+        async fn reconcile_controls(
+            &self,
+            _request: crate::opensandbox::ReconcileSandboxControlsV1,
+        ) -> Result<Vec<SandboxRepositoryDecisionV1>, Self::Error> {
+            panic!("control reconcile is not used by this driver fixture")
+        }
+
         async fn heartbeat(
             &self,
             _command: HeartbeatSandboxJobV1,
@@ -988,6 +995,13 @@ mod tests {
             _request: SandboxClaimV1,
         ) -> Result<Vec<LeasedSandboxJobV1>, Self::Error> {
             panic!("claim is not used by this rollover fixture")
+        }
+
+        async fn reconcile_controls(
+            &self,
+            _request: crate::opensandbox::ReconcileSandboxControlsV1,
+        ) -> Result<Vec<SandboxRepositoryDecisionV1>, Self::Error> {
+            panic!("control reconcile is not used by this rollover fixture")
         }
 
         async fn heartbeat(

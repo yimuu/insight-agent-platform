@@ -8,8 +8,8 @@ use insight_platform_contracts::{canonical_digest, HardLimitProfile, Sha256Diges
 use insight_platform_sandbox::{
     dispatcher::{OpenSandboxDispatcher, SandboxCleanupProgressV1, SandboxDispatchProgressV1},
     opensandbox::{
-        CandidateCursorV1, SandboxClaimV1, SandboxCleanupClaimV1, SandboxJobRepository,
-        SANDBOX_CONTRACT_SCHEMA_VERSION,
+        CandidateCursorV1, ReconcileSandboxControlsV1, SandboxClaimV1, SandboxCleanupClaimV1,
+        SandboxJobRepository, SANDBOX_CONTRACT_SCHEMA_VERSION,
     },
 };
 use insight_platform_worker::{
@@ -94,6 +94,7 @@ impl SandboxDispatcherConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SandboxDispatcherReport {
+    pub controls_reconciled: u64,
     pub claimed: u64,
     pub terminal: u64,
     pub abandoned: u64,
@@ -247,6 +248,36 @@ where
         Ok(count)
     }
 
+    pub async fn control_once(&self) -> Result<usize, SandboxDispatcherDriverError> {
+        let Some(_permit) = self
+            .pools
+            .try_acquire_critical_control()
+            .map_err(SandboxDispatcherDriverError::LocalCapacity)?
+        else {
+            return Ok(0);
+        };
+        let reconciled = self
+            .repository
+            .reconcile_controls(ReconcileSandboxControlsV1 { limit: 1 })
+            .await
+            .map_err(|failure| SandboxDispatcherDriverError::Repository(Box::new(failure)))?;
+        for decision in &reconciled {
+            decision
+                .validate()
+                .map_err(|_| SandboxDispatcherDriverError::CorruptClaim)?;
+            if decision.fence.is_some()
+                || !matches!(
+                    decision.job.state,
+                    insight_platform_contracts::JobState::Cancelled
+                        | insight_platform_contracts::JobState::TimedOut
+                )
+            {
+                return Err(SandboxDispatcherDriverError::CorruptClaim);
+            }
+        }
+        Ok(reconciled.len())
+    }
+
     pub async fn sweep_orphan_page(
         &self,
         cursor: CandidateCursorV1,
@@ -309,6 +340,12 @@ where
                     }
                 }
                 _ = scan.tick() => {
+                    match self.control_once().await {
+                        Ok(count) => {
+                            report.controls_reconciled = report.controls_reconciled.saturating_add(count as u64)
+                        }
+                        Err(failure) => eprintln!("platform-sandbox-dispatcher control scan failed: {failure}"),
+                    }
                     match self.drive_once(&mut active, &cancellation).await {
                         Ok(claimed) => report.claimed = report.claimed.saturating_add(claimed as u64),
                         Err(failure) => {

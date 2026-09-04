@@ -19,22 +19,24 @@ use insight_platform_contracts::{
     ValueRef,
 };
 use insight_platform_invocations::{
-    decide_detached_job_outcome, CapabilityExecutionInputMaterial, CapabilityInvocationRecord,
-    CapabilityOutputValue, CapabilityUncertainty, DetachedCapabilityJobOutcome,
-    DetachedSandboxSourceKind, SafeBackendFailure,
+    decide_detached_job_control, decide_detached_job_outcome, CapabilityControlKind,
+    CapabilityExecutionInputMaterial, CapabilityInvocationRecord, CapabilityOutputValue,
+    CapabilityUncertainty, DetachedCapabilityJobOutcome, DetachedSandboxSourceKind,
+    SafeBackendFailure,
 };
 use insight_platform_jobs::{
     decide_claim, decide_claim_continuation, decide_expired_continuation, decide_expired_lease,
-    decide_heartbeat, decide_observation_update, decide_reconciliation, decide_resume,
-    decide_start, decide_terminal, decide_terminal_physical_update, JobFence, JobProjection,
-    LeasePolicy,
+    decide_heartbeat, decide_observation_update, decide_owner_cancelling, decide_owner_terminal,
+    decide_reconciliation, decide_resume, decide_start, decide_terminal,
+    decide_terminal_physical_update, JobFence, JobProjection, LeasePolicy,
 };
 use insight_platform_sandbox::opensandbox::{
     AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CandidateCreateAuthorizationV1,
     ClaimedSandboxCleanupV1, CommitSandboxTerminalV1, HeartbeatSandboxJobV1, LeasedSandboxJobV1,
-    PhysicalDecision, RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1,
-    RecordSandboxObservationV1, SandboxCandidateV1, SandboxClaimV1, SandboxCleanupClaimV1,
-    SandboxCleanupObservationV1, SandboxContractError as OpenSandboxContractError,
+    PhysicalDecision, ReconcileSandboxControlsV1, RecordProvisioningIntentV1,
+    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, SandboxCandidateV1,
+    SandboxClaimV1, SandboxCleanupClaimV1, SandboxCleanupObservationV1,
+    SandboxContractError as OpenSandboxContractError, SandboxControlKindV1,
     SandboxDispatcherJobPayloadV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
     SandboxFencedIdentityV1, SandboxJobRepository, SandboxOrphanDecisionV1,
     SandboxOrphanDispositionV1, SandboxPhysicalPhaseV1, SandboxRepositoryDecisionV1,
@@ -197,6 +199,202 @@ impl SandboxJobRepository for PgRepository {
         }
         transaction.commit().await?;
         Ok(claimed)
+    }
+
+    async fn reconcile_controls(
+        &self,
+        request: ReconcileSandboxControlsV1,
+    ) -> Result<Vec<SandboxRepositoryDecisionV1>, Self::Error> {
+        request.validate(self.recovery_batch_limit())?;
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let candidates = sqlx::query(
+            r#"
+            SELECT tenant_id, job_id
+            FROM insight_platform.jobs
+            WHERE job_kind = $1 AND work_class = 'sandbox' AND owner_kind = 'job'
+              AND payload ? 'plan' AND terminal_at IS NULL
+              AND (
+                (state = 'cancelling' AND payload ? 'control')
+                OR (
+                  deadline <= $2
+                  AND state IN ('ready', 'leased', 'running', 'waiting', 'retry_scheduled')
+                  AND NOT (payload ? 'control')
+                )
+              )
+            ORDER BY deadline, updated_at, job_id
+            LIMIT $3
+            "#,
+        )
+        .bind(SANDBOX_JOB_KIND)
+        .bind(database_now)
+        .bind(i64::from(request.limit))
+        .fetch_all(&mut *transaction)
+        .await?;
+
+        let mut reconciled = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let tenant_id = parse_expected_id(
+                &candidate.try_get::<String, _>("tenant_id")?,
+                ResourceKind::Tenant,
+                "OpenSandbox control tenant",
+            )?;
+            let job_id = parse_expected_id(
+                &candidate.try_get::<String, _>("job_id")?,
+                ResourceKind::Job,
+                "OpenSandbox control Job",
+            )?;
+            let snapshot = load_job(&mut transaction, &tenant_id, &job_id, false).await?;
+            let reservation_id = snapshot
+                .record
+                .quota_reservation_id
+                .as_deref()
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow(
+                        "OpenSandbox controlled Job has no quota reservation".to_owned(),
+                    )
+                })?
+                .to_owned();
+
+            // A control terminal mutates every authority in the same order as normal terminal
+            // commit. The candidate read above holds no row lock.
+            let quota = lock_quota_bundle(
+                &mut transaction,
+                &snapshot.record.tenant_id,
+                &reservation_id,
+                &snapshot.payload,
+            )
+            .await?;
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &snapshot.payload.plan.tenant_id,
+                &snapshot.payload.plan.invocation_id,
+                true,
+            )
+            .await?;
+            let current = load_job(&mut transaction, &tenant_id, &job_id, true).await?;
+            if current.record.version != snapshot.record.version
+                || current.record.payload.digest != snapshot.record.payload.digest
+                || current.record.quota_reservation_id.as_deref() != Some(reservation_id.as_str())
+                || current.payload.plan.invocation_id != invocation.invocation_id
+            {
+                return Err(RepositoryError::Conflict(
+                    "OpenSandbox control authority snapshot",
+                ));
+            }
+
+            let (controlled_invocation, cancelling_job, controlled_payload) =
+                if let Some(control) = current.payload.control.as_deref() {
+                    if current.job.state != JobState::Cancelling
+                        || invocation.state != InvocationState::Cancelling
+                        || control.target_invocation_version != invocation.version
+                    {
+                        return Err(RepositoryError::Conflict(
+                            "OpenSandbox explicit control binding",
+                        ));
+                    }
+                    (
+                        invocation.clone(),
+                        current.job.clone(),
+                        current.payload.clone(),
+                    )
+                } else {
+                    if database_now < current.job.deadline {
+                        return Err(RepositoryError::Conflict("OpenSandbox timeout is not due"));
+                    }
+                    let controlled_invocation = decide_detached_job_control(
+                        &invocation,
+                        DetachedSandboxSourceKind::SandboxCapability,
+                        &current.job,
+                        CapabilityControlKind::Timeout,
+                        database_now,
+                    )?;
+                    let cancelling_job = decide_owner_cancelling(&current.job)?;
+                    let controlled_payload = current.payload.request_control(
+                        SandboxControlKindV1::Timeout,
+                        database_now,
+                        controlled_invocation.version,
+                    )?;
+                    (controlled_invocation, cancelling_job, controlled_payload)
+                };
+
+            controlled_payload.validate_for(&cancelling_job)?;
+            let control = controlled_payload.control.as_deref().ok_or_else(|| {
+                RepositoryError::CorruptRow(
+                    "OpenSandbox cancelling Job has no control intent".to_owned(),
+                )
+            })?;
+            let terminal_state = control.kind.job_state();
+            let terminal_job = decide_owner_terminal(&cancelling_job, terminal_state)?;
+            let terminal_payload = controlled_payload.terminal_control()?;
+            terminal_payload.validate_for(&terminal_job)?;
+            let detached_outcome = match control.kind {
+                SandboxControlKindV1::Cancel => DetachedCapabilityJobOutcome::Cancelled,
+                SandboxControlKindV1::Timeout => DetachedCapabilityJobOutcome::TimedOut,
+            };
+            let invocation_decision = decide_detached_job_outcome(
+                &controlled_invocation,
+                DetachedSandboxSourceKind::SandboxCapability,
+                &terminal_job,
+                terminal_job.attempt_count,
+                &detached_outcome,
+                database_now,
+                self.invocation_limits(),
+            )?;
+            let terminal_outcome = match control.kind {
+                SandboxControlKindV1::Cancel => SandboxTerminalOutcomeV1::Cancelled {
+                    evidence_digest: control.intent_digest.clone(),
+                },
+                SandboxControlKindV1::Timeout => SandboxTerminalOutcomeV1::TimedOut {
+                    evidence_digest: control.intent_digest.clone(),
+                },
+            };
+            settle_quota_bundle(
+                &mut transaction,
+                &reservation_id,
+                &quota,
+                &terminal_outcome,
+                &current.payload.plan.request_digest,
+            )
+            .await?;
+            let result_digest = terminal_payload
+                .terminal
+                .as_deref()
+                .map(|terminal| terminal.terminal_digest.to_string());
+            let updated = update_job(
+                &mut transaction,
+                &current.record,
+                &terminal_job,
+                &terminal_payload,
+                database_now,
+                result_digest.as_deref(),
+                None,
+            )
+            .await?;
+            update_capability_invocation(
+                &mut transaction,
+                &invocation,
+                &invocation_decision.invocation,
+            )
+            .await?;
+            append_job_event(
+                &mut transaction,
+                &updated,
+                "sandbox.job.controlled",
+                serde_json::json!({
+                    "control_intent_digest": control.intent_digest,
+                    "control_kind": control.kind,
+                    "job_id": updated.job_id,
+                    "physical_attempt": terminal_job.attempt_count,
+                    "terminal_digest": result_digest,
+                    "terminal_state": terminal_job.state,
+                }),
+            )
+            .await?;
+            reconciled.push(decision_from(updated, terminal_payload)?);
+        }
+        transaction.commit().await?;
+        Ok(reconciled)
     }
 
     async fn heartbeat(
@@ -1062,6 +1260,12 @@ fn require_same_lease_identity(
     identity: &SandboxFencedIdentityV1,
     database_now: DateTime<Utc>,
 ) -> Result<(), RepositoryError> {
+    if current.payload.control.is_some()
+        || current.payload.terminal.is_some()
+        || current.job.state == JobState::Cancelling
+    {
+        return Err(RepositoryError::StaleFence);
+    }
     let lease = current
         .job
         .lease
@@ -1225,7 +1429,7 @@ fn decision_from(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_job(
+pub(crate) async fn update_job(
     transaction: &mut Transaction<'_, Postgres>,
     current: &JobRecord,
     next: &JobProjection,

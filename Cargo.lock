@@ -2765,6 +2765,7 @@ dependencies = [
  "insight-platform-mcp-host",
  "insight-platform-model-adapters",
  "insight-platform-models",
+ "insight-platform-opensandbox-client",
  "insight-platform-orchestrator",
  "insight-platform-registry",
  "insight-platform-sandbox",

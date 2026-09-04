@@ -255,8 +255,8 @@ closed_state_machine! {
 
 closed_state_machine! {
     pub enum JobState, "job" {
-        Ready => "ready" => [Leased, Cancelled, TimedOut],
-        Leased => "leased" => [Running, Ready, Cancelled, TimedOut],
+        Ready => "ready" => [Leased, Cancelling, Cancelled, TimedOut],
+        Leased => "leased" => [Running, Ready, Cancelling, Cancelled, TimedOut],
         Running => "running" => [Ready, Waiting, RetryScheduled, Cancelling, Succeeded, Failed, Cancelled, TimedOut, ReconciliationRequired],
         Waiting => "waiting" => [Ready, Cancelling, Succeeded, Failed, Cancelled, TimedOut, ReconciliationRequired],
         RetryScheduled => "retry_scheduled" => [Ready, Cancelling, Cancelled, TimedOut],

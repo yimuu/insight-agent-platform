@@ -5,6 +5,7 @@ use crate::{
         load_capability_node_for_update, load_exact_capability_interface_spec,
         validate_capability_value_against_schema, PgInvocationTransaction,
     },
+    opensandbox_repository::update_job as update_opensandbox_job,
     repository::{
         append_command_event, append_scheduler_event, claim_command_receipt, database_timestamp,
         decode_versioned_payload, job_from_row, job_projection, load_deployment, load_resource,
@@ -41,8 +42,8 @@ use insight_platform_invocations::{
     ResolveCapabilityInput, ResolveCapabilityReconciliation, WakeCapabilityInvocation,
     CAPABILITY_QUOTA_LINES,
 };
-use insight_platform_jobs::{JobFence, LeasePolicy};
-use insight_platform_sandbox::opensandbox::SandboxDispatcherJobPayloadV1;
+use insight_platform_jobs::{decide_owner_cancelling, JobFence, LeasePolicy};
+use insight_platform_sandbox::opensandbox::{SandboxControlKindV1, SandboxDispatcherJobPayloadV1};
 use insight_platform_tasks::{
     decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
     TaskState,
@@ -461,7 +462,6 @@ enum CapabilityOwnerJobKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapabilityOwnerJobLock {
     None,
-    Share,
     Update,
 }
 
@@ -535,9 +535,6 @@ async fn load_capability_owner_job(
     let query = match lock {
         CapabilityOwnerJobLock::None => {
             "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2"
-        }
-        CapabilityOwnerJobLock::Share => {
-            "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR SHARE"
         }
         CapabilityOwnerJobLock::Update => {
             "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR UPDATE"
@@ -1887,7 +1884,7 @@ impl PgInvocationTransaction {
                 &mut transaction,
                 &current_invocation,
                 job_id,
-                CapabilityOwnerJobLock::Share,
+                CapabilityOwnerJobLock::Update,
             )
             .await?;
             if current_kind != CapabilityOwnerJobKind::DetachedSandbox(source_kind)
@@ -1912,6 +1909,26 @@ impl PgInvocationTransaction {
                 command.kind,
                 database_now,
             )?;
+            let payload: SandboxDispatcherJobPayloadV1 =
+                decode_versioned_payload(&sandbox_job.payload, "OpenSandbox Job")?;
+            let control_kind = match command.kind {
+                CapabilityControlKind::Cancel => SandboxControlKindV1::Cancel,
+                CapabilityControlKind::Timeout => SandboxControlKindV1::Timeout,
+            };
+            let payload =
+                payload.request_control(control_kind, database_now, invocation.version)?;
+            let cancelling_job = decide_owner_cancelling(&projection)
+                .map_err(|_| RepositoryError::Conflict("Sandbox control Job"))?;
+            let sandbox_job = update_opensandbox_job(
+                &mut transaction,
+                &sandbox_job,
+                &cancelling_job,
+                &payload,
+                database_now,
+                sandbox_job.result_digest.as_deref(),
+                sandbox_job.quota_reservation_id.as_deref(),
+            )
+            .await?;
             update_capability_invocation(&mut transaction, &current_invocation, &invocation)
                 .await?;
             let event_type = match command.kind {
@@ -1931,6 +1948,7 @@ impl PgInvocationTransaction {
                         "control_kind": command.kind,
                         "job_id": job_id,
                         "state": invocation.state,
+                        "control_intent_digest": payload.control.as_deref().map(|intent| &intent.intent_digest),
                         "task_id": null,
                     }),
                 )?,

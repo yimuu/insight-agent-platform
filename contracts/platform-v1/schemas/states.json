@@ -456,6 +456,10 @@
         ],
         [
           "ready",
+          "cancelling"
+        ],
+        [
+          "ready",
           "cancelled"
         ],
         [
@@ -469,6 +473,10 @@
         [
           "leased",
           "running"
+        ],
+        [
+          "leased",
+          "cancelling"
         ],
         [
           "leased",

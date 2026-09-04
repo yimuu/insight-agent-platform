@@ -709,7 +709,11 @@ pub fn decide_detached_job_outcome(
         )
         || current.payload.current_job_id.as_ref() != Some(&terminal_job.job_id)
         || terminal_job.tenant_id != current.tenant_id
-        || logical_attempt_no == 0
+        || (logical_attempt_no == 0
+            && !matches!(
+                outcome,
+                DetachedCapabilityJobOutcome::Cancelled | DetachedCapabilityJobOutcome::TimedOut
+            ))
         || terminal_job.work_class != WorkClass::Sandbox
         || terminal_job.owner.owner_kind != ResourceKind::Job
         || terminal_job.owner.owner_id.uuid() != terminal_job.job_id.uuid()

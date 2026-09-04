@@ -40,6 +40,10 @@ original_dispatcher_replicas="$(
   kubectl get deployment "$dispatcher_deployment" -n "$control_namespace" \
     -o jsonpath='{.spec.replicas}'
 )"
+original_server_replicas="$(
+  kubectl get deployment "$server_deployment" -n "$control_namespace" \
+    -o jsonpath='{.spec.replicas}'
+)"
 port_forward_pid=""
 port_forward_log="$(mktemp -t platform-opensandbox-l3-port-forward.XXXXXX)"
 
@@ -50,6 +54,8 @@ cleanup() {
   fi
   kubectl scale deployment "$dispatcher_deployment" -n "$control_namespace" \
     --replicas="$original_dispatcher_replicas" >/dev/null 2>&1 || true
+  kubectl scale deployment "$server_deployment" -n "$control_namespace" \
+    --replicas="$original_server_replicas" >/dev/null 2>&1 || true
   rm -f "$port_forward_log"
 }
 trap cleanup EXIT INT TERM
@@ -119,6 +125,33 @@ fi
 run_provider_phase core opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes
 run_provider_phase boot-rollover \
   opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recreation
+
+# Start a real long-running Sandbox, persist cancel intent, and let the local Dispatcher process
+# exit. The business terminal must commit while Server is unavailable; only physical cleanup waits
+# for Server recovery.
+PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent \
+  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+    opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit \
+    -- --exact --nocapture
+kubectl scale deployment "$server_deployment" -n "$control_namespace" --replicas=0
+kubectl wait --for=delete pod -n "$control_namespace" \
+  -l app.kubernetes.io/component=server --timeout=60s
+PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-terminal \
+  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+    opensandbox_kubernetes_l3_cancel_terminal_commits_while_server_is_unavailable \
+    -- --exact --nocapture
+kubectl scale deployment "$server_deployment" -n "$control_namespace" --replicas=1
+kubectl rollout status "deployment/$server_deployment" -n "$control_namespace" --timeout=120s
+start_port_forward
+PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-cleanup \
+  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+    opensandbox_kubernetes_l3_cancel_cleanup_resumes_after_server_recovery \
+    -- --exact --nocapture
+PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=timeout \
+  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+    opensandbox_kubernetes_l3_running_deadline_terminal_and_cleanup \
+    -- --exact --nocapture
+
 run_provider_phase persistent-create opensandbox_kubernetes_l3_persistent_candidate_create
 
 kubectl rollout restart "deployment/$controller_deployment" -n "$control_namespace"

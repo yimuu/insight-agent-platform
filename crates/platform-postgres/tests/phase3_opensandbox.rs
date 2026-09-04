@@ -4,39 +4,50 @@ use insight_platform_contracts::{
     CapabilityBackendFeatures, CapabilityBackendKind, CapabilityCancellationKind,
     CapabilityDataFlowPolicy, CapabilityIdempotencyKind, CapabilityInterfaceLimits,
     CapabilityInterfaceResourceSpec, CapabilityProgressContract, CapabilityProgressDurability,
-    CapabilityProgressMode, ClosedJsonSchema, DataClassification, Effect, ExactDeploymentRef,
-    ExactPolicyBinding, ExactVersionRef, InvocationState, JobState, Permission, PermissionSet,
-    PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot, PublishedVersionPayload,
-    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind, Sha256Digest,
-    TenantConfig, TraceIdentityV1, ValidationSummary,
+    CapabilityProgressMode, ClosedJsonSchema, CommandAudit, CommandOutcome, DataClassification,
+    Effect, ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, InvocationState, JobState,
+    Permission, PermissionSet, PrincipalBindingsPayload, PrincipalKind, PrincipalSnapshot,
+    PublishedVersionPayload, QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId,
+    ResourceKind, Sha256Digest, TenantConfig, TenantPrincipalPayload, TraceIdentityV1,
+    ValidationSummary,
 };
 use insight_platform_invocations::{
-    decide_defer_to_sandbox, CapabilityAdmissionSnapshot, CapabilityInvocationPayload,
-    CapabilityInvocationRecord, DetachedSandboxSourceKind, ExactInvocationValueRef,
-    InvocationOrigin, InvocationPolicyDecision, InvocationPolicyDecisionBundle,
-    InvocationPolicyDisposition, InvocationSelectionEvidence, InvocationValueStorage,
+    decide_defer_to_sandbox, CapabilityAdmissionSnapshot, CapabilityControlKind,
+    CapabilityInvocationPayload, CapabilityInvocationRecord, ControlCapabilityInvocation,
+    DetachedSandboxSourceKind, ExactInvocationValueRef, InvocationOrigin, InvocationPolicyDecision,
+    InvocationPolicyDecisionBundle, InvocationPolicyDisposition, InvocationSelectionEvidence,
+    InvocationTransaction, InvocationValueStorage,
 };
 use insight_platform_jobs::{JobOwnerRef, JobProjection};
+use insight_platform_opensandbox_client::{
+    OpenSandboxApiKey, OpenSandboxHttpClient, OpenSandboxHttpClientConfig,
+};
 use insight_platform_postgres::{
-    repository::{NewPrincipal, NewTenant, PgRepository, RepositoryError, TypedPayload},
+    repository::{
+        NewPrincipal, NewTenant, NewTenantPrincipal, PgRepository, RepositoryError, TypedPayload,
+    },
     verify_schema,
+};
+use insight_platform_sandbox::dispatcher::{
+    OpenSandboxDispatcher, SandboxCleanupProgressV1, SandboxDispatchProgressV1,
 };
 use insight_platform_sandbox::opensandbox::{
     AuthorizeCandidateCreateV1, AuthorizeSandboxActivationV1, CommitSandboxTerminalV1,
-    OpaqueActivationToken, OpenSandboxId, PhysicalDecision, RecordProvisioningIntentV1,
-    RecordSandboxCleanupObservationV1, RecordSandboxObservationV1, RunnerBootId,
-    SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxClaimV1, SandboxCleanupClaimV1,
-    SandboxCleanupObservationV1, SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1,
-    SandboxExecutionPlanV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
-    SandboxFencedIdentityV1, SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1,
-    SandboxPhysicalPhaseV1, SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1,
-    SandboxResourceLimitsV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
-    SandboxRunnerResultFrameV1, SandboxRunnerStateFrameV1, SandboxTerminalOutcomeV1,
-    SelectSandboxCandidateV1,
+    OpaqueActivationToken, OpenSandboxId, PhysicalDecision, ReconcileSandboxControlsV1,
+    RecordProvisioningIntentV1, RecordSandboxCleanupObservationV1, RecordSandboxObservationV1,
+    RunnerBootId, SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxClaimV1,
+    SandboxCleanupClaimV1, SandboxCleanupObservationV1, SandboxControlKindV1,
+    SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1, SandboxExecutionPlanV1,
+    SandboxExecutionRequestV1, SandboxFailureClassV1, SandboxFencedIdentityV1,
+    SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1, SandboxPhysicalPhaseV1,
+    SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1, SandboxResourceLimitsV1,
+    SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1, SandboxRunnerResultFrameV1,
+    SandboxRunnerStateFrameV1, SandboxTerminalOutcomeV1, SelectSandboxCandidateV1,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use std::sync::Arc;
 use uuid::Uuid;
 
 struct Fixture {
@@ -53,6 +64,7 @@ struct FixtureOptions {
     runtime_contract_digest: Sha256Digest,
     package_argv: Vec<String>,
     network_mode: SandboxNetworkMode,
+    deadline_after: Duration,
 }
 
 impl Default for FixtureOptions {
@@ -63,6 +75,7 @@ impl Default for FixtureOptions {
             runtime_contract_digest: digest('5'),
             package_argv: vec!["/opt/insight/package".to_owned()],
             network_mode: SandboxNetworkMode::Direct,
+            deadline_after: Duration::minutes(5),
         }
     }
 }
@@ -668,111 +681,186 @@ async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
 }
 
 async fn exercise_cancel_timeout_and_quota(pool: PgPool) {
-    let cases = [
-        (
-            JobState::Cancelled,
-            "cancelled",
-            SandboxTerminalOutcomeV1::Cancelled {
-                evidence_digest: digest('b'),
-            },
-            SandboxTerminalOutcomeV1::TimedOut {
-                evidence_digest: digest('c'),
-            },
-        ),
-        (
-            JobState::TimedOut,
-            "timed_out",
-            SandboxTerminalOutcomeV1::TimedOut {
-                evidence_digest: digest('d'),
-            },
-            SandboxTerminalOutcomeV1::Cancelled {
-                evidence_digest: digest('e'),
-            },
-        ),
-    ];
-
-    for (expected_job_state, expected_invocation_state, outcome, losing_outcome) in cases {
-        let fixture = seed_fixture(pool.clone()).await;
-        let leased = SandboxJobRepository::claim(
-            &fixture.repository,
-            claim(&id(ResourceKind::WorkerProcessGeneration), digest('a')),
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-        let started = SandboxJobRepository::record_provisioning_intent(
-            &fixture.repository,
+    let cancelled_fixture = seed_fixture(pool.clone()).await;
+    let leased = SandboxJobRepository::claim(
+        &cancelled_fixture.repository,
+        claim(&id(ResourceKind::WorkerProcessGeneration), digest('a')),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    let old_identity = identity(&leased);
+    SandboxJobRepository::record_provisioning_intent(
+        &cancelled_fixture.repository,
+        RecordProvisioningIntentV1 {
+            identity: old_identity.clone(),
+            activation_token: OpaqueActivationToken::parse("3".repeat(64)).unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    let controlled = execute_control(
+        &cancelled_fixture.repository,
+        ControlCapabilityInvocation {
+            audit: control_audit(&cancelled_fixture),
+            invocation_id: cancelled_fixture.invocation.invocation_id.clone(),
+            expected_invocation_version: cancelled_fixture.invocation.version,
+            quota_entry_ids: vec![],
+            kind: CapabilityControlKind::Cancel,
+        },
+    )
+    .await;
+    assert_eq!(controlled.invocation.state, InvocationState::Cancelling);
+    let controlled_job = controlled.job.unwrap();
+    assert_eq!(controlled_job.state, "cancelling");
+    let controlled_payload: SandboxDispatcherJobPayloadV1 =
+        serde_json::from_value(controlled_job.payload.value).unwrap();
+    assert_eq!(
+        controlled_payload
+            .control
+            .as_deref()
+            .map(|control| control.kind),
+        Some(SandboxControlKindV1::Cancel)
+    );
+    assert!(matches!(
+        SandboxJobRepository::record_provisioning_intent(
+            &cancelled_fixture.repository,
             RecordProvisioningIntentV1 {
-                identity: identity(&leased),
+                identity: old_identity,
                 activation_token: OpaqueActivationToken::parse("3".repeat(64)).unwrap(),
             },
         )
-        .await
-        .unwrap();
-        let command = CommitSandboxTerminalV1 {
-            identity: decision_identity(&started),
-            outcome,
-        };
-        let terminal = SandboxJobRepository::commit_terminal(&fixture.repository, command.clone())
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(terminal.job.state, expected_job_state);
-        assert!(matches!(
-            SandboxJobRepository::commit_terminal(&fixture.repository, command.clone())
-                .await
-                .unwrap(),
-            PhysicalDecision::Replayed(_)
-        ));
-        assert!(matches!(
-            SandboxJobRepository::commit_terminal(
-                &fixture.repository,
-                CommitSandboxTerminalV1 {
-                    identity: command.identity,
-                    outcome: losing_outcome,
-                },
-            )
-            .await,
-            Err(RepositoryError::Conflict(_))
-        ));
+        .await,
+        Err(RepositoryError::StaleFence)
+    ));
+    let cancelled = SandboxJobRepository::reconcile_controls(
+        &cancelled_fixture.repository,
+        ReconcileSandboxControlsV1 { limit: 1 },
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(cancelled.job.state, JobState::Cancelled);
+    assert_eq!(cancelled.job.attempt_count, 1);
+    assert_eq!(
+        cancelled
+            .payload
+            .control
+            .as_deref()
+            .map(|control| control.kind),
+        Some(SandboxControlKindV1::Cancel)
+    );
+    assert_sandbox_control_settled(&cancelled_fixture, "cancelled").await;
 
-        let invocation_state: String = sqlx::query_scalar(
-            "SELECT state FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
-        )
-        .bind(fixture.request.tenant_id.to_string())
-        .bind(fixture.invocation.invocation_id.to_string())
-        .fetch_one(&fixture.pool)
+    let timeout_fixture = seed_fixture_with(
+        pool,
+        FixtureOptions {
+            deadline_after: Duration::milliseconds(100),
+            ..FixtureOptions::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let timed_out = SandboxJobRepository::reconcile_controls(
+        &timeout_fixture.repository,
+        ReconcileSandboxControlsV1 { limit: 1 },
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(timed_out.job.state, JobState::TimedOut);
+    assert_eq!(timed_out.job.attempt_count, 0);
+    assert!(timed_out.payload.physical.is_none());
+    assert!(!timed_out.payload.cleanup.required);
+    assert_eq!(
+        timed_out
+            .payload
+            .control
+            .as_deref()
+            .map(|control| control.kind),
+        Some(SandboxControlKindV1::Timeout)
+    );
+    assert_sandbox_control_settled(&timeout_fixture, "timed_out").await;
+}
+
+async fn execute_control(
+    repository: &PgRepository,
+    command: ControlCapabilityInvocation,
+) -> insight_platform_postgres::capability_execution_repository::ControlledCapabilityExecution {
+    let mut transaction = repository.begin_invocation_transaction().await.unwrap();
+    let controlled = match transaction
+        .control_capability_invocation(command)
         .await
-        .unwrap();
-        assert_eq!(invocation_state, expected_invocation_state);
-        let settlement_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'",
-        )
-        .bind(fixture.request.tenant_id.to_string())
-        .bind(fixture.usage_reservation_id.to_string())
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(settlement_count, 4);
-        let unreleased_reservations: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND reserved_value <> 0",
-        )
-        .bind(fixture.request.tenant_id.to_string())
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(unreleased_reservations, 0);
-        let quota_reservation_id: Option<String> = sqlx::query_scalar(
-            "SELECT quota_reservation_id FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
-        )
-        .bind(fixture.request.tenant_id.to_string())
-        .bind(fixture.request.job_id.to_string())
-        .fetch_one(&fixture.pool)
-        .await
-        .unwrap();
-        assert!(quota_reservation_id.is_none());
+        .unwrap()
+    {
+        CommandOutcome::Applied(controlled) => controlled,
+        CommandOutcome::Replayed(_) => panic!("fresh Sandbox control unexpectedly replayed"),
+    };
+    transaction.commit().await.unwrap();
+    controlled
+}
+
+fn control_audit(fixture: &Fixture) -> CommandAudit {
+    control_audit_parts(
+        &fixture.request.tenant_id,
+        &fixture.invocation.payload.admission.principal.principal_id,
+    )
+}
+
+fn control_audit_parts(tenant_id: &ResourceId, principal_id: &ResourceId) -> CommandAudit {
+    CommandAudit {
+        trace: TraceIdentityV1::generate(),
+        tenant_id: tenant_id.clone(),
+        principal_id: principal_id.clone(),
+        principal_kind: PrincipalKind::AgentRunner,
+        receipt_id: id(ResourceKind::Receipt),
+        event_id: id(ResourceKind::Event),
+        outbox_id: id(ResourceKind::OutboxEvent),
+        idempotency_key_digest: digest('b'),
+        request_digest: digest('c'),
+        receipt_expires_at: Utc::now() + Duration::hours(1),
     }
+}
+
+async fn assert_sandbox_control_settled(fixture: &Fixture, expected_state: &str) {
+    let invocation_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .bind(fixture.invocation.invocation_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(invocation_state, expected_state);
+    let settlement_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .bind(fixture.usage_reservation_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(settlement_count, 4);
+    let unreleased_reservations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND reserved_value <> 0",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(unreleased_reservations, 0);
+    let quota_reservation_id: Option<String> = sqlx::query_scalar(
+        "SELECT quota_reservation_id FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .bind(fixture.request.job_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(quota_reservation_id.is_none());
 }
 
 async fn exercise_boot_rollover_unknown_outcome(pool: PgPool) {
@@ -944,6 +1032,7 @@ async fn opensandbox_kubernetes_l3_dispatcher_kill_reclaims_same_started_runner(
                 "15000".to_owned(),
             ],
             network_mode: SandboxNetworkMode::Disabled,
+            deadline_after: Duration::minutes(5),
         },
     )
     .await;
@@ -1044,6 +1133,238 @@ async fn opensandbox_kubernetes_l3_dispatcher_kill_reclaims_same_started_runner(
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit() {
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE").as_deref() != Ok("cancel-intent") {
+        eprintln!(
+            "PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent is unset; real control L3 skipped"
+        );
+        return;
+    }
+    let pool = l3_pool().await;
+    verify_schema(&pool).await.unwrap();
+    let fixture = seed_fixture_with(
+        pool,
+        FixtureOptions {
+            input: json!({"l3":"control-server-outage"}),
+            image_uri: std::env::var("PLATFORM_OPENSANDBOX_L3_IMAGE").unwrap(),
+            runtime_contract_digest: std::env::var("PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST")
+                .unwrap()
+                .parse()
+                .unwrap(),
+            package_argv: vec![
+                "/opt/insight/package".to_owned(),
+                "sleep-echo".to_owned(),
+                "30000".to_owned(),
+            ],
+            network_mode: SandboxNetworkMode::Disabled,
+            deadline_after: Duration::minutes(5),
+        },
+    )
+    .await;
+    let repository = Arc::new(fixture.repository);
+    let dispatcher = OpenSandboxDispatcher::new(Arc::clone(&repository), Arc::new(l3_client()));
+    let leased = SandboxJobRepository::claim(
+        repository.as_ref(),
+        claim(&id(ResourceKind::WorkerProcessGeneration), digest('d')),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    let running = match dispatcher.drive_job(leased).await.unwrap() {
+        SandboxDispatchProgressV1::AwaitingRunner(running) => running,
+        progress => panic!("real Sandbox did not remain running: {progress:?}"),
+    };
+    assert_eq!(
+        running
+            .payload
+            .physical
+            .as_deref()
+            .map(|physical| physical.phase),
+        Some(SandboxPhysicalPhaseV1::Started)
+    );
+    let sandbox_id = running
+        .payload
+        .physical
+        .as_deref()
+        .and_then(|physical| physical.selected_sandbox_id.as_ref())
+        .unwrap()
+        .clone();
+
+    let controlled = execute_control(
+        repository.as_ref(),
+        ControlCapabilityInvocation {
+            audit: control_audit_parts(
+                &fixture.request.tenant_id,
+                &fixture.invocation.payload.admission.principal.principal_id,
+            ),
+            invocation_id: fixture.invocation.invocation_id.clone(),
+            expected_invocation_version: fixture.invocation.version,
+            quota_entry_ids: vec![],
+            kind: CapabilityControlKind::Cancel,
+        },
+    )
+    .await;
+    assert_eq!(controlled.invocation.state, InvocationState::Cancelling);
+    assert_eq!(controlled.job.unwrap().state, "cancelling");
+    assert!(batchsandbox_exists(&fixture.request.job_id, &sandbox_id).await);
+
+    // Exit without reconciling the durable intent. The next phase runs in a new process while
+    // OpenSandbox Server is deliberately unavailable.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_kubernetes_l3_cancel_terminal_commits_while_server_is_unavailable() {
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE").as_deref() != Ok("cancel-terminal") {
+        eprintln!(
+            "PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-terminal is unset; real control L3 skipped"
+        );
+        return;
+    }
+    let pool = l3_pool().await;
+    verify_schema(&pool).await.unwrap();
+    let repository = PgRepository::new(pool.clone());
+    let before = load_l3_control_job(&pool, "control-server-outage").await;
+    assert_eq!(before.state, "cancelling");
+    assert_eq!(before.physical_phase(), Some("started"));
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let terminal = 'reconcile: loop {
+        for decision in SandboxJobRepository::reconcile_controls(
+            &repository,
+            ReconcileSandboxControlsV1 { limit: 1 },
+        )
+        .await
+        .unwrap()
+        {
+            if decision.job.tenant_id == before.tenant_id && decision.job.job_id == before.job_id {
+                break 'reconcile decision;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "durable cancel intent was not reconciled"
+        );
+    };
+    assert_eq!(terminal.job.state, JobState::Cancelled);
+    assert_eq!(terminal.job.attempt_count, 1);
+    assert!(terminal.fence.is_none());
+    assert!(terminal.payload.cleanup.required);
+    assert_l3_control_terminal(&pool, &before.tenant_id, &before.job_id, "cancelled").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opensandbox_kubernetes_l3_cancel_cleanup_resumes_after_server_recovery() {
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE").as_deref() != Ok("cancel-cleanup") {
+        eprintln!(
+            "PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-cleanup is unset; real control L3 skipped"
+        );
+        return;
+    }
+    let pool = l3_pool().await;
+    verify_schema(&pool).await.unwrap();
+    let before = load_l3_control_job(&pool, "control-server-outage").await;
+    assert_eq!(before.state, "cancelled");
+    assert_eq!(before.physical_phase(), Some("started"));
+    let repository = Arc::new(PgRepository::new(pool.clone()));
+    cleanup_l3_control_job(Arc::clone(&repository), &before.tenant_id, &before.job_id).await;
+    let after = load_l3_control_job(&pool, "control-server-outage").await;
+    assert_eq!(after.state, "cancelled");
+    assert_eq!(after.physical_phase(), Some("absent"));
+    assert!(!after.cleanup_required());
+    assert_no_batchsandbox_for_job(&after.job_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opensandbox_kubernetes_l3_running_deadline_terminal_and_cleanup() {
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE").as_deref() != Ok("timeout") {
+        eprintln!(
+            "PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=timeout is unset; real control L3 skipped"
+        );
+        return;
+    }
+    let pool = l3_pool().await;
+    verify_schema(&pool).await.unwrap();
+    let fixture = seed_fixture_with(
+        pool.clone(),
+        FixtureOptions {
+            input: json!({"l3":"running-timeout"}),
+            image_uri: std::env::var("PLATFORM_OPENSANDBOX_L3_IMAGE").unwrap(),
+            runtime_contract_digest: std::env::var("PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST")
+                .unwrap()
+                .parse()
+                .unwrap(),
+            package_argv: vec![
+                "/opt/insight/package".to_owned(),
+                "sleep-echo".to_owned(),
+                "30000".to_owned(),
+            ],
+            network_mode: SandboxNetworkMode::Disabled,
+            deadline_after: Duration::seconds(8),
+        },
+    )
+    .await;
+    let repository = Arc::new(fixture.repository);
+    let dispatcher = OpenSandboxDispatcher::new(Arc::clone(&repository), Arc::new(l3_client()));
+    let leased = SandboxJobRepository::claim(
+        repository.as_ref(),
+        claim(&id(ResourceKind::WorkerProcessGeneration), digest('e')),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    let running = match dispatcher.drive_job(leased).await.unwrap() {
+        SandboxDispatchProgressV1::AwaitingRunner(running) => running,
+        progress => panic!("real Sandbox did not remain running: {progress:?}"),
+    };
+    assert_eq!(
+        running
+            .payload
+            .physical
+            .as_deref()
+            .map(|physical| physical.phase),
+        Some(SandboxPhysicalPhaseV1::Started)
+    );
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let terminal = loop {
+        let reconciled = SandboxJobRepository::reconcile_controls(
+            repository.as_ref(),
+            ReconcileSandboxControlsV1 { limit: 1 },
+        )
+        .await
+        .unwrap();
+        if let Some(decision) = reconciled.into_iter().find(|decision| {
+            decision.job.tenant_id == fixture.request.tenant_id
+                && decision.job.job_id == fixture.request.job_id
+        }) {
+            break decision;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "running Sandbox deadline was not materialized"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(terminal.job.state, JobState::TimedOut);
+    assert_eq!(terminal.job.attempt_count, 1);
+    assert_l3_control_terminal(
+        &pool,
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+        "timed_out",
+    )
+    .await;
+    cleanup_l3_control_job(
+        Arc::clone(&repository),
+        &fixture.request.tenant_id,
+        &fixture.request.job_id,
+    )
+    .await;
+    assert_no_batchsandbox_for_job(&fixture.request.job_id).await;
+}
+
 #[derive(Debug)]
 struct LiveSandboxJob {
     state: String,
@@ -1080,6 +1401,222 @@ impl LiveSandboxJob {
     fn activation_token(&self) -> Option<&str> {
         self.physical()?.get("activation_token")?.as_str()
     }
+}
+
+#[derive(Debug)]
+struct L3ControlJob {
+    tenant_id: ResourceId,
+    job_id: ResourceId,
+    state: String,
+    payload: Value,
+}
+
+impl L3ControlJob {
+    fn physical_phase(&self) -> Option<&str> {
+        self.payload.pointer("/physical/phase")?.as_str()
+    }
+
+    fn cleanup_required(&self) -> bool {
+        self.payload
+            .pointer("/cleanup/required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+}
+
+async fn l3_pool() -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap()
+}
+
+fn l3_client() -> OpenSandboxHttpClient {
+    OpenSandboxHttpClient::new(OpenSandboxHttpClientConfig {
+        lifecycle_base_url: std::env::var("PLATFORM_OPENSANDBOX_L3_URL")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        api_key: OpenSandboxApiKey::parse(
+            std::env::var("PLATFORM_OPENSANDBOX_L3_API_KEY").unwrap(),
+        )
+        .unwrap(),
+        request_timeout_milliseconds: 10_000,
+        connect_timeout_milliseconds: 1_000,
+        candidate_page_items: 4,
+        orphan_page_items: 20,
+    })
+    .unwrap()
+}
+
+async fn load_l3_control_job(pool: &PgPool, marker: &str) -> L3ControlJob {
+    let row = sqlx::query(
+        r#"
+        SELECT job.tenant_id, job.job_id, job.state, job.payload
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.invocations AS invocation
+          ON invocation.tenant_id = job.tenant_id AND invocation.invocation_id = job.invocation_id
+        JOIN insight_platform.run_values AS input
+          ON input.tenant_id = invocation.tenant_id AND input.value_id = invocation.input_value_id
+        WHERE input.inline_value ->> 'l3' = $1
+        ORDER BY job.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(marker)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    L3ControlJob {
+        tenant_id: row.get::<String, _>("tenant_id").parse().unwrap(),
+        job_id: row.get::<String, _>("job_id").parse().unwrap(),
+        state: row.get("state"),
+        payload: row.get("payload"),
+    }
+}
+
+async fn assert_l3_control_terminal(
+    pool: &PgPool,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    expected_state: &str,
+) {
+    let row = sqlx::query(
+        r#"
+        SELECT job.state,
+               invocation.state AS invocation_state,
+               job.quota_reservation_id,
+               (SELECT count(*) FROM insight_platform.quota_ledger AS ledger
+                WHERE ledger.tenant_id = job.tenant_id AND ledger.entry_kind = 'settle') AS settlements,
+               (SELECT count(*) FROM insight_platform.quota_accounts AS account
+                WHERE account.tenant_id = job.tenant_id AND account.reserved_value <> 0) AS reserved_accounts,
+               (SELECT count(*)
+                FROM insight_platform.events AS event
+                JOIN insight_platform.outbox_events AS outbox
+                  ON outbox.tenant_id = event.tenant_id AND outbox.event_id = event.event_id
+                WHERE event.tenant_id = job.tenant_id AND event.aggregate_id = job.job_id
+                  AND event.event_type = 'sandbox.job.controlled') AS controlled_events
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.invocations AS invocation
+          ON invocation.tenant_id = job.tenant_id AND invocation.invocation_id = job.invocation_id
+        WHERE job.tenant_id = $1 AND job.job_id = $2
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("state"), expected_state);
+    assert_eq!(row.get::<String, _>("invocation_state"), expected_state);
+    assert!(row
+        .get::<Option<String>, _>("quota_reservation_id")
+        .is_none());
+    assert_eq!(row.get::<i64, _>("settlements"), 4);
+    assert_eq!(row.get::<i64, _>("reserved_accounts"), 0);
+    assert_eq!(row.get::<i64, _>("controlled_events"), 1);
+}
+
+async fn cleanup_l3_control_job(
+    repository: Arc<PgRepository>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+) {
+    let dispatcher = OpenSandboxDispatcher::new(Arc::clone(&repository), Arc::new(l3_client()));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+    loop {
+        let current = sqlx::query_scalar::<_, Value>(
+            "SELECT payload FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_one(repository.pool())
+        .await
+        .unwrap();
+        if current
+            .pointer("/cleanup/required")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            return;
+        }
+        let claims = SandboxJobRepository::claim_cleanup(
+            repository.as_ref(),
+            SandboxCleanupClaimV1 {
+                process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+                limit: 1,
+                lease_milliseconds: 1_000,
+            },
+        )
+        .await
+        .unwrap();
+        for mut claim in claims {
+            loop {
+                match dispatcher.cleanup_once(claim).await {
+                    Ok(SandboxCleanupProgressV1::Complete) => break,
+                    Ok(SandboxCleanupProgressV1::CandidateAbsent(next)) => claim = *next,
+                    Err(_) => {
+                        // DELETE may have committed while its response was lost. Leave the
+                        // durable cleanup requirement set, let the short fence expire, and prove
+                        // absence from a fresh claim.
+                        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "controlled Sandbox cleanup did not complete"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn batchsandbox_exists(job_id: &ResourceId, sandbox_id: &OpenSandboxId) -> bool {
+    let selector = format!("platform.insight.dev/job={job_id}");
+    let value = kubectl_json(&[
+        "get",
+        "batchsandboxes",
+        "-n",
+        "platform-sandbox-workloads",
+        "-l",
+        &selector,
+        "-o",
+        "json",
+    ])
+    .await;
+    value
+        .get("items")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.pointer("/metadata/name").and_then(Value::as_str) == Some(sandbox_id.as_str())
+            })
+        })
+}
+
+async fn assert_no_batchsandbox_for_job(job_id: &ResourceId) {
+    let selector = format!("platform.insight.dev/job={job_id}");
+    let remaining = kubectl_json(&[
+        "get",
+        "batchsandboxes",
+        "-n",
+        "platform-sandbox-workloads",
+        "-l",
+        &selector,
+        "-o",
+        "json",
+    ])
+    .await;
+    assert_eq!(
+        remaining
+            .get("items")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
 }
 
 async fn wait_for_job(
@@ -1201,11 +1738,26 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
         })
         .await
         .unwrap();
+    repository
+        .bind_tenant_principal(NewTenantPrincipal {
+            tenant_id: tenant_id.clone(),
+            principal_id: principal_id.clone(),
+            principal_kind: PrincipalKind::AgentRunner,
+            payload: TenantPrincipalPayload {
+                permissions: PermissionSet::new(vec![
+                    Permission::CapabilityInvoke,
+                    Permission::RuntimeControl,
+                ])
+                .unwrap(),
+            },
+        })
+        .await
+        .unwrap();
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let deadline = now + Duration::minutes(5);
+    let deadline = now + options.deadline_after;
     let deployment_id = id(ResourceKind::CapabilityDeployment);
     let interface_exact =
         ExactVersionRef::new(id(ResourceKind::CapabilityInterfaceRevision), digest('e')).unwrap();

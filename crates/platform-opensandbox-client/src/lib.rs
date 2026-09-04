@@ -264,7 +264,10 @@ impl OpenSandboxHttpClient {
                 }
                 true
             }
-            StatusCode::NOT_FOUND => false,
+            StatusCode::NOT_FOUND => {
+                validate_not_found(&exchange)?;
+                false
+            }
             status => return Err(classify_status(status)),
         };
         OpenSandboxObservationV1 {
@@ -517,13 +520,16 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
         sandbox_id: &OpenSandboxId,
     ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
         let url = self.lifecycle_url(&format!("sandboxes/{}", sandbox_id.as_str()))?;
-        let exchange = self.exchange(self.request(Method::DELETE, url), 0).await?;
+        let exchange = self
+            .exchange(
+                self.request(Method::DELETE, url),
+                MAX_LIFECYCLE_RESPONSE_BYTES,
+            )
+            .await?;
         match exchange.status {
-            StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => {}
+            StatusCode::NO_CONTENT if exchange.body.is_empty() => {}
+            StatusCode::NOT_FOUND => validate_not_found(&exchange)?,
             status => return Err(classify_status(status)),
-        }
-        if !exchange.body.is_empty() {
-            return Err(SandboxProviderError::InvalidResponse);
         }
         self.observe_internal(sandbox_id).await
     }
@@ -600,6 +606,22 @@ fn parse_json<T: DeserializeOwned>(
     )
     .map_err(|_| SandboxProviderError::InvalidResponse)?;
     serde_json::from_value(value).map_err(|_| SandboxProviderError::InvalidResponse)
+}
+
+fn validate_not_found(exchange: &HttpExchange) -> Result<(), SandboxProviderError> {
+    exchange.validate_json_body()?;
+    let error: VendorErrorResponse = parse_json(&exchange.body, MAX_LIFECYCLE_RESPONSE_BYTES)?;
+    if error.code.is_empty()
+        || error.code.len() > 256
+        || !error.code.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b':')
+        })
+        || error.message.is_empty()
+        || error.message.len() > 4_096
+    {
+        return Err(SandboxProviderError::InvalidResponse);
+    }
+    Ok(())
 }
 
 fn encode_metadata(
@@ -831,6 +853,13 @@ struct VendorPagination {
     total_items: u64,
     total_pages: u32,
     has_next_page: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VendorErrorResponse {
+    code: String,
+    message: String,
 }
 
 impl VendorPagination {
@@ -1090,11 +1119,17 @@ mod tests {
                 json_response(StatusCode::OK, value)
             }
             (Method::DELETE, "/v1/sandboxes/sandbox-one") => {
-                state.present.store(false, Ordering::SeqCst);
-                Response::builder()
-                    .status(StatusCode::NO_CONTENT)
-                    .body(Body::empty())
-                    .unwrap()
+                if state.present.swap(false, Ordering::SeqCst) {
+                    Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body(Body::empty())
+                        .unwrap()
+                } else {
+                    json_response(
+                        StatusCode::NOT_FOUND,
+                        json!({"code":"NOT_FOUND","message":"absent"}),
+                    )
+                }
             }
             (Method::GET, "/v1/sandboxes/sandbox-one/proxy/18080/v1/state") => json_response(
                 StatusCode::OK,
@@ -1442,6 +1477,9 @@ mod tests {
         let observation = client.terminate(&sandbox_id).await.unwrap();
         assert!(!observation.present);
         observation.validate().unwrap();
+        let replayed = client.terminate(&sandbox_id).await.unwrap();
+        assert!(!replayed.present);
+        replayed.validate().unwrap();
         assert!(!client.prove_absent(&sandbox_id).await.unwrap().present);
     }
 

@@ -1259,6 +1259,78 @@ impl<T> PhysicalDecision<T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxControlKindV1 {
+    Cancel,
+    Timeout,
+}
+
+impl SandboxControlKindV1 {
+    pub const fn job_state(self) -> JobState {
+        match self {
+            Self::Cancel => JobState::Cancelled,
+            Self::Timeout => JobState::TimedOut,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxControlIntentV1 {
+    pub schema_version: u16,
+    pub kind: SandboxControlKindV1,
+    pub requested_at: DateTime<Utc>,
+    pub target_invocation_version: u64,
+    pub intent_digest: Sha256Digest,
+}
+
+impl SandboxControlIntentV1 {
+    pub fn new(
+        plan: &SandboxExecutionPlanV1,
+        kind: SandboxControlKindV1,
+        requested_at: DateTime<Utc>,
+        target_invocation_version: u64,
+    ) -> Result<Self, SandboxContractError> {
+        let mut intent = Self {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            kind,
+            requested_at,
+            target_invocation_version,
+            intent_digest: zero_digest(),
+        };
+        intent.intent_digest = intent.digest_for(plan)?;
+        intent.validate_for(plan)?;
+        Ok(intent)
+    }
+
+    pub fn validate_for(&self, plan: &SandboxExecutionPlanV1) -> Result<(), SandboxContractError> {
+        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+            || self.target_invocation_version == 0
+            || self.intent_digest != self.digest_for(plan)?
+        {
+            return Err(SandboxContractError::InvalidControl);
+        }
+        Ok(())
+    }
+
+    fn digest_for(
+        &self,
+        plan: &SandboxExecutionPlanV1,
+    ) -> Result<Sha256Digest, SandboxContractError> {
+        digest_json(&serde_json::json!({
+            "domain": "insight.sandbox.control-intent/v1",
+            "tenant_id": plan.tenant_id,
+            "invocation_id": plan.invocation_id,
+            "target_invocation_version": self.target_invocation_version,
+            "job_id": plan.job_id,
+            "execution_request_digest": plan.request_digest,
+            "kind": self.kind,
+            "requested_at": self.requested_at,
+        }))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SandboxTerminalOutcomeV1 {
@@ -1440,20 +1512,35 @@ impl SandboxTerminalSummaryV1 {
         })
     }
 
+    fn from_control(control: &SandboxControlIntentV1) -> Self {
+        match control.kind {
+            SandboxControlKindV1::Cancel => Self::Cancelled {
+                evidence_digest: control.intent_digest.clone(),
+            },
+            SandboxControlKindV1::Timeout => Self::TimedOut {
+                evidence_digest: control.intent_digest.clone(),
+            },
+        }
+    }
+
     fn validate_for(
         &self,
         plan: &SandboxExecutionPlanV1,
-        physical: &SandboxPhysicalEvidenceV1,
+        physical: Option<&SandboxPhysicalEvidenceV1>,
+        control: Option<&SandboxControlIntentV1>,
     ) -> Result<(), SandboxContractError> {
         match self {
             Self::Succeeded { result } => {
+                let physical = physical.ok_or(SandboxContractError::InvalidTerminal)?;
                 result.validate_for(plan)?;
-                if !matches!(
-                    physical.phase,
-                    SandboxPhysicalPhaseV1::Succeeded
-                        | SandboxPhysicalPhaseV1::Cleaning
-                        | SandboxPhysicalPhaseV1::Absent
-                ) || physical.result_evidence.as_deref() != Some(result)
+                if control.is_some()
+                    || !matches!(
+                        physical.phase,
+                        SandboxPhysicalPhaseV1::Succeeded
+                            | SandboxPhysicalPhaseV1::Cleaning
+                            | SandboxPhysicalPhaseV1::Absent
+                    )
+                    || physical.result_evidence.as_deref() != Some(result)
                 {
                     return Err(SandboxContractError::InvalidTerminal);
                 }
@@ -1463,15 +1550,18 @@ impl SandboxTerminalSummaryV1 {
                 result,
                 ..
             } => {
+                let physical = physical.ok_or(SandboxContractError::InvalidTerminal)?;
                 if let Some(result) = result {
                     result.validate_for(plan)?;
                 }
-                if !matches!(
-                    physical.phase,
-                    SandboxPhysicalPhaseV1::Failed
-                        | SandboxPhysicalPhaseV1::Cleaning
-                        | SandboxPhysicalPhaseV1::Absent
-                ) || physical.result_evidence.as_deref() != result.as_ref()
+                if control.is_some()
+                    || !matches!(
+                        physical.phase,
+                        SandboxPhysicalPhaseV1::Failed
+                            | SandboxPhysicalPhaseV1::Cleaning
+                            | SandboxPhysicalPhaseV1::Absent
+                    )
+                    || physical.result_evidence.as_deref() != result.as_ref()
                     || result.as_ref().is_some_and(|result| {
                         !matches!(
                             result,
@@ -1485,23 +1575,32 @@ impl SandboxTerminalSummaryV1 {
                     return Err(SandboxContractError::InvalidTerminal);
                 }
             }
-            Self::Cancelled { .. } | Self::TimedOut { .. } => {
-                if matches!(
-                    physical.phase,
-                    SandboxPhysicalPhaseV1::Succeeded
-                        | SandboxPhysicalPhaseV1::Failed
-                        | SandboxPhysicalPhaseV1::UnknownOutcome
-                ) {
+            Self::Cancelled { evidence_digest } => {
+                let control = control.ok_or(SandboxContractError::InvalidTerminal)?;
+                if control.kind != SandboxControlKindV1::Cancel
+                    || &control.intent_digest != evidence_digest
+                {
+                    return Err(SandboxContractError::InvalidTerminal);
+                }
+            }
+            Self::TimedOut { evidence_digest } => {
+                let control = control.ok_or(SandboxContractError::InvalidTerminal)?;
+                if control.kind != SandboxControlKindV1::Timeout
+                    || &control.intent_digest != evidence_digest
+                {
                     return Err(SandboxContractError::InvalidTerminal);
                 }
             }
             Self::UnknownOutcome { .. } => {
-                if !matches!(
-                    physical.phase,
-                    SandboxPhysicalPhaseV1::UnknownOutcome
-                        | SandboxPhysicalPhaseV1::Cleaning
-                        | SandboxPhysicalPhaseV1::Absent
-                ) {
+                let physical = physical.ok_or(SandboxContractError::InvalidTerminal)?;
+                if control.is_some()
+                    || !matches!(
+                        physical.phase,
+                        SandboxPhysicalPhaseV1::UnknownOutcome
+                            | SandboxPhysicalPhaseV1::Cleaning
+                            | SandboxPhysicalPhaseV1::Absent
+                    )
+                {
                     return Err(SandboxContractError::InvalidTerminal);
                 }
             }
@@ -1527,14 +1626,15 @@ impl SandboxTerminalRecordV1 {
     fn validate_for(
         &self,
         plan: &SandboxExecutionPlanV1,
-        physical: &SandboxPhysicalEvidenceV1,
+        physical: Option<&SandboxPhysicalEvidenceV1>,
+        control: Option<&SandboxControlIntentV1>,
     ) -> Result<(), SandboxContractError> {
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || self.terminal_digest != digest_without_field(self, "terminal_digest")?
         {
             return Err(SandboxContractError::InvalidTerminal);
         }
-        self.summary.validate_for(plan, physical)
+        self.summary.validate_for(plan, physical, control)
     }
 }
 
@@ -1636,6 +1736,8 @@ pub struct SandboxDispatcherJobPayloadV1 {
     pub schema_version: u16,
     pub plan: Box<SandboxExecutionPlanV1>,
     pub submission_digest: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<Box<SandboxControlIntentV1>>,
     pub physical: Option<Box<SandboxPhysicalEvidenceV1>>,
     pub terminal: Option<Box<SandboxTerminalRecordV1>>,
     pub cleanup: SandboxCleanupStateV1,
@@ -1650,6 +1752,7 @@ impl SandboxDispatcherJobPayloadV1 {
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
             plan: Box::new(plan),
             submission_digest,
+            control: None,
             physical: None,
             terminal: None,
             cleanup: SandboxCleanupStateV1::initial(),
@@ -1688,12 +1791,14 @@ impl SandboxDispatcherJobPayloadV1 {
         if let Some(physical) = &self.physical {
             physical.validate_for(&self.plan)?;
         }
+        if let Some(control) = &self.control {
+            control.validate_for(&self.plan)?;
+        }
         if let Some(terminal) = &self.terminal {
             terminal.validate_for(
                 &self.plan,
-                self.physical
-                    .as_deref()
-                    .ok_or(SandboxContractError::InvalidTerminal)?,
+                self.physical.as_deref(),
+                self.control.as_deref(),
             )?;
             if terminal.summary.job_state() != job.state {
                 return Err(SandboxContractError::InvalidTerminal);
@@ -1702,15 +1807,17 @@ impl SandboxDispatcherJobPayloadV1 {
         self.cleanup
             .validate(self.terminal.is_some(), self.physical.as_deref())?;
         let state_matches = match job.state {
-            JobState::Ready | JobState::Leased => self.terminal.is_none(),
-            JobState::Running | JobState::Cancelling => {
-                self.physical.is_some() && self.terminal.is_none()
+            JobState::Ready | JobState::Leased => self.control.is_none() && self.terminal.is_none(),
+            JobState::Running => {
+                self.control.is_none() && self.physical.is_some() && self.terminal.is_none()
             }
-            JobState::Succeeded
-            | JobState::Failed
-            | JobState::Cancelled
-            | JobState::TimedOut
-            | JobState::ReconciliationRequired => self.terminal.is_some(),
+            JobState::Cancelling => self.control.is_some() && self.terminal.is_none(),
+            JobState::Succeeded | JobState::Failed | JobState::ReconciliationRequired => {
+                self.control.is_none() && self.terminal.is_some()
+            }
+            JobState::Cancelled | JobState::TimedOut => {
+                self.control.is_some() && self.terminal.is_some()
+            }
             _ => false,
         };
         if !state_matches || (job.attempt_count == 0) != self.physical.is_none() {
@@ -1825,6 +1932,51 @@ impl SandboxDispatcherJobPayloadV1 {
         }
     }
 
+    pub fn request_control(
+        &self,
+        kind: SandboxControlKindV1,
+        requested_at: DateTime<Utc>,
+        target_invocation_version: u64,
+    ) -> Result<Self, SandboxContractError> {
+        if self.control.is_some() || self.terminal.is_some() {
+            return Err(SandboxContractError::InvalidControl);
+        }
+        let mut next = self.clone();
+        next.control = Some(Box::new(SandboxControlIntentV1::new(
+            &self.plan,
+            kind,
+            requested_at,
+            target_invocation_version,
+        )?));
+        next.seal()
+    }
+
+    pub fn terminal_control(&self) -> Result<Self, SandboxContractError> {
+        if self.terminal.is_some() {
+            return Err(SandboxContractError::TerminalConflict);
+        }
+        let control = self
+            .control
+            .as_deref()
+            .ok_or(SandboxContractError::InvalidControl)?;
+        control.validate_for(&self.plan)?;
+        let terminal = SandboxTerminalRecordV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            summary: SandboxTerminalSummaryV1::from_control(control),
+            terminal_digest: zero_digest(),
+        }
+        .seal()?;
+        terminal.validate_for(&self.plan, self.physical.as_deref(), Some(control))?;
+        let mut next = self.clone();
+        next.terminal = Some(Box::new(terminal));
+        next.cleanup = self
+            .physical
+            .as_deref()
+            .map(SandboxCleanupStateV1::for_terminal)
+            .unwrap_or_else(SandboxCleanupStateV1::initial);
+        next.seal()
+    }
+
     pub fn terminal(
         &self,
         request: &SandboxExecutionRequestV1,
@@ -1833,6 +1985,15 @@ impl SandboxDispatcherJobPayloadV1 {
         self.plan.validate_request(request)?;
         if self.terminal.is_some() {
             return Err(SandboxContractError::TerminalConflict);
+        }
+        if self.control.is_some()
+            || matches!(
+                &outcome,
+                SandboxTerminalOutcomeV1::Cancelled { .. }
+                    | SandboxTerminalOutcomeV1::TimedOut { .. }
+            )
+        {
+            return Err(SandboxContractError::InvalidControl);
         }
         let physical = self
             .physical
@@ -1844,7 +2005,7 @@ impl SandboxDispatcherJobPayloadV1 {
             terminal_digest: zero_digest(),
         }
         .seal()?;
-        terminal.validate_for(&self.plan, physical)?;
+        terminal.validate_for(&self.plan, Some(physical), None)?;
         let mut next = self.clone();
         next.terminal = Some(Box::new(terminal));
         next.cleanup = SandboxCleanupStateV1::for_terminal(physical);
@@ -2077,6 +2238,21 @@ impl SandboxClaimV1 {
             || self.lease_milliseconds > maximum_lease_milliseconds
         {
             return Err(SandboxContractError::InvalidJob);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileSandboxControlsV1 {
+    pub limit: u16,
+}
+
+impl ReconcileSandboxControlsV1 {
+    pub fn validate(&self, maximum_batch: u16) -> Result<(), SandboxContractError> {
+        if self.limit == 0 || self.limit > maximum_batch {
+            return Err(SandboxContractError::InvalidControl);
         }
         Ok(())
     }
@@ -2386,6 +2562,11 @@ pub trait SandboxJobRepository: Send + Sync {
     type Error: Send;
 
     async fn claim(&self, request: SandboxClaimV1) -> Result<Vec<LeasedSandboxJobV1>, Self::Error>;
+
+    async fn reconcile_controls(
+        &self,
+        request: ReconcileSandboxControlsV1,
+    ) -> Result<Vec<SandboxRepositoryDecisionV1>, Self::Error>;
 
     async fn heartbeat(
         &self,
@@ -3020,6 +3201,7 @@ pub enum SandboxContractError {
     InvalidResult,
     InvalidPhysicalTransition,
     InvalidJob,
+    InvalidControl,
     InvalidTerminal,
     InvalidCleanup,
     TerminalConflict,
@@ -3044,6 +3226,7 @@ impl fmt::Display for SandboxContractError {
             Self::InvalidResult => "sandbox runner result is invalid",
             Self::InvalidPhysicalTransition => "sandbox physical transition is invalid",
             Self::InvalidJob => "sandbox Job payload is invalid",
+            Self::InvalidControl => "sandbox control intent is invalid",
             Self::InvalidTerminal => "sandbox terminal evidence is invalid",
             Self::InvalidCleanup => "sandbox cleanup fence or evidence is invalid",
             Self::TerminalConflict => "sandbox terminal commit already has a winner",
@@ -3144,8 +3327,8 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
     use insight_platform_jobs::{
-        decide_claim, decide_start, decide_terminal, decide_terminal_physical_update, JobOwnerRef,
-        LeasePolicy,
+        decide_claim, decide_owner_cancelling, decide_owner_terminal, decide_start,
+        decide_terminal, decide_terminal_physical_update, JobOwnerRef, LeasePolicy,
     };
     use uuid::Uuid;
 
@@ -3824,6 +4007,45 @@ mod tests {
     }
 
     #[test]
+    fn preclaim_control_is_digest_bound_and_terminal_without_physical_effect() {
+        for (kind, terminal_state) in [
+            (SandboxControlKindV1::Cancel, JobState::Cancelled),
+            (SandboxControlKindV1::Timeout, JobState::TimedOut),
+        ] {
+            let request = request(1);
+            let ready = ready_job(&request);
+            let requested_at = request.deadline_at - Duration::seconds(1);
+            let payload = SandboxDispatcherJobPayloadV1::accepted(
+                SandboxExecutionPlanV1::from_request(&request).unwrap(),
+            )
+            .unwrap()
+            .request_control(kind, requested_at, 3)
+            .unwrap();
+            let cancelling = decide_owner_cancelling(&ready).unwrap();
+            payload.validate_for(&cancelling).unwrap();
+            assert_eq!(payload.physical, None);
+            assert_eq!(cancelling.attempt_count, 0);
+            assert!(payload.request_control(kind, requested_at, 3).is_err());
+
+            let mut tampered = payload.clone();
+            tampered.control.as_mut().unwrap().target_invocation_version = 4;
+            let tampered = tampered.seal().unwrap();
+            assert_eq!(
+                tampered.validate_for(&cancelling),
+                Err(SandboxContractError::InvalidControl)
+            );
+
+            let terminal_payload = payload.terminal_control().unwrap();
+            let terminal_job = decide_owner_terminal(&cancelling, terminal_state).unwrap();
+            terminal_payload.validate_for(&terminal_job).unwrap();
+            assert_eq!(terminal_job.attempt_count, 0);
+            assert_eq!(terminal_payload.physical, None);
+            assert!(!terminal_payload.cleanup.required);
+            assert!(terminal_payload.terminal.is_some());
+        }
+    }
+
+    #[test]
     fn cancellation_before_candidate_creation_is_a_valid_terminal() {
         let request = request(1);
         let now = request.deadline_at - Duration::minutes(4);
@@ -3859,17 +4081,12 @@ mod tests {
                 now + Duration::seconds(1),
             )
             .unwrap()
-            .terminal(
-                &request,
-                SandboxTerminalOutcomeV1::Cancelled {
-                    evidence_digest: digest('4'),
-                },
-            )
+            .request_control(SandboxControlKindV1::Cancel, now + Duration::seconds(2), 3)
+            .unwrap()
+            .terminal_control()
             .unwrap();
-        let mut terminal_job = running;
-        terminal_job.state = JobState::Cancelled;
-        terminal_job.version += 1;
-        terminal_job.lease = None;
+        let cancelling = decide_owner_cancelling(&running).unwrap();
+        let terminal_job = decide_owner_terminal(&cancelling, JobState::Cancelled).unwrap();
         payload.validate_for(&terminal_job).unwrap();
         assert_eq!(
             decide_recovery(&payload).unwrap(),
