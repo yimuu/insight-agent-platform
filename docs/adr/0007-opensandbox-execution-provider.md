@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-218 revision 1 |
+| 状态 | Accepted / CR-219 revision 1 |
 | 日期 | 2026-09-04 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -36,6 +36,12 @@ provider create；`Replayed`不调用provider。授权提交后、provider调用
 CR-218 revision 1明确：`ActivationAuthorized/PotentiallyStarted`后观察到不同runner boot时，旧activation frame不能安全发送给新boot。
 Dispatcher必须先以current Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要并进入
 `UnknownOutcome`；terminal/reclaim复用同一摘要。相同observation可重放，不同第二observation拒绝，且整个路径不创建replacement。
+
+CR-219 revision 1明确：cancel/timeout不能只推进Invocation并假设Event会被消费。Capability owner事务必须把typed、digest-bound control
+intent写入同一shared Job并将Job/Invocation原子推进到`Cancelling`；Dispatcher reserved critical-control scan按数据库时间发现显式intent
+与deadline-past Job，并按quota → Invocation → Job锁序提交terminal、quota、Event/Outbox及cleanup intent。该scan不做provider I/O；
+terminate/delete/absence严格发生在terminal之后并沿用既有cleanup generation fence。pre-claim control不创建physical attempt，已有physical
+attempt则late worker由Job terminal/version fence拒绝。该方案复用同一Job row，不增加queue、table、aggregate或第二lease authority。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -99,6 +105,9 @@ fallback。OpenSandbox Server 和 Controller 都是 physical provider；它们�
 8. terminal commit 清除业务 Job lease并在同一 Job physical evidence 内产生 cleanup intent。之后的 delete/absence 写入使用独立
    `SandboxCleanupFenceV1` 的 expected Job version、cleanup generation、process generation 与 database-time expiry CAS；它不允许改变
    Job terminal outcome、Invocation、RunValue、quota、Event 或 Outbox，也不是第二业务 lease/aggregate/table。
+9. Sandbox cancel/timeout的唯一durable control fact是shared Job payload中的`SandboxControlIntentV1`。显式命令只提交
+   Job/Invocation `Cancelling`和intent；reserved critical-control scan以bounded database transaction提交终态并结算quota。无physical
+   evidence时terminal允许attempt 0且不得接触provider；有physical evidence时cleanup generation负责后续best-effort kill与absence proof。
 
 ## 两阶段 provisioning 与激活
 
@@ -185,6 +194,9 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
   bounded recovery/orphan point lookup，不公开、不授予Platform authority；
 - TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
   后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
+- cancel/timeout terminalization由Dispatcher reserved critical-control scan执行，扫描database-time deadline并在一个事务内重验
+  control intent、Invocation、Job和quota；它不占普通Sandbox execution slot且不在事务内调用OpenSandbox。provider不可达只保留
+  cleanup pending/alert，不重新打开业务terminal或quota reservation。
 
 ## 否决方案
 

@@ -2,10 +2,15 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-218 revision 1 |
+| 状态 | Accepted / CR-219 revision 1 |
 | 日期 | 2026-09-04 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
+
+> CR-219 revision 1 control recovery：Sandbox-backed Invocation的cancel/timeout owner事务必须同时锁定并更新其唯一shared Job，
+> 将同一control kind、数据库请求时间、目标Invocation version及request/Job identity封入typed digest-bound intent。Invocation与Job先进入
+> `Cancelling`；Dispatcher保留capacity的数据库scan才可提交二者`Cancelled/TimedOut`并结算Sandbox quota。timeout由数据库时间发现，
+> 不依赖调用方继续发送命令；pre-claim路径不创建physical attempt，已开始路径由terminal first-winner阻止late result覆盖。
 
 > CR-216 revision 1 impact：Sandbox dispatch 固定为 `Dispatcher -> OpenSandbox Kubernetes -> BatchSandbox`，但 Invocation 与
 > shared Job authority 不变。平台幂等只覆盖 command Receipt、PostgreSQL candidate selection、fixed runner activation 与 Job terminal
@@ -170,6 +175,13 @@ Worker在提交Deferred后释放execution permit和lease。callback、poll、can
 - timeout不把unknown external outcome归类为safe failure；
 - 非幂等或返回不确定的backend进入`Reconciling`或`UnknownOutcome`；
 - recovery只在验证current owner/Job fence后创建新generation。
+
+Sandbox control intent由`tenant_id + invocation_id + target_invocation_version + job_id + request_digest + control_kind + requested_at`
+的domain-separated摘要绑定。控制命令不得在此事务调用OpenSandbox；它只提交Invocation/Job `Cancelling`与intent。Dispatcher的
+critical-control scan以有界batch重新验证该摘要；对跨过deadline且仍非终态的Sandbox Job先物化`timeout` intent，再在同一数据库事务
+提交Job/Invocation终态、quota settlement、Event/Outbox及可选cleanup intent。没有physical evidence时终态attempt保持零、cleanup为false；
+存在candidate或selected sandbox时cleanup为true并由后续generation-fenced worker执行。控制scan不领取普通execution permit，provider
+不可用只使cleanup保持pending并告警，不能阻塞业务终态或释放quota。
 
 Sandbox create 只产生 bounded inert candidates；response loss 后按同一 stable provisioning token 发现，current Job CAS 只选择一个。
 Dispatcher 在外部 activate 前持久化 selected sandbox、runner boot identity、activation token digest 与

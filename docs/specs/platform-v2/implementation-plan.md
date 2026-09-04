@@ -1,10 +1,16 @@
-# Platform v2 四阶段实现计划（CR-218）
+# Platform v2 四阶段实现计划（CR-219）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-218 revision 1 L1～L3 passed; L4～L6 Not run |
+| 状态 | In progress / CR-219 revision 1; L4～L6 Not run |
 | 日期 | 2026-09-04 |
-| 合同输入 | 00～18、cross-review CR-218、ADR-0001、ADR-0007、AGENTS.md |
+| 合同输入 | 00～18、cross-review CR-219、ADR-0001、ADR-0007、AGENTS.md |
+
+> 2026-09-04 CR-219 revision 1：先增加optional `SandboxControlIntentV1`及Job `Cancelling` payload/state闭包；再让
+> Capability control事务原子更新Invocation与shared Job；随后接入Dispatcher reserved critical-control bounded scan，按数据库时间处理
+> explicit cancel与expired deadline，在同一quota → Invocation → Job事务提交终态、quota、Event/Outbox和cleanup intent。最后补
+> pre-claim/started cancel、timeout、late-result race、Dispatcher kill、provider unavailable与absence proof的定向L1～L3；当前HEAD镜像部署并
+> 重跑Kind本机L4 mechanics前，不更新L4证据。
 
 > 2026-09-04 CR-218 revision 1：先在physical evidence增加optional、domain-separated boot-rollover摘要，再让
 > `record_physical_observation`以current Job fence持久化不同boot并进入`UnknownOutcome`；Dispatcher的

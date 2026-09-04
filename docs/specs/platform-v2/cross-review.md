@@ -1,10 +1,33 @@
-# Platform v2 00～18 Cross-review（CR-218）
+# Platform v2 00～18 Cross-review（CR-219）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-218 revision 1 Sandbox boot-rollover review |
+| 状态 | Accepted / CR-219 revision 1 Sandbox control recovery review |
 | 日期 | 2026-09-04 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
+
+### CR-219 revision 1 Sandbox cancel/timeout cross-review
+
+整体review确认现有Sandbox控制路径存在authority断点：Capability owner事务只把Invocation推进为`Cancelling`，shared Job、lease、payload和
+quota均不变；Dispatcher没有消费该Event的分支，claim又排除deadline-past Job。因此cancel后旧worker仍可能create/activate/commit，timeout
+后Job、Invocation与四维quota可能永久悬挂。已有L2直接构造`Cancelled/TimedOut` outcome只证明terminal helper，不证明生产控制入口。
+
+本revision把控制事实收敛到既有shared Job。`SandboxControlIntentV1`以closed kind、database requested time、target Invocation version及
+tenant/invocation/Job/request identity的domain-separated digest绑定。显式命令按Invocation → Job锁序同时写intent并推进二者
+`Cancelling`；Job状态图只为带owner intent的Ready/Leased/Running/Waiting/RetryScheduled开放该转换。Dispatcher在reserved
+critical-control capacity中执行bounded scan；每个终态事务按quota → Invocation → Job锁序重验并提交Job/Invocation、quota、Event/Outbox
+和cleanup intent。deadline由数据库时间物化timeout，消息仅是wake hint。scan不调用provider、不建立第二lease或current-state表。
+
+ownership/identity/schema复核：PostgreSQL shared Job仍是cancel/attempt/lease/terminal唯一authority，Invocation仍是业务调用projection，
+OpenSandbox仍只拥有physical lifecycle。optional intent不新增表、aggregate、JobKind、WorkClass、ComponentRole、route、credential或queue；
+无intent payload保持既有canonical shape。pre-claim control保持attempt 0且没有physical evidence；started control保留原physical identity。
+terminal first-winner使late result、第二control与scanner race零写入，四维quota只在terminal事务结算一次。
+
+安全/容量/恢复复核：intent不含正文、activation token、provider URL或credential，不进入metric label。控制scan使用critical-control保留容量，
+Sandbox普通lane饱和不能阻止cancel/timeout；provider不可达不能阻塞terminal/quota，只使既有cleanup backlog重试并持续告警。外部
+terminate/delete/absence始终发生在terminal之后并由`SandboxCleanupFenceV1`保护。L1必须覆盖intent digest/second-intent/pre-claim零provider，
+L2必须覆盖public cancel、database-time timeout、result/control race、quota exact-once和provider-independent terminal，L3必须覆盖started
+workload cancel/timeout、Dispatcher kill恢复与provider unavailable cleanup。该revision本身不产生L4～L6 passed evidence。
 
 ### CR-218 revision 1 Sandbox boot-rollover cross-review
 

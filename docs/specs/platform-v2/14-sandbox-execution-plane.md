@@ -2,10 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-218 revision 1 |
+| 状态 | Accepted / CR-219 revision 1 |
 | 日期 | 2026-09-04 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
+
+> CR-219 revision 1 control recovery：Sandbox Job payload增加optional `SandboxControlIntentV1`，以closed kind、数据库时间、
+> target Invocation version、tenant/invocation/Job/request identity及domain-separated digest绑定cancel/timeout。Capability owner事务原子推进
+> Invocation与Job到`Cancelling`并写intent；Dispatcher的reserved critical-control scan对显式intent及deadline-past Job执行bounded、
+> database-time、quota → Invocation → Job first-winner terminal commit。该scan不调用provider；terminal后才复用既有cleanup generation执行
+> terminate/delete/absence。pre-claim控制保持attempt=0且不产生physical evidence，started控制保留physical evidence并拒绝所有late worker写入。
 
 > CR-216 clean-cut：首版 physical provider 只有 OpenSandbox Kubernetes provider + BatchSandbox Controller +
 > containerd/runc。restricted WASI、Wasmtime Executor、自建 gVisor Launcher/guest、process attestor、Docker provider、
@@ -539,6 +545,33 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 拖垮 API、Scheduler、Model、MCP、Artifact 或 critical-control admission。
 
 ## 12. 超时、重试、取消与恢复
+
+`SandboxControlIntentV1`是shared Job payload中的唯一控制事实：
+
+```rust
+struct SandboxControlIntentV1 {
+    schema_version: Const<1>,
+    kind: SandboxControlKindV1, // cancel | timeout
+    requested_at: DatabaseTimestamp,
+    target_invocation_version: NonZeroU64,
+    intent_digest: Sha256Digest,
+}
+```
+
+`intent_digest`固定绑定`tenant_id + invocation_id + target_invocation_version + job_id + execution_request_digest + kind + requested_at`。
+缺字段、错误version/kind、调用方时间、摘要漂移、第二个不同intent或terminal后intent写入均fail closed。显式控制事务按Invocation后Job锁序
+重验current version/owner/deadline，并原子写入两者`Cancelling`；它不做provider I/O、不结算quota，也不接受Sandbox quota ledger ID。
+
+Dispatcher使用reserved critical-control permit运行有界control scan。scan只读选择显式`Cancelling + intent`或database-time deadline-past的
+Sandbox Job；每个mutation重新按quota → Invocation → Job锁序取锁并重验snapshot。deadline-past且没有intent时，scan以数据库时间物化
+`timeout` intent；随后在一个事务内提交Job与Invocation `Cancelled/TimedOut`、四维Sandbox quota settlement、terminal Event/Outbox和同一
+Job payload中的cleanup intent。这个数据库步骤不需要也不得领取普通Sandbox execution slot，不调用create/list/state/activate/result/
+terminate/delete。并发result/control/timeout只有一个Job version与terminal winner，loser零业务写入。
+
+pre-claim Job在控制终态保持`attempt_count=0`、没有physical evidence、cleanup=false，证明没有任何Sandbox provider调用；已有physical
+evidence的Job保留原attempt/token/candidate/activation evidence，terminal cleanup是否required只由该physical evidence决定。后续外部
+terminate/delete/absence仍由现有`SandboxCleanupFenceV1`执行；provider不可达时terminal Job与已释放quota保持不变，cleanup backlog持续重试
+并告警。旧execution lease/fence、迟到runner success和重放控制都不能覆盖terminal或生成第二intent。
 
 - create response 丢失：先按同token bounded list；同一已授权ordinal只返回`Replayed`且不得再次调用provider。授权后create前崩溃同样
   burn ordinal；只有durable quiescence/count/total-time budget允许时才CAS授权下一ordinal；已有候选保持inert，candidate CAS只选一个，

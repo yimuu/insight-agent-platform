@@ -2,10 +2,17 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-218 revision 1 |
+| 状态 | Accepted / CR-219 revision 1 |
 | 日期 | 2026-09-04 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
+
+> CR-219 revision 1 control recovery：Sandbox cancel/timeout必须同时写入Invocation与同一shared Job的typed durable intent，
+> 不能只依赖Event唤醒或进程内cancellation。`Ready/Leased/Running/Waiting/RetryScheduled -> Cancelling`只在owner事务已绑定该intent时
+> 适用；随后Sandbox Dispatcher的bounded critical-control scan按数据库时间与quota → Invocation → Job锁序原子提交
+> `Cancelled/TimedOut`。pre-claim terminal允许没有physical evidence且不得调用provider；已有physical evidence时terminal事务产生
+> cleanup intent，外部terminate/delete/absence继续使用独立cleanup generation fence。timeout scan、late worker与重放均争用同一Job
+> version/terminal first-winner，不新增current-state authority。
 
 > CR-216 revision 1 impact：Sandbox create 与 Package activation 拆开。shared Job 保存 stable provisioning token、selected candidate、
 > runner boot/activation 与 cleanup evidence；create 只生成 bounded inert candidates，PostgreSQL current-fence CAS 选唯一 candidate，

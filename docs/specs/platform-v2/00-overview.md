@@ -2,11 +2,19 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-218 revision 1 L1～L3 passed; L4～L6 Not run |
+| 状态 | Reviewed / CR-219 revision 1 implementation pending; L4～L6 Not run |
 | 日期 | 2026-09-04 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | OpenSandbox-only；以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-09-04 control recovery（CR-219 revision 1）：整体review确认Sandbox cancel/timeout只推进Invocation，
+> 没有把durable intent写入shared Job，也没有生产消费者或deadline scan，因而已取消workload仍可能activate，过期Job与quota可永久悬挂。
+> 03/10/14与ADR-0007现规定：控制命令在同一事务把typed、digest-bound intent写入既有Sandbox Job并推进Job/Invocation到
+> `Cancelling`；Sandbox Dispatcher以保留critical-control容量执行bounded database-time scan，按quota → Invocation → Job锁序
+> 原子提交`Cancelled/TimedOut`、quota settlement、Event/Outbox与cleanup intent，之后才以既有cleanup generation执行provider
+> terminate/delete/absence。pre-claim控制不得创建candidate或调用provider，允许零physical-attempt终态；已开始执行则late result由
+> Job version/terminal first-winner拒绝。该revision不新增表、aggregate、JobKind、队列、角色或第二authority，实施与L1～L3证据尚未完成。
 
 > 2026-09-02 qualification hardening（CR-217）：production profile固定至少24小时持续soak，Evidence manifest的
 > 实际起止时间必须覆盖该声明；每个gate至少绑定一个未被其他gate复用的专属artifact digest，artifact闭包禁止别名和未引用项。
