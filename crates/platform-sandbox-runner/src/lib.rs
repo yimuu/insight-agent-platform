@@ -854,8 +854,8 @@ unsafe fn install_package_seccomp() -> std::io::Result<()> {
     const BPF_LOAD_SYSCALL: u16 = 0x20;
     const BPF_JUMP_EQUAL: u16 = 0x15;
     const BPF_RETURN: u16 = 0x06;
-    const SECCOMP_RETURN_ALLOW: u32 = 0x7fff_0000;
-    const SECCOMP_RETURN_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_ACTION_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_ACTION_ERRNO: u32 = 0x0005_0000;
 
     const fn statement(code: u16, value: u32) -> libc::sock_filter {
         libc::sock_filter {
@@ -873,7 +873,7 @@ unsafe fn install_package_seccomp() -> std::io::Result<()> {
                 jf: 1,
                 k: syscall as u32,
             },
-            statement(SECCOMP_RETURN_ERRNO, libc::EPERM as u32),
+            statement(BPF_RETURN, SECCOMP_ACTION_ERRNO | libc::EPERM as u32),
         ]
     }
 
@@ -906,7 +906,7 @@ unsafe fn install_package_seccomp() -> std::io::Result<()> {
         setpgid[1],
         unshare[0],
         unshare[1],
-        statement(SECCOMP_RETURN_ALLOW, 0),
+        statement(BPF_RETURN, SECCOMP_ACTION_ALLOW),
     ];
     let program = libc::sock_fprog {
         len: u16::try_from(filter.len()).expect("fixed seccomp program length fits u16"),
