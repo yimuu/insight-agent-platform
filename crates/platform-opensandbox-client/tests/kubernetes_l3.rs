@@ -10,12 +10,14 @@ use insight_platform_contracts::{
 };
 use insight_platform_opensandbox_client::{
     OpenSandboxApiKey, OpenSandboxHttpClient, OpenSandboxHttpClientConfig,
+    OpenSandboxReadinessProbeConfig,
 };
 use insight_platform_sandbox::opensandbox::{
-    parse_result_frame, CandidateCursorV1, OpaqueActivationToken, OpenSandboxCreateV1,
-    OpenSandboxProvider, SandboxActivationFrameV1, SandboxExecutionRequestV1, SandboxNetworkMode,
-    SandboxPhysicalEvidenceV1, SandboxProvisioningLimitsV1, SandboxResourceLimitsV1,
-    SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    parse_result_frame, ActivationSignature, CandidateCursorV1, OpaqueActivationToken,
+    OpenSandboxCreateV1, OpenSandboxProvider, SandboxActivationFrameV1, SandboxExecutionRequestV1,
+    SandboxNetworkMode, SandboxPhysicalEvidenceV1, SandboxProviderError,
+    SandboxProvisioningLimitsV1, SandboxResourceLimitsV1, SandboxRunnerOutcomeV1,
+    SandboxRunnerPhaseV1, SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_PACKAGE_UID,
 };
 use serde_json::{json, Value};
 use std::{env, time::Duration};
@@ -112,7 +114,7 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
     };
     assert_eq!(context.phase, "core");
     let client = context.client(10_000);
-    client.readiness_probe().await.unwrap();
+    client.lifecycle_probe().await.unwrap();
     let wrong_credential_client = OpenSandboxHttpClient::new(OpenSandboxHttpClientConfig {
         lifecycle_base_url: context.lifecycle_base_url.clone(),
         api_key: OpenSandboxApiKey::parse("wrong-opensandbox-api-key-0000001").unwrap(),
@@ -123,7 +125,7 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
     })
     .unwrap();
     assert_eq!(
-        wrong_credential_client.readiness_probe().await,
+        wrong_credential_client.lifecycle_probe().await,
         Err(insight_platform_sandbox::opensandbox::SandboxProviderError::Unauthorized)
     );
 
@@ -202,6 +204,126 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_kubernetes_l3_full_readiness_probe() {
+    let Some(context) = L3Context::load("readiness") else {
+        return;
+    };
+    let client = context.client(90_000);
+    client
+        .readiness_probe(&OpenSandboxReadinessProbeConfig {
+            image_uri: context.image_uri,
+            runtime_contract_digest: context.runtime_contract_digest,
+            profile_deployment_digest: digest('9'),
+            ttl_seconds: 60,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_kubernetes_l3_signed_activation_is_candidate_bound() {
+    let Some(context) = L3Context::load("activation-boundary") else {
+        return;
+    };
+    let client = context.client(10_000);
+    let request = request(
+        &context,
+        15,
+        SandboxNetworkMode::Disabled,
+        vec!["/opt/insight/package".to_owned(), "echo".to_owned()],
+    );
+    let (first_create, token_digest, evidence) = authorized_create(&request, '5', 1, 60);
+    let (second_create, second_token_digest, _) = authorized_create(&request, '5', 2, 60);
+    assert_eq!(token_digest, second_token_digest);
+    for sandbox_id in list_candidates(&client, token_digest).await {
+        delete_and_wait(&client, &sandbox_id).await;
+    }
+    let (first, second) = tokio::join!(
+        client.create_candidate(first_create),
+        client.create_candidate(second_create),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let first_armed = wait_for_runner(&client, &first.sandbox_id).await;
+    let second_armed = wait_for_runner(&client, &second.sandbox_id).await;
+    let activation = SandboxActivationFrameV1 {
+        magic: String::new(),
+        schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        sandbox_id: first.sandbox_id.clone(),
+        boot_id: first_armed.boot_id.clone(),
+        execution_request_digest: request.request_digest.clone(),
+        input_schema_digest: request.input_schema_digest.clone(),
+        input_digest: request.input_digest.clone(),
+        declared_input_bytes: 0,
+        input: request.input.clone(),
+        activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
+        frame_digest: zero_digest(),
+    }
+    .seal_with(&evidence.activation_token)
+    .unwrap();
+    assert_eq!(
+        client.activate(&second.sandbox_id, activation).await,
+        Err(SandboxProviderError::InvalidResponse)
+    );
+    let second_after = client.runner_state(&second.sandbox_id).await.unwrap();
+    assert_eq!(second_after.phase, SandboxRunnerPhaseV1::Armed);
+    assert_eq!(second_after.boot_id, second_armed.boot_id);
+    assert_eq!(
+        client.runner_state(&first.sandbox_id).await.unwrap().phase,
+        SandboxRunnerPhaseV1::Armed
+    );
+    delete_and_wait(&client, &first.sandbox_id).await;
+    delete_and_wait(&client, &second.sandbox_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_kubernetes_l3_package_cannot_cross_runner_boundary_or_survive() {
+    let Some(context) = L3Context::load("package-boundary") else {
+        return;
+    };
+    let client = context.client(10_000);
+    let marker = "/tmp/insight-boundary-daemon-survived";
+    let request = request(
+        &context,
+        16,
+        SandboxNetworkMode::Disabled,
+        vec![
+            "/opt/insight/package".to_owned(),
+            "boundary".to_owned(),
+            marker.to_owned(),
+        ],
+    );
+    let (sandbox_id, output) = execute_retained(&client, &request, '6').await;
+    assert_eq!(
+        output,
+        json!({
+            "effective_capabilities": 0,
+            "effective_uid": SANDBOX_PACKAGE_UID,
+            "runner_setuid_allowed": false,
+            "runner_signal_allowed": false,
+            "state_write_allowed": false,
+        })
+    );
+    sleep(Duration::from_secs(3)).await;
+    let pod_name = workload_pod_name(&context.workloads_namespace, &sandbox_id)
+        .await
+        .expect("boundary workload Pod name");
+    kubectl(&[
+        "exec",
+        "-n",
+        &context.workloads_namespace,
+        &pod_name,
+        "--",
+        "/usr/bin/test",
+        "!",
+        "-e",
+        marker,
+    ])
+    .await;
+    delete_and_wait(&client, &sandbox_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recreation() {
     let Some(context) = L3Context::load("boot-rollover") else {
         return;
@@ -224,19 +346,21 @@ async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recrea
     let candidate = client.create_candidate(create).await.unwrap();
     let armed = wait_for_runner(&client, &candidate.sandbox_id).await;
     assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
+    let signing_seed = evidence.activation_token;
     let activation = SandboxActivationFrameV1 {
         magic: String::new(),
         schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-        activation_token: evidence.activation_token,
+        sandbox_id: candidate.sandbox_id.clone(),
         boot_id: armed.boot_id.clone(),
         execution_request_digest: request.request_digest.clone(),
         input_schema_digest: request.input_schema_digest.clone(),
         input_digest: request.input_digest.clone(),
         declared_input_bytes: 0,
         input: request.input.clone(),
+        activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
         frame_digest: zero_digest(),
     }
-    .seal()
+    .seal_with(&signing_seed)
     .unwrap();
     client
         .activate(&candidate.sandbox_id, activation)
@@ -307,7 +431,7 @@ async fn opensandbox_kubernetes_l3_persistent_candidate_recovers_after_provider_
         return;
     };
     let client = context.client(10_000);
-    client.readiness_probe().await.unwrap();
+    client.lifecycle_probe().await.unwrap();
     let request = request(
         &context,
         20,
@@ -395,23 +519,35 @@ async fn execute(
     request: &SandboxExecutionRequestV1,
     token_character: char,
 ) -> Value {
+    let (sandbox_id, output) = execute_retained(client, request, token_character).await;
+    delete_and_wait(client, &sandbox_id).await;
+    output
+}
+
+async fn execute_retained(
+    client: &OpenSandboxHttpClient,
+    request: &SandboxExecutionRequestV1,
+    token_character: char,
+) -> (insight_platform_sandbox::opensandbox::OpenSandboxId, Value) {
     let (create, _, evidence) = authorized_create(request, token_character, 1, 60);
     let candidate = client.create_candidate(create).await.unwrap();
     let armed = wait_for_runner(client, &candidate.sandbox_id).await;
     assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
+    let signing_seed = evidence.activation_token;
     let activation = SandboxActivationFrameV1 {
         magic: String::new(),
         schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-        activation_token: evidence.activation_token,
+        sandbox_id: candidate.sandbox_id.clone(),
         boot_id: armed.boot_id.clone(),
         execution_request_digest: request.request_digest.clone(),
         input_schema_digest: request.input_schema_digest.clone(),
         input_digest: request.input_digest.clone(),
         declared_input_bytes: 0,
         input: request.input.clone(),
+        activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
         frame_digest: zero_digest(),
     }
-    .seal()
+    .seal_with(&signing_seed)
     .unwrap();
     let activated = client
         .activate(&candidate.sandbox_id, activation)
@@ -431,8 +567,7 @@ async fn execute(
             panic!("L3 Package failed: {failure_class:?}")
         }
     };
-    delete_and_wait(client, &candidate.sandbox_id).await;
-    output
+    (candidate.sandbox_id, output)
 }
 
 fn request(
@@ -600,6 +735,31 @@ async fn workload_pod_uid(
         .and_then(Value::as_array)
         .and_then(|items| items.first())
         .and_then(|pod| pod.pointer("/metadata/uid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+async fn workload_pod_name(
+    workloads_namespace: &str,
+    sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+) -> Option<String> {
+    let output = kubectl(&[
+        "get",
+        "pods",
+        "-n",
+        workloads_namespace,
+        "-l",
+        &format!("opensandbox.io/id={}", sandbox_id.as_str()),
+        "-o",
+        "json",
+    ])
+    .await;
+    serde_json::from_slice::<Value>(&output)
+        .unwrap()
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|pod| pod.pointer("/metadata/name"))
         .and_then(Value::as_str)
         .map(str::to_owned)
 }

@@ -108,7 +108,10 @@ spec:
         object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
         object.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
-        object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL']
+        object.spec.template.spec.containers[0].securityContext.runAsUser == 65532 &&
+        object.spec.template.spec.containers[0].securityContext.runAsGroup == 65532 &&
+        object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        object.spec.template.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETUID']
       message: Armed runner container security context drifted
     - expression: >-
         object.spec.template.spec.volumes.size() == 3 &&
@@ -174,7 +177,10 @@ spec:
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
         object.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.containers[0].securityContext.runAsUser == 65532 &&
+        object.spec.containers[0].securityContext.runAsGroup == 65532 &&
         object.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        object.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETUID'] &&
         object.spec.volumes.all(v, !has(v.hostPath) && !has(v.projected) && !has(v.secret) && !has(v.persistentVolumeClaim))
       message: workload Pod gained privilege, writable root, host/runtime socket, token, Secret, or persistent storage
 ---

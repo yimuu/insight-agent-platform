@@ -37,6 +37,7 @@ spec:
             runAsGroup: 65532
             capabilities:
               drop: [ALL]
+              add: [KILL, SETUID]
           volumeMounts:
             - name: runner-state
               mountPath: /run/insight-sandbox

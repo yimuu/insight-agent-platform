@@ -14,7 +14,11 @@
   "request_timeout_milliseconds" (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds)
   "connect_timeout_milliseconds" (int .Values.dispatcher.opensandbox.connectTimeoutMilliseconds)
   "candidate_page_items" (int .Values.dispatcher.opensandbox.candidatePageItems)
-  "orphan_page_items" (int .Values.dispatcher.opensandbox.orphanPageItems) -}}
+  "orphan_page_items" (int .Values.dispatcher.opensandbox.orphanPageItems)
+  "readiness_request_timeout_milliseconds" (int .Values.dispatcher.opensandbox.readinessRequestTimeoutMilliseconds)
+  "readiness_image_uri" (printf "%s@%s" .Values.images.platform.repository .Values.images.platform.digest)
+  "readiness_profile_digest" .Values.global.deploymentConfigDigest
+  "readiness_success_ttl_milliseconds" (int .Values.dispatcher.opensandbox.readinessSuccessTtlMilliseconds) -}}
 {{- $config := dict
   "schema_version" 1
   "observability_listen_address" (printf "0.0.0.0:%v" .Values.dispatcher.observabilityPort)

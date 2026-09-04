@@ -11,6 +11,7 @@ use insight_platform_observability::{
 };
 use insight_platform_opensandbox_client::{
     OpenSandboxApiKey, OpenSandboxHttpClient, OpenSandboxHttpClientConfig,
+    OpenSandboxReadinessProbeConfig,
 };
 use insight_platform_postgres::{repository::PgRepository, verify_schema};
 use insight_platform_sandbox_dispatcher::{
@@ -70,6 +71,10 @@ struct OpenSandboxProcessConfig {
     connect_timeout_milliseconds: u32,
     candidate_page_items: u8,
     orphan_page_items: u16,
+    readiness_request_timeout_milliseconds: u32,
+    readiness_image_uri: String,
+    readiness_profile_digest: Sha256Digest,
+    readiness_success_ttl_milliseconds: u64,
 }
 
 impl SandboxDispatcherProcessConfig {
@@ -132,10 +137,13 @@ impl SandboxDispatcherProcessConfig {
             || self.opensandbox.request_timeout_milliseconds == 0
             || u64::from(self.opensandbox.request_timeout_milliseconds).saturating_mul(12)
                 >= lease_milliseconds
+            || !(5_000..=120_000).contains(&self.opensandbox.readiness_request_timeout_milliseconds)
+            || !(60_000..=900_000).contains(&self.opensandbox.readiness_success_ttl_milliseconds)
         {
             return Err(ProcessError::InvalidConfiguration);
         }
         self.provider_config(OpenSandboxApiKey::parse("x".repeat(32)).expect("fixture key"))?;
+        self.readiness_probe_config()?;
         self.driver_config()?;
         Ok(())
     }
@@ -144,6 +152,14 @@ impl SandboxDispatcherProcessConfig {
         &self,
         api_key: OpenSandboxApiKey,
     ) -> Result<OpenSandboxHttpClientConfig, ProcessError> {
+        self.provider_config_with_timeout(api_key, self.opensandbox.request_timeout_milliseconds)
+    }
+
+    fn provider_config_with_timeout(
+        &self,
+        api_key: OpenSandboxApiKey,
+        request_timeout_milliseconds: u32,
+    ) -> Result<OpenSandboxHttpClientConfig, ProcessError> {
         let config = OpenSandboxHttpClientConfig {
             lifecycle_base_url: self
                 .opensandbox
@@ -151,7 +167,7 @@ impl SandboxDispatcherProcessConfig {
                 .parse::<Url>()
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
             api_key,
-            request_timeout_milliseconds: self.opensandbox.request_timeout_milliseconds,
+            request_timeout_milliseconds,
             connect_timeout_milliseconds: self.opensandbox.connect_timeout_milliseconds,
             candidate_page_items: self.opensandbox.candidate_page_items,
             orphan_page_items: self.opensandbox.orphan_page_items,
@@ -179,6 +195,19 @@ impl SandboxDispatcherProcessConfig {
         )
         .map_err(|_| ProcessError::InvalidConfiguration)
     }
+
+    fn readiness_probe_config(&self) -> Result<OpenSandboxReadinessProbeConfig, ProcessError> {
+        let config = OpenSandboxReadinessProbeConfig {
+            image_uri: self.opensandbox.readiness_image_uri.clone(),
+            runtime_contract_digest: self.runtime_contract_digest.clone(),
+            profile_deployment_digest: self.opensandbox.readiness_profile_digest.clone(),
+            ttl_seconds: 60,
+        };
+        config
+            .validate()
+            .map_err(|_| ProcessError::InvalidConfiguration)?;
+        Ok(config)
+    }
 }
 
 #[tokio::main]
@@ -194,8 +223,15 @@ async fn run() -> Result<(), ProcessError> {
     let api_key = OpenSandboxApiKey::parse(required(OPENSANDBOX_API_KEY_ENV)?)
         .map_err(|_| ProcessError::InvalidConfiguration)?;
     let provider = Arc::new(
-        OpenSandboxHttpClient::new(config.provider_config(api_key)?)
+        OpenSandboxHttpClient::new(config.provider_config(api_key.clone())?)
             .map_err(|_| ProcessError::InvalidConfiguration)?,
+    );
+    let readiness_provider = Arc::new(
+        OpenSandboxHttpClient::new(config.provider_config_with_timeout(
+            api_key,
+            config.opensandbox.readiness_request_timeout_milliseconds,
+        )?)
+        .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
@@ -209,8 +245,9 @@ async fn run() -> Result<(), ProcessError> {
     verify_schema(&pool)
         .await
         .map_err(|_| ProcessError::SchemaMismatch)?;
-    provider
-        .readiness_probe()
+    let readiness_probe = config.readiness_probe_config()?;
+    readiness_provider
+        .readiness_probe(&readiness_probe)
         .await
         .map_err(|_| ProcessError::ProviderUnavailable)?;
 
@@ -261,6 +298,11 @@ async fn run() -> Result<(), ProcessError> {
         DependencySampler {
             pool,
             provider,
+            readiness_provider,
+            readiness_probe,
+            readiness_success_ttl: Duration::from_millis(
+                config.opensandbox.readiness_success_ttl_milliseconds,
+            ),
             observations: dependency_metrics,
             metrics: Arc::clone(&metrics),
             readiness,
@@ -331,6 +373,7 @@ async fn run_samplers(
 async fn run_dependency_sampler(dependencies: DependencySampler, cancellation: CancellationToken) {
     let mut interval = tokio::time::interval(DEPENDENCY_SAMPLE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_full_success = Some(std::time::Instant::now());
     loop {
         tokio::select! {
             biased;
@@ -345,7 +388,21 @@ async fn run_dependency_sampler(dependencies: DependencySampler, cancellation: C
                     PlatformDependency::Postgresql,
                     outcome(postgres_ok),
                 );
-                let provider_ok = dependencies.provider.readiness_probe().await.is_ok();
+                let lifecycle_ok = dependencies.provider.lifecycle_probe().await.is_ok();
+                let full_probe_due = last_full_success.is_none_or(|last| {
+                    last.elapsed() >= dependencies.readiness_success_ttl
+                });
+                let provider_ok = if lifecycle_ok && full_probe_due {
+                    let success = dependencies
+                        .readiness_provider
+                        .readiness_probe(&dependencies.readiness_probe)
+                        .await
+                        .is_ok();
+                    last_full_success = success.then(std::time::Instant::now);
+                    success
+                } else {
+                    lifecycle_ok
+                };
                 dependencies.readiness.opensandbox.store(provider_ok, Ordering::Release);
                 let _ = dependencies.observations.observe(
                     PlatformDependency::OpenSandbox,
@@ -360,6 +417,9 @@ async fn run_dependency_sampler(dependencies: DependencySampler, cancellation: C
 struct DependencySampler {
     pool: sqlx::PgPool,
     provider: Arc<OpenSandboxHttpClient>,
+    readiness_provider: Arc<OpenSandboxHttpClient>,
+    readiness_probe: OpenSandboxReadinessProbeConfig,
+    readiness_success_ttl: Duration,
     observations: Arc<DependencyObservationMetrics>,
     metrics: Arc<ProcessHttpMetrics>,
     readiness: Arc<DependencyReadiness>,
@@ -533,7 +593,7 @@ mod tests {
                 critical_control_reserved_slots: 1,
             },
             runtime_contract,
-            runtime_contract_digest,
+            runtime_contract_digest: runtime_contract_digest.clone(),
             opensandbox: OpenSandboxProcessConfig {
                 lifecycle_base_url:
                     "http://opensandbox-server.sandbox-system.svc.cluster.local:8080/v1/".to_owned(),
@@ -541,6 +601,10 @@ mod tests {
                 connect_timeout_milliseconds: 500,
                 candidate_page_items: 4,
                 orphan_page_items: 50,
+                readiness_request_timeout_milliseconds: 90_000,
+                readiness_image_uri: format!("registry.invalid/platform@sha256:{}", "4".repeat(64)),
+                readiness_profile_digest: digest('5'),
+                readiness_success_ttl_milliseconds: 300_000,
             },
             database_max_connections: 8,
             database_acquire_timeout_milliseconds: 2_000,

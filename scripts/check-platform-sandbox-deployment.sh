@@ -49,10 +49,13 @@ reject_values --set-json networkPolicy.kubernetesApiPorts='[0]'
 reject_values --set dispatcher.worker.maximumConcurrency=0
 reject_values --set dispatcher.worker.criticalControlReservedSlots=0
 reject_values --set dispatcher.opensandbox.requestTimeoutMilliseconds=5000
+reject_values --set dispatcher.opensandbox.readinessRequestTimeoutMilliseconds=120001
+reject_values --set dispatcher.opensandbox.readinessSuccessTtlMilliseconds=900001
 reject_values --set-string dispatcher.database.existingSecret=
 reject_values --set-string sandbox.serviceAccountName=default
 reject_values --set sandbox.runnerPort=8080
 reject_values --set sandbox.runAsUser=0
+reject_values --set sandbox.packageRunAsUser=65532
 
 ruby - "$root" "$chart" "$rendered" <<'RUBY'
 require "digest"

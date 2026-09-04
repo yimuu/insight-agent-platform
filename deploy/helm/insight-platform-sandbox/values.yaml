@@ -28,8 +28,8 @@ imagePullSecrets: []
 runtimeContract:
   lifecycleSchemaDigest: sha256:97dbdff2dbbf571c8e3ac77acd24454bc774275478decc1990918cbf7c518351
   batchSandboxCrdDigest: sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4
-  kubernetesProviderTemplateDigest: sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a
-  runnerProtocolDigest: sha256:4a8df3b9f4469e1e4781ff6831a23c5c60b139a8cabc128121a0832d203b4bf7
+  kubernetesProviderTemplateDigest: sha256:f37195db789a3f39d603e6c3985b707db51ae08e6240312acf4fd500dba21af1
+  runnerProtocolDigest: sha256:b029329284e7ab4ae19ee92ee344381ef009658fc900f0dcc26a68e8e816efd6
   containerRuntimeDigest: sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e
   networkPolicyDigest: sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e
 
@@ -49,6 +49,8 @@ dispatcher:
     connectTimeoutMilliseconds: 1000
     candidatePageItems: 16
     orphanPageItems: 100
+    readinessRequestTimeoutMilliseconds: 90000
+    readinessSuccessTtlMilliseconds: 300000
   worker:
     maximumConcurrency: 4
     criticalControlReservedSlots: 1
@@ -98,6 +100,7 @@ sandbox:
   stateVolumeSizeLimit: 2Mi
   runAsUser: 65532
   runAsGroup: 65532
+  packageRunAsUser: 65533
   ttlMaximumSeconds: 3600
 
 crds:

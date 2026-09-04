@@ -7,6 +7,6 @@ RUN mkdir -p /out \
        -o /out/platform-sandbox-l3-package /src/platform-sandbox-l3-package.rs
 
 FROM ${RUNNER_IMAGE}
-COPY --from=package-builder --chown=65532:65532 \
+COPY --from=package-builder --chown=65533:65532 \
   /out/platform-sandbox-l3-package /opt/insight/package
 USER 65532:65532

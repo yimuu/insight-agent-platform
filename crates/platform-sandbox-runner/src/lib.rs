@@ -1,7 +1,8 @@
 //! Immutable CR-216 Armed runner.
 //!
-//! The runner starts inert, accepts one digest-bound activation token, fsyncs a one-way latch
-//! before spawning the published Package argv, and exposes a read-only fixed result operation.
+//! The runner starts inert, accepts one candidate- and boot-bound signed activation, fsyncs a
+//! one-way latch before spawning the published Package argv, and exposes a read-only fixed result
+//! operation.
 
 use axum::{
     body::{Body, Bytes},
@@ -19,7 +20,7 @@ use insight_platform_sandbox::opensandbox::{
     SandboxFailureClassV1, SandboxRunnerConfigV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
     SandboxRunnerResultFrameV1, SandboxRunnerStateFrameV1, MAX_SANDBOX_RUNNER_CONFIG_BYTES,
     OPENSANDBOX_ID_ENV, SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_RUNNER_CONFIG_DIGEST_ENV,
-    SANDBOX_RUNNER_CONFIG_ENV,
+    SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_UID,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -27,9 +28,12 @@ use std::{
     error::Error,
     fmt,
     fs::{self, File, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     net::SocketAddr,
-    os::unix::process::CommandExt as _,
+    os::unix::{
+        fs::MetadataExt as _, fs::OpenOptionsExt as _, fs::PermissionsExt as _,
+        process::CommandExt as _,
+    },
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -38,12 +42,12 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::Mutex,
-    time::{sleep_until, Instant},
+    time::{sleep, sleep_until, Instant},
 };
 use uuid::Uuid;
 
 pub const RUNNER_LISTEN_ADDRESS: &str = "0.0.0.0:18080";
-pub const RUNNER_STATE_DIRECTORY: &str = "/run/insight-sandbox";
+pub const RUNNER_STATE_DIRECTORY: &str = "/run/insight-sandbox/authority";
 pub const RUNNER_LATCH_FILE: &str = "activation.latch";
 pub const RUNNER_RESULT_FILE: &str = "result.frame";
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,13 +132,28 @@ impl RunnerStorage {
 
     fn initialize(&self) -> Result<(), RunnerError> {
         fs::create_dir_all(&self.directory).map_err(|_| RunnerError::Storage)?;
+        fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o700))
+            .map_err(|_| RunnerError::Storage)?;
+        let metadata = fs::symlink_metadata(&self.directory).map_err(|_| RunnerError::Storage)?;
+        if !metadata.file_type().is_dir()
+            || metadata.permissions().mode() & 0o777 != 0o700
+            || metadata.uid() != effective_uid()
+        {
+            return Err(RunnerError::Storage);
+        }
         Ok(())
     }
 
     fn latch(&self, token_digest: &Sha256Digest) -> Result<LatchDisposition, RunnerError> {
         self.initialize()?;
         let path = self.latch_path();
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(token_digest.as_str().as_bytes())
                     .map_err(|_| RunnerError::Storage)?;
@@ -143,7 +162,8 @@ impl RunnerStorage {
                 Ok(LatchDisposition::Created)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = fs::read_to_string(path).map_err(|_| RunnerError::Storage)?;
+                let existing = read_secure_file(&path, 71).map_err(|_| RunnerError::Storage)?;
+                let existing = String::from_utf8(existing).map_err(|_| RunnerError::Storage)?;
                 if existing == token_digest.as_str() {
                     Ok(LatchDisposition::Replayed)
                 } else {
@@ -155,19 +175,23 @@ impl RunnerStorage {
     }
 
     fn latch_digest(&self) -> Result<Option<Sha256Digest>, RunnerError> {
-        match fs::read_to_string(self.latch_path()) {
-            Ok(value) => value.parse().map(Some).map_err(|_| RunnerError::Storage),
+        match read_secure_file(&self.latch_path(), 71) {
+            Ok(value) => String::from_utf8(value)
+                .map_err(|_| RunnerError::Storage)?
+                .parse()
+                .map(Some)
+                .map_err(|_| RunnerError::Storage),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(RunnerError::Storage),
         }
     }
 
     fn read_result(&self, maximum_bytes: u64) -> Result<Option<Vec<u8>>, RunnerError> {
-        match fs::metadata(self.result_path()) {
-            Ok(metadata) if metadata.len() > maximum_bytes => Err(RunnerError::ResultTooLarge),
-            Ok(_) => fs::read(self.result_path())
-                .map(Some)
-                .map_err(|_| RunnerError::Storage),
+        match read_secure_file(
+            &self.result_path(),
+            usize::try_from(maximum_bytes).unwrap_or(usize::MAX),
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(RunnerError::Storage),
         }
@@ -181,13 +205,47 @@ impl RunnerStorage {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&temporary)
             .map_err(|_| RunnerError::Storage)?;
         file.write_all(bytes).map_err(|_| RunnerError::Storage)?;
         file.sync_all().map_err(|_| RunnerError::Storage)?;
-        fs::rename(&temporary, self.result_path()).map_err(|_| RunnerError::Storage)?;
+        let result_path = self.result_path();
+        if fs::symlink_metadata(&result_path).is_ok() {
+            return Err(RunnerError::Storage);
+        }
+        fs::rename(&temporary, result_path).map_err(|_| RunnerError::Storage)?;
         sync_directory(&self.directory)
     }
+}
+
+fn read_secure_file(path: &Path, maximum: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.uid() != effective_uid()
+        || metadata.len() > u64::try_from(maximum).unwrap_or(u64::MAX)
+    {
+        return Err(std::io::Error::other("runner state file is not secure"));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    std::io::Read::by_ref(&mut file)
+        .take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(std::io::Error::other("runner state file exceeds limit"));
+    }
+    Ok(bytes)
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` has no arguments and only reads the calling process credential.
+    unsafe { libc::geteuid() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,14 +268,25 @@ pub struct RunnerCore {
     config: Arc<SandboxRunnerConfigV1>,
     storage: RunnerStorage,
     current: Arc<Mutex<CurrentState>>,
+    enforce_package_boundary: bool,
 }
 
 impl RunnerCore {
     pub fn production(startup: RunnerStartupV1) -> Result<Self, RunnerError> {
-        Self::new(startup, RunnerStorage::production())
+        enable_child_subreaper()?;
+        Self::new_with_boundary(startup, RunnerStorage::production(), true)
     }
 
+    #[cfg(test)]
     fn new(startup: RunnerStartupV1, storage: RunnerStorage) -> Result<Self, RunnerError> {
+        Self::new_with_boundary(startup, storage, false)
+    }
+
+    fn new_with_boundary(
+        startup: RunnerStartupV1,
+        storage: RunnerStorage,
+        enforce_package_boundary: bool,
+    ) -> Result<Self, RunnerError> {
         startup.validate()?;
         let RunnerStartupV1 { sandbox_id, config } = startup;
         storage.initialize()?;
@@ -247,6 +316,7 @@ impl RunnerCore {
                 phase,
                 result,
             })),
+            enforce_package_boundary,
         })
     }
 
@@ -276,16 +346,21 @@ impl RunnerCore {
         &self,
         frame: SandboxActivationFrameV1,
     ) -> Result<ActivationDisposition, RunnerError> {
-        validate_activation(&self.config, &frame)?;
-        let token_digest = frame
-            .activation_token
+        validate_activation(&self.sandbox_id, &self.config, &frame)?;
+        let signature_digest = frame
+            .activation_signature
             .digest()
             .map_err(RunnerError::Contract)?;
         let mut current = self.current.lock().await;
         if current.boot_id != frame.boot_id {
             return Err(RunnerError::BootChanged);
         }
-        match self.storage.latch(&token_digest)? {
+        if current.phase == SandboxRunnerPhaseV1::UnknownPriorActivation {
+            return Ok(ActivationDisposition::Replayed(
+                self.state_frame_for(&current)?,
+            ));
+        }
+        match self.storage.latch(&signature_digest)? {
             LatchDisposition::Conflict => return Err(RunnerError::ActivationConflict),
             LatchDisposition::Replayed => {
                 return Ok(ActivationDisposition::Replayed(
@@ -317,7 +392,8 @@ impl RunnerCore {
             current.phase = SandboxRunnerPhaseV1::Started;
         }
         let boot_id = { self.current.lock().await.boot_id.clone() };
-        let result = match execute_package(&self.config, input).await {
+        let result = match execute_package(&self.config, input, self.enforce_package_boundary).await
+        {
             Ok(output) => SandboxRunnerOutcomeV1::Succeeded {
                 output,
                 output_schema_digest: self.config.output_schema_digest.clone(),
@@ -478,6 +554,7 @@ struct PackageFailure {
 async fn execute_package(
     config: &SandboxRunnerConfigV1,
     input: Value,
+    enforce_package_boundary: bool,
 ) -> Result<Value, PackageFailure> {
     let input_bytes = canonical_json(&input).map_err(|_| {
         package_failure(
@@ -500,10 +577,22 @@ async fn execute_package(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let maximum_processes = libc::rlim_t::from(config.maximum_processes);
-    // SAFETY: this closure executes after fork and before exec, only calls the async-signal-safe
-    // setrlimit syscall, captures a Copy integer, and returns the OS error without allocation.
+    let package_uid = config.package_uid;
+    // SAFETY: this closure executes after fork and before exec. It captures only Copy integers and
+    // performs credential, capability, session, seccomp, and rlimit syscalls before returning the
+    // OS error to `Command`; it does not touch shared application state.
     unsafe {
         command.as_std_mut().pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if enforce_package_boundary {
+                if libc::geteuid() != SANDBOX_RUNNER_UID || libc::setuid(package_uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                drop_package_capabilities()?;
+                install_package_seccomp()?;
+            }
             let limit = libc::rlimit {
                 rlim_cur: maximum_processes,
                 rlim_max: maximum_processes,
@@ -518,6 +607,15 @@ async fn execute_package(
     let mut child = command
         .spawn()
         .map_err(|_| package_failure(SandboxFailureClassV1::RunnerFailure, b"spawn-failed"))?;
+    let process_group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or_else(|| {
+            package_failure(
+                SandboxFailureClassV1::RunnerFailure,
+                b"process-group-missing",
+            )
+        })?;
     let mut stdin = child
         .stdin
         .take()
@@ -558,8 +656,7 @@ async fn execute_package(
                 match join_bounded(result) {
                     Ok(bytes) => output = Some(bytes),
                     Err(_) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        let _ = terminate_package_group(&mut child, process_group).await;
                         return Err(package_failure(
                             SandboxFailureClassV1::OutputTooLarge,
                             b"output-too-large",
@@ -571,8 +668,7 @@ async fn execute_package(
                 match join_bounded(result) {
                     Ok(bytes) => diagnostic = Some(bytes),
                     Err(_) => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        let _ = terminate_package_group(&mut child, process_group).await;
                         return Err(package_failure(
                             SandboxFailureClassV1::PackageFailed,
                             b"diagnostic-too-large",
@@ -581,8 +677,7 @@ async fn execute_package(
                 }
             }
             () = sleep_until(deadline) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                let _ = terminate_package_group(&mut child, process_group).await;
                 return Err(package_failure(
                     SandboxFailureClassV1::PackageTimedOut,
                     b"package-timeout",
@@ -594,6 +689,14 @@ async fn execute_package(
     let status = status.expect("loop exits only with status");
     let output = output.expect("loop exits only with output");
     let diagnostic = diagnostic.expect("loop exits only with diagnostic");
+    terminate_package_group(&mut child, process_group)
+        .await
+        .map_err(|_| {
+            package_failure(
+                SandboxFailureClassV1::RunnerFailure,
+                b"package-group-not-quiescent",
+            )
+        })?;
     if !status.success() {
         return Err(package_failure(
             SandboxFailureClassV1::PackageFailed,
@@ -611,6 +714,58 @@ async fn execute_package(
         },
     )
     .map_err(|_| package_failure(SandboxFailureClassV1::OutputInvalid, &diagnostic))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn drop_package_capabilities() -> std::io::Result<()> {
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    let header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let empty = CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    };
+    let data = [empty; 2];
+    // SAFETY: the kernel reads one fixed header and the two v3 capability words from these
+    // stack-resident values and applies them only to the calling post-fork child.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            &header as *const CapabilityHeader,
+            data.as_ptr(),
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn drop_package_capabilities() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "package capability boundary requires Linux",
+    ))
 }
 
 async fn read_bounded<R>(mut reader: R, maximum_bytes: u64) -> Result<Vec<u8>, RunnerError>
@@ -638,6 +793,149 @@ where
     }
 }
 
+async fn terminate_package_group(
+    child: &mut tokio::process::Child,
+    process_group: i32,
+) -> Result<(), RunnerError> {
+    // SAFETY: the process group is the positive PID returned for the child after `setsid`.
+    let killed = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if killed != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(RunnerError::PackageBoundary);
+        }
+    }
+    let _ = child.wait().await;
+    for _ in 0..100 {
+        reap_adopted_children();
+        // SAFETY: signal zero only tests whether the exact child process group still exists.
+        let present = unsafe { libc::kill(-process_group, 0) };
+        if present != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(RunnerError::PackageBoundary);
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    Err(RunnerError::PackageBoundary)
+}
+
+fn reap_adopted_children() {
+    loop {
+        let mut status = 0;
+        // SAFETY: `waitpid(-1, WNOHANG)` only reaps exited descendants adopted by this runner.
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            break;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enable_child_subreaper() -> Result<(), RunnerError> {
+    // SAFETY: PR_SET_CHILD_SUBREAPER changes only this process's descendant reparenting policy.
+    let result = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(RunnerError::PackageBoundary)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_child_subreaper() -> Result<(), RunnerError> {
+    Err(RunnerError::PackageBoundary)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn install_package_seccomp() -> std::io::Result<()> {
+    const BPF_LOAD_SYSCALL: u16 = 0x20;
+    const BPF_JUMP_EQUAL: u16 = 0x15;
+    const BPF_RETURN: u16 = 0x06;
+    const SECCOMP_RETURN_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_RETURN_ERRNO: u32 = 0x0005_0000;
+
+    const fn statement(code: u16, value: u32) -> libc::sock_filter {
+        libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k: value,
+        }
+    }
+    const fn deny(syscall: libc::c_long) -> [libc::sock_filter; 2] {
+        [
+            libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                jt: 0,
+                jf: 1,
+                k: syscall as u32,
+            },
+            statement(SECCOMP_RETURN_ERRNO, libc::EPERM as u32),
+        ]
+    }
+
+    let kill = deny(libc::SYS_kill);
+    let tkill = deny(libc::SYS_tkill);
+    let tgkill = deny(libc::SYS_tgkill);
+    let queue = deny(libc::SYS_rt_sigqueueinfo);
+    let thread_queue = deny(libc::SYS_rt_tgsigqueueinfo);
+    let pidfd_signal = deny(libc::SYS_pidfd_send_signal);
+    let setsid = deny(libc::SYS_setsid);
+    let setpgid = deny(libc::SYS_setpgid);
+    let unshare = deny(libc::SYS_unshare);
+    let filter = [
+        statement(BPF_LOAD_SYSCALL, 0),
+        kill[0],
+        kill[1],
+        tkill[0],
+        tkill[1],
+        tgkill[0],
+        tgkill[1],
+        queue[0],
+        queue[1],
+        thread_queue[0],
+        thread_queue[1],
+        pidfd_signal[0],
+        pidfd_signal[1],
+        setsid[0],
+        setsid[1],
+        setpgid[0],
+        setpgid[1],
+        unshare[0],
+        unshare[1],
+        statement(SECCOMP_RETURN_ALLOW, 0),
+    ];
+    let program = libc::sock_fprog {
+        len: u16::try_from(filter.len()).expect("fixed seccomp program length fits u16"),
+        filter: filter.as_ptr().cast_mut(),
+    };
+    // SAFETY: both calls use fixed scalar arguments and a stack-resident immutable BPF program.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
+        || unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                1_u32,
+                0_u32,
+                &program as *const libc::sock_fprog,
+            )
+        } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn install_package_seccomp() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "package seccomp boundary requires Linux",
+    ))
+}
+
 fn join_bounded(
     result: Result<Result<Vec<u8>, RunnerError>, tokio::task::JoinError>,
 ) -> Result<Vec<u8>, RunnerError> {
@@ -645,6 +943,7 @@ fn join_bounded(
 }
 
 fn validate_activation(
+    sandbox_id: &OpenSandboxId,
     config: &SandboxRunnerConfigV1,
     frame: &SandboxActivationFrameV1,
 ) -> Result<(), RunnerError> {
@@ -657,15 +956,14 @@ fn validate_activation(
         .parse()
         .map_err(|_| RunnerError::InvalidActivation)?;
     if frame.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+        || &frame.sandbox_id != sandbox_id
         || frame.execution_request_digest != config.execution_request_digest
         || frame.input_schema_digest != config.input_schema_digest
         || frame.input_digest != config.input_digest
         || frame.input_digest != input_digest
         || frame
-            .activation_token
-            .digest()
-            .map_err(RunnerError::Contract)?
-            != config.activation_token_digest
+            .verify_signature(&config.activation_verifying_key)
+            .is_err()
         || u64::try_from(input_bytes.len())
             .map_or(true, |length| length > config.maximum_input_bytes)
     {
@@ -771,6 +1069,7 @@ pub enum RunnerError {
     BootChanged,
     Storage,
     PackageIo,
+    PackageBoundary,
     ResultTooLarge,
     Contract(SandboxContractError),
 }
@@ -780,10 +1079,11 @@ impl fmt::Display for RunnerError {
         formatter.write_str(match self {
             Self::InvalidConfiguration => "runner configuration is invalid",
             Self::InvalidActivation => "runner activation is invalid",
-            Self::ActivationConflict => "runner activation token conflicts",
+            Self::ActivationConflict => "runner activation signature conflicts",
             Self::BootChanged => "runner boot identity changed",
             Self::Storage => "runner durable state is unavailable",
             Self::PackageIo => "runner package I/O failed",
+            Self::PackageBoundary => "runner package boundary failed",
             Self::ResultTooLarge => "runner output exceeded its hard limit",
             Self::Contract(_) => "runner contract is invalid",
         })
@@ -815,7 +1115,9 @@ pub async fn serve(startup: RunnerStartupV1) -> Result<(), RunnerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use insight_platform_sandbox::opensandbox::OpaqueActivationToken;
+    use insight_platform_sandbox::opensandbox::{
+        ActivationSignature, OpaqueActivationToken, SANDBOX_PACKAGE_UID,
+    };
     use tempfile::TempDir;
 
     fn digest(character: char) -> Sha256Digest {
@@ -838,7 +1140,8 @@ mod tests {
                 .parse()
                 .unwrap(),
             output_schema_digest: digest('3'),
-            activation_token_digest: token().digest().unwrap(),
+            activation_verifying_key: token().verifying_key().unwrap(),
+            package_uid: SANDBOX_PACKAGE_UID,
             package_argv: vec!["/bin/echo".to_owned(), "{\"ok\":true}".to_owned()],
             maximum_input_bytes: 1_024,
             maximum_output_bytes: 1_024,
@@ -859,7 +1162,7 @@ mod tests {
         SandboxActivationFrameV1 {
             magic: String::new(),
             schema_version: 1,
-            activation_token: token(),
+            sandbox_id: OpenSandboxId::parse("sandbox-one").unwrap(),
             boot_id,
             execution_request_digest: digest('1'),
             input_schema_digest: digest('2'),
@@ -869,9 +1172,10 @@ mod tests {
                 .unwrap(),
             declared_input_bytes: 0,
             input: serde_json::json!({"input":true}),
+            activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
             frame_digest: zero_digest(),
         }
-        .seal()
+        .seal_with(&token())
         .unwrap()
     }
 
@@ -909,6 +1213,22 @@ mod tests {
         ));
         assert!(temporary.path().join(RUNNER_LATCH_FILE).is_file());
         assert!(temporary.path().join(RUNNER_RESULT_FILE).is_file());
+        assert_eq!(
+            fs::metadata(temporary.path().join(RUNNER_LATCH_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(temporary.path().join(RUNNER_RESULT_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert!(fs::read_dir(temporary.path()).unwrap().all(|entry| !entry
             .unwrap()
             .file_name()
@@ -916,14 +1236,15 @@ mod tests {
             .ends_with(".tmp")));
 
         let conflicting = SandboxActivationFrameV1 {
-            activation_token: OpaqueActivationToken::parse("b".repeat(64)).unwrap(),
+            activation_signature: ActivationSignature::parse("b".repeat(128)).unwrap(),
+            frame_digest: zero_digest(),
             ..frame
-        }
-        .seal()
-        .unwrap();
+        };
         assert!(matches!(
             runner.activate(conflicting).await,
-            Err(RunnerError::InvalidActivation | RunnerError::ActivationConflict)
+            Err(RunnerError::InvalidActivation
+                | RunnerError::ActivationConflict
+                | RunnerError::Contract(_))
         ));
     }
 

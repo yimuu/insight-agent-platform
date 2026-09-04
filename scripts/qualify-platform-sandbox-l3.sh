@@ -123,6 +123,11 @@ if kubectl exec -n "$control_namespace" "deployment/$server_deployment" -- \
 fi
 
 run_provider_phase core opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes
+run_provider_phase readiness opensandbox_kubernetes_l3_full_readiness_probe
+run_provider_phase activation-boundary \
+  opensandbox_kubernetes_l3_signed_activation_is_candidate_bound
+run_provider_phase package-boundary \
+  opensandbox_kubernetes_l3_package_cannot_cross_runner_boundary_or_survive
 run_provider_phase boot-rollover \
   opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recreation
 

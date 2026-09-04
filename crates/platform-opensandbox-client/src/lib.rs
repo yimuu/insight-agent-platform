@@ -5,25 +5,27 @@
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::StreamExt as _;
 use insight_platform_contracts::{
-    canonical_json, parse_strict_json, JsonLimits, ResourceId, Sha256Digest,
+    canonical_digest, canonical_json, parse_strict_json, DataClassification, JsonLimits,
+    ResourceId, ResourceKind, Sha256Digest, TraceIdentityV1,
 };
-#[cfg(test)]
-use insight_platform_sandbox::opensandbox::SandboxProvisioningLimitsV1;
 use insight_platform_sandbox::opensandbox::{
-    BoundedCandidatePageV1, CandidateCursorV1, OpenSandboxCreateV1, OpenSandboxId,
-    OpenSandboxObservationV1, OpenSandboxProvider, SandboxActivationFrameV1,
-    SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxNetworkMode, SandboxProviderError,
-    SandboxRunnerPhaseV1, SandboxRunnerStateFrameV1, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS,
-    MAX_SANDBOX_INPUT_BYTES, MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    BoundedCandidatePageV1, CandidateCursorV1, OpaqueActivationToken, OpenSandboxCreateV1,
+    OpenSandboxId, OpenSandboxObservationV1, OpenSandboxProvider, SandboxActivationFrameV1,
+    SandboxCandidateMetadataV1, SandboxCandidateV1, SandboxExecutionRequestV1, SandboxNetworkMode,
+    SandboxPhysicalEvidenceV1, SandboxProviderError, SandboxProvisioningLimitsV1,
+    SandboxResourceLimitsV1, SandboxRunnerPhaseV1, SandboxRunnerStateFrameV1,
+    MAX_SANDBOX_CANDIDATES, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS, MAX_SANDBOX_INPUT_BYTES,
+    MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
     SANDBOX_RUNNER_CONFIG_DIGEST_ENV, SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PORT,
 };
 use reqwest::{header, Client, Method, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
 use url::Url;
+use uuid::Uuid;
 
 const API_KEY_HEADER: &str = "OPEN-SANDBOX-API-KEY";
 const METADATA_SCHEMA: &str = "platform.insight.dev/schema";
@@ -78,6 +80,24 @@ pub struct OpenSandboxHttpClientConfig {
     pub connect_timeout_milliseconds: u32,
     pub candidate_page_items: u8,
     pub orphan_page_items: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenSandboxReadinessProbeConfig {
+    pub image_uri: String,
+    pub runtime_contract_digest: Sha256Digest,
+    pub profile_deployment_digest: Sha256Digest,
+    pub ttl_seconds: u32,
+}
+
+impl OpenSandboxReadinessProbeConfig {
+    pub fn validate(&self) -> Result<(), OpenSandboxClientConfigError> {
+        if !(60..=300).contains(&self.ttl_seconds) {
+            return Err(OpenSandboxClientConfigError::InvalidConfiguration);
+        }
+        readiness_request(self).map_err(|_| OpenSandboxClientConfigError::InvalidConfiguration)?;
+        Ok(())
+    }
 }
 
 impl OpenSandboxHttpClientConfig {
@@ -143,12 +163,8 @@ impl OpenSandboxHttpClient {
         Ok(Self { client, config })
     }
 
-    /// Authenticated, bounded lifecycle readiness probe.
-    ///
-    /// OpenSandbox `/health` only proves that the server process is alive. This probe exercises
-    /// the configured lifecycle credential and Kubernetes-backed list path without creating a
-    /// sandbox or mutating Platform business state.
-    pub async fn readiness_probe(&self) -> Result<(), SandboxProviderError> {
+    /// Authenticated, bounded lifecycle check used between low-frequency full probes.
+    pub async fn lifecycle_probe(&self) -> Result<(), SandboxProviderError> {
         let page = self
             .list_operator_candidates(CandidateCursorV1 {
                 schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
@@ -158,6 +174,166 @@ impl OpenSandboxHttpClient {
         if page.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || page.items.len() > usize::from(self.config.orphan_page_items)
         {
+            return Err(SandboxProviderError::InvalidResponse);
+        }
+        Ok(())
+    }
+
+    /// Full inert readiness probe for the lifecycle, controller, runner proxy, and delete path.
+    ///
+    /// The synthetic request never activates its Package and never touches Platform business
+    /// state. A unique provisioning identity bounds response-loss discovery and cleanup.
+    pub async fn readiness_probe(
+        &self,
+        config: &OpenSandboxReadinessProbeConfig,
+    ) -> Result<(), SandboxProviderError> {
+        config
+            .validate()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?;
+        self.lifecycle_probe().await?;
+        let request = readiness_request(config)?;
+        let signing_seed =
+            OpaqueActivationToken::generate().map_err(|_| SandboxProviderError::InvalidResponse)?;
+        let database_now = Utc::now();
+        let evidence = SandboxPhysicalEvidenceV1::begin(&request, signing_seed, database_now)
+            .and_then(|evidence| {
+                evidence.authorize_candidate_create(
+                    &request,
+                    &request.provisioning_limits,
+                    database_now,
+                    1,
+                )
+            })
+            .map_err(|_| SandboxProviderError::InvalidResponse)?
+            .into_inner();
+        let token_digest = evidence.provisioning_token_digest.clone();
+        let create =
+            OpenSandboxCreateV1::from_authorization(&request, &evidence, 1, config.ttl_seconds)
+                .map_err(|_| SandboxProviderError::InvalidResponse)?;
+        let mut create_attempted = false;
+        let mut created_id = None;
+        let outcome = async {
+            create_attempted = true;
+            let candidate = self.create_candidate(create).await?;
+            created_id = Some(candidate.sandbox_id.clone());
+            let listed = self.wait_for_probe_candidate(&token_digest).await?;
+            if !listed
+                .iter()
+                .any(|listed| listed.sandbox_id == candidate.sandbox_id)
+            {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+            let mut armed = None;
+            for _ in 0..60 {
+                match self.runner_state(&candidate.sandbox_id).await {
+                    Ok(frame) if frame.phase == SandboxRunnerPhaseV1::Armed => {
+                        armed = Some(frame);
+                        break;
+                    }
+                    Ok(_) => return Err(SandboxProviderError::InvalidResponse),
+                    Err(SandboxProviderError::Unavailable | SandboxProviderError::NotReady) => {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let armed = armed.ok_or(SandboxProviderError::Unavailable)?;
+            if armed.execution_request_digest != request.request_digest
+                || armed.sandbox_id != candidate.sandbox_id
+            {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = self
+            .cleanup_readiness_probe(&token_digest, created_id.as_ref(), create_attempted)
+            .await;
+        match (outcome, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+        }
+    }
+
+    async fn wait_for_probe_candidate(
+        &self,
+        token_digest: &Sha256Digest,
+    ) -> Result<Vec<SandboxCandidateV1>, SandboxProviderError> {
+        for _ in 0..40 {
+            let candidates = self.probe_candidates(token_digest).await?;
+            if !candidates.is_empty() {
+                return Ok(candidates);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(SandboxProviderError::Unavailable)
+    }
+
+    async fn probe_candidates(
+        &self,
+        token_digest: &Sha256Digest,
+    ) -> Result<Vec<SandboxCandidateV1>, SandboxProviderError> {
+        let mut cursor = CandidateCursorV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            opaque: None,
+        };
+        let mut candidates = Vec::new();
+        loop {
+            let page = self.list_candidates(token_digest.clone(), cursor).await?;
+            candidates.extend(page.items);
+            if candidates.len() > usize::from(MAX_SANDBOX_CANDIDATES) {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+            let Some(next) = page.next else {
+                return Ok(candidates);
+            };
+            cursor = next;
+        }
+    }
+
+    async fn cleanup_readiness_probe(
+        &self,
+        token_digest: &Sha256Digest,
+        created_id: Option<&OpenSandboxId>,
+        create_attempted: bool,
+    ) -> Result<(), SandboxProviderError> {
+        if !create_attempted {
+            return Ok(());
+        }
+        let candidates = if created_id.is_some() {
+            self.probe_candidates(token_digest).await?
+        } else {
+            let mut discovered = Vec::new();
+            for attempt in 0..40 {
+                discovered = self.probe_candidates(token_digest).await?;
+                if !discovered.is_empty() || attempt == 39 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            discovered
+        };
+        let mut sandbox_ids = candidates
+            .into_iter()
+            .map(|candidate| candidate.sandbox_id)
+            .collect::<Vec<_>>();
+        if let Some(created_id) = created_id {
+            if !sandbox_ids.iter().any(|candidate| candidate == created_id) {
+                sandbox_ids.push(created_id.clone());
+            }
+        }
+        for sandbox_id in sandbox_ids {
+            let observation = self.terminate(&sandbox_id).await?;
+            if observation.present {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+            let absence = self.prove_absent(&sandbox_id).await?;
+            if absence.present {
+                return Err(SandboxProviderError::InvalidResponse);
+            }
+        }
+        if !self.probe_candidates(token_digest).await?.is_empty() {
             return Err(SandboxProviderError::InvalidResponse);
         }
         Ok(())
@@ -560,6 +736,74 @@ impl HttpExchange {
         }
         Ok(())
     }
+}
+
+fn readiness_request(
+    config: &OpenSandboxReadinessProbeConfig,
+) -> Result<SandboxExecutionRequestV1, SandboxProviderError> {
+    let id = |kind| {
+        ResourceId::from_uuid_v7(kind, Uuid::now_v7())
+            .map_err(|_| SandboxProviderError::InvalidResponse)
+    };
+    let marker_digest = |marker: &str| {
+        canonical_digest(&serde_json::json!({
+            "domain": "insight.sandbox.readiness-probe/v1",
+            "marker": marker,
+        }))
+        .map_err(|_| SandboxProviderError::InvalidResponse)?
+        .parse::<Sha256Digest>()
+        .map_err(|_| SandboxProviderError::InvalidResponse)
+    };
+    let now = Utc::now();
+    SandboxExecutionRequestV1 {
+        schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        tenant_id: id(ResourceKind::Tenant)?,
+        invocation_id: id(ResourceKind::CapabilityInvocation)?,
+        job_id: id(ResourceKind::Job)?,
+        lease_generation: 1,
+        physical_attempt: 1,
+        worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration)?,
+        package_version_id: id(ResourceKind::SandboxPackageRevision)?,
+        image_uri: config.image_uri.clone(),
+        runtime_version_id: id(ResourceKind::SandboxRuntimeRevision)?,
+        runtime_contract_digest: config.runtime_contract_digest.clone(),
+        sandbox_profile_deployment_id: id(ResourceKind::SandboxProfileDeployment)?,
+        profile_deployment_digest: config.profile_deployment_digest.clone(),
+        runner_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
+        package_argv: vec!["/usr/local/bin/platform-sandbox-runner".to_owned()],
+        input_value_id: id(ResourceKind::RunValue)?,
+        output_value_id: id(ResourceKind::RunValue)?,
+        classification: DataClassification::Internal,
+        input: serde_json::json!({"probe":"armed-only"}),
+        input_schema_digest: marker_digest("input-schema")?,
+        input_digest: zero_digest(),
+        output_schema_digest: marker_digest("output-schema")?,
+        network_mode: SandboxNetworkMode::Disabled,
+        limits: SandboxResourceLimitsV1 {
+            maximum_input_bytes: 1_024,
+            maximum_output_bytes: 1_024,
+            cpu_millicores: 100,
+            memory_mebibytes: 64,
+            pids: 8,
+            ephemeral_storage_bytes: 16_777_216,
+            wall_milliseconds: 1_000,
+            cleanup_milliseconds: 10_000,
+        },
+        provisioning_limits: SandboxProvisioningLimitsV1 {
+            maximum_candidates: 1,
+            candidate_page_items: 4,
+            candidate_quiescence_milliseconds: 100,
+            provisioning_timeout_milliseconds: 30_000,
+            orphan_page_items: 20,
+            runner_header_bytes: 8_192,
+            diagnostic_bytes: 8_192,
+        },
+        deadline_at: now + ChronoDuration::seconds(i64::from(config.ttl_seconds)),
+        trace: TraceIdentityV1::generate(),
+        request_digest: zero_digest(),
+    }
+    .seal()
+    .map_err(|_| SandboxProviderError::InvalidResponse)
 }
 
 fn media_type(value: &str) -> &str {
@@ -977,9 +1221,10 @@ mod tests {
     use chrono::TimeZone as _;
     use insight_platform_contracts::{DataClassification, ResourceId, ResourceKind};
     use insight_platform_sandbox::opensandbox::{
-        OpaqueActivationToken, RunnerBootId, SandboxExecutionRequestV1, SandboxPhysicalEvidenceV1,
-        SandboxProvisioningTokenV1, SandboxResourceLimitsV1, SandboxRunnerConfigV1,
-        SandboxRunnerOutcomeV1, SandboxRunnerResultFrameV1, OPENSANDBOX_ID_ENV,
+        ActivationSignature, OpaqueActivationToken, RunnerBootId, SandboxExecutionRequestV1,
+        SandboxPhysicalEvidenceV1, SandboxProvisioningTokenV1, SandboxResourceLimitsV1,
+        SandboxRunnerConfigV1, SandboxRunnerOutcomeV1, SandboxRunnerResultFrameV1,
+        OPENSANDBOX_ID_ENV,
     };
     use serde_json::{json, Value};
     use std::sync::{
@@ -1042,6 +1287,20 @@ mod tests {
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 *state.create_metadata.lock().await = value.get("metadata").cloned();
                 *state.create_entrypoint.lock().await = value.get("entrypoint").cloned();
+                let runner_config: SandboxRunnerConfigV1 =
+                    serde_json::from_str(value["env"][SANDBOX_RUNNER_CONFIG_ENV].as_str().unwrap())
+                        .unwrap();
+                *state.runner_state.lock().await = SandboxRunnerStateFrameV1 {
+                    magic: String::new(),
+                    schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                    sandbox_id: OpenSandboxId::parse("sandbox-one").unwrap(),
+                    boot_id: RunnerBootId::parse("boot-one").unwrap(),
+                    execution_request_digest: runner_config.execution_request_digest,
+                    phase: SandboxRunnerPhaseV1::Armed,
+                    frame_digest: zero_digest(),
+                }
+                .seal()
+                .unwrap();
                 state.present.store(true, Ordering::SeqCst);
                 json_response(
                     StatusCode::ACCEPTED,
@@ -1057,6 +1316,21 @@ mod tests {
                 )
             }
             (Method::GET, "/v1/sandboxes") => {
+                if !state.present.load(Ordering::SeqCst) {
+                    return json_response(
+                        StatusCode::OK,
+                        json!({
+                            "items":[],
+                            "pagination":{
+                                "page":1,
+                                "pageSize":4,
+                                "totalItems":0,
+                                "totalPages":0,
+                                "hasNextPage":false
+                            }
+                        }),
+                    );
+                }
                 let metadata = state
                     .create_metadata
                     .lock()
@@ -1278,7 +1552,7 @@ mod tests {
         };
         let runner_config = SandboxRunnerConfigV1::from_request(
             &request,
-            evidence.activation_token_digest.clone(),
+            evidence.activation_token.verifying_key().unwrap(),
             8_192,
         )
         .unwrap();
@@ -1435,6 +1709,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_readiness_probe_creates_armed_candidate_and_proves_absence() {
+        let (client, state) = fixture().await;
+        let config = OpenSandboxReadinessProbeConfig {
+            image_uri: format!("registry.invalid/platform@sha256:{}", "a".repeat(64)),
+            runtime_contract_digest: digest('b'),
+            profile_deployment_digest: digest('c'),
+            ttl_seconds: 60,
+        };
+        client.readiness_probe(&config).await.unwrap();
+        assert!(!state.present.load(Ordering::SeqCst));
+        let records = state.records.lock().await;
+        assert!(records
+            .iter()
+            .any(|record| record.method == Method::POST && record.path == "/v1/sandboxes"));
+        assert!(records.iter().any(|record| {
+            record.method == Method::GET
+                && record.path == "/v1/sandboxes/sandbox-one/proxy/18080/v1/state"
+        }));
+        assert!(records.iter().any(|record| {
+            record.method == Method::DELETE && record.path == "/v1/sandboxes/sandbox-one"
+        }));
+        assert!(!records
+            .iter()
+            .any(|record| record.path.ends_with("/v1/activate")));
+    }
+
+    #[tokio::test]
     async fn fixed_runner_proxy_activation_result_and_absence_are_validated() {
         let (client, state) = fixture().await;
         let (create, evidence) = create_request();
@@ -1446,19 +1747,21 @@ mod tests {
         let armed = client.runner_state(&sandbox_id).await.unwrap();
         assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
         let request = execution_request();
+        let signing_seed = evidence.activation_token;
         let frame = SandboxActivationFrameV1 {
             magic: String::new(),
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-            activation_token: evidence.activation_token,
+            sandbox_id: sandbox_id.clone(),
             boot_id: armed.boot_id.clone(),
             execution_request_digest: request.request_digest,
             input_schema_digest: request.input_schema_digest,
             input_digest: request.input_digest,
             declared_input_bytes: 0,
             input: request.input,
+            activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
             frame_digest: zero_digest(),
         }
-        .seal()
+        .seal_with(&signing_seed)
         .unwrap();
         let activated = client.activate(&sandbox_id, frame).await.unwrap();
         assert_eq!(activated.phase, SandboxRunnerPhaseV1::ActivationLatched);

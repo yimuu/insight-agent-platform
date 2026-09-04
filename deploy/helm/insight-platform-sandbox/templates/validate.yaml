@@ -38,6 +38,12 @@
 {{- if or (lt (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds) 100) (gt (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds) 4999) -}}
   {{- fail "OpenSandbox request timeout must fit below the Job lease safety budget" -}}
 {{- end -}}
+{{- if or (lt (int .Values.dispatcher.opensandbox.readinessRequestTimeoutMilliseconds) 5000) (gt (int .Values.dispatcher.opensandbox.readinessRequestTimeoutMilliseconds) 120000) -}}
+  {{- fail "OpenSandbox full readiness request timeout must be bounded" -}}
+{{- end -}}
+{{- if or (lt (int .Values.dispatcher.opensandbox.readinessSuccessTtlMilliseconds) 60000) (gt (int .Values.dispatcher.opensandbox.readinessSuccessTtlMilliseconds) 900000) -}}
+  {{- fail "OpenSandbox full readiness success TTL must remain short and bounded" -}}
+{{- end -}}
 {{- if or (empty .Values.dispatcher.database.existingSecret) (empty .Values.dispatcher.opensandbox.apiKeySecret) (empty .Values.server.apiKeySecret) -}}
   {{- fail "database and OpenSandbox credentials must be existing Secret references" -}}
 {{- end -}}
@@ -49,4 +55,7 @@
 {{- end -}}
 {{- if or (ne (int .Values.sandbox.runAsUser) 65532) (ne (int .Values.sandbox.runAsGroup) 65532) -}}
   {{- fail "the Armed runner UID and GID are closed values" -}}
+{{- end -}}
+{{- if ne (int .Values.sandbox.packageRunAsUser) 65533 -}}
+  {{- fail "the untrusted Package UID is a closed value distinct from the runner" -}}
 {{- end -}}

@@ -121,6 +121,7 @@ COPY --from=builder /workspace/target/release/platform-artifact-maintenance /usr
 COPY --from=builder /workspace/target/release/platform-egress-broker /usr/local/bin/platform-egress-broker
 COPY --from=builder /workspace/target/release/platform-security-authority /usr/local/bin/platform-security-authority
 COPY --from=builder /workspace/target/release/platform-sandbox-dispatcher /usr/local/bin/platform-sandbox-dispatcher
+COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner
 COPY database /app/database
 
 RUN mkdir -p /data/artifacts \

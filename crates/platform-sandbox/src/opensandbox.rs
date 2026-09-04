@@ -35,6 +35,8 @@ pub const OPENSANDBOX_ID_ENV: &str = "OPENSANDBOX_ID";
 pub const MAX_SANDBOX_RUNNER_CONFIG_BYTES: usize = 65_536;
 pub const SANDBOX_RUNNER_FRAME_MAGIC: &str = "insight.sandbox.runner/v1";
 pub const MAX_SANDBOX_JOB_PAYLOAD_BYTES: usize = 1_048_576;
+pub const SANDBOX_RUNNER_UID: u32 = 65_532;
+pub const SANDBOX_PACKAGE_UID: u32 = 65_533;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -624,6 +626,95 @@ impl OpaqueActivationToken {
             "token": self.0,
         }))
     }
+
+    pub fn verifying_key(&self) -> Result<ActivationVerifyingKey, SandboxContractError> {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+
+        let seed = decode_fixed_hex::<32>(&self.0)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(&seed)
+            .map_err(|_| SandboxContractError::InvalidActivation)?;
+        ActivationVerifyingKey::parse(encode_hex(pair.public_key().as_ref()))
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<ActivationSignature, SandboxContractError> {
+        use ring::signature::Ed25519KeyPair;
+
+        let seed = decode_fixed_hex::<32>(&self.0)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(&seed)
+            .map_err(|_| SandboxContractError::InvalidActivation)?;
+        ActivationSignature::parse(encode_hex(pair.sign(message).as_ref()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ActivationVerifyingKey(String);
+
+impl ActivationVerifyingKey {
+    pub fn parse(value: impl Into<String>) -> Result<Self, SandboxContractError> {
+        let value = value.into();
+        decode_fixed_hex::<32>(&value)?;
+        Ok(Self(value))
+    }
+
+    fn verify(
+        &self,
+        message: &[u8],
+        signature: &ActivationSignature,
+    ) -> Result<(), SandboxContractError> {
+        let key = decode_fixed_hex::<32>(&self.0)?;
+        let signature = decode_fixed_hex::<64>(&signature.0)?;
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+            .verify(message, &signature)
+            .map_err(|_| SandboxContractError::InvalidActivation)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ActivationSignature(String);
+
+impl ActivationSignature {
+    pub fn parse(value: impl Into<String>) -> Result<Self, SandboxContractError> {
+        let value = value.into();
+        decode_fixed_hex::<64>(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn digest(&self) -> Result<Sha256Digest, SandboxContractError> {
+        digest_json(&serde_json::json!({
+            "domain": "insight.sandbox.activation-signature/v1",
+            "signature": self.0,
+        }))
+    }
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], SandboxContractError> {
+    if value.len() != N.saturating_mul(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SandboxContractError::InvalidActivation);
+    }
+    let mut decoded = [0_u8; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let pair =
+            std::str::from_utf8(pair).map_err(|_| SandboxContractError::InvalidActivation)?;
+        decoded[index] =
+            u8::from_str_radix(pair, 16).map_err(|_| SandboxContractError::InvalidActivation)?;
+    }
+    Ok(decoded)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,7 +725,8 @@ pub struct SandboxRunnerConfigV1 {
     pub input_schema_digest: Sha256Digest,
     pub input_digest: Sha256Digest,
     pub output_schema_digest: Sha256Digest,
-    pub activation_token_digest: Sha256Digest,
+    pub activation_verifying_key: ActivationVerifyingKey,
+    pub package_uid: u32,
     pub package_argv: Vec<String>,
     pub maximum_input_bytes: u64,
     pub maximum_output_bytes: u64,
@@ -646,7 +738,7 @@ pub struct SandboxRunnerConfigV1 {
 impl SandboxRunnerConfigV1 {
     pub fn from_request(
         request: &SandboxExecutionRequestV1,
-        activation_token_digest: Sha256Digest,
+        activation_verifying_key: ActivationVerifyingKey,
         maximum_diagnostic_bytes: u32,
     ) -> Result<Self, SandboxContractError> {
         request.validate()?;
@@ -656,7 +748,8 @@ impl SandboxRunnerConfigV1 {
             input_schema_digest: request.input_schema_digest.clone(),
             input_digest: request.input_digest.clone(),
             output_schema_digest: request.output_schema_digest.clone(),
-            activation_token_digest,
+            activation_verifying_key,
+            package_uid: SANDBOX_PACKAGE_UID,
             package_argv: request.package_argv.clone(),
             maximum_input_bytes: request.limits.maximum_input_bytes,
             maximum_output_bytes: request.limits.maximum_output_bytes,
@@ -671,6 +764,7 @@ impl SandboxRunnerConfigV1 {
     pub fn validate(&self) -> Result<(), SandboxContractError> {
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || !valid_absolute_argv(&self.package_argv)
+            || self.package_uid != SANDBOX_PACKAGE_UID
             || self.maximum_input_bytes == 0
             || self.maximum_input_bytes > MAX_SANDBOX_INPUT_BYTES
             || self.maximum_output_bytes == 0
@@ -2672,13 +2766,14 @@ impl SandboxRunnerStateFrameV1 {
 pub struct SandboxActivationFrameV1 {
     pub magic: String,
     pub schema_version: u16,
-    pub activation_token: OpaqueActivationToken,
+    pub sandbox_id: OpenSandboxId,
     pub boot_id: RunnerBootId,
     pub execution_request_digest: Sha256Digest,
     pub input_schema_digest: Sha256Digest,
     pub input_digest: Sha256Digest,
     pub declared_input_bytes: u64,
     pub input: Value,
+    pub activation_signature: ActivationSignature,
     pub frame_digest: Sha256Digest,
 }
 
@@ -2692,24 +2787,32 @@ impl SandboxActivationFrameV1 {
             .runner_boot_id
             .clone()
             .ok_or(SandboxContractError::InvalidActivation)?;
+        let sandbox_id = evidence
+            .selected_sandbox_id
+            .clone()
+            .ok_or(SandboxContractError::InvalidActivation)?;
         let frame = Self {
             magic: String::new(),
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
-            activation_token: evidence.activation_token.clone(),
+            sandbox_id,
             boot_id,
             execution_request_digest: request.request_digest.clone(),
             input_schema_digest: request.input_schema_digest.clone(),
             input_digest: request.input_digest.clone(),
             declared_input_bytes: 0,
             input: request.input.clone(),
+            activation_signature: ActivationSignature::parse("0".repeat(128))?,
             frame_digest: zero_digest(),
         }
-        .seal()?;
+        .seal_with(&evidence.activation_token)?;
         frame.validate_for(request, evidence)?;
         Ok(frame)
     }
 
-    pub fn seal(mut self) -> Result<Self, SandboxContractError> {
+    pub fn seal_with(
+        mut self,
+        signing_seed: &OpaqueActivationToken,
+    ) -> Result<Self, SandboxContractError> {
         self.magic = SANDBOX_RUNNER_FRAME_MAGIC.to_owned();
         self.declared_input_bytes = u64::try_from(
             canonical_json(&self.input)
@@ -2717,9 +2820,33 @@ impl SandboxActivationFrameV1 {
                 .len(),
         )
         .map_err(|_| SandboxContractError::InvalidActivation)?;
+        self.activation_signature = signing_seed.sign(&self.signature_preimage()?)?;
         self.frame_digest = digest_without_field(&self, "frame_digest")?;
         self.validate_wire(MAX_SANDBOX_INPUT_BYTES)?;
         Ok(self)
+    }
+
+    fn signature_preimage(&self) -> Result<Vec<u8>, SandboxContractError> {
+        canonical_json(&serde_json::json!({
+            "domain": "insight.sandbox.activation-frame/v1",
+            "magic": self.magic,
+            "schema_version": self.schema_version,
+            "sandbox_id": self.sandbox_id,
+            "boot_id": self.boot_id,
+            "execution_request_digest": self.execution_request_digest,
+            "input_schema_digest": self.input_schema_digest,
+            "input_digest": self.input_digest,
+            "declared_input_bytes": self.declared_input_bytes,
+            "input": self.input,
+        }))
+        .map_err(|_| SandboxContractError::InvalidActivation)
+    }
+
+    pub fn verify_signature(
+        &self,
+        verifying_key: &ActivationVerifyingKey,
+    ) -> Result<(), SandboxContractError> {
+        verifying_key.verify(&self.signature_preimage()?, &self.activation_signature)
     }
 
     pub fn validate_wire(&self, maximum_input_bytes: u64) -> Result<(), SandboxContractError> {
@@ -2733,6 +2860,7 @@ impl SandboxActivationFrameV1 {
             || self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || self.declared_input_bytes != actual_input_bytes
             || actual_input_bytes > maximum_input_bytes
+            || decode_fixed_hex::<64>(&self.activation_signature.0).is_err()
             || self.frame_digest != digest_without_field(self, "frame_digest")?
         {
             return Err(SandboxContractError::InvalidActivation);
@@ -2749,8 +2877,10 @@ impl SandboxActivationFrameV1 {
         if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
             || evidence.phase != SandboxPhysicalPhaseV1::ActivationAuthorized
             || evidence.runner_boot_id.as_ref() != Some(&self.boot_id)
-            || evidence.activation_token != self.activation_token
-            || evidence.activation_token_digest != self.activation_token.digest()?
+            || evidence.selected_sandbox_id.as_ref() != Some(&self.sandbox_id)
+            || self
+                .verify_signature(&evidence.activation_token.verifying_key()?)
+                .is_err()
             || self.execution_request_digest != request.request_digest
             || self.input_schema_digest != request.input_schema_digest
             || self.input_digest != request.input_digest
@@ -3032,7 +3162,7 @@ impl OpenSandboxCreateV1 {
             metadata,
             runner_config: SandboxRunnerConfigV1::from_request(
                 request,
-                evidence.activation_token_digest.clone(),
+                evidence.activation_token.verifying_key()?,
                 request.provisioning_limits.diagnostic_bytes,
             )?,
             resource_limits: request.limits.clone(),
@@ -3516,8 +3646,8 @@ mod tests {
         assert_eq!(create.metadata.network_mode, SandboxNetworkMode::Direct);
         assert_eq!(create.entrypoint, request.runner_argv);
         assert_eq!(
-            create.runner_config.activation_token_digest,
-            first.activation_token_digest
+            create.runner_config.activation_verifying_key,
+            first.activation_token.verifying_key().unwrap()
         );
         assert!(matches!(
             first
@@ -3736,18 +3866,34 @@ mod tests {
         let activation = SandboxActivationFrameV1 {
             magic: String::new(),
             schema_version: 1,
-            activation_token,
+            sandbox_id: candidate.sandbox_id.clone(),
             boot_id: boot_id.clone(),
             execution_request_digest: request.request_digest.clone(),
             input_schema_digest: request.input_schema_digest.clone(),
             input_digest: request.input_digest.clone(),
             declared_input_bytes: 0,
             input: request.input.clone(),
+            activation_signature: ActivationSignature::parse("0".repeat(128)).unwrap(),
             frame_digest: digest('0'),
         }
-        .seal()
+        .seal_with(&activation_token)
         .unwrap();
         activation.validate_for(&request, &evidence).unwrap();
+        let mut other_candidate = activation.clone();
+        other_candidate.sandbox_id = OpenSandboxId::parse("sandbox-two").unwrap();
+        other_candidate.frame_digest =
+            digest_without_field(&other_candidate, "frame_digest").unwrap();
+        assert_eq!(
+            other_candidate.validate_for(&request, &evidence),
+            Err(SandboxContractError::InvalidActivation)
+        );
+        let mut other_boot = activation.clone();
+        other_boot.boot_id = RunnerBootId::parse("boot-two").unwrap();
+        other_boot.frame_digest = digest_without_field(&other_boot, "frame_digest").unwrap();
+        assert_eq!(
+            other_boot.validate_for(&request, &evidence),
+            Err(SandboxContractError::InvalidActivation)
+        );
 
         let frame = SandboxRunnerResultFrameV1 {
             magic: String::new(),
