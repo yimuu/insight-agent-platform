@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fschema-closed-bounded-object",
-      "owner_spec": "05",
-      "related_specs": ["09", "12", "16", "17"],
+      "contract_area": "schema",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input": {
@@ -25,8 +24,7 @@
     },
     {
       "fixture_id": "fschema-open-object",
-      "owner_spec": "05",
-      "related_specs": ["17"],
+      "contract_area": "schema",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[],"additionalProperties":true},
@@ -37,8 +35,7 @@
     },
     {
       "fixture_id": "fschema-unknown-keyword",
-      "owner_spec": "05",
-      "related_specs": ["17"],
+      "contract_area": "schema",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"required":[],"additionalProperties":false,"pattern":".*"},

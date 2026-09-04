@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when the protected product release pipeline loses Spec 05 controls."""
+"""Fail closed when the protected product release pipeline loses release controls."""
 
 import re
 from pathlib import Path

@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "ffence-current-epoch-commits",
-      "owner_spec": "03",
-      "related_specs": ["06", "07"],
+      "contract_area": "lease_fencing",
       "profile": "insight.platform/v1",
       "seed": 41,
       "input": {"stored_epoch":7,"attempt_epoch":7,"terminal_already_committed":false},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "ffence-stale-epoch-rejected",
-      "owner_spec": "03",
-      "related_specs": ["06", "07"],
+      "contract_area": "lease_fencing",
       "profile": "insight.platform/v1",
       "seed": 41,
       "input": {"stored_epoch":8,"attempt_epoch":7,"terminal_already_committed":false},

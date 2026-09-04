@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fid-valid-agent-v7",
-      "owner_spec": "02",
-      "related_specs": ["17"],
+      "contract_area": "identity",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"value":"agt_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent"},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "fid-unknown-prefix",
-      "owner_spec": "02",
-      "related_specs": ["17"],
+      "contract_area": "identity",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"value":"zzz_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent"},
@@ -27,8 +25,7 @@
     },
     {
       "fixture_id": "fid-wrong-field-kind",
-      "owner_spec": "02",
-      "related_specs": ["05", "17"],
+      "contract_area": "identity",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"value":"mdep_0198f1c3-8f49-7c3e-b1f3-773c28367b7e","expected_kind":"agent_deployment"},
@@ -39,8 +36,7 @@
     },
     {
       "fixture_id": "fid-uuid-not-v7",
-      "owner_spec": "02",
-      "related_specs": ["17"],
+      "contract_area": "identity",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"value":"agt_550e8400-e29b-41d4-a716-446655440000","expected_kind":"agent"},

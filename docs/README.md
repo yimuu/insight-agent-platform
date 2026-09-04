@@ -1,7 +1,7 @@
 # Insight Agent Platform 文档
 
-`current` 描述当前 `insight.platform/v1` 产品；`specs` 保存仍有效的设计合同；`qualifications` 只记录开发阶段
-验证边界。已完成、被替代和废弃的文档不在工作树保留，需要时从 Git 历史查看。
+`current` 描述当前 `insight.platform/v1` 产品；`contracts` 中的机器合同定义跨进程和公开边界；ADR 记录仍然有效的
+架构决策；`qualifications` 只记录开发阶段验证边界。已完成、被替代和废弃的设计文档不在工作树保留，需要时从 Git 历史查看。
 
 ## 阅读路线
 
@@ -24,10 +24,13 @@ Platform v2 是架构代号，不会产生 `/v2` API。OpenSandbox 仓库实现�
 
 ## 权威关系
 
-发生冲突时依次以 owning spec、公开 OpenAPI/JSON Schema 或 protobuf、Rust nominal type、实现与 conformance evidence
-判断。`docs/current` 解释已实现合同；Git 历史只用于追溯，不能恢复旧 DSL、单进程 runtime、fallback 或双写。
+公开或跨进程边界以 OpenAPI、JSON Schema、protobuf 和生成 registry 为 authority；持久化结构以 migration 为 authority；
+进程内语义以 owning Rust type 与 domain test 为 authority；ADR 记录架构取舍。`docs/current` 解释当前行为，不建立第二套
+字段或状态机。Git 历史只用于追溯，不能恢复旧 DSL、单进程 runtime、fallback 或双写。
 
 ## 设计与验证
 
-- [活动设计规范](specs/README.md)
+- [`insight.platform/v1` 机器合同](../contracts/platform-v1/README.md)
+- [Agent compiler conformance corpus](../contracts/product-experience/agent-compiler/v1/corpus.json)
+- [架构决策](adr/)
 - [开发阶段验证状态](qualifications/README.md)

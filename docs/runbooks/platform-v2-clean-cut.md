@@ -93,6 +93,6 @@ Secret泄漏、schema不一致、数据完整性未知、error budget超限、cr
 1. 重新计算最终Candidate/Capacity/QualificationEvidence digest并确认与GitOps ref一致；
 2. 记录人工approval、promotion时间、observation结果及上一/当前闭包digest；
 3. 更新 `docs/current` 为实际运行合同；
-4. 将00～18状态推进到Verified，再在current文档与证据交叉检查后归档规范和通过报告。
+4. 更新machine contracts、`docs/current`和资格状态，使其与同一exact revision的实际结果一致；设计过程只从Git历史追溯。
 
 手册存在、静态Helm检查或GitOps PR创建都不构成gate通过；只有目标环境实际执行并保留可解析证据才允许标记`passed`。

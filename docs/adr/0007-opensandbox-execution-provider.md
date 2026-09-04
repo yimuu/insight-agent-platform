@@ -5,7 +5,7 @@
 | 状态 | Accepted / CR-220 Sandbox activation and runner-boundary revision |
 | 日期 | 2026-09-04 |
 | 取代 | ADR-0002（历史记录见 Git） |
-| 影响规范 | 00、01～04、07、09、10、14、15、17、18、product-experience 00/06 |
+| 当前合同 | `contracts/platform-v1`、Sandbox Rust types/tests与production qualification profile |
 
 ## 背景
 

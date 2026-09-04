@@ -27,6 +27,49 @@ insight agent run my-agent --path ./my-agent --input '{"message":"hello"}'
 高级 `apply`、`operation`、`run`、`task`、`artifact` 命令保留在 `insight advanced`，仍完整执行 public `/v1`
 Receipt/CAS/Operation 语义。
 
+## `agent.yaml`
+
+普通作者只描述名称、执行方式、输入输出与发布环境。CLI负责确定性编译、Artifact上传、Draft校验、immutable publish、
+Deployment activation和恢复；manifest、`insight.lock`都不是服务端authority。
+
+```yaml
+apiVersion: insight.platform/v1
+kind: Agent
+metadata:
+  name: support-agent
+  displayName: Support Agent
+spec:
+  execution:
+    kind: model_chat
+  instructions: |
+    Answer using only the provided user input.
+  model:
+    ref: project/default-model
+  input:
+    schema: schemas/input.json
+    classification: internal
+  output:
+    schema: schemas/output.json
+  limits:
+    deadlineSeconds: 120
+  publish:
+    environment: development
+```
+
+首版 execution kind 只有：
+
+- `deterministic`：`start -> return`，不允许 `instructions` 或 `model`，且 input/output schema 必须相同；
+- `model_chat`：`start -> model_loop -> return`，必须提供 `instructions` 和一个 Model binding。
+
+`metadata.name` 匹配 `[a-z][a-z0-9-]{0,62}`；schema 路径必须位于 project root 内；classification 只有
+`public|internal|confidential|restricted`；deadline 为 1～3600 秒。YAML 和其中所有对象都是 closed schema，拒绝 unknown/duplicate
+field、merge/anchor/alias/tag、绝对路径、`..`、符号链接逃逸、Secret/token/数据库URL、任意endpoint和shell command。条件字段错误
+会在网络请求、Artifact上传或lock写入前失败。完整可执行结构以
+[`agent-compiler/v1`](../../contracts/product-experience/agent-compiler/v1/corpus.json) corpus 为准。
+
+成功发布后，0600 `insight.lock`只保存manifest digest、name到Agent ID的映射、active revision/deployment摘要和binding alias。
+它不保存credential或正文；每次使用仍向`/v1`重验。lock丢失时用`insight agent adopt`恢复寻址，不会重建或覆盖服务端事实。
+
 ## 本地 profile
 
 ```bash

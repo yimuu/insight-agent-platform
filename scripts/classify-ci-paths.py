@@ -49,7 +49,6 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
             "tests/productization",
             "tests/fixtures/productization-reports",
             "examples/productization",
-            "docs/specs/product-experience",
             "release",
         )
     ) or any(

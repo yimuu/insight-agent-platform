@@ -13,6 +13,6 @@ feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L
 
 旧 `insight.agent/v1` DSL、单进程 runtime 和 terminal-only 路径已经退出默认产品合同；历史设计可从 Git 查看。
 
-当前行为以 `contracts/platform-v1/openapi.yaml`、public JSON Schema、protobuf、Rust nominal type、实现和
-conformance tests 的交集为准。真实多节点 OpenSandbox/Kubernetes production topology 与 GitOps promotion 仍为外部门禁，
-不因仓库 clean cut 自动通过。
+公开与跨进程边界以 `contracts/platform-v1` 中的 OpenAPI、JSON Schema、protobuf和生成registry为authority；持久化结构以
+migration为authority；进程内语义由owning Rust type与domain test约束。真实多节点OpenSandbox/Kubernetes production topology
+与GitOps promotion仍为外部门禁，不因仓库clean cut自动通过。

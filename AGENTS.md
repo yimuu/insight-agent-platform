@@ -1,8 +1,9 @@
 # Insight Agent Platform Engineering Rules
 
 These rules apply to the entire repository. They are durable engineering guardrails, not a second
-source of product truth. The reviewed Platform specifications and ADRs own product behaviour. If
-code, documentation, and the reviewed contract disagree, stop and repair the contract and
+source of product truth. Machine-readable boundary contracts, database migrations, and owning Rust
+types define current behaviour; accepted ADRs record durable architecture decisions. If code,
+documentation, tests, and an owning authority disagree, stop and repair the authority and
 cross-review before continuing.
 
 ## Core architecture
@@ -17,22 +18,25 @@ cross-review before continuing.
 - PostgreSQL owns durable state, transaction atomicity, concurrency guards, lease fencing, and
   outbox durability. Application code owns business semantics. Messages carry wake hints or
   committed projections, never current execution state.
-- Specifications describe observable behaviour and invariants, not required table names,
-  migration numbers, trigger layouts, checksums, or proof artifacts.
+- Prose documentation explains observable behaviour and invariants. Do not copy exhaustive
+  registries, schemas, state machines, checksums, or proof artifacts into prose; independent
+  conformance tests may assert their closed expected values.
 - Application promotion and rollback belong to the deployment/GitOps system, not the business
   database or public management API.
 
 ## Contract workflow
 
-- Before changing a Platform contract or implementation, read
-  `docs/specs/platform-v2/00-overview.md`, the owning reviewed specification, and linked ADRs.
-- Draft and architecture-revision documents describe targets, not current behaviour.
-- Update affected upstream contracts before downstream contracts. Architecture changes require a
-  cross-review covering ownership, identities, schemas, errors, transactions, events, security,
-  capacity, recovery, and test evidence.
-- Keep fields, state machines, limits, topology, and acceptance evidence in their owning
-  specification. Keep this file small and principle-oriented.
-- Only Reviewed or Accepted contracts may authorize implementation or schema work.
+- Before changing a public, persistence, or process boundary, read its machine contract or owning
+  type, the relevant migration, linked ADRs, and the corresponding `docs/current` page.
+- Update affected upstream machine contracts before downstream consumers. Architecture changes
+  require an accepted ADR and a cross-review covering ownership, identities, schemas, errors,
+  transactions, events, security, capacity, recovery, and test evidence.
+- Keep fields, closed states, limits, and wire values in their owning contract or type. Keep
+  `docs/current` concise and explanatory instead of maintaining a parallel normative model.
+- Temporary design proposals describe targets, not current behaviour. Remove them after the
+  implementation, contracts, current documentation, and evidence agree; Git retains the history.
+- Do not start implementation or schema work until the corresponding contract and architecture
+  changes have been reviewed together.
 
 ## Data and migration safety
 

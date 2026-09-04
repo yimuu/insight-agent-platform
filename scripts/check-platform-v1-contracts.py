@@ -134,8 +134,7 @@ def check_fixtures(errors):
                 continue
             seen_fixture_ids.add(fixture_id)
             required = {
-                "owner_spec",
-                "related_specs",
+                "contract_area",
                 "profile",
                 "seed",
                 "input_digest",
@@ -145,6 +144,10 @@ def check_fixtures(errors):
             missing = sorted(required - case.keys())
             if missing:
                 errors.append(f"{fixture_id}: missing fields {missing}")
+            if not isinstance(case.get("contract_area"), str) or not case.get("contract_area"):
+                errors.append(f"{fixture_id}: contract_area must be a non-empty string")
+            if {"owner_spec", "related_specs"} & case.keys():
+                errors.append(f"{fixture_id}: retired specification references are forbidden")
             source = case.get("input", case.get("input_artifact"))
             if source is None:
                 errors.append(f"{fixture_id}: missing input or input_artifact")
@@ -679,11 +682,11 @@ def check_qualification_manifests(errors):
         ("upgrade_rollback_rehearsal", "l6_release"),
     ]
     if registries.get("qualification_layers") != expected_layers:
-        errors.append("18 qualification layer registry is not closed")
+        errors.append("qualification layer registry is not closed")
     if registries.get("qualification_gates") != [
         {"name": name, "layer": layer} for name, layer in expected_gates
     ]:
-        errors.append("18 qualification gate/layer registry is not closed")
+        errors.append("qualification gate/layer registry is not closed")
 
     profile_fields = {
         "schema_version",
@@ -887,21 +890,7 @@ def check_contract_manifest(errors):
         errors.append("contract manifest contract_digest does not match its file closure")
 
 
-def snake_case(name):
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-
-
-def code_block_after(text, marker):
-    start = text.index(marker)
-    fence = text.index("```", start)
-    end = text.index("```", fence + 3)
-    lines = text[fence + 3 : end].strip().splitlines()
-    if lines and lines[0] in {"text", "rust", "json", "yaml", "protobuf"}:
-        lines = lines[1:]
-    return lines
-
-
-def check_spec_registry_alignment(errors):
+def check_machine_registry_contracts(errors):
     registries = load(CONTRACT_ROOT / "registries.json")
     error_registry = load(CONTRACT_ROOT / "errors.json")
     event_registry = load(CONTRACT_ROOT / "events" / "public-run-events.json")
@@ -919,7 +908,7 @@ def check_spec_registry_alignment(errors):
         {"name": "append_only_projection_outbox", "ordinal": 70},
     ]
     if registries.get("lock_ranks") != expected_lock_ranks:
-        errors.append("03 global lock-rank registry differs from the independent registry")
+        errors.append("global lock-rank registry differs from the independent registry")
 
     expected_artifact_registries = {
         "artifact_purposes": [
@@ -949,17 +938,21 @@ def check_spec_registry_alignment(errors):
         if registries.get(registry) != expected:
             errors.append(f"{registry} differs from the independent Artifact/Operation registry")
 
-    spec07 = (ROOT / "docs/specs/platform-v2/07-scheduler-workers-and-concurrency.md").read_text(
-        encoding="utf-8"
-    )
-    work_class_body = re.search(r"enum WorkClass \{(.*?)\n\}", spec07, re.S)
-    work_classes = [
-        snake_case(item.strip().rstrip(","))
-        for item in work_class_body.group(1).splitlines()
-        if item.strip()
+    expected_work_classes = [
+        "registry_validation",
+        "orchestration",
+        "model",
+        "capability_native",
+        "capability_remote",
+        "mcp",
+        "context",
+        "sandbox",
+        "interaction",
+        "artifact",
+        "recovery",
     ]
-    if work_classes != registries.get("work_classes"):
-        errors.append("07 WorkClass differs from the machine registry")
+    if registries.get("work_classes") != expected_work_classes:
+        errors.append("WorkClass registry is not closed")
     expected_job_kinds = [
         "registry_validation", "orchestration_node", "model_turn",
         "capability_invocation", "mcp_discovery", "mcp_subscription",
@@ -969,34 +962,34 @@ def check_spec_registry_alignment(errors):
         "artifact_rescan", "artifact_delete", "artifact_blob_cleanup", "recovery",
     ]
     if registries.get("job_kinds") != expected_job_kinds:
-        errors.append("03 JobKind registry is not closed")
+        errors.append("JobKind registry is not closed")
     if registries.get("plan_node_kinds") != [
         "start", "compute", "branch", "fork", "join", "map", "loop",
         "error_boundary", "model_loop", "capability_call", "context_query",
         "child_agent_call", "human_task", "timer_wait", "signal_wait", "return",
         "raise",
     ]:
-        errors.append("05 PlanNodeKind registry is not closed")
+        errors.append("PlanNodeKind registry is not closed")
     if registries.get("scope_kinds") != [
         "root", "branch_leg", "parallel_leg", "map_item", "loop_iteration",
         "model_round", "error_boundary",
     ]:
-        errors.append("06 ScopeKind registry is not closed")
+        errors.append("ScopeKind registry is not closed")
     if registries.get("wake_contract_kinds") != [
         "timer", "signal", "human_task", "approval", "remote_invocation",
         "child_run", "retry_deadline",
     ]:
-        errors.append("03/06 WakeContractKind registry is not closed")
+        errors.append("WakeContractKind registry is not closed")
     if registries.get("interaction_kinds") != [
         "form", "url_consent", "business_input",
     ]:
-        errors.append("06 InteractionKind registry is not closed")
+        errors.append("InteractionKind registry is not closed")
     if registries.get("scheduler_priorities") != [
         "low", "normal", "high", "critical_control",
     ]:
-        errors.append("07 SchedulerPriority registry is not closed")
+        errors.append("SchedulerPriority registry is not closed")
     if registries.get("service_classes") != ["low", "normal", "high"]:
-        errors.append("17 public ServiceClass registry is not closed")
+        errors.append("public ServiceClass registry is not closed")
     expected_work_owner_pairs = [
         {"work_class": "registry_validation", "owner_kind": "job"},
         {"work_class": "orchestration", "owner_kind": "node_execution"},
@@ -1020,7 +1013,7 @@ def check_spec_registry_alignment(errors):
         {"work_class": "recovery", "owner_kind": "job"},
     ]
     if registries.get("execution_work_owner_pairs") != expected_work_owner_pairs:
-        errors.append("03/07 execution work owner mapping is not closed")
+        errors.append("execution work owner mapping is not closed")
     expected_job_triples = [
         {"job_kind": "registry_validation", "work_class": "registry_validation", "owner_kind": "job"},
         {"job_kind": "orchestration_node", "work_class": "orchestration", "owner_kind": "node_execution"},
@@ -1048,7 +1041,7 @@ def check_spec_registry_alignment(errors):
         {"job_kind": "recovery", "work_class": "recovery", "owner_kind": "job"},
     ]
     if registries.get("job_kind_work_owner_triples") != expected_job_triples:
-        errors.append("03/07 JobKind x WorkClass x OwnerKind mapping is not closed")
+        errors.append("JobKind x WorkClass x OwnerKind mapping is not closed")
     known_resource_kinds = {
         item.get("name") for item in registries.get("resource_kinds", [])
     }
@@ -1069,10 +1062,10 @@ def check_spec_registry_alignment(errors):
         errors.append("JobKind triple references an unknown or unregistered scheduler owner")
 
     if registries.get("agent_authoring_modes") != ["structured", "graph"]:
-        errors.append("05 Agent authoring mode registry is not closed")
+        errors.append("Agent authoring mode registry is not closed")
     expected_slot_kinds = ["model", "capability", "context", "child_agent", "skill"]
     if registries.get("dependency_slot_kinds") != expected_slot_kinds:
-        errors.append("05 dependency slot kind registry is not closed")
+        errors.append("dependency slot kind registry is not closed")
     if registries.get("capability_backend_kinds") != [
         "native",
         "http",
@@ -1080,28 +1073,28 @@ def check_spec_registry_alignment(errors):
         "mcp",
         "sandbox",
     ]:
-        errors.append("09 capability backend kind registry is not closed")
+        errors.append("capability backend kind registry is not closed")
     if registries.get("capability_idempotency_kinds") != [
         "intrinsic",
         "caller_key",
         "reconcile_before_retry",
         "none",
     ]:
-        errors.append("09 capability idempotency kind registry is not closed")
+        errors.append("capability idempotency kind registry is not closed")
     if registries.get("capability_cancellation_kinds") != [
         "unsupported",
         "best_effort",
         "confirmed",
     ]:
-        errors.append("09 capability cancellation kind registry is not closed")
+        errors.append("capability cancellation kind registry is not closed")
     if registries.get("capability_progress_modes") != ["none", "events"]:
-        errors.append("09 capability progress mode registry is not closed")
+        errors.append("capability progress mode registry is not closed")
     if registries.get("capability_progress_durabilities") != [
         "none",
         "live_only",
         "coarse_durable",
     ]:
-        errors.append("09 capability progress durability registry is not closed")
+        errors.append("capability progress durability registry is not closed")
     if registries.get("skill_instruction_phases") != [
         "task_understanding",
         "planning",
@@ -1109,20 +1102,20 @@ def check_spec_registry_alignment(errors):
         "validation",
         "output_composition",
     ]:
-        errors.append("11 Skill instruction phase registry is not closed")
+        errors.append("Skill instruction phase registry is not closed")
     if registries.get("skill_instruction_audiences") != [
         "planner",
         "tool_user",
         "validator",
         "composer",
     ]:
-        errors.append("11 Skill instruction audience registry is not closed")
+        errors.append("Skill instruction audience registry is not closed")
     if registries.get("skill_requirement_kinds") != [
         "capability",
         "context",
         "model_feature",
     ]:
-        errors.append("11 Skill requirement kind registry is not closed")
+        errors.append("Skill requirement kind registry is not closed")
     if registries.get("skill_package_entry_kinds") != [
         "manifest",
         "instruction",
@@ -1130,14 +1123,14 @@ def check_spec_registry_alignment(errors):
         "example",
         "asset",
     ]:
-        errors.append("11 Skill package entry kind registry is not closed")
+        errors.append("Skill package entry kind registry is not closed")
     if registries.get("skill_selection_modes") != [
         "required",
         "plan_selected",
         "policy_selected",
         "model_proposed",
     ]:
-        errors.append("11 Skill selection mode registry is not closed")
+        errors.append("Skill selection mode registry is not closed")
     if registries.get("context_backend_kinds") != [
         "managed_index",
         "remote_search",
@@ -1146,72 +1139,72 @@ def check_spec_registry_alignment(errors):
         "artifact_collection",
         "native_catalog",
     ]:
-        errors.append("12 Context backend kind registry is not closed")
+        errors.append("Context backend kind registry is not closed")
     if registries.get("context_consistency_modes") != [
         "pinned_generation",
         "pin_at_run_admission",
         "latest_at_query_start",
         "external_observation",
     ]:
-        errors.append("12 Context consistency mode registry is not closed")
+        errors.append("Context consistency mode registry is not closed")
     if registries.get("context_citation_strengths") != [
         "exact",
         "observation_only",
     ]:
-        errors.append("12 Context citation strength registry is not closed")
+        errors.append("Context citation strength registry is not closed")
     if registries.get("context_backend_outcome_kinds") != [
         "completed",
         "deferred",
         "retryable_failure",
         "permanent_failure",
     ]:
-        errors.append("12 Context backend outcome registry is not closed")
+        errors.append("Context backend outcome registry is not closed")
     if registries.get("mcp_transport_kinds") != ["streamable_http"]:
-        errors.append("13 MCP transport kind registry is not closed")
+        errors.append("MCP transport kind registry is not closed")
     if registries.get("mcp_authorization_principal_kinds") != [
         "per_user",
         "service_identity",
     ]:
-        errors.append("13 MCP authorization principal kind registry is not closed")
+        errors.append("MCP authorization principal kind registry is not closed")
     if registries.get("mcp_oauth_client_authentication_kinds") != [
         "none",
         "client_secret_basic",
     ]:
-        errors.append("13 MCP OAuth client authentication kind registry is not closed")
+        errors.append("MCP OAuth client authentication kind registry is not closed")
     if registries.get("model_identity_stabilities") != [
         "pinned",
         "externally_mutable",
     ]:
-        errors.append("16 Model identity stability registry is not closed")
+        errors.append("Model identity stability registry is not closed")
     if registries.get("model_modalities") != [
         "text",
         "image",
         "audio",
         "document",
     ]:
-        errors.append("16 Model modality registry is not closed")
+        errors.append("Model modality registry is not closed")
     if registries.get("sandbox_runtime_families") != [
         "python",
         "node_js",
         "wasm_module",
         "reviewed_shell",
     ]:
-        errors.append("14 Sandbox runtime family registry is not closed")
+        errors.append("Sandbox runtime family registry is not closed")
     if registries.get("sandbox_isolation_classes") != [
         {"name": "container_runtime", "security_rank": 1},
     ]:
-        errors.append("14 Sandbox isolation class registry is not rank-closed")
+        errors.append("Sandbox isolation class registry is not rank-closed")
     if registries.get("sandbox_abi_versions") != ["v1"]:
-        errors.append("14 Sandbox ABI registry is not closed")
+        errors.append("Sandbox ABI registry is not closed")
     if registries.get("sandbox_cleanup_policies") != ["single_use_destroy"]:
-        errors.append("14 Sandbox cleanup policy registry is not closed")
+        errors.append("Sandbox cleanup policy registry is not closed")
     if registries.get("sandbox_entrypoint_kinds") != [
         "python_module",
         "node_module",
         "wasm_export",
         "reviewed_executable",
     ]:
-        errors.append("14 Sandbox entrypoint kind registry is not closed")
+        errors.append("Sandbox entrypoint kind registry is not closed")
     slot_schema = load(CONTRACT_ROOT / "schemas" / "frozen-slot-binding.schema.json")
     if slot_schema.get("$id") != "urn:insight:platform:v1:frozen-slot-binding":
         errors.append("FrozenSlotBinding schema has the wrong canonical ID")
@@ -1347,7 +1340,7 @@ def check_spec_registry_alignment(errors):
         errors.append("ExactSecretBindingRef schema differs from its closed Rust owner fields")
 
     if registries.get("quota_accounting_modes") != ["leased", "consumable", "reclaimable"]:
-        errors.append("04 quota accounting mode registry is not closed")
+        errors.append("quota accounting mode registry is not closed")
     expected_scope_kinds = [
         "tenant",
         "agent_deployment",
@@ -1361,7 +1354,7 @@ def check_spec_registry_alignment(errors):
         "principal",
     ]
     if registries.get("quota_scope_kinds") != expected_scope_kinds:
-        errors.append("04 quota scope kind registry is not closed")
+        errors.append("quota scope kind registry is not closed")
     if registries.get("quota_window_kinds") != [
         "current",
         "run",
@@ -1369,7 +1362,7 @@ def check_spec_registry_alignment(errors):
         "utc_month",
         "lifetime",
     ]:
-        errors.append("04 quota window kind registry is not closed")
+        errors.append("quota window kind registry is not closed")
     limit_profile = load(CONTRACT_ROOT / "limits" / "q1-50.json")
     quota_paths = []
     for descriptor in registries.get("quota_dimensions", []):
@@ -1387,68 +1380,39 @@ def check_spec_registry_alignment(errors):
     if len(quota_paths) != len(set(quota_paths)) or not quota_paths:
         errors.append("quota dimension HardLimitProfile paths must be non-empty and unique")
 
-    spec02 = (ROOT / "docs/specs/platform-v2/02-identity-revision-and-deployment.md").read_text(
-        encoding="utf-8"
-    )
-    if "contracts/platform-v1/registries.json" not in spec02:
-        errors.append("02 does not name the authoritative prefix machine registry")
-    if "| Prefix | 对象 |" in spec02:
-        errors.append("02 duplicates the authoritative prefix machine registry")
-
-    spec04 = (ROOT / "docs/specs/platform-v2/04-tenancy-security-and-policy.md").read_text(
-        encoding="utf-8"
-    )
-    policy_body = re.search(r"enum PolicyKind \{(.*?)\n\}", spec04, re.S)
-    policy_kinds = [
-        snake_case(item.strip().rstrip(","))
-        for item in policy_body.group(1).splitlines()
-        if item.strip()
+    expected_policy_kinds = [
+        "authorization", "approval", "data_handling", "network_egress",
+        "secret_access", "sandbox_isolation", "model_safety", "logging",
+        "data_flow", "declassification", "network", "tls", "trust", "retry",
+        "budget", "quota", "selection", "scheduling", "execution", "resource",
+        "isolation", "parser", "chunker", "ranking", "retention", "artifact_io",
+        "secret_resolution", "public_projection", "protocol", "mcp_auth",
     ]
-    if not set(policy_kinds).issubset(registries["policy_kinds"]):
-        errors.append("04 required PolicyKind values are absent from the machine registry")
-    permission_block = re.search(
-        r"```text\n(installation\.manage/support.*?)\n```", spec04, re.S
-    )
-    # Spec 04 may show a deliberately non-exhaustive permission example. Only compare
-    # the legacy exhaustive block when it is present; the machine registry remains the
-    # closed authority and is validated independently above.
-    if permission_block is not None:
-        permission_lines = permission_block.group(1).splitlines()
-        permissions = []
-        for line in permission_lines:
-            for token in line.split():
-                domain, actions = token.split(".", 1)
-                permissions.extend(f"{domain}.{action}" for action in actions.split("/"))
-        if permissions != registries["permissions"]:
-            errors.append("04 permission registry differs from the machine registry")
+    if registries.get("policy_kinds") != expected_policy_kinds:
+        errors.append("PolicyKind registry is not closed")
 
-    spec05 = (ROOT / "docs/specs/platform-v2/05-agent-and-typed-plan.md").read_text(
-        encoding="utf-8"
-    )
-    platform_codes = [line.strip() for line in code_block_after(spec05, "PlatformFailureCode`首批闭集为")]
-    if platform_codes != error_registry["failure"]["platform_codes"]:
-        errors.append("05 PlatformFailureCode differs from errors.json")
+    expected_platform_failure_codes = [
+        "agent_input_invalid", "agent_output_invalid", "plan_invariant_failed",
+        "budget_exhausted", "deadline_exceeded", "capability_failed",
+        "context_query_failed", "model_turn_failed", "child_agent_failed",
+        "artifact_unavailable", "interaction_failed", "dependency_unavailable",
+        "content_rejected", "uncertain_effect", "platform_invariant_failed",
+    ]
+    if error_registry.get("failure", {}).get("platform_codes") != expected_platform_failure_codes:
+        errors.append("PlatformFailureCode registry is not closed")
 
-    spec17 = (ROOT / "docs/specs/platform-v2/17-management-and-runtime-api.md").read_text(
-        encoding="utf-8"
-    )
-    # Accepted spec 17 intentionally summarizes these registries instead of duplicating
-    # their complete machine-readable definitions. Keep validating an exhaustive block
-    # when an older/full form is supplied, while treating errors.json and events.json as
-    # the closed authorities otherwise.
-    if "ApiProblemCode`首版闭集" in spec17:
-        api_codes = [line.strip() for line in code_block_after(spec17, "ApiProblemCode`首版闭集")]
-        if api_codes != error_registry["api_problem"]["codes"]:
-            errors.append("17 ApiProblemCode differs from errors.json")
-    if "最小closed event types" in spec17:
-        event_types = []
-        for line in code_block_after(spec17, "最小closed event types"):
-            value = line.split("#", 1)[0].strip()
-            if value:
-                event_types.append(value)
-        machine_events = [item["type"] for item in event_registry["event_types"]]
-        if event_types != machine_events:
-            errors.append("17 PublicRunEventType differs from the machine event registry")
+    expected_api_problem_codes = [
+        "invalid_request", "schema_validation_failed", "unauthenticated",
+        "permission_denied", "resource_not_found", "precondition_required",
+        "precondition_failed", "idempotency_conflict", "invalid_state_transition",
+        "policy_denied", "approval_required", "quota_exceeded", "rate_limited",
+        "resource_suspended", "secret_unavailable", "network_denied",
+        "isolation_unavailable", "content_rejected", "cursor_invalid",
+        "cursor_expired", "run_not_terminal", "operation_not_terminal",
+        "deadline_exceeded", "temporarily_unavailable", "internal_error",
+    ]
+    if error_registry.get("api_problem", {}).get("codes") != expected_api_problem_codes:
+        errors.append("ApiProblemCode registry is not closed")
 
     expected_source_kinds = [
         "run",
@@ -1584,7 +1548,7 @@ def main():
     check_qualification_manifests(errors)
     check_nominal_schemas(errors)
     check_contract_manifest(errors)
-    check_spec_registry_alignment(errors)
+    check_machine_registry_contracts(errors)
     pending = [
         str(path.relative_to(ROOT))
         for path in CONTRACT_ROOT.rglob("*")

@@ -4,8 +4,7 @@
   "cases": [
     {
       "fixture_id": "fq1-foundation-workload-shape",
-      "owner_spec": "18",
-      "related_specs": ["07", "14", "15", "17"],
+      "contract_area": "qualification",
       "profile": "q1-50",
       "seed": 20260807,
       "input": {

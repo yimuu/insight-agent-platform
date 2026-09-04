@@ -16,9 +16,10 @@ SSE/cursor 合同；不引入 SSR、BFF、Console database、worker credential �
 发布、Run输入、durable timeline、Task处理与结果读取；Artifact、Deployment、Operation、Receipt、ETag、cursor与
 low-sensitivity Trace只在关联对象的Advanced diagnostics中显示。
 
-Agent/Run历史使用Platform 17评审的bounded authority list route和opaque分页envelope；不允许用localStorage、Event
-重建或Console数据库伪造current state。表单与YAML导入必须通过Spec 01同一conformance corpus，不能维护宽松的第二份
-字段语义。浏览器reload只从publication handle、public authority与SSE cursor恢复，不把React state当作持久事实。
+Agent/Run历史使用public OpenAPI的bounded authority list route和opaque分页envelope；不允许用localStorage、Event
+重建或Console数据库伪造current state。表单与YAML导入必须通过
+`contracts/product-experience/agent-compiler/v1`的conformance corpus，不能维护宽松的第二份字段语义。浏览器reload只从
+publication handle、public authority与SSE cursor恢复，不把React state当作持久事实。
 
 写操作必须使用 Receipt/ETag，SSE 断开按 public cursor/replay 语义恢复。浏览器持久化不得包含长期 Secret、
 worker token、database URL、manifest正文、输入/结果正文或 raw credential。

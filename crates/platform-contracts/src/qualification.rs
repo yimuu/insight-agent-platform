@@ -56,7 +56,7 @@ impl QualificationLayer {
     }
 }
 
-/// Closed minimum release qualification matrix from specification 18 section 13.
+/// Closed minimum release qualification matrix exported by the production release profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QualificationGate {

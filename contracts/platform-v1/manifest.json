@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:52875a823e3ef3f0f7a01446cb19ec0192dadf540c47bc1d89db27be9e60ab1c",
+  "contract_digest": "sha256:b3c898c8a39c428754bcd03e879b4392ed414120bed75d68521582f8cbefcccb",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -234,7 +234,7 @@
       "bytes": 1430,
       "media_type": "application/json",
       "path": "contracts/platform-v1/fixtures/manifest.json",
-      "sha256": "7c45aabea2dbd1310188b674940c80ddedceccd402f45633aa0316d5f2f06a4d"
+      "sha256": "53d3629ac37c54f52cf4c94724bedd47be422bbe44e3883838b8c814ca9a8a9d"
     },
     {
       "bytes": 1947,

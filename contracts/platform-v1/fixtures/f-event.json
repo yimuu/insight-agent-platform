@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fevent-run-terminal-durable",
-      "owner_spec": "17",
-      "related_specs": ["03", "06"],
+      "contract_area": "public_events",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"event_type":"run.completed","durability":"durable","event_id":"present","sequence":"present","cursor":"present","data":{"source_kind":"run","source_id":"run_018f0000-0000-7000-8000-000000000001","source_projection_version":1,"safe_summary":null}},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "fevent-node-source-kind-mismatch",
-      "owner_spec": "17",
-      "related_specs": ["03", "06"],
+      "contract_area": "public_events",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"event_type":"node.completed","durability":"durable","event_id":"present","sequence":"present","cursor":"present","data":{"source_kind":"run","source_id":"run_018f0000-0000-7000-8000-000000000001","source_projection_version":1,"safe_summary":null}},
@@ -27,8 +25,7 @@
     },
     {
       "fixture_id": "fevent-live-delta-cannot-advance",
-      "owner_spec": "17",
-      "related_specs": ["16"],
+      "contract_area": "public_events",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"event_type":"model.delta","durability":"live_only","event_id":"present","sequence":"absent","cursor":"absent"},
@@ -39,8 +36,7 @@
     },
     {
       "fixture_id": "fevent-list-cursor-cannot-resume-run",
-      "owner_spec": "17",
-      "related_specs": ["03"],
+      "contract_area": "public_events",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"actual_purpose":"list","required_purpose":"run_event"},

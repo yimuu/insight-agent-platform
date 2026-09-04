@@ -14,7 +14,7 @@ SPEC.loader.exec_module(MODULE)
 
 class ClassifyCiPathsTests(unittest.TestCase):
     def test_docs_only_uses_quick_lane(self) -> None:
-        result = MODULE.classify(["docs/specs/platform-v2/00-overview.md"])
+        result = MODULE.classify(["docs/current/architecture.md"])
         self.assertTrue(result["quick"])
         self.assertFalse(result["runtime"])
         self.assertFalse(result["cli"])
@@ -31,11 +31,9 @@ class ClassifyCiPathsTests(unittest.TestCase):
         self.assertTrue(result["cli"])
         self.assertFalse(result["runtime"])
 
-    def test_product_experience_spec_uses_cli_without_runtime(self) -> None:
-        result = MODULE.classify(
-            ["docs/specs/product-experience/02-agent-cli-journey.md"]
-        )
-        self.assertTrue(result["cli"])
+    def test_product_documentation_does_not_expand_the_ci_lane(self) -> None:
+        result = MODULE.classify(["docs/current/cli.md"])
+        self.assertFalse(result["cli"])
         self.assertFalse(result["runtime"])
 
     def test_first_run_qualifier_uses_cli_without_runtime(self) -> None:

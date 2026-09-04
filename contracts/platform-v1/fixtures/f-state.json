@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fstate-run-wait-resume",
-      "owner_spec": "06",
-      "related_specs": ["07", "17"],
+      "contract_area": "state_machine",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"machine":"run","from":"waiting","to":"running"},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "fstate-run-terminal-cannot-leave",
-      "owner_spec": "06",
-      "related_specs": ["17"],
+      "contract_area": "state_machine",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"machine":"run","from":"succeeded","to":"running"},
@@ -27,8 +25,7 @@
     },
     {
       "fixture_id": "fstate-stale-fence-not-attempt-state",
-      "owner_spec": "06",
-      "related_specs": ["03", "10"],
+      "contract_area": "state_machine",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"machine":"execution_attempt","state":"rejected_stale_fence"},

@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fcanon-object-key-order",
-      "owner_spec": "02",
-      "related_specs": ["05", "18"],
+      "contract_area": "canonicalization",
       "profile": "rfc8785",
       "seed": 0,
       "input": {"z":1,"a":[true,null]},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "fcanon-duplicate-key",
-      "owner_spec": "05",
-      "related_specs": ["02", "17"],
+      "contract_area": "canonicalization",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input_artifact": {"media_type":"application/json","utf8":"{\"a\":1,\"a\":2}"},
@@ -27,8 +25,7 @@
     },
     {
       "fixture_id": "fcanon-invalid-utf8",
-      "owner_spec": "05",
-      "related_specs": ["17"],
+      "contract_area": "canonicalization",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input_artifact": {"media_type":"application/json","bytes_hex":"ff"},
@@ -39,8 +36,7 @@
     },
     {
       "fixture_id": "fcanon-integer-outside-interoperable-range",
-      "owner_spec": "05",
-      "related_specs": ["02", "17"],
+      "contract_area": "canonicalization",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input_artifact": {"media_type":"application/json","utf8":"18446744073709551616"},
@@ -51,8 +47,7 @@
     },
     {
       "fixture_id": "fcanon-number-not-finite",
-      "owner_spec": "05",
-      "related_specs": ["02", "17"],
+      "contract_area": "canonicalization",
       "profile": "insight.closed-json-schema/1",
       "seed": 0,
       "input_artifact": {"media_type":"application/json","utf8":"1e400"},

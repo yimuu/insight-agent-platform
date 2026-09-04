@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-20 |
 | 决策范围 | clean-cut `/v1` 的 PostgreSQL 物理模型 |
-| 规范输入 | `docs/specs/platform-v2/00-overview.md`～`18-deployment-observability-and-qualification.md` |
+| 历史设计输入 | Platform v2 00～18（已退役，见 Git 历史）；当前合同见 `contracts/platform-v1` |
 | 被替代设计 | migration 1～35、177 表 catalog/schema contract |
 
 ## 1. 决策
@@ -259,4 +259,4 @@ Rust 语义。绕过 repository 的直接业务写入不属于支持的接口；
 9. Run admission与active Deployment切换并发，证明既有Run binding不变；Operation GET只投影shared Job且无ManagementOperation current state；
 10. repository all-target test、strict Clippy 与 workspace consumer compile。
 
-完成前不得把 00～18 推进为 Implemented 或把新 schema 声明为当前生产行为。
+上述仓库门禁通过后才可把schema声明为当前开发行为；生产行为仍要求目标环境L4～L6证据。

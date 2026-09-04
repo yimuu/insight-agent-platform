@@ -3,8 +3,7 @@
   "cases": [
     {
       "fixture_id": "fpolicy-effect-max-risk",
-      "owner_spec": "04",
-      "related_specs": ["09", "10"],
+      "contract_area": "policy",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"interface_effect":"read_only","implementation_effect":"non_idempotent_write"},
@@ -15,8 +14,7 @@
     },
     {
       "fixture_id": "fpolicy-classification-join",
-      "owner_spec": "04",
-      "related_specs": ["12", "15", "16"],
+      "contract_area": "policy",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"classifications":["internal","restricted","confidential"]},
@@ -27,8 +25,7 @@
     },
     {
       "fixture_id": "fpolicy-secret-read-does-not-exist",
-      "owner_spec": "04",
-      "related_specs": ["17"],
+      "contract_area": "policy",
       "profile": "insight.platform/v1",
       "seed": 0,
       "input": {"permission":"secret.read"},
