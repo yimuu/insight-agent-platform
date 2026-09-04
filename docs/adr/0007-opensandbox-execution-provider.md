@@ -37,6 +37,11 @@ CR-218 revision 1明确：`ActivationAuthorized/PotentiallyStarted`后观察到�
 Dispatcher必须先以current Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要并进入
 `UnknownOutcome`；terminal/reclaim复用同一摘要。相同observation可重放，不同第二observation拒绝，且整个路径不创建replacement。
 
+CR-220 revision 1明确：full readiness使用synthetic identity但没有shared Job owner，不能与业务candidate共享未区分的orphan
+metadata。operator metadata增加closed `purpose = job | readiness`；业务create固定为`job`，probe固定为`readiness`。orphan
+sweep在任何repository lookup前跳过`readiness`，不得把missing synthetic owner解释为`DeleteMissingOwner`。probe自身负责
+delete/absence，TTL只作最后保护；缺失/unknown purpose使list不能授权任何删除并撤销readiness。
+
 CR-219 revision 1明确：cancel/timeout不能只推进Invocation并假设Event会被消费。Capability owner事务必须把typed、digest-bound control
 intent写入同一shared Job并将Job/Invocation原子推进到`Cancelling`；Dispatcher reserved critical-control scan按数据库时间发现显式intent
 与deadline-past Job，并按quota → Invocation → Job锁序提交terminal、quota、Event/Outbox及cleanup intent。该scan不做provider I/O；
@@ -200,8 +205,9 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
   撤销readiness并尽力回收已发现candidate；
 - physical persistence 位于 Kubernetes API/BatchSandbox CR；create authorization、candidate selection与activation evidence位于既有shared
   Job row/version，不引入OpenSandbox SQLite、新Platform业务表或第二aggregate作为provider store；
-- BatchSandbox operator metadata固定携带内部`tenant_id/job_id/physical_attempt/create_ordinal`及token/request/runtime/profile/network digest；只用于
-  bounded recovery/orphan point lookup，不公开、不授予Platform authority；
+- BatchSandbox operator metadata固定携带closed `purpose = job | readiness`、内部`tenant_id/job_id/physical_attempt/create_ordinal`及
+  token/request/runtime/profile/network digest；不公开、不授予Platform authority。只有`job`进入bounded recovery/orphan point lookup；
+  `readiness`由probe cleanup与TTL回收，orphan sweep必须跳过；
 - TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
   后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
 - cancel/timeout terminalization由Dispatcher reserved critical-control scan执行，扫描database-time deadline并在一个事务内重验

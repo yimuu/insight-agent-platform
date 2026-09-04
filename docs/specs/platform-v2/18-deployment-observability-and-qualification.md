@@ -12,6 +12,11 @@
 > state path、process group、signal/session escape和terminal quiescence成为必测负向边界。Dispatcher readiness必须低频运行
 > inert create/list/Armed/delete/absence，不得以metadata list单独表示Ready。实现与L1～L3/本机Kind证据完成前，
 > 不得关闭对应review P1；正式L4～L6仍为Not run。
+>
+> CR-220 revision 1：readiness candidate必须以closed operator metadata `purpose=readiness`区别于`purpose=job`。
+> 周期orphan sweep在repository lookup之前跳过readiness；probe cleanup与controller TTL是其唯一回收者。缺失/unknown purpose
+> fail closed为整页不可删且撤销readiness。资格必须覆盖同一Dispatcher周期sweep与full probe并发，以及滚动升级中新旧Dispatcher重叠，
+> 证明synthetic owner不存在时仍不会触发`DeleteMissingOwner`。
 
 > CR-219 impact：Sandbox L1～L3增加真实生产入口的cancel/timeout资格，而非直接构造terminal helper。L1覆盖typed intent摘要、
 > second-intent/late-result拒绝和pre-claim零provider；L2 fresh PostgreSQL覆盖显式cancel、database-time deadline scan、四维quota exact-once、
@@ -338,7 +343,8 @@ CR-216 Sandbox target矩阵：
   terminal first-winner、cancel/timeout、quota settlement与orphan decision；OpenSandbox evidence不能直接推进Run/Invocation；
 - L3：真实 OpenSandbox Server + Kubernetes provider + BatchSandbox Controller + containerd/runc 覆盖 concurrent create、response loss、
   Server/Controller restart、Dispatcher 在 create/select/activate/result/commit 窗口强杀、activation replay/conflict、boot rollover/runner-start
-  uncertainty 不重发、TTL/delete/absence 与 orphan cleanup；
+  uncertainty 不重发、TTL/delete/absence 与 orphan cleanup；full readiness candidate与同进程周期orphan sweep、滚动升级旧Dispatcher
+  重叠时均不被误删，probe cleanup后取得absence；
 - L3 network/security：Direct 只可达 DNS/external 且 internal/metadata deny，Disabled 零 egress；二者均无 public ingress、host network/path/
   socket/device/Platform credential，wrong Dispatcher API key/source 零 create，OpenSandbox/Controller/runner 无 Platform DB/NATS/业务 RPC；
 - L4～L6：强隔离、OpenSandbox HA、production capacity/chaos/soak/restore/promotion 全部 Not run。不得用 Docker provider/本机流程、静态 manifest 或

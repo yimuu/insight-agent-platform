@@ -30,6 +30,12 @@ readiness/capacity/recovery：无业务Job的低频探针用唯一synthetic iden
 成功只缓存短TTL，每次dependency sample仍执行authenticated list，任一观测失败立即撤销readiness。response-loss
 按唯一token bounded list回收，delete/absence失败本身使readiness fail closed，不能影响Job/Invocation/quota。
 
+CR-220 revision 1关闭本机滚动部署暴露的readiness/orphan ownership P1：旧Dispatcher的周期orphan sweep会把新Dispatcher
+刚创建、没有shared Job row的synthetic readiness candidate判成`DeleteMissingOwner`，使rollout永久无法Ready。candidate metadata
+增加closed `purpose = job | readiness`；normal create固定为job，probe固定为readiness。sweep必须在repository point-read前跳过readiness，
+且不能替probe执行delete/absence；unknown/缺失purpose使整页fail closed为不可删并撤销readiness。probe cleanup和TTL仍保证bounded
+回收，不新增DB row、business authority或兼容fallback。
+
 证据：L1覆盖签名篡改/cross-candidate/cross-boot、state no-follow/mode、Package signal/session/daemon/fill失败和
 readiness各阶段失败清理；L3使用真实OpenSandbox/Kubernetes/containerd-runc验证cross-candidate零激活、恶意Package
 terminal后无存活后代与state不可写，并在controller/runner/delete故障下撤销readiness。本机Kind可生成
@@ -164,7 +170,7 @@ authorization、current lease terminal fence、PotentiallyStarted后的no-replac
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
 | IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID和activation signing seed都是physical evidence；public Operation仍等于JobId |
-| schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CreateAuthorization/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；CandidateMetadata以operator-only tenant/job/physical attempt/create ordinal支持point lookup与authorization校验，Plan/Request逐字节冻结Runtime contract/Profile Deployment digest并绑定其余metadata；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
+| schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CreateAuthorization/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；CandidateMetadata以closed job/readiness purpose区分业务与探针，且仅job使用operator-only tenant/job/physical attempt/create ordinal支持point lookup与authorization校验；Plan/Request逐字节冻结Runtime contract/Profile Deployment digest并绑定其余metadata；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
 | idempotency | Platform保证command Receipt、PostgreSQL exact-ordinal create authorization/candidate-selection first-winner、每个Applied ordinal至多发起一次provider create、runner signed activation replay-safe/最多一次Package start、Job terminal first-winner；不保证一个token历史上只有一个inert object，也不拥有workload外部副作用幂等 |
 | transactions | current fence先持久化provisioning intent/database-time start；每次provider create前CAS exact ordinal/count/last time，仅`Applied` caller在事务外调用一次provider，`Replayed`不调用且crash可burn ordinal；candidate selection与activation authorization分别CAS；`PotentiallyStarted`先于外部activate；terminal重验latest Job fence并原子写Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；之后cleanup只用独立generation fence CAS physical evidence |
 | errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
@@ -1382,10 +1388,15 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 42. Acceptance 49：create authorization response必须是closed `Applied | Replayed`；只有本次CAS为`Applied`的唯一caller可恰好调用
     一次provider create，`Replayed`不得调用。authorization commit后、provider call前崩溃会burn该ordinal，恢复只能在durable
     quiescence后授权下一ordinal；每个ordinal至多一次外部create调用，全部调用数不超过Profile maximum candidates。
+43. Acceptance 50：candidate metadata必须额外携带closed `purpose = job | readiness`。业务candidate只能是job；full readiness
+    candidate只能是readiness。orphan sweep对readiness在repository lookup与provider delete前跳过；同进程周期sweep及滚动升级中新旧
+    Dispatcher与probe重叠时均不得误删。missing/unknown purpose不得授权任何candidate删除，并使readiness fail closed；probe cleanup与TTL
+    必须最终证明readiness candidate absence。
 
 ## 16. 最终结论与未运行环境门禁
 
-CR-216 final implementation review没有未关闭P0/P1合同或实现偏差；00标记Implemented / repository L1～L3 passed，受影响
+CR-216 final implementation review此前没有未关闭P0/P1合同或实现偏差；本机滚动部署新发现的CR-220 revision 1
+readiness/orphan竞态在实现与证据完成前保持开放。00标记Implemented / repository L1～L3 passed，受影响
 01～04、07、09、10、14、15、17、18与product-experience 00/06保持Accepted合同。OpenSandbox Kubernetes/BatchSandbox/Armed
 runner、shared Job fencing、CLI/profile、部署与cleanup/recovery已经实现，当前产品文档已切换。
 

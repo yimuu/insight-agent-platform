@@ -12,6 +12,11 @@
 > sandbox/boot/request/schema/input完整闭包签名。OpenSandbox Server是已签名字节的物理relay，不是activation authority。
 > runner/Package使用不同fixed UID；Package只在独立且不可逃逸的process group中运行，runner在发布terminal前
 > kill-all并证明quiescence。runner durable state只存入runner-owned `0700`目录与`0600` no-follow文件。
+>
+> CR-220 revision 1 readiness ownership：candidate operator metadata增加closed `purpose = job | readiness`。
+> 业务create只能产生`job`，无业务Job的full readiness probe只能产生`readiness`。orphan sweep对
+> `readiness`必须在任何repository point-read之前fail-safe retain，且不得调用delete/absence；只有发起该probe的
+> readiness lifecycle负责bounded cleanup，controller TTL是最终保护。缺失或unknown purpose使整页无法作为删除依据并立即撤销readiness。
 
 > CR-219 revision 1 control recovery：Sandbox Job payload增加optional `SandboxControlIntentV1`，以closed kind、数据库时间、
 > target Invocation version、tenant/invocation/Job/request identity及domain-separated digest绑定cancel/timeout。Capability owner事务原子推进
@@ -345,8 +350,11 @@ struct CandidateCreateAuthorizationV1 {
     create_ordinal: BoundedNonZeroU8<1, 4>,
 }
 
+enum SandboxCandidatePurposeV1 { Job, Readiness }
+
 struct SandboxCandidateMetadataV1 {
     schema_version: ConstU16<1>,
+    purpose: SandboxCandidatePurposeV1,
     tenant_id: TenantId,
     job_id: JobId,
     physical_attempt: NonZeroU32,
@@ -360,9 +368,10 @@ struct SandboxCandidateMetadataV1 {
 ```
 
 wire token 是 `sha256(canonical_jcs({"domain":"insight.sandbox.provision/v1","token":token}))` 的 lowercase opaque digest。它不含 lease
-generation、worker generation、trace 或 deadline。OpenSandbox metadata携带只供内部point lookup的`tenant_id + job_id +
-physical_attempt + create_ordinal`、token/correlation digest与operator-controlled closed labels；不含Invocation、RunValue/input body、Secret、用户字符串或
-任何Platform credential。这些ID只定位shared Job，不让OpenSandbox获得读写该Job的权限。
+generation、worker generation、trace 或 deadline。OpenSandbox metadata携带closed `purpose = job | readiness`、
+`tenant_id + job_id + physical_attempt + create_ordinal`、token/correlation digest与operator-controlled closed labels；不含Invocation、
+RunValue/input body、Secret、用户字符串或任何Platform credential。只有`job`可用这些ID定位shared Job；`readiness`的synthetic ID
+不得进入repository point lookup，也不让OpenSandbox获得读写Platform state的权限。
 
 `record_provisioning_intent` 的 current-fence CAS 同时记录数据库时间的provisioning start并生成一个 256-bit
 `OpaqueActivationToken`；CAS loser 读取 winner 的既有 token，
@@ -393,10 +402,12 @@ OpenSandbox create 不是原子唯一性 primitive。合同允许同 token 出�
 10. metadata list只用于发现与orphan reconcile；PostgreSQL create authorization与candidate selection拥有相应唯一裁决，不把
     list/create描述为原子幂等。
 
-orphan sweeper 对每个bounded candidate page调用repository point-read裁决。裁决必须先验证metadata身份、current Job kind/owner、Plan、
+orphan sweeper必须先完整解码bounded candidate page，并在任何repository调用前跳过`purpose=readiness`。对其余`purpose=job`
+candidate调用repository point-read裁决。裁决必须先验证metadata身份、current Job kind/owner、Plan、
 physical attempt、provisioning/request/runtime/profile/network digest与candidate membership，再返回closed
 `RetainProvisioning | RetainSelected | DeleteUnselected | DeleteLateCandidate | DeleteStaleAttempt | DeleteMissingOwner`。规则如下：
 
+- readiness candidate只由发起probe的cleanup执行delete/absence，TTL作最后保护；周期sweep不得查询synthetic Job或删除，避免与自身probe及滚动升级中的新旧Dispatcher竞态；
 - current attempt仍为`Provisioning`时，已记录或尚未记录但metadata完整匹配的candidate一律retain，避免与candidate CAS竞态；
 - selected candidate在cleanup generation完成前retain并只由cleanup claim删除；
 - selection/activation之后出现的未记录late candidate与已知unselected candidate可delete，因为它们永远不能获得绑定其exact
@@ -696,7 +707,8 @@ manifest digest 与 values schema；不得把 mutable tag 或未发布 artifact 
 
 单节点 developer Profile 默认 `Direct`，并提供显式 `Disabled` Profile。Server 与 Controller 都为 1 replica；这只用于 L3，不能
 声称 control-plane HA。`/health` 只作 process liveness。Dispatcher/provider readiness 必须认证核验 API、CRD/controller、create/list/
-delete、runner protocol、network policy 与 exact digest closure；探针产生的 inert candidate 必须删除并取得 absence proof。
+delete、runner protocol、network policy 与 exact digest closure；探针产生的 inert candidate必须标记`purpose=readiness`，由同一probe
+删除并取得absence proof。周期orphan sweep即使与自身probe或滚动升级中的新旧Dispatcher重叠，也只能跳过该candidate。
 
 ## 17. Error taxonomy
 
@@ -716,7 +728,7 @@ activation boundary 决定，不能只根据 HTTP status 或 error class 推断�
 
 | 层级 | 必须证明 |
 |---|---|
-| L1 contract/unit | closed schemas、canonical digest、fixed argv/runner/result frame、size/depth/count limits、illegal config/provider/network rejection |
+| L1 contract/unit | closed schemas、canonical digest、fixed argv/runner/result frame、size/depth/count limits、illegal config/provider/network rejection；job/readiness purpose编码、缺失/unknown拒绝及orphan/probe竞态零误删 |
 | L2 real PostgreSQL | concurrent claim/create authorization/candidate CAS、lease rollover、stale result、terminal first-winner、cancel/timeout、quota settlement、orphan decision |
 | L3 real provider | OpenSandbox+Kubernetes+containerd/runc concurrent create、response loss、durable create budget、Server/Controller restart、Dispatcher kill/reclaim |
 | L3 runner/recovery | activation replay/conflict、runner-start uncertainty、boot rollover、fixed result validation、TTL/delete/absence/orphan cleanup |
