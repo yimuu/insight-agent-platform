@@ -309,8 +309,15 @@ struct SandboxPhysicalEvidenceV1 {
     provisioning_started_at: Timestamp,
     create_authorization_count: BoundedU8<0, 4>,
     last_create_authorized_at: Option<Timestamp>,
-    runner_boot_rollover_digest: Option<Sha256Digest>,
+    runner_boot_rollover: Option<SandboxRunnerBootRolloverEvidenceV1>,
     // selected candidate, activation, result and cleanup evidence follow
+}
+
+struct SandboxRunnerBootRolloverEvidenceV1 {
+    schema_version: ConstU16<1>,
+    observed_boot_id: RunnerBootId,
+    runner_state_frame_digest: Sha256Digest,
+    evidence_digest: Sha256Digest,
 }
 
 struct AuthorizeCandidateCreateV1 {
@@ -452,8 +459,10 @@ runner 不把新 lease token 传给 Package。
 
 若 runner/container 在 latch 后重启，新的 boot ID 读取到旧 latch且没有完整 terminal result 时必须进入
 `UnknownPriorActivation`，不得自动 restart Package。Dispatcher 对同 boot ID 可以安全重放同 token；boot ID 改变且无完整 result 时必须先
-把`original_boot_id + observed_boot_id + runner_state_frame_digest + request/job/physical identity`的domain-separated摘要写入
-`runner_boot_rollover_digest`并进入`UnknownOutcome`，再cancel/terminate/cleanup，不能activate或create replacement。相同observation可重放，
+把observed boot、runner state frame digest及由
+`original_boot_id + observed_boot_id + runner_state_frame_digest + request/job/physical identity`计算的domain-separated摘要写入
+`runner_boot_rollover`并进入`UnknownOutcome`，再cancel/terminate/cleanup，不能activate或create replacement。回读时必须重算摘要；
+相同observation可重放，
 不同第二observation fail closed；terminal/reclaim必须复用该摘要。
 
 Package 可以在一个 Job 内启动 published contract 允许的多个子进程，但 runner 只调用 `package_argv` 一次，不经 shell 解析。Package
@@ -592,7 +601,7 @@ Platform 在 shared Job 的 bounded binding/evidence 中保存：
 - 不含正文的execution plan、exact input/output RunValue ID、schema/content digest与semantic request digest；
 - physical attempt 与 provisioning token digest；
 - database-time provisioning start、create authorization count/last time、selected OpenSandbox ID与candidate discovery evidence；
-- runner boot ID、optional boot-rollover evidence digest、sensitive activation token/its digest 与 activation state；
+- runner boot ID、optional validated boot-rollover evidence、sensitive activation token/its digest 与 activation state；
 - result frame/output digest、declared bytes、safe failure/unknown-outcome code；
 - cleanup required/generation/owner/expiry、delete observation 与 absence proof digest。
 

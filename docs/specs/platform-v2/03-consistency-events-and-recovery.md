@@ -23,7 +23,7 @@
 > 18-kind/25-triple 与 managed MCP physical-session 记录仅是 CR-216 之前的历史证据，不是当前合同。
 
 > CR-218 revision 1 recovery hardening：`ActivationAuthorized/PotentiallyStarted` 后观察到不同 runner boot 时，current
-> Job fence 必须先持久化 domain-separated `runner_boot_rollover_digest` 并进入 `UnknownOutcome`；Dispatcher 在该 CAS 前后都
+> Job fence 必须先持久化 observed boot、runner state frame digest及domain-separated `runner_boot_rollover_digest`并进入 `UnknownOutcome`；Dispatcher 在该 CAS 前后都
 > 不得向新 boot 发送旧 activation frame。terminal/reclaim 复用同一摘要，避免 observation 与 terminal 之间崩溃后丢失 rollover 证据。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
@@ -129,7 +129,7 @@ subscription aggregate identity，不产生新的Context current-state aggregate
 证明只开放目标方向。PostgreSQL source-row/payload验证和跨WorkClass claim仍待后续L2/L3证据。
 
 Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。Job的bounded physical evidence可以保存
-`provisioning_token_digest + selected_sandbox_id + physical_attempt + runner_boot_id + optional runner_boot_rollover_digest + activation_state + cleanup evidence`，
+`provisioning_token_digest + selected_sandbox_id + physical_attempt + runner_boot_id + optional validated runner_boot_rollover evidence + activation_state + cleanup evidence`，
 但不得复制OpenSandbox/Kubernetes lifecycle state。MCP首版无stdio
 session child。Operation无owner variant；它直接投影Job的typed owner。
 

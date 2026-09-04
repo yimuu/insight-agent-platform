@@ -13,15 +13,16 @@
 已授权boot。这使旧activation frame可能到达controller重建后的新runner，且repository把不同boot仅映射为普通frame错误，无法进入
 既有`UnknownOutcome + cleanup`路径。
 
-本revision不改变业务语义，只补足已有裁决的持久证据与顺序。03先把optional、domain-separated
-`runner_boot_rollover_digest`纳入shared Job bounded physical evidence；10/14规定其preimage绑定tenant/job/physical attempt、selected
+本revision不改变业务语义，只补足已有裁决的持久证据与顺序。03先把optional、validated
+`runner_boot_rollover`纳入shared Job bounded physical evidence；它保存observed boot、runner state frame digest与domain-separated evidence digest，
+回读必须重算摘要。10/14规定其preimage绑定tenant/job/physical attempt、selected
 sandbox、request digest、original/observed boot与observed runner state frame digest。Dispatcher观察到不同boot时必须先用current Job fence
 CAS该摘要并转为physical `UnknownOutcome`，随后terminal transaction把同一摘要写入既有`SandboxTerminalOutcomeV1::UnknownOutcome`。
 相同observation可重放；不同第二observation、旧fence或已有完整result均fail closed。Dispatcher在该CAS前后均不得调用activate，且不能创建新
 token/candidate/sandbox/physical attempt。
 
 ownership/identity/schema复核：PostgreSQL shared Job仍是唯一attempt/lease/terminal与physical-evidence authority；Invocation/RunValue、
-OpenSandbox/Kubernetes与cleanup所有权不变。optional digest不新增表、aggregate、ID、JobKind、WorkClass、ComponentRole、public/internal route、
+OpenSandbox/Kubernetes与cleanup所有权不变。optional evidence不新增表、aggregate、ID、JobKind、WorkClass、ComponentRole、public/internal route、
 credential或第二状态投影；未发生rollover的canonical payload保持原shape。terminal仍按quota → Invocation → Job锁序first-winner，rollover
 observation只按current Job fence更新同一payload/version，不直接推进Invocation、quota或RunValue。
 
