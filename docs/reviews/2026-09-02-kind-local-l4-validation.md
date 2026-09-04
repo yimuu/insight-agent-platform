@@ -1,6 +1,6 @@
 # Platform v2 Kind 本地验证与修复报告
 
-- 执行时间：2026-09-02～2026-09-03
+- 执行时间：2026-09-02～2026-09-04
 - fresh rebuild 代码基线：`41e9995830d552314cec9b796d6f4f30be7d94e0`
 - 最终动态验证器基线：`8c2cf06f`
 - 集群：`insight-l4-repro`
@@ -13,7 +13,9 @@
 16 个 `ComponentRole`、25 个隔离 workload pool 全部部署，47 个角色副本全部 Ready；production topology/workload
 preflight 在最终 live inventory 上通过。验证还真实覆盖了 containerd、BatchSandbox CRD、准入、跨节点
 NetworkPolicy、客户端证书强制、RBAC、配置/镜像漂移、滚动升级、Pod/Node 故障，以及 OpenSandbox
-Server/Controller 重启后的物理对象恢复。
+Server/Controller 重启后的物理对象恢复。2026-09-04又在同一真实OpenSandbox上补充了`Started`任务的workload Pod删除/
+Controller重建，确认Pod UID与runner boot同时变化，新runner因`emptyDir`丢失回到`Armed`，并由CR-218的Dispatcher与
+PostgreSQL门禁收敛为`UnknownOutcome`而非重新激活。
 
 验证过程中复现并修复了三类仓库问题：Registry NetworkPolicy 渲染无效、若干 Platform 内部调用的
 NetworkPolicy selector/namespace/port 不闭合，以及 full profile 对部分配置集合越界并遗漏 Management API cursor key。
@@ -151,14 +153,16 @@ CapacityProfile 与真实生产环境共同产生的 release authority。
 | 完整 Platform live readiness | 通过：全部 Deployment 达到期望副本，非 Ready Pod 为 0 |
 | `scripts/bootstrap-platform-kind-local.sh` | 从不存在的集群开始完整通过 |
 | `scripts/verify-platform-kind-l4.sh` | 12/12 本地动态检查通过 |
-| Rust tests | 按要求未重复执行 |
-| 临时诊断资源 | NetworkPolicy/mTLS/OpenSandbox 探针已删除，无 BatchSandbox 残留 |
+| CR-218 L1 | `platform-sandbox --lib` 12/12；两个boot-rollover Dispatcher分支通过；strict Clippy通过 |
+| CR-218 fresh PostgreSQL L2 | schema contract 8 / 23 tables；定向boot-rollover事务测试1/1通过；临时库已删除 |
+| CR-218 real OpenSandbox L3 | `Started`任务Pod删除后新Pod UID/新boot/`Armed`；定向测试1/1通过；strict Clippy通过 |
+| 临时诊断资源 | NetworkPolicy/mTLS/OpenSandbox 探针已删除，无 BatchSandbox/Pod残留 |
 
 ## 10. 分层判定与下一步
 
 | 层级 | 本地已获得证据 | 正式资格状态 |
 |---|---|---|
-| L4 Topology / isolation / recovery | 三节点、containerd、CRD、准入、跨节点策略、客户端证书、RBAC、漂移、Pod/Node 与 OpenSandbox 恢复 | **Not run**：同宿主节点、Node 恢复需 Pod recreation、无 gVisor/生产 Prometheus/真实 Provider、租户并发与完整 production fault matrix |
+| L4 Topology / isolation / recovery | 三节点、containerd、真实OpenSandbox/CRD、准入、跨节点策略、客户端证书、RBAC、漂移、Pod/Node 与 OpenSandbox 恢复 | **Not run**：同宿主节点、Node 恢复需 Pod recreation、无 gVisor/生产 Prometheus/真实外部依赖、租户并发与完整 production fault matrix |
 | L5 Capacity | Metrics API 可用；发现并修正本地 PostgreSQL 连接上限 | **Not run**：无批准的 CapacityProfile、mixed load、饱和验证和至少 86,400 秒 soak |
 | L6 Release | 仓库内 fail-closed validator 已存在 | **Not run**：无受保护 CI 签名供应链、backup/restore、upgrade/rollback 和 GitOps promotion 证据 |
 

@@ -118,11 +118,12 @@ cancel、timeout、commit-window kill 和 provider unavailable。
 
 ### P1-02 runner boot rollover 无法进入合同要求的 UnknownOutcome
 
-状态（2026-09-04）：**代码路径已修复，真实OpenSandbox runner/Pod rollover L3证据待补**。CR-218 revision 1已让
+状态（2026-09-04）：**已修复并通过CR-218 L1～L3**。CR-218 revision 1已让
 `ActivationAuthorized`与`Started`在任何activate/read-result之前比较boot，并以current Job fence持久化绑定original/observed
 boot、request、sandbox与state-frame的摘要；随后只可进入`UnknownOutcome + cleanup`。定向L1覆盖两个Dispatcher分支的
-zero-activate/zero-wait、同观察幂等、第二个不同观察与篡改fail closed；现有Kind PostgreSQL上的定向L2证明Job与Invocation原子进入
-`ReconciliationRequired`。在真实BatchSandbox Pod重建证据通过前，本项不声明资格关闭。
+zero-activate/zero-wait、同观察幂等、第二个不同观察与篡改fail closed；fresh Kind PostgreSQL定向L2证明Job与Invocation原子进入
+`ReconciliationRequired`；真实Kind/OpenSandbox L3证明`Started` workload Pod删除后由Controller以新Pod UID/新boot重建，
+且丢失emptyDir的新runner回到最危险的`Armed`状态。测试完成后BatchSandbox/Pod残留均为零。本项代码与L1～L3资格关闭，但不构成L4～L6证据。
 
 原始审查证据：
 

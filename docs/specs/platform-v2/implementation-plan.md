@@ -2,21 +2,22 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-218 revision 1; prior CR-216 L1～L3 passed; L4～L6 Not run |
+| 状态 | Implemented / CR-218 revision 1 L1～L3 passed; L4～L6 Not run |
 | 日期 | 2026-09-04 |
 | 合同输入 | 00～18、cross-review CR-218、ADR-0001、ADR-0007、AGENTS.md |
 
 > 2026-09-04 CR-218 revision 1：先在physical evidence增加optional、domain-separated boot-rollover摘要，再让
 > `record_physical_observation`以current Job fence持久化不同boot并进入`UnknownOutcome`；Dispatcher的
 > `ActivationAuthorized`与`Started`分支必须在activate/await前比较boot并先提交该observation。随后补L1 same/different observation、
-> new-boot zero-activate回归，补fresh PostgreSQL crash-window L2与真实Kind runner/Pod rollover动态门禁。完成这些证据前CR-218保持Implementing。
+> new-boot zero-activate回归，补fresh PostgreSQL crash-window L2与真实Kind runner/Pod rollover动态门禁。
 
-> 2026-09-04 CR-218 revision 1 local evidence：`platform-sandbox`定向L1共12/12通过，覆盖
+> 2026-09-04 CR-218 revision 1 implementation evidence：`platform-sandbox`定向L1共12/12通过，覆盖
 > `ActivationAuthorized`与`Started`看到不同boot后先持久化domain-separated observation、同observation幂等、不同二次
-> observation与摘要篡改fail closed、zero activate/zero old-result wait并提交`ReconciliationRequired`。使用现有Kind PostgreSQL
-> 运行`phase3_opensandbox::opensandbox_boot_rollover_is_durable_unknown_outcome`定向L2共1/1通过，证明同一shared Job fence下
-> observation持久化/重放、Job与Invocation原子收敛；两个受影响target strict Clippy通过。该证据不是fresh-database crash-window
-> qualification，也没有触发真实OpenSandbox runner/Pod rollover，因此CR-218仍为Implementing，L3动态门禁与L4～L6仍Not run。
+> observation与摘要篡改fail closed、zero activate/zero old-result wait并提交`ReconciliationRequired`。fresh Kind PostgreSQL临时库先
+> provision schema contract 8（23 tables），再运行`opensandbox_boot_rollover_is_durable_unknown_outcome`定向L2共1/1通过，证明同一
+> shared Job fence下observation持久化/重放、Job与Invocation原子收敛。真实Kind/OpenSandbox L3在长任务`Started`后删除workload
+> Pod，确认Controller创建新Pod UID、runner boot发生变化且丢失emptyDir的新runner回到`Armed`；测试随后删除BatchSandbox并证明零
+> BatchSandbox/Pod残留。受影响target strict Clippy通过。CR-218 L1～L3由此关闭；该证据不是正式L4～L6资格。
 
 > 2026-09-01 CR-216 revision 1：Sandbox physical implementation clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox
 > Controller + containerd/runc，不修改 OpenSandbox 源码。按 contract/types -> shared Job candidate/activation evidence -> Armed runner

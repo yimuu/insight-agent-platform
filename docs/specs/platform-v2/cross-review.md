@@ -31,6 +31,11 @@ observation只按current Job fence更新同一payload/version，不直接推进I
 没有额外provider调用或容量lane；反而把新boot上的activate调用数收紧为零。L1必须覆盖same-observation replay与different-observation拒绝，
 Dispatcher回归必须证明new-boot `activate_calls=0`；真实provider门禁必须覆盖Pod/runner boot rollover。该revision不构成L4～L6 passed evidence。
 
+2026-09-04 closure evidence：L1以两个Dispatcher phase证明different-boot observation先于任何activate/await且
+`activate_calls=0`；fresh PostgreSQL L2证明同一摘要的持久化、重放和Job/Invocation原子`ReconciliationRequired`；真实
+Kind/OpenSandbox L3在`Started`长任务期间删除workload Pod，证明Controller重建产生新Pod UID与新runner boot，且新runner因
+emptyDir丢失回到`Armed`。该危险状态由前两层门禁收敛为`UnknownOutcome + cleanup`，不发送旧activation frame。L4～L6仍Not run。
+
 ### CR-217 qualification fail-closed cross-review
 
 本轮只收紧CI/GitOps资格证据边界，不改变Platform业务状态机。ownership保持：PostgreSQL仍是业务current state authority；

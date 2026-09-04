@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implementing / CR-218 Sandbox recovery hardening; L4～L6 Not run |
+| 状态 | Implemented / CR-218 revision 1 L1～L3 passed; L4～L6 Not run |
 | 日期 | 2026-09-04 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -18,7 +18,8 @@
 > 2026-09-04 recovery hardening（CR-218 revision 1）：整体review发现已授权激活后的runner boot rollover实现会把旧activation
 > frame发送给新boot，违反既有`UnknownOutcome`规则。03/10/14与ADR-0007现明确：Dispatcher必须在任何activate/await动作前，以current
 > Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要，再进入`UnknownOutcome`；terminal/reclaim
-> 复用该摘要，且新boot的旧activation frame调用数为零。cross-review确认不新增authority、ID、表、JobKind、route或角色；实现与本机动态证据待补。
+> 复用该摘要，且新boot的旧activation frame调用数为零。cross-review确认不新增authority、ID、表、JobKind、route或角色；
+> 定向L1、fresh PostgreSQL L2与真实Kind/OpenSandbox Pod重建L3现已通过，正式L4～L6仍为Not run。
 
 > 2026-09-01 architecture revision（CR-216 revision 1）：首版 Sandbox 物理实现 clean-cut 为 OpenSandbox Kubernetes provider、
 > BatchSandbox Controller 与 containerd/runc。create 只产生 inert Armed candidates，PostgreSQL 选择唯一 candidate，fixed runner
@@ -308,7 +309,7 @@ Platform v2 采用以下不可逆的架构决定：
 
 | 编号 | 文件 | 状态 | 负责合同 |
 |---|---|---|---|
-| 00 | `00-overview.md` | Implemented / CR-216 L1～L3 passed | 总体路线、规范模板、依赖和完成定义；L4～L6 Not run |
+| 00 | `00-overview.md` | Implemented / CR-218 revision 1 L1～L3 passed | 总体路线、规范模板、依赖和完成定义；L4～L6 Not run |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 revision 1 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 revision 1 | ID、Resource、Version、Deployment、Binding |
 | 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-218 revision 1 | PostgreSQL、事务、Outbox、Lease、恢复 |

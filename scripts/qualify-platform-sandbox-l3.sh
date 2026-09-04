@@ -84,6 +84,7 @@ run_provider_phase() {
   local phase="$1"
   local test_name="$2"
   PLATFORM_OPENSANDBOX_L3_PHASE="$phase" \
+    PLATFORM_OPENSANDBOX_L3_WORKLOADS_NAMESPACE="$workloads_namespace" \
     cargo test -p insight-platform-opensandbox-client --test kubernetes_l3 \
       "$test_name" -- --exact --nocapture
 }
@@ -116,6 +117,8 @@ if kubectl exec -n "$control_namespace" "deployment/$server_deployment" -- \
 fi
 
 run_provider_phase core opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes
+run_provider_phase boot-rollover \
+  opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recreation
 run_provider_phase persistent-create opensandbox_kubernetes_l3_persistent_candidate_create
 
 kubectl rollout restart "deployment/$controller_deployment" -n "$control_namespace"

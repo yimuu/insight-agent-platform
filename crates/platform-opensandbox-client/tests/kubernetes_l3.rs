@@ -30,6 +30,7 @@ const L3_IMAGE_ENV: &str = "PLATFORM_OPENSANDBOX_L3_IMAGE";
 const L3_RUNTIME_DIGEST_ENV: &str = "PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST";
 const L3_PROBE_ADDRESS_ENV: &str = "PLATFORM_OPENSANDBOX_L3_PROBE_ADDRESS";
 const L3_PROBE_PORT_ENV: &str = "PLATFORM_OPENSANDBOX_L3_PROBE_PORT";
+const L3_WORKLOADS_NAMESPACE_ENV: &str = "PLATFORM_OPENSANDBOX_L3_WORKLOADS_NAMESPACE";
 
 #[derive(Clone)]
 struct L3Context {
@@ -40,6 +41,7 @@ struct L3Context {
     runtime_contract_digest: Sha256Digest,
     probe_address: String,
     probe_port: String,
+    workloads_namespace: String,
 }
 
 impl L3Context {
@@ -72,6 +74,12 @@ impl L3Context {
             probe_port.parse::<u16>().is_ok_and(|port| port != 0),
             "L3 external probe port must be non-zero"
         );
+        let workloads_namespace = env::var(L3_WORKLOADS_NAMESPACE_ENV)
+            .unwrap_or_else(|_| "platform-sandbox-workloads".to_owned());
+        assert!(
+            !workloads_namespace.is_empty() && workloads_namespace.len() <= 63,
+            "L3 workloads namespace is invalid"
+        );
         Some(Self {
             phase,
             lifecycle_base_url,
@@ -80,6 +88,7 @@ impl L3Context {
             runtime_contract_digest,
             probe_address,
             probe_port,
+            workloads_namespace,
         })
     }
 
@@ -190,6 +199,82 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
         SandboxRunnerPhaseV1::Armed
     );
     delete_and_wait(&client, &recovered[0]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recreation() {
+    let Some(context) = L3Context::load("boot-rollover") else {
+        return;
+    };
+    let client = context.client(10_000);
+    let request = request(
+        &context,
+        14,
+        SandboxNetworkMode::Disabled,
+        vec![
+            "/opt/insight/package".to_owned(),
+            "sleep-echo".to_owned(),
+            "90000".to_owned(),
+        ],
+    );
+    let (create, token_digest, evidence) = authorized_create(&request, '4', 1, 120);
+    for sandbox_id in list_candidates(&client, token_digest).await {
+        delete_and_wait(&client, &sandbox_id).await;
+    }
+    let candidate = client.create_candidate(create).await.unwrap();
+    let armed = wait_for_runner(&client, &candidate.sandbox_id).await;
+    assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
+    let activation = SandboxActivationFrameV1 {
+        magic: String::new(),
+        schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        activation_token: evidence.activation_token,
+        boot_id: armed.boot_id.clone(),
+        execution_request_digest: request.request_digest.clone(),
+        input_schema_digest: request.input_schema_digest.clone(),
+        input_digest: request.input_digest.clone(),
+        declared_input_bytes: 0,
+        input: request.input.clone(),
+        frame_digest: zero_digest(),
+    }
+    .seal()
+    .unwrap();
+    client
+        .activate(&candidate.sandbox_id, activation)
+        .await
+        .unwrap();
+    wait_for_runner_phase(
+        &client,
+        &candidate.sandbox_id,
+        &armed.boot_id,
+        SandboxRunnerPhaseV1::Started,
+    )
+    .await;
+
+    let old_pod_uid = workload_pod_uid(&context.workloads_namespace, &candidate.sandbox_id)
+        .await
+        .expect("running workload Pod UID");
+    kubectl(&[
+        "delete",
+        "pod",
+        "-n",
+        &context.workloads_namespace,
+        "-l",
+        &format!("opensandbox.io/id={}", candidate.sandbox_id.as_str()),
+        "--wait=false",
+    ])
+    .await;
+    let recreated = wait_for_recreated_runner(
+        &client,
+        &context.workloads_namespace,
+        &candidate.sandbox_id,
+        &old_pod_uid,
+        &armed.boot_id,
+    )
+    .await;
+    assert_eq!(recreated.phase, SandboxRunnerPhaseV1::Armed);
+    assert_eq!(recreated.sandbox_id, candidate.sandbox_id);
+    assert_eq!(recreated.execution_request_digest, request.request_digest);
+    delete_and_wait(&client, &candidate.sandbox_id).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -442,6 +527,95 @@ async fn wait_for_runner(
         assert!(Instant::now() < deadline, "runner did not become reachable");
         sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn wait_for_runner_phase(
+    client: &OpenSandboxHttpClient,
+    sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+    boot_id: &insight_platform_sandbox::opensandbox::RunnerBootId,
+    expected_phase: SandboxRunnerPhaseV1,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if client
+            .runner_state(sandbox_id)
+            .await
+            .is_ok_and(|frame| frame.boot_id == *boot_id && frame.phase == expected_phase)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "runner did not reach the expected phase"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_recreated_runner(
+    client: &OpenSandboxHttpClient,
+    workloads_namespace: &str,
+    sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+    old_pod_uid: &str,
+    old_boot_id: &insight_platform_sandbox::opensandbox::RunnerBootId,
+) -> insight_platform_sandbox::opensandbox::SandboxRunnerStateFrameV1 {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let pod_was_recreated = workload_pod_uid(workloads_namespace, sandbox_id)
+            .await
+            .is_some_and(|uid| uid != old_pod_uid);
+        if pod_was_recreated {
+            if let Ok(frame) = client.runner_state(sandbox_id).await {
+                if frame.boot_id != *old_boot_id {
+                    return frame;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workload Pod did not return with a new runner boot"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn workload_pod_uid(
+    workloads_namespace: &str,
+    sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+) -> Option<String> {
+    let output = kubectl(&[
+        "get",
+        "pods",
+        "-n",
+        workloads_namespace,
+        "-l",
+        &format!("opensandbox.io/id={}", sandbox_id.as_str()),
+        "-o",
+        "json",
+    ])
+    .await;
+    serde_json::from_slice::<Value>(&output)
+        .unwrap()
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|pod| pod.pointer("/metadata/uid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+async fn kubectl(arguments: &[&str]) -> Vec<u8> {
+    let output = tokio::process::Command::new("kubectl")
+        .args(arguments)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "kubectl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
 }
 
 async fn wait_for_result(
