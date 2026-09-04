@@ -33,5 +33,5 @@ performance 项必须保留 Not run，不能由本机结果推断。
 生产promotion仍由Kubernetes/GitOps持有。Helm role chart位于[`deploy/helm`](../../deploy/helm/)；Sandbox chart部署internal
 ClusterIP OpenSandbox Server、BatchSandbox Controller和Dispatcher，并固定command、ServiceAccount、NetworkPolicy、workload identity
 与image/config digest。开发Profile网络默认Direct，也支持显式Disabled；二者均禁止public ingress、host network/runtime socket和
-Platform credential。真实多节点production topology、capacity、chaos、restore与soak属于
-[`platform-v2-production-l4-l6.md`](../qualifications/platform-v2-production-l4-l6.md)，当前L4～L6仍为Not run。
+Platform credential。项目当前处于开发阶段，本机验证与延期的生产资格边界见
+[开发阶段验证状态](../qualifications/README.md)。

@@ -5,8 +5,7 @@
 状态：**Qualified。实现、真实 NATS 安全/故障测试、双后端数据库 regression、30 分钟混合负载和
 2 小时 soak 全部通过。**
 
-规范：
-[Run Stream 可插拔实时消息总线与 NATS Core 优化规范](../../docs/archive/specs/2026-08-02-pluggable-run-stream-bus-and-nats-core.md)
+对应规范已退出工作树，可从 Git 历史查看。
 
 正式证据：
 

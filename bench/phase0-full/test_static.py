@@ -138,20 +138,9 @@ class Phase0FullStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, sql)
 
-    def test_archived_qualification_and_report_template_state_non_gate_semantics(self) -> None:
-        qualification = text(
-            "docs/archive/qualifications/2026-07-28-terminal-only-qualification.md"
-        )
+    def test_report_template_state_non_gate_semantics(self) -> None:
         readme = text("bench/phase0-full/README.md")
         template = text("bench/phase0-full/report-template.md")
-        for token in (
-            "Phase 0：独立 full-runtime 基线",
-            "71,033,480,938",
-            "wal_keep_size=8GB",
-            "95%～105%",
-            "bench/phase0-full/run-phase0-full.sh qualification",
-        ):
-            self.assertIn(token, qualification)
         for token in (
             "does not apply terminal-only forbidden-ledger or WAL ceilings",
             "1 minute warm-up",

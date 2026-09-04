@@ -5,8 +5,8 @@ Formal status: **Passed** on 2026-07-28. The authoritative evidence is
 600/600 warm-up and 6,000/6,000 measured Runs succeeded, with no dropped,
 rejected, failed, interrupted, early, or late arrival.
 
-This harness closes the
-[terminal-only specification's Phase 0 evidence prerequisite](../../docs/archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md).
+This historical harness closed the terminal-only Phase 0 evidence prerequisite; the retired
+specification remains available in Git history.
 It measures the existing **full** durable engine on a fresh PostgreSQL 16
 deployment; it is not a shortened Terminal-only Gate B and it
 does not apply terminal-only forbidden-ledger or WAL ceilings.

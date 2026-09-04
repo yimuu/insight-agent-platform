@@ -11,8 +11,7 @@ feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L
 - [MCP、remote Capability 与 Sandbox](mcp.md)
 - [部署与运维](operations.md)
 
-旧 `insight.agent/v1` DSL、单进程 runtime、terminal-only 路径及其迁移文档已移入
-[`docs/archive/current-dsl-v1`](../archive/current-dsl-v1/)，不再是默认产品合同。
+旧 `insight.agent/v1` DSL、单进程 runtime 和 terminal-only 路径已经退出默认产品合同；历史设计可从 Git 查看。
 
 当前行为以 `contracts/platform-v1/openapi.yaml`、public JSON Schema、protobuf、Rust nominal type、实现和
 conformance tests 的交集为准。真实多节点 OpenSandbox/Kubernetes production topology 与 GitOps promotion 仍为外部门禁，

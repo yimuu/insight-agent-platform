@@ -6,7 +6,7 @@
 | 日期 | 2026-09-01 |
 | 目标协议 | 保持 `insight.platform/v1` 与 `/v1` |
 | 当前行为 | CR-216已实现；现行使用说明以 [`docs/current`](../../current/README.md) 为准 |
-| 前置阶段 | [`productization`](../productization/00-goals.md) repository scope 已完成 |
+| 前置阶段 | Repository productization scope completed |
 
 本阶段把已经通过资格场景的平台内核收敛为普通开发者可使用的 Agent 产品。成功标准不是再增加
 ResourceKind、Job、Worker、表或资格证据，而是让默认用户只需要理解 Agent、发布、Run 和结果。

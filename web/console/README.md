@@ -16,8 +16,8 @@ pnpm run dev
 打开页面后填写 Gateway origin 与短期 OIDC access token。token 只保存在当前 React 内存状态，刷新页面即清除；
 不要在 URL、环境构建变量或静态文件中嵌入 credential。
 
-生产 bundle 位于忽略提交的 `dist/`，应由 Gateway/Ingress 同源托管。完整边界、当前证据和未关闭门禁见
-[`docs/specs/productization/m3-console.md`](../../docs/specs/productization/m3-console.md)。
+生产 bundle 位于忽略提交的 `dist/`，应由 Gateway/Ingress 同源托管。用户行为和边界见
+[`docs/current/console.md`](../../docs/current/console.md)。
 
 资格测试可用透明 loopback 同源代理把同一静态 bundle 接到 fresh 本地 Gateway。代理只转发 `/readyz`
 和 `/v1`，不保存 token、不改写业务响应，也不拥有状态：

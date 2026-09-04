@@ -7,11 +7,7 @@
 对象：Insight Agent Platform 的 `terminal_only` Run、Conversation、持久化边界、故障语义、
 WAL、保留与隐私删除
 
-规范：
-[Terminal-only Runtime 存储与 Conversation 规范](../../docs/archive/specs/2026-07-27-terminal-only-runtime-and-conversations.md)
-
-独立 rollout 决策：
-[Terminal-only 默认模式 rollout 决策](../../docs/archive/reviews/2026-07-28-terminal-only-default-rollout-decision.md)
+对应规范和独立 rollout 决策已退出工作树，可从 Git 历史查看。
 
 正式证据根目录：
 [`bench/results/2026-07-28-terminal-only-qualified/`](../results/2026-07-28-terminal-only-qualified/)
@@ -490,7 +486,7 @@ Gate C pass3/pass4 属于证据获取或基础设施失败，不应写成产品�
 | Helm `values.yaml` | `defaultPersistenceMode: full` | `enabled: true` |
 
 完整理由、回退和复审条件见
-[独立 rollout 决策](../../docs/archive/reviews/2026-07-28-terminal-only-default-rollout-decision.md)。
+独立 rollout 决策可从 Git 历史查看。
 
 ## 12. 规范完成定义 1～12
 
