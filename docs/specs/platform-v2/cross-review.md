@@ -1,10 +1,39 @@
-# Platform v2 00～18 Cross-review（CR-219）
+# Platform v2 00～18 Cross-review（CR-220）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-219 revision 1 Sandbox control recovery review |
+| 状态 | Accepted / CR-220 Sandbox activation and runner-boundary review |
 | 日期 | 2026-09-04 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
+
+### CR-220 Sandbox activation/runner/readiness cross-review
+
+整体review的P1-03～05共享一个边界问题：已持久化activation secret作为bearer通过OpenSandbox Server
+proxy，而runner与不可信Package同UID且共享可写state path；同时Dispatcher只用metadata list判定Ready。这使
+Server可对另一candidate重组activation，Package可signal runner/改写latch或留下daemon，且controller/runner/delete
+链路失效仍可以假Ready。
+
+ownership/identity/schema：PostgreSQL shared Job、Invocation、RunValue和terminal authority不变，不新增表、aggregate、
+JobKind、WorkClass、ComponentRole或public route。Job physical evidence中现有opaque 256-bit value改为Dispatcher-only
+Ed25519 signing seed，它与public-key digest继续受current Job fence保护。runner config只公开verifying key；activation
+frame增加exact sandbox ID和signature，签名preimage绑定boot/request/schema/input digest、declared bytes及正文。
+OpenSandbox Server被承认为signed-byte relay，但不获得signing authority或Platform credential。
+
+security/process/files：runner/Package固定为UID 65532/65533；container先drop all，仅向trusted runner增加`SETUID`与
+`KILL`。child切换UID时不保留capability，在独立process group运行，并以no-new-privileges/seccomp拒绝信号、
+session/process-group与namespace逃逸。runner在任何terminal前kill整组并bounded等待quiescence。latch/result只位于
+runner-owned `0700`子目录，用`0600`/`O_NOFOLLOW`建立和读取。Package不取得seed、OpenSandbox/API/DB
+credential、runner state权限或父进程信号权限。这不把containerd/runc说成强多租户隔离；该声明仍需正式L4。
+
+readiness/capacity/recovery：无业务Job的低频探针用唯一synthetic identity和不可变Platform image执行inert
+`create -> token-scoped list -> Armed state -> delete -> absence`，不activate Package，不写Platform DB。full probe严格有界且不并发；
+成功只缓存短TTL，每次dependency sample仍执行authenticated list，任一观测失败立即撤销readiness。response-loss
+按唯一token bounded list回收，delete/absence失败本身使readiness fail closed，不能影响Job/Invocation/quota。
+
+证据：L1覆盖签名篡改/cross-candidate/cross-boot、state no-follow/mode、Package signal/session/daemon/fill失败和
+readiness各阶段失败清理；L3使用真实OpenSandbox/Kubernetes/containerd-runc验证cross-candidate零激活、恶意Package
+terminal后无存活后代与state不可写，并在controller/runner/delete故障下撤销readiness。本机Kind可生成
+`production:false`机制证据；正式production-equivalent L4、L5、L6仍须独立运行。
 
 ### CR-219 revision 1 Sandbox cancel/timeout cross-review
 

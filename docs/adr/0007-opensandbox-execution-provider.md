@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-219 revision 1 |
+| 状态 | Accepted / CR-220 Sandbox activation and runner-boundary revision |
 | 日期 | 2026-09-04 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
@@ -42,6 +42,12 @@ intent写入同一shared Job并将Job/Invocation原子推进到`Cancelling`；Di
 与deadline-past Job，并按quota → Invocation → Job锁序提交terminal、quota、Event/Outbox及cleanup intent。该scan不做provider I/O；
 terminate/delete/absence严格发生在terminal之后并沿用既有cleanup generation fence。pre-claim control不创建physical attempt，已有physical
 attempt则late worker由Job terminal/version fence拒绝。该方案复用同一Job row，不增加queue、table、aggregate或第二lease authority。
+
+CR-220明确：OpenSandbox Server的runner proxy是物理relay，但不得获得可对另一candidate重组的activation bearer。
+Job evidence中的256-bit secret改为Dispatcher-only Ed25519 signing seed，create只公开verifying key，activation signature绑定
+exact sandbox/boot/request/schema/input闭包。runner与Package分为fixed UID 65532/65533，runner仅保留将child切换到
+Package UID及清理该process group所需的`SETUID`/`KILL`；这两个capability不进入child。Package无法signal runner、
+访问runner-owned state或从execution process group脱离。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -91,7 +97,8 @@ fallback。OpenSandbox Server 和 Controller 都是 physical provider；它们�
 1. shared Job 是唯一业务 work authority，保存 attempt、lease、fence、retry、cancel、terminal 与 bounded physical evidence；
 2. Sandbox Dispatcher 是唯一可 claim Sandbox Job、调用 OpenSandbox、选择 physical candidate、激活 runner、提交结果并清理的
    Platform role；
-3. OpenSandbox 只拥有 BatchSandbox/Pod/runner 的 physical lifecycle，不得获得 Platform PostgreSQL、NATS、Run、Invocation、
+3. OpenSandbox 只拥有 BatchSandbox/Pod/runner 的 physical lifecycle及已签名activation frame的byte relay，不得获得
+   activation signing seed、Platform PostgreSQL、NATS、Run、Invocation、
    Receipt、Event、Outbox、Artifact store 或 public API credential；
 4. OpenSandbox lifecycle、Pod phase、runner state 与 result 都只是证据。terminal commit 必须重新读取并 CAS 验证 current Job owner、
    lease generation/token、worker process generation、physical attempt 与 request digest；
@@ -144,11 +151,12 @@ POST /v1/activate
 GET  /v1/result
 ```
 
-provisioning intent 事务生成并持久化一个 opaque 256-bit activation token；create frame 只向 runner 提供其 digest，不泄露 token。
+provisioning intent事务生成并持久化一个opaque 256-bit activation signing seed；create frame只向runner提供其
+Ed25519 verifying key，不泄露seed。
 Dispatcher 先读取 runner boot identity，再在 PostgreSQL current Job fence 下把 selected candidate 记录为
-`ActivationAuthorized/PotentiallyStarted`，然后发送包含 activation token、request digest 与 input digest 的 activate frame。
-runner 必须先以 create-exclusive + fsync 的 durable latch 接受 token，再启动 Package：同 token 重放返回相同状态；不同 token
-返回 conflict；一个 boot identity 最多启动一次 Package。
+`ActivationAuthorized/PotentiallyStarted`，然后对包含exact sandbox ID、boot ID、request/schema/input digest和input正文的
+canonical frame签名。runner必须在固定public key下验签，再以create-exclusive + fsync durable latch接受该签名frame
+并启动Package：同frame重放返回相同状态；任一字段重组验签失败；一个boot identity最多启动一次Package。
 
 一旦 Job 持久化 `ActivationAuthorized/PotentiallyStarted`，无论 activate response 是否丢失，都不得创建新 key、candidate、sandbox
 或自动重跑 Package。恢复只能查询同一 runner 的 state/result；runner boot identity 变化、Pod 被 controller 重建或无法证明结果时，
@@ -186,8 +194,10 @@ Profile 的受限直接出网，不得宣称 production-grade egress control 或
   `c39b814f36ded4c61d5ac6f9332ee4dfbab86c00` vendor/source-pin 最小 chart，并冻结 CRD、模板和镜像 manifest digest；
 - developer Profile 使用 1 个 Server replica、1 个启用 leader election 的 Controller；Server `informer_enabled=false`，让恢复
   list 直接读取 Kubernetes API；
-- `/health` 只证明 Server 进程存活。Dispatcher readiness 必须做 authenticated create/list/delete capability probe 或等价的
-  provider contract probe，并核验 CRD、controller、runner、network policy 与 exact digest closure；
+- `/health`只证明Server进程存活。Dispatcher startup及低频持续readiness必须执行inert authenticated
+  `create -> token-scoped list -> Armed state -> delete -> absence`探针，并通过固定runner request digest绑定installed
+  CRD/controller/template/runner/network-policy/runtime closure。成功结果只允许短TTL cache；任一full probe失败必须立即
+  撤销readiness并尽力回收已发现candidate；
 - physical persistence 位于 Kubernetes API/BatchSandbox CR；create authorization、candidate selection与activation evidence位于既有shared
   Job row/version，不引入OpenSandbox SQLite、新Platform业务表或第二aggregate作为provider store；
 - BatchSandbox operator metadata固定携带内部`tenant_id/job_id/physical_attempt/create_ordinal`及token/request/runtime/profile/network digest；只用于

@@ -2,10 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-219 Sandbox control recovery revision |
+| 状态 | Accepted / CR-220 Sandbox activation and runner-boundary revision |
 | 日期 | 2026-09-04 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
+
+> CR-220 impact：Sandbox activation不再把256-bit secret通过OpenSandbox Server proxy发给runner；Dispatcher-only
+> Ed25519 seed对exact sandbox/boot/request/input frame签名，runner create config只持有公钥。runner/Package用不同fixed UID，
+> state path、process group、signal/session escape和terminal quiescence成为必测负向边界。Dispatcher readiness必须低频运行
+> inert create/list/Armed/delete/absence，不得以metadata list单独表示Ready。实现与L1～L3/本机Kind证据完成前，
+> 不得关闭对应review P1；正式L4～L6仍为Not run。
 
 > CR-219 impact：Sandbox L1～L3增加真实生产入口的cancel/timeout资格，而非直接构造terminal helper。L1覆盖typed intent摘要、
 > second-intent/late-result拒绝和pre-claim零provider；L2 fresh PostgreSQL覆盖显式cancel、database-time deadline scan、四维quota exact-once、

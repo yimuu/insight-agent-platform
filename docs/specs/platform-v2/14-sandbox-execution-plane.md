@@ -2,10 +2,16 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-219 revision 1 |
+| 状态 | Accepted / CR-220 Sandbox activation and runner-boundary revision |
 | 日期 | 2026-09-04 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
+
+> CR-220 activation/runner boundary：已持久化的opaque 256-bit activation secret只是Dispatcher signing seed，
+> 不再出现于runner wire。create frame只携带其Ed25519 verifying key；activation frame必须包含exact sandbox ID并对
+> sandbox/boot/request/schema/input完整闭包签名。OpenSandbox Server是已签名字节的物理relay，不是activation authority。
+> runner/Package使用不同fixed UID；Package只在独立且不可逃逸的process group中运行，runner在发布terminal前
+> kill-all并证明quiescence。runner durable state只存入runner-owned `0700`目录与`0600` no-follow文件。
 
 > CR-219 revision 1 control recovery：Sandbox Job payload增加optional `SandboxControlIntentV1`，以closed kind、数据库时间、
 > target Invocation version、tenant/invocation/Job/request identity及domain-separated digest绑定cancel/timeout。Capability owner事务原子推进
@@ -432,8 +438,9 @@ GET  /v1/result
 
 协议由 OpenAPI/schema digest 冻结，禁用 redirect、content negotiation、chunked/unbounded body、caller path 和其他 method。所有 request/
 response 都有 magic、version、declared length、canonical body digest 与 hard timeout。fixed NetworkPolicy 把 route 限制给 Dispatcher；
-activate 还必须证明 provisioning intent 中持久化的 256-bit token 与 create-time digest 相符。该 token 不作为 Platform credential，
-不能调用任何其他接口；state/result 仍受 namespace/service-account flow 与 sandbox-scoped endpoint isolation 限制。
+activation还必须验证create-time Ed25519 public key下的exact frame签名。持久化的256-bit signing seed只能留在
+PostgreSQL Job evidence与Dispatcher bounded memory，不发给OpenSandbox Server或runner；state/result仍受
+namespace/service-account flow与sandbox-scoped endpoint isolation限制。
 
 ```rust
 enum SandboxRunnerPhaseV1 {
@@ -447,33 +454,39 @@ enum SandboxRunnerPhaseV1 {
 
 struct SandboxActivationFrameV1 {
     schema_version: ConstU16<1>,
-    activation_token: OpaqueActivationToken,
+    sandbox_id: OpenSandboxId,
     boot_id: RunnerBootId,
     execution_request_digest: Sha256Digest,
     input_digest: Sha256Digest,
     input: InlineCanonicalJson,
+    activation_signature: Ed25519Signature,
 }
 ```
 
-Dispatcher 必须先读取 `Armed + boot_id`，再在 PostgreSQL current Job fence 下持久化 selected ID、boot ID、activation token、
-request digest 与 `ActivationAuthorized/PotentiallyStarted`，之后才可调用 activate。activation token 一经持久化不得轮换。
+Dispatcher必须先读取`Armed + boot_id`，再在PostgreSQL current Job fence下持久化selected ID、boot ID、activation
+signing seed/public-key binding、request digest与`ActivationAuthorized/PotentiallyStarted`，之后才可签名并调用activate。
+signing seed一经持久化不得轮换。
 
-runner 在 spawn Package 之前必须：验证 boot/request、activation token digest、input schema/digest/size；以 create-exclusive 写入固定
-activation latch；fsync file 和 parent directory；
-原子发布 `ActivationLatched`。同 token 重放返回已有状态；不同 token 返回 `409 activation_conflict`；一个 boot ID 最多 spawn 一次。
-runner 不把新 lease token 传给 Package。
+runner 在 spawn Package 之前必须：验证 sandbox/boot/request、public-key signature、input schema/digest/size；以
+create-exclusive写入固定activation latch；fsync file和parent directory；原子发布`ActivationLatched`。同一signed frame重放
+返回已有状态；不合法或不同signature返回`409 activation_conflict`；一个boot ID最多spawn一次。runner不把
+signing seed、Job lease token或OpenSandbox credential传给Package。
 
-若 runner/container 在 latch 后重启，新的 boot ID 读取到旧 latch且没有完整 terminal result 时必须进入
-`UnknownPriorActivation`，不得自动 restart Package。Dispatcher 对同 boot ID 可以安全重放同 token；boot ID 改变且无完整 result 时必须先
+若runner/container在latch后重启，新的boot ID读取到旧latch且没有完整terminal result时必须进入
+`UnknownPriorActivation`，不得自动restart Package。Dispatcher对同boot ID可以安全重放逐字节相同的signed frame；
+boot ID改变且无完整result时必须先
 把observed boot、runner state frame digest及由
 `original_boot_id + observed_boot_id + runner_state_frame_digest + request/job/physical identity`计算的domain-separated摘要写入
 `runner_boot_rollover`并进入`UnknownOutcome`，再cancel/terminate/cleanup，不能activate或create replacement。回读时必须重算摘要；
 相同observation可重放，
 不同第二observation fail closed；terminal/reclaim必须复用该摘要。
 
-Package 可以在一个 Job 内启动 published contract 允许的多个子进程，但 runner 只调用 `package_argv` 一次，不经 shell 解析。Package
-terminal 后 runner 将 result 写临时文件，fsync，校验长度/digest，再 atomic rename 到 fixed result path；路径和 maximum bytes 由 runner
-contract 冻结。
+Package可以在一个Job内启动published contract允许的多个子进程，但runner只调用`package_argv`一次，不经shell解析。
+Package terminal后不能直接发布结果：Package必须在与runner不同的fixed UID和独立process group中运行，子进程禁止信号、
+session/process-group与namespace逃逸。runner对整组kill-all并在bounded window内证明无存活成员，然后才把result写临时文件、
+fsync、校验长度/digest并atomic rename到fixed result path。latch/result位于runner-owned `0700`目录，用`0600`+
+`O_NOFOLLOW`固定文件访问；Package UID不得访问。`pids` Profile limit由容器/PID boundary与child RLIMIT共同fail closed，
+RLIMIT不得被单独描述为强多租户隔离。
 
 `GET /v1/result` 是唯一结果读取面，只读 fixed path，未 terminal 返回 stable not-ready。Dispatcher 不使用 execd shell command、PTY、
 code context、file upload/download/list/delete/rename、runtime installer 或任意 OpenSandbox endpoint。result 必须完整校验 magic、version、

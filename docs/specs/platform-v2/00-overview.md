@@ -2,11 +2,20 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / CR-219 revision 1 implemented; L1～L3 passed; L4～L6 Not run |
+| 状态 | Reviewed / CR-220 Sandbox activation and runner-boundary revision |
 | 日期 | 2026-09-04 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | OpenSandbox-only；以 [`docs/current`](../../current/README.md) 为准 |
+
+> 2026-09-04 activation/runner boundary（CR-220）：整体review确认OpenSandbox Server位于runner proxy路径，
+> 因而不得继续转发可重组到其他candidate的activation bearer。新合同把已持久化的256-bit secret作为
+> Dispatcher-only Ed25519 signing seed；create frame只给runner公钥，activation frame签名绑定exact sandbox ID、boot ID、
+> request/schema/input digest与正文。Server可以relay已签名frame，但不能合成另一candidate/boot的合法激活。
+> runner与Package改为固定不同UID，runner仅保留child UID切换和kill权限；Package在独立进程组中运行，禁止信号/
+> session逃逸，terminal前kill-all并证明quiescence。latch/result收紧到runner-owned `0700`目录、`0600` no-follow文件。
+> Dispatcher readiness改为低频有界inert `create -> list -> Armed state -> delete -> absence`探针，成功只在短TTL内复用，
+> 任一实际失败立即撤销readiness。该revision需独立L1～L3与本机Kind证据，正式L4～L6仍为Not run。
 
 > 2026-09-04 control recovery（CR-219 revision 1）：整体review确认Sandbox cancel/timeout只推进Invocation，
 > 没有把durable intent写入shared Job，也没有生产消费者或deadline scan，因而已取消workload仍可能activate，过期Job与quota可永久悬挂。
