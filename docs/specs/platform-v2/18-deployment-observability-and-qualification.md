@@ -183,8 +183,9 @@ RunValue读取budget，不获得Provider、MCP、Context、Secret或Sandbox egre
 
 任何 role 都不得挂载 Docker/containerd/CRI socket；Dispatcher、OpenSandbox、Controller、sandbox Pod、Gateway、Scheduler、Model、MCP
 与普通 Worker 必须由 static manifest 和 live preflight 证明。sandbox Pod 显式使用 containerd/runc，禁止 privileged、host PID/IPC/network/
-path、device、runtime socket、service-account token、Platform/Kubernetes credential 与 capability 追加；固定 non-root、read-only root、
-`allowPrivilegeEscalation=false`、qualified seccomp、capability drop、pids/CPU/memory/ephemeral-storage/deadline limits。
+path、device、runtime socket、service-account token与Platform/Kubernetes credential。container先drop all；只有trusted runner可精确增加
+`SETUID/KILL`，且切换UID后的Package child必须清空全部capability；其他capability追加一律禁止。Pod固定non-root、read-only root、
+`allowPrivilegeEscalation=false`、qualified seccomp、pids/CPU/memory/ephemeral-storage/deadline limits。
 
 OpenSandbox API 只允许 Dispatcher source/audience 且不公开 ingress；runner fixed port 只允许 Dispatcher。physical store 是 Kubernetes API/
 BatchSandbox CR，不使用 OpenSandbox SQLite 或 Platform 业务表。Server `informer_enabled=false`，developer Profile 的 Server/Controller

@@ -52,7 +52,7 @@ OpenSandbox仍只拥有physical lifecycle。optional intent不新增表、aggreg
 无intent payload保持既有canonical shape。pre-claim control保持attempt 0且没有physical evidence；started control保留原physical identity。
 terminal first-winner使late result、第二control与scanner race零写入，四维quota只在terminal事务结算一次。
 
-安全/容量/恢复复核：intent不含正文、activation token、provider URL或credential，不进入metric label。控制scan使用critical-control保留容量，
+安全/容量/恢复复核：intent不含正文、activation signing seed、provider URL或credential，不进入metric label。控制scan使用critical-control保留容量，
 Sandbox普通lane饱和不能阻止cancel/timeout；provider不可达不能阻塞terminal/quota，只使既有cleanup backlog重试并持续告警。外部
 terminate/delete/absence始终发生在terminal之后并由`SandboxCleanupFenceV1`保护。L1必须覆盖intent digest/second-intent/pre-claim零provider，
 L2必须覆盖public cancel、database-time timeout、result/control race、quota exact-once和provider-independent terminal，L3必须覆盖started
@@ -163,15 +163,15 @@ authorization、current lease terminal fence、PotentiallyStarted后的no-replac
 | 维度 | Cross-review ruling |
 |---|---|
 | state ownership | Invocation拥有业务调用，shared Job拥有attempt/lease/fence/cancel/terminal、selected candidate与cleanup intent；RunValue拥有input/output正文；OpenSandbox/Kubernetes只拥有physical lifecycle；Job只保存bounded reference/digest/evidence |
-| IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID 和 activation token 都是 physical evidence；public Operation 仍等于 JobId |
+| IDs | 不新增 SandboxJob/Operation/business ID；provisioning token、OpenSandbox ID、runner boot ID和activation signing seed都是physical evidence；public Operation仍等于JobId |
 | schemas | provider是closed `OpenSandboxKubernetes` singleton；Runtime/Profile/Plan/Request/ProvisioningToken/CreateAuthorization/CandidateMetadata/Activation/RunnerResult/CleanupFence均为canonical、bounded v1并有digest；CandidateMetadata以operator-only tenant/job/physical attempt/create ordinal支持point lookup与authorization校验，Plan/Request逐字节冻结Runtime contract/Profile Deployment digest并绑定其余metadata；Inline正文effective ceiling为`min(Profile, 1_048_576)`；unknown backend/fallback拒绝 |
-| idempotency | Platform保证command Receipt、PostgreSQL exact-ordinal create authorization/candidate-selection first-winner、每个Applied ordinal至多发起一次provider create、runner activation replay-safe/最多一次Package start、Job terminal first-winner；不保证一个token历史上只有一个inert object，也不拥有workload外部副作用幂等 |
+| idempotency | Platform保证command Receipt、PostgreSQL exact-ordinal create authorization/candidate-selection first-winner、每个Applied ordinal至多发起一次provider create、runner signed activation replay-safe/最多一次Package start、Job terminal first-winner；不保证一个token历史上只有一个inert object，也不拥有workload外部副作用幂等 |
 | transactions | current fence先持久化provisioning intent/database-time start；每次provider create前CAS exact ordinal/count/last time，仅`Applied` caller在事务外调用一次provider，`Replayed`不调用且crash可burn ordinal；candidate selection与activation authorization分别CAS；`PotentiallyStarted`先于外部activate；terminal重验latest Job fence并原子写Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；之后cleanup只用独立generation fence CAS physical evidence |
 | errors/events | candidate limit/selection conflict、activation conflict、boot rollover、provider unavailable、unknown outcome、invalid/oversized result 映射 safe Job failure/Event；不公开 ID、endpoint、API body、diagnostics 或 workload 正文 |
 | permissions | Dispatcher 只有 Sandbox Job repository、OpenSandbox lifecycle client 和 fixed runner protocol；官方 execd init 只监督 fixed runner 且 Platform 不调用 general exec/file API；OpenSandbox/Controller/runner 无 Platform DB/NATS/Artifact/Run/Invocation 权限；任何组件都无 Docker/CRI socket |
 | network/Secret | Profile 只允许 `Disabled | Direct` operator policy；默认 deny ingress，无 public exposure；Direct 拒绝 internal/metadata CIDR，Disabled 零 egress；Secret injection disabled |
 | capacity | `WorkClass::Sandbox` 不变；candidate count/quiescence/time、Dispatcher permits、OpenSandbox API、BatchSandbox/Pod、result bytes 与 cleanup backlog 独立有界，饱和不得消耗其他 lane |
-| recovery | create response loss先list inert candidates；下一create必须由durable ordinal/count/quiescence/total-time重新授权，restart不重置预算；PostgreSQL只选一个；`ActivationAuthorized/PotentiallyStarted`后只查询/重放同runner/token；expired Running lease只可用owner-proven continuation在一个claim transaction内逻辑执行`Running -> Ready -> Leased -> Running`并只提交最终Running，attempt不变；boot变化则UnknownOutcome；terminal后cleanup claim/reclaim由database time与generation first-winner；orphan以tenant/job point-read并在corrupt/ambiguous/unavailable时retain；delete/TTL/orphan sweep不推进业务state |
+| recovery | create response loss先list inert candidates；下一create必须由durable ordinal/count/quiescence/total-time重新授权，restart不重置预算；PostgreSQL只选一个；`ActivationAuthorized/PotentiallyStarted`后只查询/重放同runner/boot的逐字节相同signed activation；expired Running lease只可用owner-proven continuation在一个claim transaction内逻辑执行`Running -> Ready -> Leased -> Running`并只提交最终Running，attempt不变；boot变化则UnknownOutcome；terminal后cleanup claim/reclaim由database time与generation first-winner；orphan以tenant/job point-read并在corrupt/ambiguous/unavailable时retain；delete/TTL/orphan sweep不推进业务state |
 | fixtures | L1 closed contract/digest/runner/result/limits；L2 real PostgreSQL claim/create authorization/CAS/fence/terminal/cancel/quota/orphan；L3 real OpenSandbox+Kubernetes/containerd-runc create/restart/kill/activation/network/cleanup；L4～L6 `Not run` |
 
 完整00～18影响复核结论：01/02收敛plane与ComponentRole；03收敛provisioning/terminal幂等及recovery；04收敛Direct network和Secret边界；
@@ -1349,7 +1349,7 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
     runner没有Platform DB、NATS、Run/Invocation mutation权限。Dispatcher terminal transaction重验latest Job lease fence并原子写
     Job/Invocation/RunValue/quota/Event/Outbox/cleanup intent；physical ID只作bounded internal evidence。
 32. Acceptance 39：`SandboxProvisioningTokenV1` 不含 lease generation；create 可产生 bounded inert candidates，metadata list 只发现，
-    current Job row CAS 选择唯一 candidate。fixed runner 在 `PotentiallyStarted` 先持久化后用同 activation token replay-safe，Package
+    current Job row CAS选择唯一candidate。fixed runner在`PotentiallyStarted`先持久化后只接受candidate/boot-bound signed activation，Package
     最多启动一次；不修改 OpenSandbox 源码，也不声称一个 token 历史上只有一个 object。
 33. Acceptance 40：Profile 只允许 `Disabled | Direct` operator NetworkPolicy；Direct workload 外部副作用不在 Platform idempotency/
     exactly-once 边界，可能已开始后不创建 replacement。默认 Secret injection disabled，Artifact port 不可 activate。

@@ -399,7 +399,8 @@ physical attempt、provisioning/request/runtime/profile/network digest与candida
 
 - current attempt仍为`Provisioning`时，已记录或尚未记录但metadata完整匹配的candidate一律retain，避免与candidate CAS竞态；
 - selected candidate在cleanup generation完成前retain并只由cleanup claim删除；
-- selection/activation之后出现的未记录late candidate与已知unselected candidate可delete，因为它们永远不能获得activation token；
+- selection/activation之后出现的未记录late candidate与已知unselected candidate可delete，因为它们永远不能获得绑定其exact
+  sandbox/boot的signed activation；
 - 明确不存在owner Job或已被新physical attempt取代的candidate可delete；corrupt/ambiguous/数据库不可用返回错误并retain，禁止猜测删除；
 - repository裁决是只读证据，不写Job/Invocation/Run；provider delete和absence observation在事务外，不能借orphan sweep推进terminal。
 
@@ -411,7 +412,7 @@ Platform 只承诺 “selected physical attempt 的 Package 最多激活一次�
 
 - `image.uri` 必须是 publication 冻结的 OCI manifest digest，拒绝 tag；
 - `entrypoint` 必须是 Runtime evidence 中的 fixed runner argv，不允许调用方覆盖或 `sh -c`；
-- create frame 只含 input/schema/output/package/runtime/profile digest、published package argv、limits、activation-token digest 与 fixed
+- create frame 只含 input/schema/output/package/runtime/profile digest、published package argv、limits、activation verifying key 与 fixed
   runner protocol config；不把 business input body 写入 BatchSandbox/Pod spec 或 environment；
 - Package 在 runner 接受 activate 前不得启动；
 - timeout/TTL 不晚于 Profile ceiling 与 reconciliation budget；CPU、memory、pids、ephemeral storage 只能在 Profile 内缩小；
@@ -546,7 +547,7 @@ CR-216 只承诺：
 
 1. command Receipt 唯一逻辑 Invocation；
 2. PostgreSQL candidate selection first-winner；
-3. fixed runner activation token 在同 boot identity 上 replay-safe，Package 最多启动一次；
+3. fixed runner的candidate/boot-bound signed activation在同boot identity上replay-safe，Package最多启动一次；
 4. current Job fence 的 terminal commit first-winner。
 
 候选 object 可以短暂重复，但必须 inert、bounded、可枚举、可删除。Sandbox workload 通过网络、数据库、消息或第三方 API 产生的
@@ -594,7 +595,7 @@ terminate/delete/absence仍由现有`SandboxCleanupFenceV1`执行；provider不�
   `Running -> Ready -> Leased -> Running`并只提交最终Running；只增加lease generation，不增加attempt count，不创建新
   token/candidate/sandbox或Package activation，中间Leased不得成为可观察或可卡死的持久状态；
 - `CandidateSelected` 后：不得选择第二个 candidate，除非 current fence 在激活前以明确 pre-start failure 创建新的 physical attempt；
-- `ActivationAuthorized/PotentiallyStarted` 后：只能对相同 sandbox、boot ID、activation token 查询或重放；禁止新 token、candidate、
+- `ActivationAuthorized/PotentiallyStarted` 后：只能对相同sandbox、boot ID和逐字节相同的signed activation查询或重放；禁止新signing seed、candidate、
   sandbox、physical attempt 或自动 workload retry；
 - runner `Succeeded/Failed` 且 result 完整：新 lease 可以在 current fence 下提交既有证据；boot 变化、result 不完整或 start 不确定则
   `UnknownOutcome`；不同boot必须先持久化rollover摘要，且新boot的activate调用计数为零；
@@ -637,8 +638,9 @@ OpenSandbox/Kubernetes store 或 public error。需要 Secret 的 Deployment 不
 ### 13.4 Container minimum
 
 Pod 固定 non-root、read-only root filesystem、`allowPrivilegeEscalation=false`、capability drop、qualified seccomp、resource/pids/
-ephemeral-storage limits、service-account automount false。禁止 privileged、host PID/IPC/network、hostPath、device、Docker/containerd/CRI
-socket、Kubernetes token 与 Platform credential。满足这些 minimum 不等价于 gVisor/microVM isolation。
+ephemeral-storage limits、service-account automount false。只有trusted runner可在drop-all后精确增加`SETUID/KILL`以切换Package UID并回收其
+process group；child必须清空全部capability。其余追加及privileged、host PID/IPC/network、hostPath、device、Docker/containerd/CRI
+socket、Kubernetes token与Platform credential均禁止。满足这些minimum不等价于gVisor/microVM isolation。
 
 ## 14. Physical evidence 与持久化
 
@@ -647,11 +649,11 @@ Platform 在 shared Job 的 bounded binding/evidence 中保存：
 - 不含正文的execution plan、exact input/output RunValue ID、schema/content digest与semantic request digest；
 - physical attempt 与 provisioning token digest；
 - database-time provisioning start、create authorization count/last time、selected OpenSandbox ID与candidate discovery evidence；
-- runner boot ID、optional validated boot-rollover evidence、sensitive activation token/its digest 与 activation state；
+- runner boot ID、optional validated boot-rollover evidence、sensitive activation signing seed/public-key binding与activation state；
 - result frame/output digest、declared bytes、safe failure/unknown-outcome code；
 - cleanup required/generation/owner/expiry、delete observation 与 absence proof digest。
 
-activation token 只保存在 protected Job physical evidence，不进入任何 projection/observability；不保存 runner bearer、OpenSandbox
+activation signing seed只保存在protected Job physical evidence，不进入任何projection/observability；不保存runner bearer、OpenSandbox
 lifecycle snapshot、Pod spec/status、input/result body、log/stdout/stderr 正文或 container config。input唯一正文来自exact immutable
 RunValue，成功output唯一正文由terminal transaction写入预分配RunValue；Job/Event/Outbox/Receipt都只保存digest/evidence。没有独立业务
 lifecycle，因此不新增第二Job aggregate/table；Job lease前的执行与terminal后的cleanup generation都由shared Job同一row/version CAS。
@@ -722,7 +724,7 @@ activation boundary 决定，不能只根据 HTTP status 或 error class 推断�
 | L4～L6 release | production topology、strong isolation、capacity/chaos/soak/restore/promotion；CR-216 未实际运行时均为 `Not run` |
 
 负向 fixture 必须包括：candidate list race、create ordinal replay/skip/exhaustion、late duplicate candidate、mutable tag、wrong image/runner/schema/policy digest、shell override、
-privileged/host mount/socket、oversized input/result/diagnostic、duplicate/trailing terminal frame、activation token conflict、boot identity rollover、
+privileged/host mount/socket、oversized input/result/diagnostic、duplicate/trailing terminal frame、activation signature conflict、boot identity rollover、
 OpenSandbox late observation、old lease cleanup、orphan误删保护与 provider 直接业务写入尝试。
 
 ## 19. 验收标准
