@@ -32,5 +32,7 @@ Platform v2 是架构代号，不会产生 `/v2` API。OpenSandbox 仓库实现�
 
 - [`insight.platform/v1` 机器合同](../contracts/platform-v1/README.md)
 - [Agent compiler conformance corpus](../contracts/product-experience/agent-compiler/v1/corpus.json)
-- [架构决策](adr/)
+- [PostgreSQL 基线决策](adr/0001-platform-v2-postgres-baseline.md)
+- [产品入口边界决策](adr/0004-product-surface-boundaries.md)
+- [OpenSandbox 执行决策](adr/0007-opensandbox-execution-provider.md)
 - [开发阶段验证状态](qualifications/README.md)

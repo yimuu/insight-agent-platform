@@ -2,234 +2,99 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-220 Sandbox activation and runner-boundary revision |
+| 状态 | Accepted |
 | 日期 | 2026-09-04 |
 | 取代 | ADR-0002（历史记录见 Git） |
-| 当前合同 | `contracts/platform-v1`、Sandbox Rust types/tests与production qualification profile |
 
-## 背景
+## 问题
 
-首版自建 restricted WASI 与 per-Job gVisor 链路包含 Wasmtime Executor、Kubernetes Pod Launcher、
-`RuntimeClass=runsc`、admission/RBAC、process attestor、guest bootstrap 与多套资格矩阵。CR-216 要以 clean-cut
-方式替换这些物理执行实现，同时保留 shared Job、Invocation、Run、Artifact 与 terminal transaction 的业务authority。
-
-revision 3明确：physical attempt已持久化后，Dispatcher lease recovery是同一effect的durable continuation。shared Job允许
-`Running -> Ready` 后由新lease接管，但保持attempt count，并禁止创建或激活replacement sandbox；无physical evidence时不适用。
-
-revision 4明确：冻结Runtime contract/Profile Deployment digest属于Execution Plan/Request semantic identity，并由Dispatcher逐字段
-校验candidate metadata；provider object或mutable resource head不能替代该绑定。
-
-revision 5明确：orphan page必须能以operator metadata中的`tenant_id + job_id + physical_attempt` point-read唯一shared Job，再重验
-current token与全部frozen candidate binding。该metadata不含正文、Secret或credential；OpenSandbox仍无Platform repository权限。
-orphan repository裁决只读，corrupt/ambiguous/unavailable fail closed为retain，不能以全表payload扫描或猜测删除替代。
-
-revision 6明确：expired Running continuation reclaim在同一数据库claim事务中逻辑完成`Running -> Ready -> Leased -> Running`，
-只持久化最终Running，防止带physical evidence的中间Leased在Dispatcher再次故障后无法接管；attempt和全部physical identity保持不变。
-
-revision 7明确：metadata list不能证明一次create调用是否已生效。每次外部create前必须由current shared Job fence在PostgreSQL
-CAS授权exact ordinal，并持久化database-time provisioning start、authorization count与last authorization time；同ordinal可重放，
-下一ordinal必须满足durable count/quiescence/total-time hard limit，进程重启不能重新获得预算。
-
-revision 8明确：authorization replay不是外部side effect replay。repository返回`Applied | Replayed`，只有`Applied` caller可调用一次
-provider create；`Replayed`不调用provider。授权提交后、provider调用前崩溃会消耗该ordinal，之后只能在静默窗口后授权下一ordinal。
-
-CR-218 revision 1明确：`ActivationAuthorized/PotentiallyStarted`后观察到不同runner boot时，旧activation frame不能安全发送给新boot。
-Dispatcher必须先以current Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要并进入
-`UnknownOutcome`；terminal/reclaim复用同一摘要。相同observation可重放，不同第二observation拒绝，且整个路径不创建replacement。
-
-CR-220 revision 1明确：full readiness使用synthetic identity但没有shared Job owner，不能与业务candidate共享未区分的orphan
-metadata。operator metadata增加closed `purpose = job | readiness`；业务create固定为`job`，probe固定为`readiness`。orphan
-sweep在任何repository lookup前跳过`readiness`，不得把missing synthetic owner解释为`DeleteMissingOwner`。probe自身负责
-delete/absence，TTL只作最后保护；缺失/unknown purpose使list不能授权任何删除并撤销readiness。
-
-CR-219 revision 1明确：cancel/timeout不能只推进Invocation并假设Event会被消费。Capability owner事务必须把typed、digest-bound control
-intent写入同一shared Job并将Job/Invocation原子推进到`Cancelling`；Dispatcher reserved critical-control scan按数据库时间发现显式intent
-与deadline-past Job，并按quota → Invocation → Job锁序提交terminal、quota、Event/Outbox及cleanup intent。该scan不做provider I/O；
-terminate/delete/absence严格发生在terminal之后并沿用既有cleanup generation fence。pre-claim control不创建physical attempt，已有physical
-attempt则late worker由Job terminal/version fence拒绝。该方案复用同一Job row，不增加queue、table、aggregate或第二lease authority。
-
-CR-220明确：OpenSandbox Server的runner proxy是物理relay，但不得获得可对另一candidate重组的activation bearer。
-Job evidence中的256-bit secret改为Dispatcher-only Ed25519 signing seed，create只公开verifying key，activation signature绑定
-exact sandbox/boot/request/schema/input闭包。runner与Package分为fixed UID 65532/65533，runner仅保留将child切换到
-Package UID及清理该process group所需的`SETUID`/`KILL`；这两个capability不进入child。Package无法signal runner、
-访问runner-owned state或从execution process group脱离。
-
-上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
-文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
-
-- 公开 create API 没有可依赖的 client create idempotency key；metadata list 是发现接口，不是原子唯一性原语；
-- Kubernetes provider 已把 lifecycle metadata 落到 BatchSandbox/Pod label，Kubernetes API 可作为可恢复 physical store；
-- BatchSandbox controller 已提供 TTL、Pod reconciliation、delete 与 absence 基础，不需要平台维护另一套 launcher/guest；
-- Docker provider 需要 Docker socket，且默认把 sandbox 服务随机发布到 `0.0.0.0`，不适合作为平台目标拓扑；
-- create 立即启动有副作用的 workload 时，response-loss 后若既不能证明 create 未发生、又没有 provider 原子幂等，任何自动重试
-  都可能重复执行。这个问题不能靠 Dispatcher 内存锁或 `list(metadata) -> create` 正确关闭。
-
-因此，本修订不修改 OpenSandbox 源码，而是把“physical candidate 创建”与“Package workload 激活”拆成两个阶段。
-
-审计输入固定为官方 [Kubernetes overview](https://open-sandbox.ai/kubernetes/)、
-[deployment guide](https://open-sandbox.ai/kubernetes/deployment)、
-[Lifecycle API](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)、
-[server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) 与
-[official image repository](https://hub.docker.com/u/opensandbox)。外部 `main`、mutable tag 和网页当前内容都不是运行时选择；
-实施 BOM 必须解析为本 ADR 第“部署与恢复”节的 exact source commit、schema 与 OCI manifest digest。
+OpenSandbox 的 create API 没有可依赖的客户端幂等键；metadata list 只能发现对象，不能证明一次 create 是否已经生效。
+如果 create 立即执行 Package，响应丢失或 Dispatcher 重启后的自动重试可能重复产生外部副作用。
+进程内锁、`list -> create` 检查和 provider object 都不能替代 PostgreSQL 中的 durable authority 与 fence。
 
 ## 决策
 
-首版唯一物理链是：
+唯一物理路径是 Sandbox Dispatcher 经内部 OpenSandbox Server 使用 Kubernetes provider 创建 BatchSandbox，由 Controller 管理 Pod，
+并由 containerd/runc 中的固定 runner 执行 Package。Docker provider、自建 WASI/gVisor 及其他 backend 不允许作为 fallback。
 
-```text
-Capability owner transaction
-        |
-        | shared Sandbox Job
-        v
-Sandbox Dispatcher ---- internal ClusterIP/auth ----> OpenSandbox Server
-  PostgreSQL Job authority                            Kubernetes provider
-  claim/fence/evidence/cleanup                              |
-                                                           v
-                                              BatchSandbox Controller
-                                                           |
-                                                           v
-                                              Pod + containerd/runc
-                                              immutable Armed runner
-```
-
-不使用 OpenSandbox Docker provider、agent-sandbox、Pool、task-executor、snapshot、image-committer、node-agent、
-RuntimeClass/runsc 或任何备用 backend。Kubernetes/containerd-runc 是显式的 developer-profile runtime，不是隔离级别
-fallback。OpenSandbox Server 和 Controller 都是 physical provider；它们不得成为 Platform 业务状态authority。
-
-边界固定如下：
-
-1. shared Job 是唯一业务 work authority，保存 attempt、lease、fence、retry、cancel、terminal 与 bounded physical evidence；
-2. Sandbox Dispatcher 是唯一可 claim Sandbox Job、调用 OpenSandbox、选择 physical candidate、激活 runner、提交结果并清理的
-   Platform role；
-3. OpenSandbox 只拥有 BatchSandbox/Pod/runner 的 physical lifecycle及已签名activation frame的byte relay，不得获得
-   activation signing seed、Platform PostgreSQL、NATS、Run、Invocation、
-   Receipt、Event、Outbox、Artifact store 或 public API credential；
-4. OpenSandbox lifecycle、Pod phase、runner state 与 result 都只是证据。terminal commit 必须重新读取并 CAS 验证 current Job owner、
-   lease generation/token、worker process generation、physical attempt 与 request digest；
-5. 每个 selected sandbox 只服务一个 Job physical attempt。首版不跨 Job 复用 sandbox，不开放 interactive exec、PTY、code context、
-   mutable filesystem API、snapshot、persistent session 或 public endpoint。
-6. shared Job JSON 只保存 bounded execution plan、RunValue identity/digest、physical evidence 与 terminal summary，不复制 input/result
-   body。Dispatcher 在 claim/recovery 时从 exact immutable input RunValue 重建 execution request；terminal first-winner 在同一事务验证
-   result frame并写 output RunValue、Job、Invocation、quota、Event 与 Outbox。
-7. CR-216 Inline input/output 的有效 hard ceiling 固定为既有 RunValue inline ceiling `1_048_576` bytes，并同时受冻结 Profile
-   ceiling约束；大于任一 ceiling 都 fail closed，Artifact port 保持 inactive。Job/Event/Outbox/Receipt 不保存 workload 正文。
-8. terminal commit 清除业务 Job lease并在同一 Job physical evidence 内产生 cleanup intent。之后的 delete/absence 写入使用独立
-   `SandboxCleanupFenceV1` 的 expected Job version、cleanup generation、process generation 与 database-time expiry CAS；它不允许改变
-   Job terminal outcome、Invocation、RunValue、quota、Event 或 Outbox，也不是第二业务 lease/aggregate/table。
-9. Sandbox cancel/timeout的唯一durable control fact是shared Job payload中的`SandboxControlIntentV1`。显式命令只提交
-   Job/Invocation `Cancelling`和intent；reserved critical-control scan以bounded database transaction提交终态并结算quota。无physical
-   evidence时terminal允许attempt 0且不得接触provider；有physical evidence时cleanup generation负责后续best-effort kill与absence proof。
+- shared Job 是 attempt、lease、fence、control、terminal 和 bounded physical evidence 的唯一业务 authority；
+- Dispatcher 是唯一可以 claim Sandbox Job、调用 provider、选择候选、授权激活、提交结果和驱动清理的 Platform role；
+- OpenSandbox、Controller、Pod 和 runner 只拥有物理生命周期与证据，不得修改 Job、Run、Invocation 或其他业务状态；
+- provider observation 不能直接决定业务终态；terminal commit 必须在 PostgreSQL 中重新验证 current Job fence；
+- 一个 selected sandbox 只服务一个 Job physical attempt，不跨 Job 复用，也不开放交互式或持久 session。
 
 ## 两阶段 provisioning 与激活
 
-### 1. 稳定 provisioning identity
+### Inert candidate
 
-`SandboxProvisioningTokenV1` 由 `tenant_id + job_id + physical_attempt + execution_request_digest` 的 domain-separated
-canonical digest 产生。它不含 lease generation、worker generation、trace 或超时等会在接管时变化的字段。
+Dispatcher 从 immutable execution request 与 physical attempt 导出稳定 provisioning identity；接管时会变化的信息不属于该 identity。
+候选 metadata 只携带恢复和校验所需的 bounded identity。
 
-Dispatcher 用该 token 的 digest 作为 OpenSandbox metadata。Kubernetes provider 把 metadata 转换成 operator-owned label，
-因此 Dispatcher 在 create response 丢失或进程重启后，可以直接通过 Kubernetes-backed list 找回候选。
-每个candidate还携带已由PostgreSQL授权的`create_ordinal`；该ordinal是有界外部调用证据，不是业务attempt或provider idempotency key。
+每次外部 create 前，Dispatcher 必须在 current Job fence 下原子授权下一个 durable ordinal；次数、静默窗口和总时长等
+冻结上限不会因重启而恢复。repository 返回 `Applied` 或 `Replayed`：只有 `Applied` 可在事务外调用一次 provider；
+`Replayed` 不得调用。授权后、调用前崩溃会消耗该 ordinal，只能在约束允许时授权下一 ordinal。
 
-### 2. 惰性候选
+create 只启动 immutable runner；runner 进入 inert `Armed` 状态，不启动 Package。Dispatcher 可按稳定 identity 发现有限个
+inert candidates，并在 Job fence 下选择唯一候选；未选候选只能清理，永不激活。
 
-OpenSandbox create 只启动 immutable fixed runner。runner 进入 `Armed`，校验固定 closure/digest frame 并等待一次性激活，绝不在
-create/boot 时启动 Package。并发 create 或 response-loss 可能产生有限个、没有 workload 副作用的 inert candidates；这不是
-“一个 key 历史上只能出现一个 physical object”的保证。
+### One-shot activation
 
-Dispatcher 对同 token 的候选执行有界发现与静默窗口。每次实际create之前，它先list，再在PostgreSQL current Job fence下CAS
-授权exact next ordinal并记录database time；只有返回`Applied`的唯一caller才在事务外恰好调用一次provider，`Replayed`不调用。
-授权后、调用前崩溃会burn ordinal；Dispatcher之后再CAS
-选择唯一candidate，并把
-OpenSandbox ID、runner boot identity 与 request digest 持久化为 physical evidence。未选候选只允许 cleanup，永不激活。
-只有在激活前、并证明现有候选均未启动Package且durable authorization count、quiescence与total-time仍在Profile hard limit内时，
-才允许授权下一ordinal并再次create。create response丢失或Dispatcher重启都不能重置这些预算。
+Dispatcher 保有激活签名私钥，runner 只得到验证材料。激活帧绑定 selected candidate、runner boot 和冻结的 execution request；runner
+验证签名并以 durable one-shot latch 接受它。同帧重放返回既有状态，冲突帧拒绝，一个 boot 最多启动一次 Package。
 
-### 3. 一次性激活
+一旦 Job 记录 activation authorized 或 potentially started，响应是否丢失都不得创建、选择或激活 replacement；恢复只能查询
+同一候选的 state/result，并由 current Job fence 裁决提交。
 
-fixed runner 暴露 closed、private、bounded 协议：
+### Boot rollover
 
-```text
-GET  /v1/state
-POST /v1/activate
-GET  /v1/result
-```
+授权激活后若观察到不同 runner boot，旧激活帧不能发送给新 boot。Dispatcher 必须先在 current Job fence 下持久化 boot-rollover
+摘要，将结果裁决为 `UnknownOutcome`，再执行 cleanup/absence reconcile，不得启动 replacement。相同 observation 可重放，矛盾则 fail closed。
 
-provisioning intent事务生成并持久化一个opaque 256-bit activation signing seed；create frame只向runner提供其
-Ed25519 verifying key，不泄露seed。
-Dispatcher 先读取 runner boot identity，再在 PostgreSQL current Job fence 下把 selected candidate 记录为
-`ActivationAuthorized/PotentiallyStarted`，然后对包含exact sandbox ID、boot ID、request/schema/input digest和input正文的
-canonical frame签名。runner必须在固定public key下验签，再以create-exclusive + fsync durable latch接受该签名frame
-并启动Package：同frame重放返回相同状态；任一字段重组验签失败；一个boot identity最多启动一次Package。
+## Control、cleanup 与 orphan
 
-一旦 Job 持久化 `ActivationAuthorized/PotentiallyStarted`，无论 activate response 是否丢失，都不得创建新 key、candidate、sandbox
-或自动重跑 Package。恢复只能查询同一 runner 的 state/result；runner boot identity 变化、Pod 被 controller 重建或无法证明结果时，
-必须先持久化boot-rollover摘要再进入 `UnknownOutcome` 并执行 cleanup/absence reconcile，且不得向新boot发送旧activation frame。
+Cancel 和 timeout 的 durable control fact 位于同一 shared Job。owner 事务原子推进 Job/Invocation 到 `Cancelling`；Dispatcher 的
+reserved control scan 以数据库时间和既定锁序提交终态与 cleanup intent，但不在事务内执行 provider I/O。迟到结果由 terminal/version fence 拒绝。
 
-## 幂等边界
+Terminal commit 清除业务 lease，并在同一 Job 中生成受版本与 generation 保护的 cleanup intent。Terminate、delete 和 absence proof
+只在 terminal 后执行；cleanup fence 不能改变业务结果，也不构成第二 lease、aggregate、queue 或 table。provider 不可达只保留 pending 与告警。
 
-平台明确保证三个不同边界：
+Orphan metadata 必须区分业务候选与 readiness probe，并只包含定位 owner 所需的非敏感标识。业务 orphan 先 point-read 唯一
+shared Job，再验证 current token、attempt 与冻结绑定；OpenSandbox 不获得 repository 权限。orphan sweep 跳过 readiness；metadata
+缺失、歧义、损坏或 repository 不可用时保留并告警，不得通过全表 payload 扫描、猜测 owner 或默认删除来恢复。
 
-1. Platform command Receipt：同一 command 只创建一个逻辑 Invocation；
-2. runner activation：selected physical attempt 的 Package 最多激活一次；
-3. Job terminal commit：current lease fence first-winner，迟到结果不能覆盖新 generation 或既有 terminal。
+## 安全与权限
 
-平台不保证历史上只创建一个 inert candidate，也不为 workload 对网络、数据库、消息或第三方 API 的副作用实现幂等或
-exactly-once。目标服务的 transaction、idempotency key 与业务语义属于 Sandbox Package 和目标服务责任。
+OpenSandbox Server 仅通过 authenticated internal endpoint 暴露给 Dispatcher。它不得获得激活签名私钥、Platform PostgreSQL、
+NATS、Artifact store、public API 或 workload credential。固定 runner 与 Package 使用隔离身份；Package 不继承 runner 的管理权限，
+不能读取 runner-owned state、控制 runner 或逃离其 execution process group。
 
-## 网络与安全基线
+Sandbox 网络 profile 只有显式 `Direct` 与 `Disabled`：两者默认拒绝 ingress，`Disabled` 拒绝 egress，`Direct` 仅允许受限外网并
+拒绝 Platform、节点、服务和云 metadata 网段。Pod 禁止 privileged、host namespace、hostPath、device、runtime socket、
+service-account token 与 Platform credential，并冻结 non-root、read-only filesystem、seccomp 和资源限制。
+部署无法证明 CNI deny 与所需权限边界时，readiness 必须 fail closed。
 
-单节点 developer Profile 默认 `Direct`，并支持显式 `Disabled`。二者都使用 operator-owned、静态、closed CNI NetworkPolicy：
+## 保证与明确不保证
 
-- 默认拒绝 sandbox ingress，只允许 Dispatcher 到 fixed runner protocol，以及 OpenSandbox Server/Controller 所需的 lifecycle 流量；
-  不创建 Ingress/LoadBalancer/NodePort/host port；
-- `Disabled` 拒绝全部 egress；
-- `Direct` 允许 DNS 与外部网络，但拒绝 Platform namespace、Pod/Service/Node CIDR、cloud metadata 与内部管理面；
-- sandbox Pod 禁止 privileged、host PID、host network、hostPath、device、runtime socket、service-account token 与 Platform credential；
-- runner non-root、read-only root filesystem、capability drop、seccomp、resource/pids/ephemeral-storage limit 均由 fixed template 冻结。
+平台保证 command Receipt 的逻辑去重、selected physical attempt 上的 Package 最多激活一次，以及 Job terminal 的 fenced first-winner。
+平台不保证历史上只创建一个 inert candidate，也不为 Package 对网络、数据库、消息或第三方 API 的副作用提供 exactly-once；
+这些副作用的事务与幂等属于 Package 和目标服务。
 
-NetworkPolicy 语义依赖 CNI，部署必须固定并完成对应 L3 资格；无法证明所需 deny 时 readiness fail closed。`Direct` 只是开发
-Profile 的受限直接出网，不得宣称 production-grade egress control 或强多租户隔离。
-
-## 部署与恢复
-
-- 固定 OpenSandbox Server `v0.2.3`、BatchSandbox Controller `v0.2.0`、execd `v1.0.22` 与 Platform runner OCI digest；
-- 官方独立 Server chart 尚未按所需版本发布，因此从审核 commit
-  `c39b814f36ded4c61d5ac6f9332ee4dfbab86c00` vendor/source-pin 最小 chart，并冻结 CRD、模板和镜像 manifest digest；
-- developer Profile 使用 1 个 Server replica、1 个启用 leader election 的 Controller；Server `informer_enabled=false`，让恢复
-  list 直接读取 Kubernetes API；
-- `/health`只证明Server进程存活。Dispatcher startup及低频持续readiness必须执行inert authenticated
-  `create -> token-scoped list -> Armed state -> delete -> absence`探针，并通过固定runner request digest绑定installed
-  CRD/controller/template/runner/network-policy/runtime closure。成功结果只允许短TTL cache；任一full probe失败必须立即
-  撤销readiness并尽力回收已发现candidate；
-- physical persistence 位于 Kubernetes API/BatchSandbox CR；create authorization、candidate selection与activation evidence位于既有shared
-  Job row/version，不引入OpenSandbox SQLite、新Platform业务表或第二aggregate作为provider store；
-- BatchSandbox operator metadata固定携带closed `purpose = job | readiness`、内部`tenant_id/job_id/physical_attempt/create_ordinal`及
-  token/request/runtime/profile/network digest；不公开、不授予Platform authority。只有`job`进入bounded recovery/orphan point lookup；
-  `readiness`由probe cleanup与TTL回收，orphan sweep必须跳过；
-- TTL 是最后保护；Dispatcher 仍负责 terminal/cancel/timeout delete、未选 candidate 回收、orphan decision 与 absence proof；terminal
-  后由 bounded cleanup claim/fence 在 shared Job row 上接管，不复用已清除的业务 lease。
-- cancel/timeout terminalization由Dispatcher reserved critical-control scan执行，扫描database-time deadline并在一个事务内重验
-  control intent、Invocation、Job和quota；它不占普通Sandbox execution slot且不在事务内调用OpenSandbox。provider不可达只保留
-  cleanup pending/alert，不重新打开业务terminal或quota reservation。
+本决策不声明 `Direct` 为 production-grade egress control，不声明单节点 runc 为强多租户隔离，也不自动证明 HA、capacity、
+restore 或 production readiness；未完成的资格门禁必须保持 `Not run`。
 
 ## 否决方案
 
-- 修改或 fork OpenSandbox 增加 provisioning extension：两阶段 runner 已关闭 workload 重复执行，不需要承担上游分叉；
-- create 时直接执行 Package，再靠 metadata list 恢复：无法关闭 response-loss 后的重复副作用窗口；
-- Dispatcher 直接创建 deterministic-name BatchSandbox CR：绕过 OpenSandbox lifecycle API，违反唯一 provider 边界；
-- 保留 Docker provider 或 WASI/gVisor fallback：引入第二条 runtime、socket/public-port 风险与不可预测降级；
-- 使用 Pool 或跨 Job 复用 sandbox：会把 tenant residue、cleanup、boot identity、quota 与 lease fence 耦合为长期 session；
-- 使用 agent-sandbox：其交互式 agent/session 定位大于 CR-216 所需面；
-- 让 OpenSandbox claim Job、修改 Run/Invocation 或直接对 public client 开放：形成第二业务authority并绕过 admission/audit。
+- fork OpenSandbox 增加 create 幂等扩展：两阶段协议已隔离 workload 副作用，不承担长期上游分叉；
+- create 时直接执行 Package，再靠 metadata list 恢复：无法关闭响应丢失后的重复执行窗口；
+- Dispatcher 直接创建 Kubernetes CR：绕过唯一 provider lifecycle 边界；
+- 保留 Docker、WASI/gVisor 或其他 fallback：形成第二执行路径并带来不可预测降级；
+- Pool 或跨 Job 复用：把 tenant residue、boot identity、quota、cleanup 与长期 session 耦合；
+- 让 OpenSandbox claim Job、修改业务状态或面向 public client：形成第二业务 authority。
 
-## 结果与资格
+## Authority 与证据
 
-目标实现删除 active composition 中的 Wasmtime、gVisor launcher/guest、attestor、RuntimeClass/runsc、相关 RBAC/admission/
-manifests/preflight、host-process execution、backend selector 与 fallback。实现完成前当前行为仍以 `docs/current` 为准。
-
-最低资格覆盖：候选并发与response-loss、durable create ordinal/count/quiescence/timeout、provider/controller重启、Dispatcher kill/reclaim、PostgreSQL candidate CAS、runner activation
-重放/conflict、runner-start uncertainty、lease rollover、stale result、cancel/timeout、TTL/delete/absence、orphan cleanup、Direct/Disabled
-网络、固定 result frame、wrong credential/audience 与 OpenSandbox 零 Platform 权限。L4～L6 未运行时必须标记 `Not run`；CR-216
-不构成 production-ready、strong isolation 或 HA 声明。
+当前机器合同与拥有类型优先于本文：[`contracts/platform-v1`](../../contracts/platform-v1/README.md)、
+[`sandbox.rs`](../../crates/platform-contracts/src/sandbox.rs) 与 [`sandbox_policy.rs`](../../crates/platform-contracts/src/sandbox_policy.rs)。
+持久化裁决见 [`sandbox_repository.rs`](../../crates/platform-postgres/src/sandbox_repository.rs)，runner 协议见
+[`platform-sandbox-runner`](../../crates/platform-sandbox-runner/src/lib.rs)，部署边界见 [`Sandbox Helm chart`](../../deploy/helm/insight-platform-sandbox/)；
+当前行为与资格状态见 [`architecture.md`](../current/architecture.md)、[`mcp.md`](../current/mcp.md) 和 [`operations.md`](../current/operations.md)。
