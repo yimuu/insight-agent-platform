@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | In progress / CR-219 revision 1; L4～L6 Not run |
+| 状态 | In progress / CR-219 L1～L3 passed; local L4 mechanics pending; L4～L6 Not run |
 | 日期 | 2026-09-04 |
 | 合同输入 | 00～18、cross-review CR-219、ADR-0001、ADR-0007、AGENTS.md |
 
@@ -11,6 +11,14 @@
 > explicit cancel与expired deadline，在同一quota → Invocation → Job事务提交终态、quota、Event/Outbox和cleanup intent。最后补
 > pre-claim/started cancel、timeout、late-result race、Dispatcher kill、provider unavailable与absence proof的定向L1～L3；当前HEAD镜像部署并
 > 重跑Kind本机L4 mechanics前，不更新L4证据。
+
+> 2026-09-04 CR-219 implementation evidence：实现提交`a5aceabb`增加typed/digest-bound control intent、Invocation+Job
+> `Cancelling`原子入口、reserved critical-control database-time scan及Job/Invocation/quota/Event/Outbox/cleanup终态事务；
+> `58a84199`把started cancel夹具收紧为intent持久化后的SIGABRT。受影响L1通过contracts 102/102、Invocations 15/15、Sandbox
+> 13/13、Dispatcher 2/2及OpenSandbox client delete-replay回归；fresh Kind PostgreSQL schema contract 8定向L2为1/1。真实三节点
+> Kind/OpenSandbox L3证明started cancel在Dispatcher硬崩溃与Server停机后由新进程提交终态、Server恢复后完成404重放与absence proof，
+> 另证明started deadline自动进入TimedOut并清理；最终三个控制面Deployment均1/1 Ready且BatchSandbox/Pod为零。受影响六包
+> all-target/all-feature strict Clippy通过。详见`docs/qualifications/cr-219-sandbox-control-recovery-l1-l3.md`。
 
 > 2026-09-04 CR-218 revision 1：先在physical evidence增加optional、domain-separated boot-rollover摘要，再让
 > `record_physical_observation`以current Job fence持久化不同boot并进入`UnknownOutcome`；Dispatcher的

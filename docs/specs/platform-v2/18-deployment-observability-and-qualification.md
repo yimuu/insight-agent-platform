@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted / CR-219 Sandbox control recovery revision |
-| 日期 | 2026-09-02 |
+| 日期 | 2026-09-04 |
 | 依赖 | 00～17 |
 | 直接下游 | cross-review、implementation-plan |
 
@@ -11,6 +11,11 @@
 > second-intent/late-result拒绝和pre-claim零provider；L2 fresh PostgreSQL覆盖显式cancel、database-time deadline scan、四维quota exact-once、
 > control/result first-winner及terminal/cleanup原子性；L3真实OpenSandbox覆盖started workload cancel/timeout、Dispatcher kill恢复、provider
 > unavailable时业务terminal不回滚且cleanup恢复后取得absence。完成这些门禁仍不等于production-equivalent L4，L4～L6继续Not run。
+
+> CR-219 evidence：`a5aceabb`/`58a84199`已通过受影响L1、fresh schema contract 8 PostgreSQL L2及真实三节点
+> Kind/OpenSandbox L3。started cancel在intent写入后SIGABRT，Server缩容至零时由新进程提交Job/Invocation/quota/Event/Outbox终态；
+> Server恢复后通过idempotent DELETE 404与absence proof清理。started deadline另进入TimedOut并清理。最终无BatchSandbox/Pod残留，
+> Sandbox控制面3/3 Deployment Ready。证据范围只关闭L1～L3，不提升正式L4～L6。
 
 > CR-217 impact：production资格至少执行86,400秒持续soak，manifest起止时间必须覆盖profile声明；每个gate至少有一个
 > 不被其他gate复用的专属content digest，artifact list为无别名、无悬空项的exact closure。该结构合同只证明声明闭包，

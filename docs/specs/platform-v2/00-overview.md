@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Reviewed / CR-219 revision 1 implementation pending; L4～L6 Not run |
+| 状态 | Reviewed / CR-219 revision 1 implemented; L1～L3 passed; L4～L6 Not run |
 | 日期 | 2026-09-04 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
@@ -14,7 +14,8 @@
 > `Cancelling`；Sandbox Dispatcher以保留critical-control容量执行bounded database-time scan，按quota → Invocation → Job锁序
 > 原子提交`Cancelled/TimedOut`、quota settlement、Event/Outbox与cleanup intent，之后才以既有cleanup generation执行provider
 > terminate/delete/absence。pre-claim控制不得创建candidate或调用provider，允许零physical-attempt终态；已开始执行则late result由
-> Job version/terminal first-winner拒绝。该revision不新增表、aggregate、JobKind、队列、角色或第二authority，实施与L1～L3证据尚未完成。
+> Job version/terminal first-winner拒绝。该revision不新增表、aggregate、JobKind、队列、角色或第二authority。实现提交`a5aceabb`与
+> crash-window门禁提交`58a84199`已通过contract/unit、fresh PostgreSQL及真实Kind/OpenSandbox L1～L3；正式L4～L6仍为Not run。
 
 > 2026-09-02 qualification hardening（CR-217）：production profile固定至少24小时持续soak，Evidence manifest的
 > 实际起止时间必须覆盖该声明；每个gate至少绑定一个未被其他gate复用的专属artifact digest，artifact闭包禁止别名和未引用项。

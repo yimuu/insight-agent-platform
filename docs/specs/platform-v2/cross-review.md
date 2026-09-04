@@ -29,6 +29,11 @@ terminate/delete/absence始终发生在terminal之后并由`SandboxCleanupFenceV
 L2必须覆盖public cancel、database-time timeout、result/control race、quota exact-once和provider-independent terminal，L3必须覆盖started
 workload cancel/timeout、Dispatcher kill恢复与provider unavailable cleanup。该revision本身不产生L4～L6 passed evidence。
 
+实现复核（2026-09-04）：`a5aceabb`与`58a84199`已按上述ownership、锁序和错误边界实现，并通过L1～L3。
+真实L3在started cancel intent落库后对测试Dispatcher进程发出SIGABRT，随后把OpenSandbox Server缩容为零；新进程仍完成
+Job/Invocation/quota/Event/Outbox终态，Server恢复后完成DELETE 404重放与absence proof。started timeout与最终零残留也已通过。
+该实现证据不改变正式L4～L6的Not run状态。
+
 ### CR-218 revision 1 Sandbox boot-rollover cross-review
 
 整体review确认CR-216的目标规则正确，但实现缺少可在observation与terminal之间崩溃后恢复的boot-rollover evidence：

@@ -101,7 +101,13 @@ closure，并继续明确 L4～L6 为 `Not run`。
 
 ### P1-01 Sandbox cancel/timeout durable intent 没有生产消费者
 
-证据：
+状态（2026-09-04）：**已修复并通过CR-219 L1～L3**。`a5aceabb`把typed、digest-bound control intent写入既有
+shared Job，并由Capability owner事务原子推进Job/Invocation到`Cancelling`；Dispatcher使用reserved critical-control bounded scan，
+按数据库时间与quota → Invocation → Job锁序提交Job/Invocation/quota/Event/Outbox/cleanup终态，provider I/O只在终态之后。
+`58a84199`进一步把L3 intent窗口收紧为SIGABRT。真实Kind/OpenSandbox证明Server停机不阻塞业务终态，恢复后DELETE 404重放与
+absence proof完成，started timeout同样收敛；最终零BatchSandbox/Pod残留。正式L4～L6仍为Not run。
+
+修复前证据：
 
 - `crates/platform-invocations/src/execution.rs:2054-2094` 仅把 detached Sandbox Invocation 置为
   `Cancelling`，注释要求 owning backend controller 消费 committed Event；
@@ -115,6 +121,9 @@ closure，并继续明确 L4～L6 为 `Not run`。
 建议：先在 owning spec 明确 pre-start、post-start、provider unavailable 和 unknown-outcome 收敛，再实现由 Sandbox
 authority 事务消费 durable intent 的路径，并增加 expired-deadline reconciliation scan。必须覆盖 pre-claim cancel、Started
 cancel、timeout、commit-window kill 和 provider unavailable。
+
+落实：CR-219 revision 1已更新03/10/14/18、cross-review和ADR-0007；实现不新增表、aggregate、JobKind、队列、角色或第二authority。
+资格证据见`docs/qualifications/cr-219-sandbox-control-recovery-l1-l3.md`。
 
 ### P1-02 runner boot rollover 无法进入合同要求的 UnknownOutcome
 
