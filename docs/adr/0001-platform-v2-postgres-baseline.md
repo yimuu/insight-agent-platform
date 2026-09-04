@@ -72,7 +72,7 @@ partition、materialized view、业务 trigger、Installation Release、Manageme
 type 与 bounded payload，而不是新增 aggregate。代价是 payload reader 必须显式支持旧版本或在发布前完成 bounded
 backfill，且 fresh-only cutover 需要部署系统明确管理数据生命周期。
 
-该模型减少了重复 authority 和跨表状态同步，但不会自动证明生产可用性。当前可观察行为与资格状态分别见
-[`docs/current`](../current/README.md)和[`docs/qualifications`](../qualifications/README.md)；provisioning 与恢复流程见
-[`platform-v2-clean-cut`](../runbooks/platform-v2-clean-cut.md)。Rust producer、repository 与测试是进程内语义及行为证据，
-不能由本 ADR 的 prose 替代。
+该模型减少了重复 authority 和跨表状态同步，但不会自动证明生产可用性。当前可观察行为、部署边界与资格状态分别见
+[`docs/current`](../current/README.md)、[部署与运维](../current/operations.md)和
+[`docs/qualifications`](../qualifications/README.md)。Rust producer、repository 与测试是进程内语义及行为证据，不能由
+本 ADR 的 prose 替代。

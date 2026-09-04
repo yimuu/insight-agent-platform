@@ -33,7 +33,7 @@ for mutation in \
   fi
 done
 
-ruby -rjson -ryaml - "$rendered" "$root/docs/runbooks/platform-v2-observability.md" "$root" <<'RUBY'
+ruby -rjson -ryaml - "$rendered" "$root/docs/current/observability.md" "$root" <<'RUBY'
 documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
 runbook = File.read(ARGV.fetch(1))
 root = ARGV.fetch(2)

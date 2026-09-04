@@ -10,6 +10,7 @@ feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L
 - [运行控制台](console.md)
 - [MCP、remote Capability 与 Sandbox](mcp.md)
 - [部署与运维](operations.md)
+- [可观测性与告警处置](observability.md)
 
 旧 `insight.agent/v1` DSL、单进程 runtime 和 terminal-only 路径已经退出默认产品合同；历史设计可从 Git 查看。
 
