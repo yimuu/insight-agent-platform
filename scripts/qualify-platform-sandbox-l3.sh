@@ -129,10 +129,14 @@ run_provider_phase boot-rollover \
 # Start a real long-running Sandbox, persist cancel intent, and let the local Dispatcher process
 # exit. The business terminal must commit while Server is unavailable; only physical cleanup waits
 # for Server recovery.
-PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent \
-  cargo test -p insight-platform-postgres --test phase3_opensandbox \
-    opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit \
-    -- --exact --nocapture
+if PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent \
+  PLATFORM_OPENSANDBOX_L3_ABORT_AFTER_INTENT=1 \
+    cargo test -p insight-platform-postgres --test phase3_opensandbox \
+      opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit \
+      -- --exact --nocapture; then
+  printf 'cancel-intent Dispatcher fixture did not terminate abruptly\n' >&2
+  exit 1
+fi
 kubectl scale deployment "$server_deployment" -n "$control_namespace" --replicas=0
 kubectl wait --for=delete pod -n "$control_namespace" \
   -l app.kubernetes.io/component=server --timeout=60s

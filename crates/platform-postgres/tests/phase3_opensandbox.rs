@@ -1210,8 +1210,11 @@ async fn opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exi
     assert_eq!(controlled.job.unwrap().state, "cancelling");
     assert!(batchsandbox_exists(&fixture.request.job_id, &sandbox_id).await);
 
-    // Exit without reconciling the durable intent. The next phase runs in a new process while
-    // OpenSandbox Server is deliberately unavailable.
+    // The qualification script requests an abrupt process boundary here. The next phase runs in
+    // a new process while OpenSandbox Server is deliberately unavailable.
+    if std::env::var("PLATFORM_OPENSANDBOX_L3_ABORT_AFTER_INTENT").as_deref() == Ok("1") {
+        std::process::abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
