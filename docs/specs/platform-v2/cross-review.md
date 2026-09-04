@@ -36,6 +36,10 @@ CR-220 revision 1关闭本机滚动部署暴露的readiness/orphan ownership P1�
 且不能替probe执行delete/absence；unknown/缺失purpose使整页fail closed为不可删并撤销readiness。probe cleanup和TTL仍保证bounded
 回收，不新增DB row、business authority或兼容fallback。
 
+revision 1实现基线`8164064b`通过closed purpose codec、full readiness lifecycle、orphan sweep零repository/零delete的定向L1，
+以及受影响check/strict Clippy/Helm门禁。三节点Kind实际滚动重叠与12项本机L4 mechanics动态矩阵全部通过，最终50/50
+Platform replicas Ready且零Sandbox残留；证据明确`production:false`，不改变正式L4～L6 Not run。
+
 证据：L1覆盖签名篡改/cross-candidate/cross-boot、state no-follow/mode、Package signal/session/daemon/fill失败和
 readiness各阶段失败清理；L3使用真实OpenSandbox/Kubernetes/containerd-runc验证cross-candidate零激活、恶意Package
 terminal后无存活后代与state不可写，并在controller/runner/delete故障下撤销readiness。本机Kind可生成
@@ -1395,8 +1399,8 @@ ADR-0001的23张总表/22张业务表目标符合以下规则：
 
 ## 16. 最终结论与未运行环境门禁
 
-CR-216 final implementation review此前没有未关闭P0/P1合同或实现偏差；本机滚动部署新发现的CR-220 revision 1
-readiness/orphan竞态在实现与证据完成前保持开放。00标记Implemented / repository L1～L3 passed，受影响
+CR-216 final implementation review没有未关闭P0/P1合同或实现偏差；本机滚动部署新发现的CR-220 revision 1
+readiness/orphan竞态已由`8164064b`及定向L1/实际Kind滚动与本机L4 mechanics证据关闭。00标记Implemented / repository L1～L3 passed，受影响
 01～04、07、09、10、14、15、17、18与product-experience 00/06保持Accepted合同。OpenSandbox Kubernetes/BatchSandbox/Armed
 runner、shared Job fencing、CLI/profile、部署与cleanup/recovery已经实现，当前产品文档已切换。
 

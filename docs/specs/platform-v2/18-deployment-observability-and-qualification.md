@@ -17,6 +17,10 @@
 > 周期orphan sweep在repository lookup之前跳过readiness；probe cleanup与controller TTL是其唯一回收者。缺失/unknown purpose
 > fail closed为整页不可删且撤销readiness。资格必须覆盖同一Dispatcher周期sweep与full probe并发，以及滚动升级中新旧Dispatcher重叠，
 > 证明synthetic owner不存在时仍不会触发`DeleteMissingOwner`。
+>
+> CR-220 revision 1 evidence：`8164064b`的定向L1、strict Clippy、Helm门禁及三节点Kind实际滚动重叠通过；
+> full readiness完成create/list/Armed/delete/absence且orphan sweep零repository/零delete。本机L4 mechanics的12项动态矩阵通过并生成
+> `production:false`证据；正式production-equivalent L4、L5、L6仍为Not run。
 
 > CR-219 impact：Sandbox L1～L3增加真实生产入口的cancel/timeout资格，而非直接构造terminal helper。L1覆盖typed intent摘要、
 > second-intent/late-result拒绝和pre-claim零provider；L2 fresh PostgreSQL覆盖显式cancel、database-time deadline scan、四维quota exact-once、
