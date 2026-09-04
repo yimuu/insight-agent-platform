@@ -743,6 +743,73 @@ impl SandboxPhysicalPhaseV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SandboxRunnerBootRolloverEvidenceV1 {
+    pub schema_version: u16,
+    pub observed_boot_id: RunnerBootId,
+    pub runner_state_frame_digest: Sha256Digest,
+    pub evidence_digest: Sha256Digest,
+}
+
+impl SandboxRunnerBootRolloverEvidenceV1 {
+    fn new(
+        physical: &SandboxPhysicalEvidenceV1,
+        frame: &SandboxRunnerStateFrameV1,
+    ) -> Result<Self, SandboxContractError> {
+        let mut evidence = Self {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            observed_boot_id: frame.boot_id.clone(),
+            runner_state_frame_digest: frame.frame_digest.clone(),
+            evidence_digest: zero_digest(),
+        };
+        evidence.evidence_digest = evidence.digest_for(physical)?;
+        evidence.validate_for(physical)?;
+        Ok(evidence)
+    }
+
+    fn validate_for(
+        &self,
+        physical: &SandboxPhysicalEvidenceV1,
+    ) -> Result<(), SandboxContractError> {
+        let original_boot_id = physical
+            .runner_boot_id
+            .as_ref()
+            .ok_or(SandboxContractError::InvalidPhysicalTransition)?;
+        if self.schema_version != SANDBOX_CONTRACT_SCHEMA_VERSION
+            || &self.observed_boot_id == original_boot_id
+            || self.evidence_digest != self.digest_for(physical)?
+        {
+            return Err(SandboxContractError::InvalidPhysicalTransition);
+        }
+        Ok(())
+    }
+
+    fn digest_for(
+        &self,
+        physical: &SandboxPhysicalEvidenceV1,
+    ) -> Result<Sha256Digest, SandboxContractError> {
+        let original_boot_id = physical
+            .runner_boot_id
+            .as_ref()
+            .ok_or(SandboxContractError::InvalidPhysicalTransition)?;
+        canonical_digest(&serde_json::json!({
+            "domain": "insight.sandbox.runner-boot-rollover/v1",
+            "tenant_id": physical.provisioning_token.tenant_id,
+            "job_id": physical.provisioning_token.job_id,
+            "physical_attempt": physical.provisioning_token.physical_attempt,
+            "request_digest": physical.provisioning_token.execution_request_digest,
+            "sandbox_id": physical.selected_sandbox_id,
+            "original_boot_id": original_boot_id,
+            "observed_boot_id": self.observed_boot_id,
+            "runner_state_frame_digest": self.runner_state_frame_digest,
+        }))
+        .map_err(|_| SandboxContractError::Canonical)?
+        .parse()
+        .map_err(|_| SandboxContractError::Canonical)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxPhysicalEvidenceV1 {
     pub schema_version: u16,
     pub provisioning_token: SandboxProvisioningTokenV1,
@@ -756,6 +823,8 @@ pub struct SandboxPhysicalEvidenceV1 {
     pub candidate_ids: Vec<OpenSandboxId>,
     pub selected_sandbox_id: Option<OpenSandboxId>,
     pub runner_boot_id: Option<RunnerBootId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_boot_rollover: Option<Box<SandboxRunnerBootRolloverEvidenceV1>>,
     pub phase: SandboxPhysicalPhaseV1,
     pub result_evidence: Option<Box<SandboxResultEvidenceV1>>,
     pub cleanup_required: bool,
@@ -789,6 +858,7 @@ impl SandboxPhysicalEvidenceV1 {
             candidate_ids: Vec::new(),
             selected_sandbox_id: None,
             runner_boot_id: None,
+            runner_boot_rollover: None,
             phase: SandboxPhysicalPhaseV1::Provisioning,
             result_evidence: None,
             cleanup_required: false,
@@ -932,10 +1002,12 @@ impl SandboxPhysicalEvidenceV1 {
     ) -> Result<Self, SandboxContractError> {
         frame.validate()?;
         if self.selected_sandbox_id.as_ref() != Some(&frame.sandbox_id)
-            || self.runner_boot_id.as_ref() != Some(&frame.boot_id)
             || self.provisioning_token.execution_request_digest != frame.execution_request_digest
         {
             return Err(SandboxContractError::InvalidRunnerFrame);
+        }
+        if self.runner_boot_id.as_ref() != Some(&frame.boot_id) {
+            return self.record_runner_boot_rollover(frame);
         }
         let phase = match frame.phase {
             SandboxRunnerPhaseV1::Armed => {
@@ -989,6 +1061,35 @@ impl SandboxPhysicalEvidenceV1 {
         };
         let mut next = self.clone();
         next.phase = phase;
+        Ok(next)
+    }
+
+    fn record_runner_boot_rollover(
+        &self,
+        frame: &SandboxRunnerStateFrameV1,
+    ) -> Result<Self, SandboxContractError> {
+        if self.result_evidence.is_some()
+            || !matches!(
+                self.phase,
+                SandboxPhysicalPhaseV1::ActivationAuthorized
+                    | SandboxPhysicalPhaseV1::Started
+                    | SandboxPhysicalPhaseV1::UnknownOutcome
+            )
+        {
+            return Err(SandboxContractError::RunnerBootChanged);
+        }
+        let evidence = SandboxRunnerBootRolloverEvidenceV1::new(self, frame)?;
+        if let Some(current) = &self.runner_boot_rollover {
+            return if current.as_ref() == &evidence {
+                Ok(self.clone())
+            } else {
+                Err(SandboxContractError::RunnerBootChanged)
+            };
+        }
+        let mut next = self.clone();
+        next.runner_boot_rollover = Some(Box::new(evidence));
+        next.phase = SandboxPhysicalPhaseV1::UnknownOutcome;
+        next.cleanup_required = true;
         Ok(next)
     }
 
@@ -1119,6 +1220,20 @@ impl SandboxPhysicalEvidenceV1 {
                         | SandboxPhysicalPhaseV1::Failed
                         | SandboxPhysicalPhaseV1::UnknownOutcome
                 ))
+            || (self.runner_boot_rollover.is_some()
+                && (self.runner_boot_id.is_none()
+                    || self.selected_sandbox_id.is_none()
+                    || self.result_evidence.is_some()
+                    || !matches!(
+                        self.phase,
+                        SandboxPhysicalPhaseV1::UnknownOutcome
+                            | SandboxPhysicalPhaseV1::Cleaning
+                            | SandboxPhysicalPhaseV1::Absent
+                    )))
+            || self
+                .runner_boot_rollover
+                .as_deref()
+                .is_some_and(|evidence| evidence.validate_for(self).is_err())
             || (self.phase == SandboxPhysicalPhaseV1::Absent
                 && (self.cleanup_required
                     || self.absence_evidence_digest.is_none()
@@ -3372,6 +3487,45 @@ mod tests {
         assert_eq!(
             authorized
                 .authorize_activation(&first.sandbox_id, RunnerBootId::parse("boot-two").unwrap(),),
+            Err(SandboxContractError::RunnerBootChanged)
+        );
+
+        let rollover = SandboxRunnerStateFrameV1 {
+            magic: String::new(),
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            sandbox_id: first.sandbox_id.clone(),
+            boot_id: RunnerBootId::parse("boot-two").unwrap(),
+            execution_request_digest: request.request_digest.clone(),
+            phase: SandboxRunnerPhaseV1::Armed,
+            frame_digest: digest('0'),
+        }
+        .seal()
+        .unwrap();
+        let unknown = authorized.record_runner_state(&rollover).unwrap();
+        assert_eq!(unknown.phase, SandboxPhysicalPhaseV1::UnknownOutcome);
+        assert!(unknown.cleanup_required);
+        assert!(unknown.runner_boot_rollover.is_some());
+        assert_eq!(unknown.record_runner_state(&rollover).unwrap(), unknown);
+        let mut tampered = unknown.clone();
+        tampered
+            .runner_boot_rollover
+            .as_mut()
+            .unwrap()
+            .evidence_digest = digest('f');
+        assert_eq!(
+            tampered.validate_for(&SandboxExecutionPlanV1::from_request(&request).unwrap()),
+            Err(SandboxContractError::InvalidPhysicalTransition)
+        );
+
+        let different_rollover = SandboxRunnerStateFrameV1 {
+            boot_id: RunnerBootId::parse("boot-three").unwrap(),
+            frame_digest: digest('0'),
+            ..rollover
+        }
+        .seal()
+        .unwrap();
+        assert_eq!(
+            unknown.record_runner_state(&different_rollover),
             Err(SandboxContractError::RunnerBootChanged)
         );
     }

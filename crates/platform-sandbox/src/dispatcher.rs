@@ -256,6 +256,21 @@ where
                         .runner_state(&sandbox_id)
                         .await
                         .map_err(SandboxDispatchError::Provider)?;
+                    if runner_boot_changed(&leased, &state)? {
+                        let decision = self
+                            .repository
+                            .record_physical_observation(RecordSandboxObservationV1 {
+                                identity: leased_identity(&leased),
+                                observation: SandboxDurableObservationV1::RunnerState {
+                                    frame: state,
+                                },
+                            })
+                            .await
+                            .map_err(SandboxDispatchError::Repository)?;
+                        apply_decision(&mut leased, decision)
+                            .map_err(SandboxDispatchError::Contract)?;
+                        continue;
+                    }
                     let state = if state.phase == SandboxRunnerPhaseV1::Armed {
                         let frame = crate::opensandbox::SandboxActivationFrameV1::from_authorized(
                             &leased.request,
@@ -291,6 +306,21 @@ where
                         .runner_state(&sandbox_id)
                         .await
                         .map_err(SandboxDispatchError::Provider)?;
+                    if runner_boot_changed(&leased, &state)? {
+                        let decision = self
+                            .repository
+                            .record_physical_observation(RecordSandboxObservationV1 {
+                                identity: leased_identity(&leased),
+                                observation: SandboxDurableObservationV1::RunnerState {
+                                    frame: state,
+                                },
+                            })
+                            .await
+                            .map_err(SandboxDispatchError::Repository)?;
+                        apply_decision(&mut leased, decision)
+                            .map_err(SandboxDispatchError::Contract)?;
+                        continue;
+                    }
                     if matches!(
                         state.phase,
                         SandboxRunnerPhaseV1::ActivationLatched | SandboxRunnerPhaseV1::Started
@@ -630,6 +660,35 @@ fn selected_sandbox_id<E>(
         ))
 }
 
+fn runner_boot_changed<E>(
+    leased: &LeasedSandboxJobV1,
+    state: &crate::opensandbox::SandboxRunnerStateFrameV1,
+) -> Result<bool, SandboxDispatchError<E>> {
+    state.validate().map_err(SandboxDispatchError::Contract)?;
+    let physical = leased
+        .payload
+        .physical
+        .as_deref()
+        .ok_or(SandboxDispatchError::Contract(
+            SandboxContractError::InvalidPhysicalTransition,
+        ))?;
+    if physical.selected_sandbox_id.as_ref() != Some(&state.sandbox_id)
+        || leased.request.request_digest != state.execution_request_digest
+    {
+        return Err(SandboxDispatchError::Contract(
+            SandboxContractError::InvalidRunnerFrame,
+        ));
+    }
+    let authorized_boot =
+        physical
+            .runner_boot_id
+            .as_ref()
+            .ok_or(SandboxDispatchError::Contract(
+                SandboxContractError::InvalidPhysicalTransition,
+            ))?;
+    Ok(authorized_boot != &state.boot_id)
+}
+
 fn sandbox_ttl_seconds(leased: &LeasedSandboxJobV1) -> u32 {
     let milliseconds = leased
         .request
@@ -663,6 +722,9 @@ fn unknown_outcome_digest(
         .physical
         .as_deref()
         .ok_or(SandboxContractError::InvalidPhysicalTransition)?;
+    if let Some(rollover) = &physical.runner_boot_rollover {
+        return Ok(rollover.evidence_digest.clone());
+    }
     canonical_digest(&serde_json::json!({
         "domain": "insight.sandbox.unknown-outcome/v1",
         "job_id": leased.job.job_id,
@@ -692,8 +754,8 @@ mod tests {
         DataClassification, ResourceId, ResourceKind, TraceIdentityV1, WorkClass,
     };
     use insight_platform_jobs::{
-        decide_claim, decide_observation_update, decide_start, JobFence, JobOwnerRef,
-        JobProjection, LeasePolicy,
+        decide_claim, decide_observation_update, decide_reconciliation, decide_start, JobFence,
+        JobOwnerRef, JobProjection, LeasePolicy,
     };
     use std::{
         convert::Infallible,
@@ -907,6 +969,375 @@ mod tests {
             ))
         ));
         assert_eq!(provider.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct RolloverRepository {
+        observation: SandboxRepositoryDecisionV1,
+        terminal: SandboxRepositoryDecisionV1,
+        rollover_digest: Sha256Digest,
+        observation_calls: AtomicUsize,
+        terminal_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxJobRepository for RolloverRepository {
+        type Error = Infallible;
+
+        async fn claim(
+            &self,
+            _request: SandboxClaimV1,
+        ) -> Result<Vec<LeasedSandboxJobV1>, Self::Error> {
+            panic!("claim is not used by this rollover fixture")
+        }
+
+        async fn heartbeat(
+            &self,
+            _command: HeartbeatSandboxJobV1,
+        ) -> Result<SandboxRepositoryDecisionV1, Self::Error> {
+            panic!("heartbeat is not used by this rollover fixture")
+        }
+
+        async fn record_provisioning_intent(
+            &self,
+            _command: RecordProvisioningIntentV1,
+        ) -> Result<SandboxRepositoryDecisionV1, Self::Error> {
+            panic!("provisioning is complete in this rollover fixture")
+        }
+
+        async fn authorize_candidate_create(
+            &self,
+            _command: AuthorizeCandidateCreateV1,
+        ) -> Result<PhysicalDecision<CandidateCreateAuthorizationV1>, Self::Error> {
+            panic!("candidate creation is complete in this rollover fixture")
+        }
+
+        async fn select_candidate(
+            &self,
+            _command: SelectSandboxCandidateV1,
+        ) -> Result<PhysicalDecision<SandboxRepositoryDecisionV1>, Self::Error> {
+            panic!("candidate selection is complete in this rollover fixture")
+        }
+
+        async fn authorize_activation(
+            &self,
+            _command: AuthorizeSandboxActivationV1,
+        ) -> Result<PhysicalDecision<SandboxRepositoryDecisionV1>, Self::Error> {
+            panic!("activation is already authorized in this rollover fixture")
+        }
+
+        async fn record_physical_observation(
+            &self,
+            command: RecordSandboxObservationV1,
+        ) -> Result<SandboxRepositoryDecisionV1, Self::Error> {
+            assert!(matches!(
+                command.observation,
+                SandboxDurableObservationV1::RunnerState { .. }
+            ));
+            self.observation_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.observation.clone())
+        }
+
+        async fn commit_terminal(
+            &self,
+            command: CommitSandboxTerminalV1,
+        ) -> Result<PhysicalDecision<SandboxRepositoryDecisionV1>, Self::Error> {
+            assert!(matches!(
+                command.outcome,
+                SandboxTerminalOutcomeV1::UnknownOutcome { evidence_digest }
+                    if evidence_digest == self.rollover_digest
+            ));
+            self.terminal_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhysicalDecision::Applied(self.terminal.clone()))
+        }
+
+        async fn claim_cleanup(
+            &self,
+            _request: SandboxCleanupClaimV1,
+        ) -> Result<Vec<ClaimedSandboxCleanupV1>, Self::Error> {
+            panic!("cleanup is not used by this rollover fixture")
+        }
+
+        async fn record_cleanup_observation(
+            &self,
+            _command: RecordSandboxCleanupObservationV1,
+        ) -> Result<ClaimedSandboxCleanupV1, Self::Error> {
+            panic!("cleanup is not used by this rollover fixture")
+        }
+
+        async fn decide_orphan(
+            &self,
+            _candidate: SandboxCandidateV1,
+        ) -> Result<SandboxOrphanDecisionV1, Self::Error> {
+            panic!("orphan cleanup is not used by this rollover fixture")
+        }
+
+        async fn recover(
+            &self,
+            _tenant_id: &ResourceId,
+            _job_id: &ResourceId,
+        ) -> Result<SandboxRepositoryDecisionV1, Self::Error> {
+            panic!("recovery is not used by this rollover fixture")
+        }
+    }
+
+    struct RolloverProvider {
+        state: SandboxRunnerStateFrameV1,
+        activate_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OpenSandboxProvider for RolloverProvider {
+        async fn create_candidate(
+            &self,
+            _request: OpenSandboxCreateV1,
+        ) -> Result<SandboxCandidateV1, SandboxProviderError> {
+            panic!("candidate creation is not used by this rollover fixture")
+        }
+
+        async fn list_candidates(
+            &self,
+            _token_digest: Sha256Digest,
+            _cursor: CandidateCursorV1,
+        ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+            panic!("candidate listing is not used by this rollover fixture")
+        }
+
+        async fn list_operator_candidates(
+            &self,
+            _cursor: CandidateCursorV1,
+        ) -> Result<BoundedCandidatePageV1, SandboxProviderError> {
+            panic!("orphan listing is not used by this rollover fixture")
+        }
+
+        async fn observe(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            panic!("observation is not used by this rollover fixture")
+        }
+
+        async fn runner_state(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
+            Ok(self.state.clone())
+        }
+
+        async fn activate(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+            _frame: crate::opensandbox::SandboxActivationFrameV1,
+        ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
+            self.activate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.state.clone())
+        }
+
+        async fn read_result(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+            _maximum_bytes: u64,
+        ) -> Result<Vec<u8>, SandboxProviderError> {
+            panic!("result reading is not used by this rollover fixture")
+        }
+
+        async fn terminate(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            panic!("cleanup is not used by this rollover fixture")
+        }
+
+        async fn prove_absent(
+            &self,
+            _sandbox_id: &OpenSandboxId,
+        ) -> Result<OpenSandboxObservationV1, SandboxProviderError> {
+            panic!("cleanup is not used by this rollover fixture")
+        }
+    }
+
+    #[tokio::test]
+    async fn new_runner_boot_is_persisted_unknown_without_activation() {
+        assert_rollover_is_terminal_without_activation(false).await;
+    }
+
+    #[tokio::test]
+    async fn started_job_with_new_runner_boot_is_persisted_unknown_without_waiting() {
+        assert_rollover_is_terminal_without_activation(true).await;
+    }
+
+    async fn assert_rollover_is_terminal_without_activation(started: bool) {
+        let (leased, observation, terminal, state, rollover_digest) = rollover_fixture(started);
+        let repository = Arc::new(RolloverRepository {
+            observation,
+            terminal,
+            rollover_digest,
+            observation_calls: AtomicUsize::new(0),
+            terminal_calls: AtomicUsize::new(0),
+        });
+        let provider = Arc::new(RolloverProvider {
+            state,
+            activate_calls: AtomicUsize::new(0),
+        });
+        let dispatcher = OpenSandboxDispatcher::new(Arc::clone(&repository), Arc::clone(&provider));
+
+        assert!(matches!(
+            dispatcher.drive_job(leased).await.unwrap(),
+            SandboxDispatchProgressV1::TerminalCommitted(JobState::ReconciliationRequired)
+        ));
+        assert_eq!(repository.observation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(repository.terminal_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.activate_calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn rollover_fixture(
+        started: bool,
+    ) -> (
+        LeasedSandboxJobV1,
+        SandboxRepositoryDecisionV1,
+        SandboxRepositoryDecisionV1,
+        SandboxRunnerStateFrameV1,
+        Sha256Digest,
+    ) {
+        let (leased, authorization) = fixture();
+        let request = leased.request.clone();
+        let now = authorization
+            .decision
+            .job
+            .lease
+            .as_ref()
+            .unwrap()
+            .expires_at
+            - Duration::seconds(1);
+        let candidate = SandboxCandidateV1 {
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            sandbox_id: OpenSandboxId::parse("sandbox-rollover").unwrap(),
+            metadata: crate::opensandbox::SandboxCandidateMetadataV1 {
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                tenant_id: request.tenant_id.clone(),
+                job_id: request.job_id.clone(),
+                physical_attempt: request.physical_attempt,
+                create_ordinal: 1,
+                provisioning_token_digest: authorization
+                    .decision
+                    .payload
+                    .physical
+                    .as_deref()
+                    .unwrap()
+                    .provisioning_token_digest
+                    .clone(),
+                execution_request_digest: request.request_digest.clone(),
+                runtime_contract_digest: request.runtime_contract_digest.clone(),
+                profile_deployment_digest: request.profile_deployment_digest.clone(),
+                network_mode: request.network_mode,
+            },
+            observed_at: now,
+        };
+        let mut job = authorization.decision.job;
+        let payload = authorization
+            .decision
+            .payload
+            .record_observation(
+                &request,
+                SandboxDurableObservationV1::Candidate {
+                    candidate: candidate.clone(),
+                    limits: request.provisioning_limits.clone(),
+                },
+            )
+            .unwrap();
+        job = decide_observation_update(&job, &job_fence(&job), now).unwrap();
+        let payload = payload
+            .select_candidate(&request, &candidate)
+            .unwrap()
+            .into_inner();
+        job = decide_observation_update(&job, &job_fence(&job), now).unwrap();
+        let mut payload = payload
+            .authorize_activation(
+                &candidate.sandbox_id,
+                crate::opensandbox::RunnerBootId::parse("boot-original").unwrap(),
+            )
+            .unwrap()
+            .into_inner();
+        job = decide_observation_update(&job, &job_fence(&job), now).unwrap();
+        if started {
+            let original_state = SandboxRunnerStateFrameV1 {
+                magic: String::new(),
+                schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+                sandbox_id: candidate.sandbox_id.clone(),
+                boot_id: crate::opensandbox::RunnerBootId::parse("boot-original").unwrap(),
+                execution_request_digest: request.request_digest.clone(),
+                phase: SandboxRunnerPhaseV1::Started,
+                frame_digest: digest('0'),
+            }
+            .seal()
+            .unwrap();
+            payload = payload
+                .record_observation(
+                    &request,
+                    SandboxDurableObservationV1::RunnerState {
+                        frame: original_state,
+                    },
+                )
+                .unwrap();
+            job = decide_observation_update(&job, &job_fence(&job), now).unwrap();
+        }
+        let leased = LeasedSandboxJobV1 {
+            fence: job_fence(&job),
+            job: job.clone(),
+            payload: payload.clone(),
+            request: request.clone(),
+            usage_reservation_id: leased.usage_reservation_id,
+        };
+        leased.validate().unwrap();
+
+        let state = SandboxRunnerStateFrameV1 {
+            magic: String::new(),
+            schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+            sandbox_id: candidate.sandbox_id,
+            boot_id: crate::opensandbox::RunnerBootId::parse("boot-restarted").unwrap(),
+            execution_request_digest: request.request_digest.clone(),
+            phase: SandboxRunnerPhaseV1::Armed,
+            frame_digest: digest('0'),
+        }
+        .seal()
+        .unwrap();
+        let unknown_payload = payload
+            .record_observation(
+                &request,
+                SandboxDurableObservationV1::RunnerState {
+                    frame: state.clone(),
+                },
+            )
+            .unwrap();
+        let unknown_job = decide_observation_update(&job, &job_fence(&job), now).unwrap();
+        let observation = SandboxRepositoryDecisionV1 {
+            fence: Some(job_fence(&unknown_job)),
+            job: unknown_job.clone(),
+            payload: unknown_payload.clone(),
+        };
+        observation.validate().unwrap();
+        let rollover_digest = unknown_payload
+            .physical
+            .as_deref()
+            .and_then(|physical| physical.runner_boot_rollover.as_deref())
+            .map(|evidence| evidence.evidence_digest.clone())
+            .unwrap();
+        let terminal_payload = unknown_payload
+            .terminal(
+                &request,
+                SandboxTerminalOutcomeV1::UnknownOutcome {
+                    evidence_digest: rollover_digest.clone(),
+                },
+            )
+            .unwrap();
+        let terminal_job =
+            decide_reconciliation(&unknown_job, &job_fence(&unknown_job), now).unwrap();
+        let terminal = SandboxRepositoryDecisionV1 {
+            fence: None,
+            job: terminal_job,
+            payload: terminal_payload,
+        };
+        terminal.validate().unwrap();
+        (leased, observation, terminal, state, rollover_digest)
     }
 
     fn fixture() -> (LeasedSandboxJobV1, CandidateCreateAuthorizationV1) {

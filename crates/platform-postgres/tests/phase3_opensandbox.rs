@@ -29,8 +29,9 @@ use insight_platform_sandbox::opensandbox::{
     SandboxCleanupObservationV1, SandboxDispatcherJobPayloadV1, SandboxDurableObservationV1,
     SandboxExecutionPlanV1, SandboxExecutionRequestV1, SandboxFailureClassV1,
     SandboxFencedIdentityV1, SandboxJobRepository, SandboxNetworkMode, SandboxOrphanDispositionV1,
-    SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1, SandboxResourceLimitsV1,
-    SandboxRunnerOutcomeV1, SandboxRunnerResultFrameV1, SandboxTerminalOutcomeV1,
+    SandboxPhysicalPhaseV1, SandboxProvisioningLimitsV1, SandboxProvisioningTokenV1,
+    SandboxResourceLimitsV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
+    SandboxRunnerResultFrameV1, SandboxRunnerStateFrameV1, SandboxTerminalOutcomeV1,
     SelectSandboxCandidateV1,
 };
 use serde::Serialize;
@@ -477,6 +478,21 @@ async fn opensandbox_shared_job_is_fenced_atomic_and_recoverable() {
     exercise_cancel_timeout_and_quota(fixture.pool.clone()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opensandbox_boot_rollover_is_durable_unknown_outcome() {
+    let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
+        eprintln!("PLATFORM_TEST_DATABASE_URL is unset; OpenSandbox boot rollover L2 skipped");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    verify_schema(&pool).await.unwrap();
+    exercise_boot_rollover_unknown_outcome(pool).await;
+}
+
 async fn exercise_lease_rollover_and_stale_result(pool: PgPool) {
     let fixture = seed_fixture(pool).await;
     let first_worker = id(ResourceKind::WorkerProcessGeneration);
@@ -757,6 +773,142 @@ async fn exercise_cancel_timeout_and_quota(pool: PgPool) {
         .unwrap();
         assert!(quota_reservation_id.is_none());
     }
+}
+
+async fn exercise_boot_rollover_unknown_outcome(pool: PgPool) {
+    let fixture = seed_fixture(pool).await;
+    let leased = SandboxJobRepository::claim(
+        &fixture.repository,
+        claim(&id(ResourceKind::WorkerProcessGeneration), digest('1')),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    let started = SandboxJobRepository::record_provisioning_intent(
+        &fixture.repository,
+        RecordProvisioningIntentV1 {
+            identity: identity(&leased),
+            activation_token: OpaqueActivationToken::parse("7".repeat(64)).unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    let authorized_create = SandboxJobRepository::authorize_candidate_create(
+        &fixture.repository,
+        AuthorizeCandidateCreateV1 {
+            identity: decision_identity(&started),
+            create_ordinal: 1,
+            limits: provisioning_limits(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .decision;
+    let candidate = candidate(&fixture.request, "sandbox-boot-rollover");
+    let observed = SandboxJobRepository::record_physical_observation(
+        &fixture.repository,
+        RecordSandboxObservationV1 {
+            identity: decision_identity(&authorized_create),
+            observation: SandboxDurableObservationV1::Candidate {
+                candidate: candidate.clone(),
+                limits: provisioning_limits(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let selected = SandboxJobRepository::select_candidate(
+        &fixture.repository,
+        SelectSandboxCandidateV1 {
+            identity: decision_identity(&observed),
+            candidate: candidate.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let activated = SandboxJobRepository::authorize_activation(
+        &fixture.repository,
+        AuthorizeSandboxActivationV1 {
+            identity: decision_identity(&selected),
+            sandbox_id: candidate.sandbox_id.clone(),
+            boot_id: RunnerBootId::parse("boot-original").unwrap(),
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let rollover = SandboxRunnerStateFrameV1 {
+        magic: String::new(),
+        schema_version: 1,
+        sandbox_id: candidate.sandbox_id,
+        boot_id: RunnerBootId::parse("boot-restarted").unwrap(),
+        execution_request_digest: fixture.request.request_digest.clone(),
+        phase: SandboxRunnerPhaseV1::Armed,
+        frame_digest: digest('0'),
+    }
+    .seal()
+    .unwrap();
+    let observation_command = RecordSandboxObservationV1 {
+        identity: decision_identity(&activated),
+        observation: SandboxDurableObservationV1::RunnerState {
+            frame: rollover.clone(),
+        },
+    };
+    let unknown = SandboxJobRepository::record_physical_observation(
+        &fixture.repository,
+        observation_command.clone(),
+    )
+    .await
+    .unwrap();
+    let physical = unknown.payload.physical.as_deref().unwrap();
+    assert_eq!(physical.phase, SandboxPhysicalPhaseV1::UnknownOutcome);
+    let rollover_digest = physical
+        .runner_boot_rollover
+        .as_deref()
+        .unwrap()
+        .evidence_digest
+        .clone();
+    let replayed =
+        SandboxJobRepository::record_physical_observation(&fixture.repository, observation_command)
+            .await
+            .unwrap();
+    assert_eq!(
+        replayed
+            .payload
+            .physical
+            .as_deref()
+            .unwrap()
+            .runner_boot_rollover
+            .as_deref()
+            .map(|evidence| &evidence.evidence_digest),
+        Some(&rollover_digest)
+    );
+
+    let terminal = SandboxJobRepository::commit_terminal(
+        &fixture.repository,
+        CommitSandboxTerminalV1 {
+            identity: decision_identity(&unknown),
+            outcome: SandboxTerminalOutcomeV1::UnknownOutcome {
+                evidence_digest: rollover_digest,
+            },
+        },
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(terminal.job.state, JobState::ReconciliationRequired);
+    let invocation_state: String = sqlx::query_scalar(
+        "SELECT state FROM insight_platform.invocations WHERE tenant_id = $1 AND invocation_id = $2",
+    )
+    .bind(fixture.request.tenant_id.to_string())
+    .bind(fixture.invocation.invocation_id.to_string())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(invocation_state, "reconciliation_required");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

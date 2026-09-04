@@ -11,6 +11,13 @@
 > `ActivationAuthorized`与`Started`分支必须在activate/await前比较boot并先提交该observation。随后补L1 same/different observation、
 > new-boot zero-activate回归，补fresh PostgreSQL crash-window L2与真实Kind runner/Pod rollover动态门禁。完成这些证据前CR-218保持Implementing。
 
+> 2026-09-04 CR-218 revision 1 local evidence：`platform-sandbox`定向L1共12/12通过，覆盖
+> `ActivationAuthorized`与`Started`看到不同boot后先持久化domain-separated observation、同observation幂等、不同二次
+> observation与摘要篡改fail closed、zero activate/zero old-result wait并提交`ReconciliationRequired`。使用现有Kind PostgreSQL
+> 运行`phase3_opensandbox::opensandbox_boot_rollover_is_durable_unknown_outcome`定向L2共1/1通过，证明同一shared Job fence下
+> observation持久化/重放、Job与Invocation原子收敛；两个受影响target strict Clippy通过。该证据不是fresh-database crash-window
+> qualification，也没有触发真实OpenSandbox runner/Pod rollover，因此CR-218仍为Implementing，L3动态门禁与L4～L6仍Not run。
+
 > 2026-09-01 CR-216 revision 1：Sandbox physical implementation clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox
 > Controller + containerd/runc，不修改 OpenSandbox 源码。按 contract/types -> shared Job candidate/activation evidence -> Armed runner
 > -> provider adapter -> cleanup/recovery -> deployment/profile -> L1～L3 顺序实现；随后删除 WASI/gVisor/attestor runtime composition
