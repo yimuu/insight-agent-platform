@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 3 |
-| 日期 | 2026-09-02 |
+| 状态 | Accepted / CR-218 revision 1 |
+| 日期 | 2026-09-04 |
 | 依赖 | 03、04、06、07、09 |
 | 直接下游 | 13、14、15、17、18 |
 
@@ -17,6 +17,9 @@
 
 > CR-216 revision 3 closure：Sandbox Job已持久化同一physical attempt后，Dispatcher lease过期只允许 continuation reclaim；
 > Job `attempt_count`不增加，Invocation不产生新attempt/effect，且不得创建或激活replacement sandbox。
+
+> CR-218 revision 1 recovery hardening：已授权激活后观察到不同runner boot时，Sandbox Job先持久化绑定原/新boot与
+> runner state frame的rollover摘要并进入`UnknownOutcome`；Dispatcher不得向新boot发送旧activation frame，terminal/reclaim必须复用该摘要。
 
 > CR-197 impact：Invocation/Job复制Run trace identity，Native/Sandbox/MCP/Remote dispatch各生成child span。Egress只在平台侧记录remote-call span，
 > 首版剥离内部`traceparent`/`tracestate`/`baggage`且不允许Implementation header模板重新加入这些名字。
@@ -171,7 +174,8 @@ Worker在提交Deferred后释放execution permit和lease。callback、poll、can
 Sandbox create 只产生 bounded inert candidates；response loss 后按同一 stable provisioning token 发现，current Job CAS 只选择一个。
 Dispatcher 在外部 activate 前持久化 selected sandbox、runner boot identity、activation token digest 与
 `ActivationAuthorized/PotentiallyStarted`。此后 response loss、crash、lease expiry 或 provider 暂不可观察，都只能查询或重放相同
-sandbox/boot/token；不得创建新 token/candidate/sandbox/physical attempt。boot 变化且无完整 result 时进入 `UnknownOutcome` 与 cleanup。
+sandbox/boot/token；不得创建新 token/candidate/sandbox/physical attempt。boot 变化且无完整 result 时先持久化rollover摘要，再进入
+`UnknownOutcome` 与 cleanup；旧activation frame对新boot的发送次数必须为零。
 Invocation Receipt防止同一Platform command重复创建逻辑Invocation，但不把Sandbox workload内部外部副作用变成幂等。
 
 ## 9. Model loop 集成

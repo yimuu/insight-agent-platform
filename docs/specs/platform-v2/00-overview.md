@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-217 qualification fail-closed hardening; L4～L6 Not run |
-| 日期 | 2026-09-02 |
+| 状态 | Implementing / CR-218 Sandbox recovery hardening; L4～L6 Not run |
+| 日期 | 2026-09-04 |
 | 目标协议 | `insight.platform/v1` |
 | 变更类型 | Clean-cut architecture |
 | 当前行为 | OpenSandbox-only；以 [`docs/current`](../../current/README.md) 为准 |
@@ -14,6 +14,11 @@
 > source常量、未标注workload或额外allow-all policy绕过。MCP callback/cleanup仍映射既有`mcp_host`，Context dataset仍映射
 > `context_worker`，不新增ComponentRole。产品release先组装并签名candidate，在本地exact cache完成starter资格后重签包含资格
 > evidence的final ReleaseBundle，才创建不可变GitHub Release和release tag。上述门禁修复不产生L4～L6 passed evidence，当前状态仍为Not run。
+
+> 2026-09-04 recovery hardening（CR-218 revision 1）：整体review发现已授权激活后的runner boot rollover实现会把旧activation
+> frame发送给新boot，违反既有`UnknownOutcome`规则。03/10/14与ADR-0007现明确：Dispatcher必须在任何activate/await动作前，以current
+> Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要，再进入`UnknownOutcome`；terminal/reclaim
+> 复用该摘要，且新boot的旧activation frame调用数为零。cross-review确认不新增authority、ID、表、JobKind、route或角色；实现与本机动态证据待补。
 
 > 2026-09-01 architecture revision（CR-216 revision 1）：首版 Sandbox 物理实现 clean-cut 为 OpenSandbox Kubernetes provider、
 > BatchSandbox Controller 与 containerd/runc。create 只产生 inert Armed candidates，PostgreSQL 选择唯一 candidate，fixed runner
@@ -306,18 +311,18 @@ Platform v2 采用以下不可逆的架构决定：
 | 00 | `00-overview.md` | Implemented / CR-216 L1～L3 passed | 总体路线、规范模板、依赖和完成定义；L4～L6 Not run |
 | 01 | [`01-architecture-and-domain-boundaries.md`](01-architecture-and-domain-boundaries.md) | Accepted / CR-216 revision 1 | 系统架构、领域对象和所有权边界 |
 | 02 | [`02-identity-revision-and-deployment.md`](02-identity-revision-and-deployment.md) | Accepted / CR-216 revision 1 | ID、Resource、Version、Deployment、Binding |
-| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-216 revision 4 | PostgreSQL、事务、Outbox、Lease、恢复 |
+| 03 | [`03-consistency-events-and-recovery.md`](03-consistency-events-and-recovery.md) | Accepted / CR-218 revision 1 | PostgreSQL、事务、Outbox、Lease、恢复 |
 | 04 | [`04-tenancy-security-and-policy.md`](04-tenancy-security-and-policy.md) | Accepted / CR-216 revision 1 | 多租户、授权、Secret、Effect、Quota、Approval |
 | 05 | [`05-agent-and-typed-plan.md`](05-agent-and-typed-plan.md) | Accepted / CR-214 | Agent Interface、Typed Plan、Model Loop |
 | 06 | [`06-durable-run-state-machine.md`](06-durable-run-state-machine.md) | Accepted / CR-203（CR-204 reviewed） | Run、NodeExecution、暂停、重试、取消 |
 | 07 | [`07-scheduler-workers-and-concurrency.md`](07-scheduler-workers-and-concurrency.md) | Accepted / CR-216 revision 3 | Scheduler、Worker、Lease、背压和隔舱并发 |
 | 08 | [`08-subagent.md`](08-subagent.md) | Accepted / CR-203（CR-204 reviewed） | Child Run、父子通信、取消传播和循环限制 |
 | 09 | [`09-capability-model-and-registry.md`](09-capability-model-and-registry.md) | Accepted / CR-216 revision 1 | Capability Interface、Implementation、Registry |
-| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-216 revision 3 | 调用协议、幂等、同步快路径、异步恢复 |
+| 10 | [`10-capability-invocation.md`](10-capability-invocation.md) | Accepted / CR-218 revision 1 | 调用协议、幂等、同步快路径、异步恢复 |
 | 11 | [`11-skill-system.md`](11-skill-system.md) | Accepted / CR-209 | Skill Package、发现、选择、绑定和依赖 |
 | 12 | [`12-context-and-retrieval.md`](12-context-and-retrieval.md) | Accepted / CR-206 | ContextSource、检索、引用和数据权限 |
 | 13 | [`13-mcp-host.md`](13-mcp-host.md) | Accepted / CR-203（CR-204 reviewed） | MCP Transport、OAuth、投影、Task 和 Subscription |
-| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-216 revision 8 | OpenSandbox Kubernetes、one-shot create authorization、Armed runner activation、atomic continuation、point-read orphan decision和清理 |
+| 14 | [`14-sandbox-execution-plane.md`](14-sandbox-execution-plane.md) | Accepted / CR-218 revision 1 | OpenSandbox Kubernetes、one-shot create authorization、Armed runner activation、boot-rollover evidence、atomic continuation、point-read orphan decision和清理 |
 | 15 | [`15-artifacts-and-files.md`](15-artifacts-and-files.md) | Accepted / CR-216 revision 1 | S3、内容寻址、上传、生命周期和内容安全 |
 | 16 | [`16-model-provider-and-invocation.md`](16-model-provider-and-invocation.md) | Accepted / CR-209 | Provider、Model Profile、ModelTurn、流式响应和预算 |
 | 17 | [`17-management-and-runtime-api.md`](17-management-and-runtime-api.md) | Accepted / CR-216 revision 1 | 管理 API、Run API、事件流和错误模型 |

@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 8 |
-| 日期 | 2026-09-02 |
+| 状态 | Accepted / CR-218 revision 1 |
+| 日期 | 2026-09-04 |
 | 依赖 | 03、04、07、09、10、15、[ADR-0007](../../adr/0007-opensandbox-execution-provider.md) |
 | 直接下游 | 17、18 |
 
@@ -35,6 +35,10 @@
 >
 > revision 8关闭authorization replay P1：repository必须区分`Applied | Replayed`；只有本次CAS为`Applied`的唯一caller可恰好调用一次
 > provider create，`Replayed`绝不调用provider。授权后、create前崩溃会burn该ordinal；quiescence后只能授权下一ordinal，禁止复用或重发。
+>
+> CR-218 revision 1关闭boot rollover P1：`ActivationAuthorized/PotentiallyStarted`后观察到不同runner boot时，Dispatcher必须在
+> 任何activate/await动作前以current Job fence持久化domain-separated rollover摘要并进入`UnknownOutcome`。terminal/reclaim复用该摘要，
+> 旧activation frame不得发送给新boot；observation与terminal之间崩溃也不能丢失rollover事实。
 
 ## 1. 决策摘要
 
@@ -305,6 +309,7 @@ struct SandboxPhysicalEvidenceV1 {
     provisioning_started_at: Timestamp,
     create_authorization_count: BoundedU8<0, 4>,
     last_create_authorized_at: Option<Timestamp>,
+    runner_boot_rollover_digest: Option<Sha256Digest>,
     // selected candidate, activation, result and cleanup evidence follow
 }
 
@@ -445,9 +450,11 @@ activation latch；fsync file 和 parent directory；
 原子发布 `ActivationLatched`。同 token 重放返回已有状态；不同 token 返回 `409 activation_conflict`；一个 boot ID 最多 spawn 一次。
 runner 不把新 lease token 传给 Package。
 
-若 runner/container 在 latch 后重启，新的 boot ID 读取到旧 latch 且没有完整 terminal result 时必须进入
-`UnknownPriorActivation`，不得自动 restart Package。Dispatcher 对同 boot ID 可以安全重放同 token；boot ID 改变且无完整 result 时只能
-记录 `UnknownOutcome`、cancel/terminate/cleanup，不能 activate 或 create replacement。
+若 runner/container 在 latch 后重启，新的 boot ID 读取到旧 latch且没有完整 terminal result 时必须进入
+`UnknownPriorActivation`，不得自动 restart Package。Dispatcher 对同 boot ID 可以安全重放同 token；boot ID 改变且无完整 result 时必须先
+把`original_boot_id + observed_boot_id + runner_state_frame_digest + request/job/physical identity`的domain-separated摘要写入
+`runner_boot_rollover_digest`并进入`UnknownOutcome`，再cancel/terminate/cleanup，不能activate或create replacement。相同observation可重放，
+不同第二observation fail closed；terminal/reclaim必须复用该摘要。
 
 Package 可以在一个 Job 内启动 published contract 允许的多个子进程，但 runner 只调用 `package_argv` 一次，不经 shell 解析。Package
 terminal 后 runner 将 result 写临时文件，fsync，校验长度/digest，再 atomic rename 到 fixed result path；路径和 maximum bytes 由 runner
@@ -535,7 +542,7 @@ runner state/result bytes、diagnostics 与 cleanup backlog 均有 hard limit。
 - `ActivationAuthorized/PotentiallyStarted` 后：只能对相同 sandbox、boot ID、activation token 查询或重放；禁止新 token、candidate、
   sandbox、physical attempt 或自动 workload retry；
 - runner `Succeeded/Failed` 且 result 完整：新 lease 可以在 current fence 下提交既有证据；boot 变化、result 不完整或 start 不确定则
-  `UnknownOutcome`；
+  `UnknownOutcome`；不同boot必须先持久化rollover摘要，且新boot的activate调用计数为零；
 - cancel/timeout：先写 durable intent，再 terminate/delete；physical kill 是 best effort，不能把已发生外部副作用改写为未发生；
 - provider 不可达：保留 Job/reconcile 状态并做 bounded probe，不盲目重发 workload；
 - orphan sweeper分页读取operator label，以metadata中的tenant/job point-read PostgreSQL并重验physical attempt、token、request、
@@ -585,7 +592,7 @@ Platform 在 shared Job 的 bounded binding/evidence 中保存：
 - 不含正文的execution plan、exact input/output RunValue ID、schema/content digest与semantic request digest；
 - physical attempt 与 provisioning token digest；
 - database-time provisioning start、create authorization count/last time、selected OpenSandbox ID与candidate discovery evidence；
-- runner boot ID、sensitive activation token/its digest 与 activation state；
+- runner boot ID、optional boot-rollover evidence digest、sensitive activation token/its digest 与 activation state；
 - result frame/output digest、declared bytes、safe failure/unknown-outcome code；
 - cleanup required/generation/owner/expiry、delete observation 与 absence proof digest。
 

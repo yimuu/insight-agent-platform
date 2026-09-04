@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 4 |
-| 日期 | 2026-09-02 |
+| 状态 | Accepted / CR-218 revision 1 |
+| 日期 | 2026-09-04 |
 | 依赖 | 01、02 |
 | 直接下游 | 04～18 |
 
@@ -21,6 +21,10 @@
 > CR-216 revision 4 consistency repair：首版 MCP 只有 remote Streamable HTTP，不再创建 managed-stdio physical session child；
 > 因而从 closed machine registry 删除 `SandboxManagedMcpSession` JobKind 及其 `Sandbox + Job` 三元组。此前 r328/r329 的
 > 18-kind/25-triple 与 managed MCP physical-session 记录仅是 CR-216 之前的历史证据，不是当前合同。
+
+> CR-218 revision 1 recovery hardening：`ActivationAuthorized/PotentiallyStarted` 后观察到不同 runner boot 时，current
+> Job fence 必须先持久化 domain-separated `runner_boot_rollover_digest` 并进入 `UnknownOutcome`；Dispatcher 在该 CAS 前后都
+> 不得向新 boot 发送旧 activation frame。terminal/reclaim 复用同一摘要，避免 observation 与 terminal 之间崩溃后丢失 rollover 证据。
 
 > CR-206 impact：public Operation result是shared Job terminal safe result的closed typed projection。普通成功Job返回
 > `digest`；ContextDatasetBuild成功返回`context_dataset_generation`并从同一frozen Job payload投影exact `dgen`与terminal
@@ -125,7 +129,7 @@ subscription aggregate identity，不产生新的Context current-state aggregate
 证明只开放目标方向。PostgreSQL source-row/payload验证和跨WorkClass claim仍待后续L2/L3证据。
 
 Sandbox execution只有shared Job owner/fence，无SandboxJob ID/aggregate。Job的bounded physical evidence可以保存
-`provisioning_token_digest + selected_sandbox_id + physical_attempt + runner_boot_id + activation_state + cleanup evidence`，
+`provisioning_token_digest + selected_sandbox_id + physical_attempt + runner_boot_id + optional runner_boot_rollover_digest + activation_state + cleanup evidence`，
 但不得复制OpenSandbox/Kubernetes lifecycle state。MCP首版无stdio
 session child。Operation无owner variant；它直接投影Job的typed owner。
 
@@ -227,7 +231,8 @@ Worker不内存sleep。cancel/timeout先写durable intent，物理cancel是best 
 Sandbox 是更严格的 specialization：同一 `SandboxProvisioningTokenV1` 可以发现 bounded inert candidates，但 current Job CAS 只能
 选择一个。Dispatcher 必须在外部 activate 前持久化 `ActivationAuthorized/PotentiallyStarted`；此后 response loss、crash 或 lease loss
 只能查询或重放相同 sandbox/boot/activation token，不能创建新 token/candidate/sandbox/physical attempt。boot identity 变化且无完整 result
-时进入 `UnknownOutcome` 并执行 absence reconcile。这个规则防止 Platform 制造重复 Package 启动，但不声称 workload 内部网络、数据库、
+时，先以current fence持久化绑定原/新boot与runner state frame的rollover摘要，再进入 `UnknownOutcome` 并执行 absence reconcile；该摘要由
+terminal/reclaim复用，Dispatcher绝不向新boot发送旧activation frame。这个规则防止 Platform 制造重复 Package 启动，但不声称 workload 内部网络、数据库、
 消息或第三方 API 具备幂等或 exactly-once。
 
 该 durable external continuation 的 lease 恢复是 shared Job 状态机的窄转换：旧 `Running` lease 到期后，owner transaction 必须先验证

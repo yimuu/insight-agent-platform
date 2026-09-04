@@ -2,8 +2,8 @@
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-216 revision 8 |
-| 日期 | 2026-09-02 |
+| 状态 | Accepted / CR-218 revision 1 |
+| 日期 | 2026-09-04 |
 | 取代 | [ADR-0002](0002-gvisor-kubernetes-launcher.md) |
 | 影响规范 | 00、01～04、07、09、10、14、15、17、18、cross-review、implementation-plan、product-experience 00/06 |
 
@@ -32,6 +32,10 @@ CAS授权exact ordinal，并持久化database-time provisioning start、authoriz
 
 revision 8明确：authorization replay不是外部side effect replay。repository返回`Applied | Replayed`，只有`Applied` caller可调用一次
 provider create；`Replayed`不调用provider。授权提交后、provider调用前崩溃会消耗该ordinal，之后只能在静默窗口后授权下一ordinal。
+
+CR-218 revision 1明确：`ActivationAuthorized/PotentiallyStarted`后观察到不同runner boot时，旧activation frame不能安全发送给新boot。
+Dispatcher必须先以current Job fence持久化绑定原/新boot、runner state frame和request/physical identity的rollover摘要并进入
+`UnknownOutcome`；terminal/reclaim复用同一摘要。相同observation可重放，不同第二observation拒绝，且整个路径不创建replacement。
 
 上一版决策选择 OpenSandbox Docker provider，并要求上游新增持久化 `Idempotency-Key` 扩展。对 OpenSandbox 0.2.x
 文档、Lifecycle API、Kubernetes deployment、BatchSandbox controller、官方镜像与 provider 实现完成部署级审计后，确认：
@@ -139,7 +143,7 @@ runner 必须先以 create-exclusive + fsync 的 durable latch 接受 token，�
 
 一旦 Job 持久化 `ActivationAuthorized/PotentiallyStarted`，无论 activate response 是否丢失，都不得创建新 key、candidate、sandbox
 或自动重跑 Package。恢复只能查询同一 runner 的 state/result；runner boot identity 变化、Pod 被 controller 重建或无法证明结果时，
-进入 `UnknownOutcome` 并执行 cleanup/absence reconcile。
+必须先持久化boot-rollover摘要再进入 `UnknownOutcome` 并执行 cleanup/absence reconcile，且不得向新boot发送旧activation frame。
 
 ## 幂等边界
 

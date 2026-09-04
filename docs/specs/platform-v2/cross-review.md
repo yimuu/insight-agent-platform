@@ -1,10 +1,34 @@
-# Platform v2 00～18 Cross-review（CR-217）
+# Platform v2 00～18 Cross-review（CR-218）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Accepted / CR-217 qualification fail-closed review |
-| 日期 | 2026-09-02 |
+| 状态 | Accepted / CR-218 revision 1 Sandbox boot-rollover review |
+| 日期 | 2026-09-04 |
 | 输入 | 00～18 live tree、product-experience 00～06、ADR-0001～0007、AGENTS.md |
+
+### CR-218 revision 1 Sandbox boot-rollover cross-review
+
+整体review确认CR-216的目标规则正确，但实现缺少可在observation与terminal之间崩溃后恢复的boot-rollover evidence：
+`ActivationAuthorized`分支会先对任何`Armed`状态调用activate，`Started`分支会对任何latched/started状态直接等待，两处都未先比较
+已授权boot。这使旧activation frame可能到达controller重建后的新runner，且repository把不同boot仅映射为普通frame错误，无法进入
+既有`UnknownOutcome + cleanup`路径。
+
+本revision不改变业务语义，只补足已有裁决的持久证据与顺序。03先把optional、domain-separated
+`runner_boot_rollover_digest`纳入shared Job bounded physical evidence；10/14规定其preimage绑定tenant/job/physical attempt、selected
+sandbox、request digest、original/observed boot与observed runner state frame digest。Dispatcher观察到不同boot时必须先用current Job fence
+CAS该摘要并转为physical `UnknownOutcome`，随后terminal transaction把同一摘要写入既有`SandboxTerminalOutcomeV1::UnknownOutcome`。
+相同observation可重放；不同第二observation、旧fence或已有完整result均fail closed。Dispatcher在该CAS前后均不得调用activate，且不能创建新
+token/candidate/sandbox/physical attempt。
+
+ownership/identity/schema复核：PostgreSQL shared Job仍是唯一attempt/lease/terminal与physical-evidence authority；Invocation/RunValue、
+OpenSandbox/Kubernetes与cleanup所有权不变。optional digest不新增表、aggregate、ID、JobKind、WorkClass、ComponentRole、public/internal route、
+credential或第二状态投影；未发生rollover的canonical payload保持原shape。terminal仍按quota → Invocation → Job锁序first-winner，rollover
+observation只按current Job fence更新同一payload/version，不直接推进Invocation、quota或RunValue。
+
+安全/错误/容量/恢复复核：摘要不进入metric label且不包含正文、token、URL或credential；Event只允许safe phase/digest。
+`sandbox_runner_boot_changed`映射既有safe `UnknownOutcome/ReconciliationRequired`，cleanup继续按独立generation fence取得absence proof。
+没有额外provider调用或容量lane；反而把新boot上的activate调用数收紧为零。L1必须覆盖same-observation replay与different-observation拒绝，
+Dispatcher回归必须证明new-boot `activate_calls=0`；真实provider门禁必须覆盖Pod/runner boot rollover。该revision不构成L4～L6 passed evidence。
 
 ### CR-217 qualification fail-closed cross-review
 

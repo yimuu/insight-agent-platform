@@ -1,10 +1,15 @@
-# Platform v2 四阶段实现计划（CR-216）
+# Platform v2 四阶段实现计划（CR-218）
 
 | 属性 | 值 |
 |---|---|
-| 状态 | Implemented / CR-216 L1～L3 passed; L4～L6 Not run |
-| 日期 | 2026-09-02 |
-| 合同输入 | 00～18、cross-review CR-216、ADR-0001、ADR-0007、AGENTS.md |
+| 状态 | Implementing / CR-218 revision 1; prior CR-216 L1～L3 passed; L4～L6 Not run |
+| 日期 | 2026-09-04 |
+| 合同输入 | 00～18、cross-review CR-218、ADR-0001、ADR-0007、AGENTS.md |
+
+> 2026-09-04 CR-218 revision 1：先在physical evidence增加optional、domain-separated boot-rollover摘要，再让
+> `record_physical_observation`以current Job fence持久化不同boot并进入`UnknownOutcome`；Dispatcher的
+> `ActivationAuthorized`与`Started`分支必须在activate/await前比较boot并先提交该observation。随后补L1 same/different observation、
+> new-boot zero-activate回归，补fresh PostgreSQL crash-window L2与真实Kind runner/Pod rollover动态门禁。完成这些证据前CR-218保持Implementing。
 
 > 2026-09-01 CR-216 revision 1：Sandbox physical implementation clean-cut 为 OpenSandbox Kubernetes provider + BatchSandbox
 > Controller + containerd/runc，不修改 OpenSandbox 源码。按 contract/types -> shared Job candidate/activation evidence -> Armed runner
