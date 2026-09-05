@@ -109,6 +109,14 @@ for marker in (
 ):
     if marker not in rust_verification:
         failures.append(f"single-target Rust verification misses {marker!r}")
+test_command = "cargo test --locked --workspace --all-targets --all-features"
+clippy_command = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
+if (
+    test_command in rust_verification
+    and clippy_command in rust_verification
+    and rust_verification.index(test_command) > rust_verification.index(clippy_command)
+):
+    failures.append("workspace Clippy must reuse the already compiled test graph")
 if "cargo check --locked" in ci:
     failures.append("ordinary CI retains a redundant cargo check before Clippy and tests")
 if (

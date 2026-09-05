@@ -196,8 +196,6 @@ jobs:
             validate-production-profile \
             contracts/platform-v1/qualification/production-release-profile.json
           cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Provision clean-cut Platform PostgreSQL baseline
         env:
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
@@ -247,6 +245,8 @@ jobs:
         run: cargo test --locked --workspace --all-targets --all-features
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features
+      - name: Clippy using the compiled test graph
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   cli:
     name: Affected CLI
