@@ -31,6 +31,8 @@ on:
         default: all
         type: choice
         options: [starter, model, remote-capability, context, mcp, sandbox, all]
+  schedule:
+    - cron: "43 4 * * 1"
 
 permissions:
   contents: read

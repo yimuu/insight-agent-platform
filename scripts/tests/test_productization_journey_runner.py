@@ -159,11 +159,25 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
         self.assertIn("INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST=$package_digest", workflow)
         self.assertIn("Always remove the disposable Kind cluster", workflow)
         self.assertIn('kind delete cluster --name "$INSIGHT_KIND_CLUSTER_NAME"', workflow)
-        self.assertIn("workflow_call:", workflow.split("permissions:", 1)[0])
+        trigger_block = workflow.split("permissions:", 1)[0]
+        self.assertIn("workflow_call:", trigger_block)
+        self.assertIn("workflow_dispatch:", trigger_block)
+        self.assertIn("schedule:", trigger_block)
+        self.assertIn(
+            "PRODUCTIZATION_FEATURES: ${{ inputs.features || 'all' }}", workflow
+        )
+        self.assertIn(
+            "PRODUCTIZATION_ARTIFACT_MODE: ${{ inputs.artifact_mode || 'source' }}",
+            workflow,
+        )
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        productization_call = ci.split("\n  productization:", 1)[-1].split(
-            "\n  required:", 1
-        )[0]
+        self.assertNotIn("uses: ./.github/workflows/productization-journey.yml", ci)
+        release = (ROOT / ".github/workflows/product-release.yml").read_text(
+            encoding="utf-8"
+        )
+        productization_call = release.split(
+            "\n  productization-10-of-10:", 1
+        )[-1].split("\n  publish:", 1)[0]
         self.assertIn(
             "uses: ./.github/workflows/productization-journey.yml",
             productization_call,
@@ -172,7 +186,7 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
             "permissions:\n      contents: read\n      packages: read",
             productization_call,
         )
-        self.assertIn("needs: [changes, quick, lint, test, cli, console, policy, productization]", ci)
+        self.assertIn("artifact_mode: signed-release-candidate", productization_call)
 
     def test_candidate_mode_is_prebuilt_only_and_fail_closed(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")

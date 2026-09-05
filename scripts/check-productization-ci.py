@@ -34,8 +34,8 @@ for marker in (
     "Quick contracts",
     "Affected CLI",
     "Affected Console",
-    "Workspace lint and checks",
-    "Workspace full tests",
+    "Static contracts and formatting",
+    "Workspace Rust verification",
     "Required CI summary",
     "scripts/classify-ci-paths.py",
     "scripts/check-product-release.py",
@@ -89,6 +89,33 @@ for test_path, boundary in (
 ):
     if test_path not in quick_contracts:
         failures.append(f"quick CI does not run the {boundary} tests")
+
+static_checks = ci.split("\n  lint:", 1)[-1].split("\n  test:", 1)[0]
+rust_verification = ci.split("\n  test:", 1)[-1].split("\n  cli:", 1)[0]
+cli_checks = ci.split("\n  cli:", 1)[-1].split("\n  console:", 1)[0]
+for forbidden in ("cargo run --locked", "cargo check --locked", "cargo clippy --locked"):
+    if forbidden in static_checks:
+        failures.append(f"static CI lane still compiles Rust via {forbidden!r}")
+for marker in (
+    "needs: [changes, quick, lint]",
+    "components: clippy",
+    "Run authoritative Rust contract validators",
+    "cargo run --locked -p insight-platform-contracts --bin check-platform-contracts",
+    "cargo run --locked -p insight-platform-contracts --bin platform-qualification",
+    "cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract",
+    "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+    "cargo test --locked --workspace --all-targets --all-features",
+    "cargo test --locked --workspace --doc --all-features",
+):
+    if marker not in rust_verification:
+        failures.append(f"single-target Rust verification misses {marker!r}")
+if "cargo check --locked" in ci:
+    failures.append("ordinary CI retains a redundant cargo check before Clippy and tests")
+if (
+    "cargo test --locked -p insight-platform-qualification-tests --test productization --no-run"
+    not in cli_checks
+):
+    failures.append("CLI CI does not compile the Productization journey harness")
 
 profile_images = {
     dependency["name"]: dependency["image"]
@@ -153,14 +180,29 @@ if dockerfile.count("cargo build --locked --release --workspace") != 1:
     failures.append("candidate Dockerfile must compile the production closure once")
 if "cargo build --locked --release --workspace" not in dockerfile:
     failures.append("candidate Dockerfile must use one workspace binary build graph")
+for marker in (
+    "RUSTFLAGS='-C target-feature=+crt-static'",
+    "! readelf -l /workspace/platform-sandbox-runner-core | grep -q INTERP",
+    "! readelf -d /workspace/platform-sandbox-runner-core | grep -q NEEDED",
+):
+    if marker not in dockerfile:
+        failures.append(f"Sandbox runner static link contract misses {marker!r}")
+if "linker=musl-gcc" in dockerfile:
+    failures.append("Sandbox runner forces the Debian musl wrapper as its Rust linker")
 
 journey_trigger = starter_journey.split("permissions:", 1)[0]
-for required_trigger in ("workflow_call:", "workflow_dispatch:"):
+for required_trigger in ("workflow_call:", "workflow_dispatch:", "schedule:"):
     if required_trigger not in journey_trigger:
         failures.append(f"10/10 journey misses required trigger {required_trigger!r}")
-for forbidden_trigger in ("push:", "pull_request:", "schedule:"):
+for forbidden_trigger in ("push:", "pull_request:"):
     if forbidden_trigger in journey_trigger:
-        failures.append(f"reusable 10/10 journey duplicates CI trigger {forbidden_trigger!r}")
+        failures.append(f"10/10 journey runs on ordinary change trigger {forbidden_trigger!r}")
+for fallback in (
+    "PRODUCTIZATION_FEATURES: ${{ inputs.features || 'all' }}",
+    "PRODUCTIZATION_ARTIFACT_MODE: ${{ inputs.artifact_mode || 'source' }}",
+):
+    if fallback not in starter_journey:
+        failures.append(f"scheduled 10/10 journey misses closed fallback {fallback!r}")
 for marker in (
     "runs-on: ubuntu-24.04",
     "scripts/run-productization-journey.sh",
@@ -364,25 +406,19 @@ for marker in (
 ):
     if marker not in product_release:
         failures.append(f"product release misses required 10/10 evidence marker {marker!r}")
+release_productization = product_release.split(
+    "\n  productization-10-of-10:", 1
+)[-1].split("\n  publish:", 1)[0]
+if "permissions:\n      contents: read\n      packages: read" not in release_productization:
+    failures.append("product release does not grant the reusable 10/10 package permission")
 
-ci_productization = ci.split("\n  productization:", 1)[-1].split("\n  required:", 1)[0]
-for marker in (
-    "needs: quick",
-    "uses: ./.github/workflows/productization-journey.yml",
-    "features: all",
-    "permissions:\n      contents: read\n      packages: read",
-):
-    if marker not in ci_productization:
-        failures.append(f"ordinary CI productization caller misses {marker!r}")
-
-for marker in (
-    "productization:",
-    "needs: [changes, quick, lint, test, cli, console, policy, productization]",
-    "PRODUCTIZATION_RESULT: ${{ needs.productization.result }}",
-    '--productization-result "$PRODUCTIZATION_RESULT"',
-):
-    if marker not in ci:
-        failures.append(f"required CI summary misses productization marker {marker!r}")
+if "uses: ./.github/workflows/productization-journey.yml" in ci:
+    failures.append("ordinary push/PR CI invokes the full Productization journey")
+required_ci = ci.split("\n  required:", 1)[-1]
+if "productization" in required_ci.lower():
+    failures.append("ordinary required CI summary still depends on Productization evidence")
+if "needs: [changes, quick, lint, test, cli, console, policy]" not in required_ci:
+    failures.append("required CI summary does not close the lightweight lane set")
 
 if failures:
     raise SystemExit("\n".join(failures))

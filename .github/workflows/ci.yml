@@ -87,7 +87,7 @@ jobs:
             scripts/tests/test_product_release.py
 
   lint:
-    name: Workspace lint and checks
+    name: Static contracts and formatting
     needs: changes
     if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
@@ -96,7 +96,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.94.1
-          components: rustfmt, clippy
+          components: rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: "v1-registry-only"
@@ -104,12 +104,7 @@ jobs:
           cache-targets: "false"
           cache-on-failure: "false"
       - name: Check Platform v1 machine contracts and fixtures
-        run: |
-          python3 scripts/check-platform-v1-contracts.py
-          cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
-          cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
-            validate-production-profile \
-            contracts/platform-v1/qualification/production-release-profile.json
+        run: python3 scripts/check-platform-v1-contracts.py
       - name: Check production qualification topology preflight
         run: |
           python3 -m unittest \
@@ -120,7 +115,7 @@ jobs:
       - name: Check signed candidate pipeline contract
         run: python3 scripts/check-platform-candidate-pipeline.py
       - name: Check Platform v1 PostgreSQL schema contract
-        run: python3 scripts/check-platform-postgres-schema.py && cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
+        run: python3 scripts/check-platform-postgres-schema.py
       - name: Check crate boundaries and dependency feature baseline
         run: bash scripts/check-crate-boundaries.sh
       - name: Install Helm for Sandbox deployment contract
@@ -153,14 +148,10 @@ jobs:
         run: bash scripts/check-platform-mcp-cleanup-deployment.sh
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --locked --workspace --all-targets --all-features
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: Workspace full tests
-    needs: changes
+    name: Workspace Rust verification
+    needs: [changes, quick, lint]
     if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     env:
@@ -168,11 +159,6 @@ jobs:
       # identities; each fixture exercises its own internal concurrency, but fixture processes
       # must not race one another for the same authority rows or tracing dispatcher.
       RUST_TEST_THREADS: "1"
-      PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-      # Model conformance performs consecutive global WDRR claims and therefore needs an
-      # independent durable authority rather than competing with earlier fixture tenants.
-      PLATFORM_MODEL_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
-      PLATFORM_TEST_NATS_URL: nats://localhost:4222
     services:
       postgres:
         image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
@@ -196,12 +182,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.94.1
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           prefix-key: "v1-registry-only"
           shared-key: "registry-only"
           cache-targets: "false"
           cache-on-failure: "false"
+      - name: Run authoritative Rust contract validators
+        run: |
+          cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
+          cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
+            validate-production-profile \
+            contracts/platform-v1/qualification/production-release-profile.json
+          cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Provision clean-cut Platform PostgreSQL baseline
         env:
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
@@ -237,6 +233,11 @@ jobs:
           bash scripts/provision-platform-artifact-roles.sh
       - name: Test
         env:
+          PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
+          # Model conformance performs consecutive global WDRR claims and therefore needs an
+          # independent durable authority rather than competing with earlier fixture tenants.
+          PLATFORM_MODEL_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
+          PLATFORM_TEST_NATS_URL: nats://localhost:4222
           PLATFORM_TEST_PROVISION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_provision
           PLATFORM_SECURITY_AUTHORITY_TEST_ROLE: platform_security_authority_qualification
           PLATFORM_ARTIFACT_DATA_READER_TEST_ROLE: platform_artifact_data_reader_qualification
@@ -263,10 +264,9 @@ jobs:
           prefix-key: "v1-cli"
           shared-key: "cli"
           cache-on-failure: "false"
-      - name: Check CLI formatting and component
+      - name: Check CLI formatting and lints
         run: |
           cargo fmt --all -- --check
-          cargo check --locked -p insight-cli --all-targets
           cargo clippy --locked -p insight-cli --all-targets -- -D warnings
       - name: Test CLI and compile Productization journeys
         run: |
@@ -323,20 +323,10 @@ jobs:
       - name: Check dependency policy
         run: cargo deny check
 
-  productization:
-    name: Required exact-revision productization 10/10
-    needs: quick
-    uses: ./.github/workflows/productization-journey.yml
-    with:
-      features: all
-    permissions:
-      contents: read
-      packages: read
-
   required:
     name: Required CI summary
     if: always()
-    needs: [changes, quick, lint, test, cli, console, policy, productization]
+    needs: [changes, quick, lint, test, cli, console, policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -353,7 +343,6 @@ jobs:
           CLI_RESULT: ${{ needs.cli.result }}
           CONSOLE_RESULT: ${{ needs.console.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
-          PRODUCTIZATION_RESULT: ${{ needs.productization.result }}
         run: |
           python3 scripts/check-required-ci-results.py \
             --runtime-selected "$RUNTIME_SELECTED" \
@@ -366,5 +355,4 @@ jobs:
             --test-result "$TEST_RESULT" \
             --cli-result "$CLI_RESULT" \
             --console-result "$CONSOLE_RESULT" \
-            --policy-result "$POLICY_RESULT" \
-            --productization-result "$PRODUCTIZATION_RESULT"
+            --policy-result "$POLICY_RESULT"

@@ -24,7 +24,13 @@ def selections(**overrides: bool) -> dict[str, bool]:
 
 
 class RequiredCiResultsTests(unittest.TestCase):
-    def test_runtime_selection_requires_both_full_lanes_and_skips_cli(self) -> None:
+    def test_lane_set_excludes_periodic_productization(self) -> None:
+        self.assertEqual(
+            set(MODULE.expected_results(selections())),
+            {"changes", "quick", "lint", "test", "cli", "console", "policy"},
+        )
+
+    def test_runtime_selection_requires_static_and_rust_lanes_and_skips_cli(self) -> None:
         selected = selections(runtime=True, cli=True, policy=True)
         expected = MODULE.expected_results(selected)
         self.assertEqual(expected["lint"], "success")
@@ -69,15 +75,6 @@ class RequiredCiResultsTests(unittest.TestCase):
                 "lint lane expected success but was 'failure'",
                 "test lane expected success but was 'cancelled'",
             ],
-        )
-
-    def test_productization_is_always_required_and_cannot_skip(self) -> None:
-        actual = MODULE.expected_results(selections())
-        self.assertEqual(actual["productization"], "success")
-        actual["productization"] = "skipped"
-        self.assertEqual(
-            MODULE.validate_results(selections(), actual),
-            ["productization lane expected success but was 'skipped'"],
         )
 
 
