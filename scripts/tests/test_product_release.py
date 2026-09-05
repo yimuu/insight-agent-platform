@@ -752,6 +752,21 @@ class ProductReleaseTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("real, non-symlink directory", result.stderr)
 
+    def test_signer_accepts_an_attached_option_like_base64url_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            bundle = root / "release-bundle.json"
+            bundle.write_bytes(b"{}")
+            result = subprocess.run([
+                "python3", str(SIGNER), "--bundle", str(bundle),
+                "--private-key", str(root / "missing-private.pem"),
+                f"--public-key-base64={'-' + 'A' * 42}",
+                "--output", str(root / "signature.json"),
+            ], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("expected one argument", result.stderr)
+            self.assertIn("release signing command failed", result.stderr)
+
     def test_signer_binds_the_configured_public_trust_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -772,7 +787,7 @@ class ProductReleaseTests(unittest.TestCase):
             public = __import__("base64").urlsafe_b64encode(public_der.read_bytes()[-32:]).decode().rstrip("=")
             result = subprocess.run([
                 "python3", str(SIGNER), "--bundle", str(bundle), "--private-key", str(private),
-                "--public-key-base64", public, "--output", str(signature),
+                f"--public-key-base64={public}", "--output", str(signature),
             ], cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             signature_document = json.loads(signature.read_bytes())
@@ -787,7 +802,7 @@ class ProductReleaseTests(unittest.TestCase):
             self.assertEqual(64, len(decoded_signature))
             wrong = subprocess.run([
                 "python3", str(SIGNER), "--bundle", str(bundle), "--private-key", str(private),
-                "--public-key-base64", "A" * 43, "--output", str(signature),
+                f"--public-key-base64={'A' * 43}", "--output", str(signature),
             ], cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(wrong.returncode, 0)
 

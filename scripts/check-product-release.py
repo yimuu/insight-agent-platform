@@ -42,6 +42,9 @@ for marker in (
     if marker not in workflow:
         failures.append(f"product release workflow misses {marker!r}")
 
+if workflow.count('--public-key-base64="$RELEASE_PUBLIC_KEY"') != 2:
+    failures.append("release signing must bind option-like base64url keys to their argument")
+
 for forbidden in (":latest", ":candidate-", "docker build ", "cargo build --release --workspace"):
     if forbidden in workflow:
         failures.append(f"product release workflow contains forbidden marker {forbidden!r}")

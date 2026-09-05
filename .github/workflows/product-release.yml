@@ -371,7 +371,7 @@ jobs:
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
           python3 scripts/sign-product-release.py \
             --bundle "$RUNNER_TEMP/release-assets/release-bundle.json" --private-key "$key" \
-            --public-key-base64 "$RELEASE_PUBLIC_KEY" \
+            --public-key-base64="$RELEASE_PUBLIC_KEY" \
             --output "$RUNNER_TEMP/release-assets/release-bundle.signature.json"
           rm -f "$key"
           cosign sign-blob --yes --bundle "$RUNNER_TEMP/release-assets/release-bundle.sigstore.json" \
@@ -563,7 +563,7 @@ jobs:
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
           python3 scripts/sign-product-release.py \
             --bundle "$assets/release-bundle.json" --private-key "$key" \
-            --public-key-base64 "$RELEASE_PUBLIC_KEY" \
+            --public-key-base64="$RELEASE_PUBLIC_KEY" \
             --output "$assets/release-bundle.signature.json"
           rm -f "$key"
           cosign sign-blob --yes --bundle "$assets/release-bundle.sigstore.json" \
