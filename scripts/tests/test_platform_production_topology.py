@@ -143,7 +143,7 @@ def security_inputs():
         "opensandbox-batchsandbox": (
             f"system:serviceaccount:{MODULE.CONTROL_NAMESPACE}:opensandbox-server "
             f"system:serviceaccount:{MODULE.CONTROL_NAMESPACE}:opensandbox-controller "
-            "armed-runner-v1 execd-installer"
+            "armed-runner-v2 execd-installer"
         ),
         "opensandbox-pods": (
             f"system:serviceaccount:{MODULE.CONTROL_NAMESPACE}:opensandbox-controller "

@@ -71,7 +71,7 @@ spec:
         has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
         object.metadata.labels['platform.insight.dev/purpose'] in ['job', 'readiness'] &&
         object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
-        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
+        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v2'
       message: BatchSandbox must carry the closed Platform operator labels
     - expression: >-
         has(object.spec.template) && has(object.spec.template.spec) &&
@@ -100,19 +100,27 @@ spec:
         !has(object.spec.template.spec.containers[0].args) && !has(object.spec.template.spec.containers[0].envFrom)
       message: sandbox image and command must be the immutable fixed Armed runner
     - expression: >-
-        object.spec.template.spec.containers[0].env.size() == 5 &&
+        object.spec.template.spec.containers[0].env.size() == 6 &&
         object.spec.template.spec.containers[0].env.all(e,
-          e.name in ['INSIGHT_SANDBOX_RUNNER_CONFIG', 'INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST', 'OPENSANDBOX_ID', 'EXECD_INIT', 'EXECD'] &&
-          has(e.value) && !has(e.valueFrom))
-      message: sandbox environment is not the closed credential-free runner frame
+          e.name in ['INSIGHT_SANDBOX_RUNNER_CONFIG', 'INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST', 'OPENSANDBOX_ID', 'EXECD_ACCESS_TOKEN', 'EXECD_INIT', 'EXECD'] &&
+          has(e.value) && !has(e.valueFrom)) &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'INSIGHT_SANDBOX_RUNNER_CONFIG') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'OPENSANDBOX_ID') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'EXECD_INIT') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'EXECD') &&
+        object.spec.template.spec.containers[0].env.exists_one(e,
+          e.name == 'EXECD_ACCESS_TOKEN' && e.value.matches('^[0-9a-f]{64}$'))
+      message: sandbox environment is not the closed authenticated execd and runner frame
     - expression: >-
-        object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.template.spec.securityContext.supplementalGroupsPolicy == 'Strict' &&
+        object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == true &&
         object.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
         object.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
         object.spec.template.spec.containers[0].securityContext.runAsUser == 65532 &&
         object.spec.template.spec.containers[0].securityContext.runAsGroup == 65532 &&
         object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
-        object.spec.template.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETUID']
+        object.spec.template.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETGID', 'SETUID']
       message: Armed runner container security context drifted
     - expression: >-
         object.spec.template.spec.volumes.size() == 3 &&
@@ -156,7 +164,7 @@ spec:
         has(object.metadata.labels) && object.metadata.labels['platform.insight.dev/schema'] == 'v1' &&
         object.metadata.labels['platform.insight.dev/purpose'] in ['job', 'readiness'] &&
         object.metadata.labels['platform.insight.dev/network'] in ['direct', 'disabled'] &&
-        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v1'
+        object.metadata.labels['insight.platform/sandbox-template'] == 'armed-runner-v2'
       message: workload Pod lacks the closed Platform labels
     - expression: >-
         object.spec.serviceAccountName == 'sandbox-workload' && object.spec.automountServiceAccountToken == false &&
@@ -166,7 +174,8 @@ spec:
         (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
         !has(object.spec.runtimeClassName) && !has(object.spec.nodeName) &&
         object.spec.securityContext.runAsNonRoot == true &&
-        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault'
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        object.spec.securityContext.supplementalGroupsPolicy == 'Strict'
       message: workload Pod escaped the fixed service-account, namespace, scheduler, or runc closure
     - expression: >-
         object.spec.initContainers.size() == 1 && object.spec.initContainers[0].name == 'execd-installer' &&
@@ -176,13 +185,13 @@ spec:
         object.spec.containers[0].command == ['/opt/opensandbox/bootstrap.sh', '/usr/local/bin/platform-sandbox-runner']
       message: workload Pod image or command is not the exact execd plus Armed runner closure
     - expression: >-
-        object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.containers[0].securityContext.allowPrivilegeEscalation == true &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
         object.spec.containers[0].securityContext.runAsNonRoot == true &&
         object.spec.containers[0].securityContext.runAsUser == 65532 &&
         object.spec.containers[0].securityContext.runAsGroup == 65532 &&
         object.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
-        object.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETUID'] &&
+        object.spec.containers[0].securityContext.capabilities.add == ['KILL', 'SETGID', 'SETUID'] &&
         object.spec.volumes.all(v, !has(v.hostPath) && !has(v.projected) && !has(v.secret) && !has(v.persistentVolumeClaim))
       message: workload Pod gained privilege, writable root, host/runtime socket, token, Secret, or persistent storage
 ---

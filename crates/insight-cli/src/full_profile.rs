@@ -4,7 +4,7 @@
 //! connect to an authority or execute worker logic; each generated document is consumed and
 //! revalidated by the corresponding independent Platform process.
 
-use super::fresh_resource_id;
+use super::DevProfile;
 use insight_platform_contracts::{
     builtin_json_codec_module_digest, builtin_json_grpc_error_mapping_digest,
     builtin_json_grpc_protobuf_contract_digest, builtin_json_grpc_request_mapping_digest,
@@ -12,7 +12,7 @@ use insight_platform_contracts::{
     builtin_json_http_protocol_contract_digest, builtin_json_http_request_mapping_digest,
     builtin_json_http_response_mapping_digest, builtin_json_mcp_output_mapping_digest,
     canonical_digest, CapabilityBackendContract, GrpcCapabilityContract, HttpCapabilityContract,
-    HttpCapabilityMethod, McpToolCapabilityContract, ResourceKind, BUILTIN_JSON_CODEC_ID,
+    HttpCapabilityMethod, McpToolCapabilityContract, ResourceId, BUILTIN_JSON_CODEC_ID,
     BUILTIN_JSON_CODEC_VERSION,
 };
 pub(crate) use insight_platform_contracts::{
@@ -141,40 +141,26 @@ pub(crate) struct WorkerDigests<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PortBindings {
     pub(crate) context_native_observability: u16,
     pub(crate) artifact_maintenance_observability: u16,
     pub(crate) security_authority: u16,
     pub(crate) security_authority_observability: u16,
-    #[serde(default = "default_egress_broker_port")]
     pub(crate) egress_broker: u16,
-    #[serde(default = "default_egress_broker_observability_port")]
     pub(crate) egress_broker_observability: u16,
-    #[serde(default = "default_model_worker_observability_port")]
     pub(crate) model_worker_observability: u16,
-    #[serde(default = "default_remote_context_worker_observability_port")]
     pub(crate) remote_context_worker_observability: u16,
-    #[serde(default = "default_mcp_host_port")]
     pub(crate) mcp_host: u16,
-    #[serde(default = "default_mcp_host_observability_port")]
     pub(crate) mcp_host_observability: u16,
-    #[serde(default = "default_mcp_resource_host_port")]
     pub(crate) mcp_resource_host: u16,
-    #[serde(default = "default_mcp_resource_host_observability_port")]
     pub(crate) mcp_resource_host_observability: u16,
-    #[serde(default = "default_capability_remote_observability_port")]
     pub(crate) capability_remote_observability: u16,
-    #[serde(default = "default_mcp_discovery_observability_port")]
     pub(crate) mcp_discovery_observability: u16,
-    #[serde(default = "default_mcp_subscription_observability_port")]
     pub(crate) mcp_subscription_observability: u16,
-    #[serde(default = "default_mcp_cleanup_observability_port")]
     pub(crate) mcp_cleanup_observability: u16,
-    #[serde(default = "default_context_subscription_observability_port")]
     pub(crate) context_subscription_observability: u16,
-    #[serde(default = "default_callback_api_port")]
     pub(crate) callback_api: u16,
-    #[serde(default = "default_context_dataset_observability_port")]
     pub(crate) context_dataset_observability: u16,
 }
 
@@ -203,100 +189,36 @@ impl PortBindings {
         })
     }
 
-    pub(crate) const fn legacy_defaults() -> Self {
+    #[cfg(test)]
+    pub(crate) const fn static_test_ports() -> Self {
         Self {
             context_native_observability: 19_095,
             artifact_maintenance_observability: 19_096,
             security_authority: 19_097,
             security_authority_observability: 19_098,
-            egress_broker: default_egress_broker_port(),
-            egress_broker_observability: default_egress_broker_observability_port(),
-            model_worker_observability: default_model_worker_observability_port(),
-            remote_context_worker_observability: default_remote_context_worker_observability_port(),
-            mcp_host: default_mcp_host_port(),
-            mcp_host_observability: default_mcp_host_observability_port(),
-            mcp_resource_host: default_mcp_resource_host_port(),
-            mcp_resource_host_observability: default_mcp_resource_host_observability_port(),
-            capability_remote_observability: default_capability_remote_observability_port(),
-            mcp_discovery_observability: default_mcp_discovery_observability_port(),
-            mcp_subscription_observability: default_mcp_subscription_observability_port(),
-            mcp_cleanup_observability: default_mcp_cleanup_observability_port(),
-            context_subscription_observability: default_context_subscription_observability_port(),
-            callback_api: default_callback_api_port(),
-            context_dataset_observability: default_context_dataset_observability_port(),
+            egress_broker: 19_099,
+            egress_broker_observability: 19_100,
+            model_worker_observability: 19_101,
+            remote_context_worker_observability: 19_102,
+            mcp_host: 19_103,
+            mcp_host_observability: 19_104,
+            mcp_resource_host: 19_105,
+            mcp_resource_host_observability: 19_106,
+            capability_remote_observability: 19_107,
+            mcp_discovery_observability: 19_108,
+            mcp_subscription_observability: 19_109,
+            mcp_cleanup_observability: 19_110,
+            context_subscription_observability: 19_111,
+            callback_api: 19_112,
+            context_dataset_observability: 19_113,
         }
-    }
-}
-
-const fn default_egress_broker_port() -> u16 {
-    19_099
-}
-
-const fn default_egress_broker_observability_port() -> u16 {
-    19_100
-}
-
-const fn default_model_worker_observability_port() -> u16 {
-    19_101
-}
-
-const fn default_remote_context_worker_observability_port() -> u16 {
-    19_102
-}
-
-const fn default_mcp_host_port() -> u16 {
-    19_103
-}
-
-const fn default_mcp_host_observability_port() -> u16 {
-    19_104
-}
-
-const fn default_mcp_resource_host_port() -> u16 {
-    19_105
-}
-
-const fn default_mcp_resource_host_observability_port() -> u16 {
-    19_106
-}
-
-const fn default_capability_remote_observability_port() -> u16 {
-    19_107
-}
-
-const fn default_mcp_discovery_observability_port() -> u16 {
-    19_108
-}
-
-const fn default_mcp_subscription_observability_port() -> u16 {
-    19_109
-}
-
-const fn default_mcp_cleanup_observability_port() -> u16 {
-    19_110
-}
-
-const fn default_context_subscription_observability_port() -> u16 {
-    19_111
-}
-
-const fn default_callback_api_port() -> u16 {
-    19_112
-}
-
-const fn default_context_dataset_observability_port() -> u16 {
-    19_113
-}
-
-impl Default for PortBindings {
-    fn default() -> Self {
-        Self::legacy_defaults()
     }
 }
 
 pub(crate) fn initial_configs(
     ports: &PortBindings,
     artifact_provider_catalog: &Value,
+    capability_protocol_profile_revision_id: &ResourceId,
     digests: WorkerDigests<'_>,
     egress: EgressConfigInputs<'_>,
 ) -> BTreeMap<String, (&'static str, Value)> {
@@ -361,7 +283,7 @@ pub(crate) fn initial_configs(
             .expect("the built-in MCP input schema digest is valid"),
         output_mapping_digest: builtin_json_mcp_output_mapping_digest(),
         protocol_profile: insight_platform_contracts::ExactVersionRef::new(
-            fresh_resource_id(ResourceKind::PolicyRevision),
+            capability_protocol_profile_revision_id.clone(),
             closed_local_digest("capability-mcp-protocol-profile")
                 .parse()
                 .expect("the built-in MCP protocol profile digest is valid"),
@@ -969,16 +891,48 @@ pub(crate) fn initial_process_launches(
     paths: ProcessPaths<'_>,
     ports: &PortBindings,
     config_digests: &BTreeMap<String, String>,
+    selected_profile: DevProfile,
     database_url: &str,
     common_aws: &[(&str, &str)],
-) -> Vec<ProcessLaunch> {
+) -> Result<Vec<ProcessLaunch>, String> {
     let binary = |name: &str| {
         paths
             .release
             .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
     };
-    let config_digest = |role: &str| config_digests.get(role).cloned().unwrap_or_default();
-    vec![
+    for role in [
+        "context-native",
+        "security-authority",
+        "egress-broker",
+        "model-worker",
+        "context-remote",
+        "mcp-host",
+        "mcp-resource-host",
+        "capability-remote",
+        "mcp-discovery",
+        "mcp-subscription",
+        "mcp-cleanup",
+        "context-subscription",
+        "callback-api",
+        "context-dataset",
+    ] {
+        if selected_profile.includes_role(role) && !config_digests.contains_key(role) {
+            return Err(format!(
+                "selected runtime role {role} has no exact configuration digest"
+            ));
+        }
+    }
+    let config_digest = |role: &str| {
+        if selected_profile.includes_role(role) {
+            config_digests
+                .get(role)
+                .expect("selected digests were validated above")
+                .clone()
+        } else {
+            String::new()
+        }
+    };
+    let launches = vec![
         ProcessLaunch {
             role: "context-native",
             binary: binary(INITIAL_BINARY_NAMES[0]),
@@ -1773,8 +1727,9 @@ pub(crate) fn initial_process_launches(
         },
     ]
     .into_iter()
-    .filter(|launch| config_digests.contains_key(launch.role))
-    .collect()
+    .filter(|launch| selected_profile.includes_role(launch.role))
+    .collect();
+    Ok(launches)
 }
 
 fn loopback_address(port: u16) -> String {
@@ -1819,6 +1774,7 @@ mod tests {
         let configs = initial_configs(
             &ports,
             &catalog,
+            &crate::fresh_resource_id(insight_platform_contracts::ResourceKind::PolicyRevision),
             WorkerDigests {
                 context_adapter: &adapter,
                 context_contract: &contract,
@@ -1946,9 +1902,11 @@ mod tests {
             },
             &ports,
             &digests,
+            DevProfile::parse(Some("all"), false, true).unwrap(),
             "postgres://local-authority",
             &[("AWS_ACCESS_KEY_ID", "test")],
-        );
+        )
+        .unwrap();
         assert_eq!(
             launches
                 .iter()
@@ -1956,7 +1914,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "context-native",
-                "artifact-maintenance",
                 "security-authority",
                 "egress-broker",
                 "model-worker",
@@ -1973,70 +1930,65 @@ mod tests {
             ]
         );
         assert_eq!(launches[0].ready_address, "127.0.0.1:31001");
-        assert_eq!(launches[1].ready_address, "127.0.0.1:31002");
-        assert_eq!(launches[2].ready_address, "127.0.0.1:31004");
-        assert_eq!(launches[3].ready_address, "127.0.0.1:31006");
-        assert_eq!(launches[4].ready_address, "127.0.0.1:31007");
-        assert_eq!(launches[5].ready_address, "127.0.0.1:31008");
-        assert_eq!(launches[6].ready_address, "127.0.0.1:31010");
-        assert_eq!(launches[7].ready_address, "127.0.0.1:31012");
-        assert_eq!(launches[8].ready_address, "127.0.0.1:31013");
-        assert_eq!(launches[9].ready_address, "127.0.0.1:31014");
-        assert_eq!(launches[10].ready_address, "127.0.0.1:31015");
-        assert_eq!(launches[11].ready_address, "127.0.0.1:31016");
-        assert_eq!(launches[12].ready_address, "127.0.0.1:31017");
-        assert_eq!(launches[13].ready_address, "127.0.0.1:31018");
-        assert_eq!(launches[14].ready_address, "127.0.0.1:31019");
+        assert_eq!(launches[1].ready_address, "127.0.0.1:31004");
+        assert_eq!(launches[2].ready_address, "127.0.0.1:31006");
+        assert_eq!(launches[3].ready_address, "127.0.0.1:31007");
+        assert_eq!(launches[4].ready_address, "127.0.0.1:31008");
+        assert_eq!(launches[5].ready_address, "127.0.0.1:31010");
+        assert_eq!(launches[6].ready_address, "127.0.0.1:31012");
+        assert_eq!(launches[7].ready_address, "127.0.0.1:31013");
+        assert_eq!(launches[8].ready_address, "127.0.0.1:31014");
+        assert_eq!(launches[9].ready_address, "127.0.0.1:31015");
+        assert_eq!(launches[10].ready_address, "127.0.0.1:31016");
+        assert_eq!(launches[11].ready_address, "127.0.0.1:31017");
+        assert_eq!(launches[12].ready_address, "127.0.0.1:31018");
+        assert_eq!(launches[13].ready_address, "127.0.0.1:31019");
         assert!(launches
             .iter()
             .all(|launch| launch.environment.iter().any(|(name, value)| name
                 .ends_with("CONFIG_DIGEST")
                 && value.starts_with("sha256:"))));
-        assert_eq!(
-            launches[1].extra_environment,
-            vec![("AWS_ACCESS_KEY_ID".to_owned(), "test".to_owned())]
-        );
-        assert!(launches[2].environment.iter().any(|(name, value)| *name
+        assert!(launches[1].environment.iter().any(|(name, value)| *name
             == "PLATFORM_SECURITY_AUTHORITY_CLIENT_CA_PATH"
             && value == "/project/runtime/tls/ca.pem"));
         assert_eq!(
-            launches[3].extra_environment,
+            launches[2].extra_environment,
             vec![("AWS_ACCESS_KEY_ID".to_owned(), "test".to_owned())]
         );
-        assert!(launches[3].environment.iter().any(|(name, value)| *name
+        assert!(launches[2].environment.iter().any(|(name, value)| *name
             == "PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH"
             && value == "/project/runtime/tls/egress-broker-client.pem"));
-        assert!(launches[4].environment.iter().any(|(name, value)| *name
+        assert!(launches[3].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MODEL_WORKER_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/model-worker-client.pem"));
-        assert!(launches[5].environment.iter().any(|(name, value)| *name
+        assert!(launches[4].environment.iter().any(|(name, value)| *name
             == "PLATFORM_REMOTE_CONTEXT_WORKER_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/context-worker-client.pem"));
-        assert!(launches[6].environment.iter().any(|(name, value)| *name
+        assert!(launches[5].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MCP_HOST_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/mcp-host-egress-client.pem"));
-        assert!(launches[7].environment.iter().any(|(name, value)| *name
+        assert!(launches[6].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MCP_RESOURCE_HOST_SERVER_CERT_PATH"
             && value == "/project/runtime/tls/mcp-resource-host.pem"));
-        assert!(launches[8].environment.iter().any(|(name, value)| *name
+        assert!(launches[7].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH"
             && value == "/project/runtime/tls/capability-remote-client.pem"));
-        assert!(launches[9].environment.iter().any(|(name, value)| *name
+        assert!(launches[8].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MCP_DISCOVERY_WORKER_CLIENT_CERT_PATH"
             && value == "/project/runtime/tls/mcp-discovery-client.pem"));
-        assert!(launches[10].environment.iter().any(|(name, value)| *name
+        assert!(launches[9].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MCP_SUBSCRIPTION_WORKER_CLIENT_CERT_PATH"
             && value == "/project/runtime/tls/mcp-subscription-client.pem"));
-        assert!(launches[11].environment.iter().any(|(name, value)| *name
+        assert!(launches[10].environment.iter().any(|(name, value)| *name
             == "PLATFORM_MCP_CLEANUP_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/mcp-cleanup-client.pem"));
-        assert!(launches[12].environment.iter().any(|(name, value)| *name
+        assert!(launches[11].environment.iter().any(|(name, value)| *name
             == "PLATFORM_SUBSCRIPTION_CONTEXT_WORKER_HOST_CERT_PATH"
             && value == "/project/runtime/tls/context-subscription-client.pem"));
-        assert!(launches[13].environment.iter().any(|(name, value)| *name
+        assert!(launches[12].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CALLBACK_API_EGRESS_CERT_PATH"
             && value == "/project/runtime/tls/callback-client.pem"));
-        assert!(launches[14].environment.iter().any(|(name, value)| *name
+        assert!(launches[13].environment.iter().any(|(name, value)| *name
             == "PLATFORM_CONTEXT_DATASET_WORKER_CLIENT_CERT_PATH"
             && value == "/project/runtime/tls/context-dataset-client.pem"));
 
@@ -2051,43 +2003,37 @@ mod tests {
             },
             &ports,
             &BTreeMap::from([("model-worker".to_owned(), digest('e'))]),
+            DevProfile::parse(Some("model"), false, true).unwrap(),
             "postgres://local-authority",
             &[],
         );
-        assert_eq!(scoped_launches.len(), 1);
-        assert_eq!(scoped_launches[0].role, "model-worker");
-        assert!(scoped_launches[0]
-            .environment
-            .iter()
-            .any(
-                |(name, value)| *name == "PLATFORM_MODEL_WORKER_CONFIG_DIGEST"
-                    && value == &digest('e')
-            ));
-    }
+        assert!(matches!(
+            scoped_launches,
+            Err(detail) if detail.contains("security-authority")
+        ));
 
-    #[test]
-    fn persisted_pre_egress_ports_replay_with_fixed_additive_defaults() {
-        let ports: PortBindings = serde_json::from_value(json!({
-            "context_native_observability": 31_001,
-            "artifact_maintenance_observability": 31_002,
-            "security_authority": 31_003,
-            "security_authority_observability": 31_004
-        }))
+        let scoped_launches = initial_process_launches(
+            ProcessPaths {
+                release: Path::new("/workspace/target/release"),
+                configuration: Path::new("/project/runtime/config"),
+                tls: Path::new("/project/runtime/tls"),
+                ca_certificate_file: "ca.pem",
+                nats_client_certificate_file: "nats-client.pem",
+                nats_client_private_key_file: "nats-client-key.pem",
+            },
+            &ports,
+            &digests,
+            DevProfile::parse(Some("model"), false, true).unwrap(),
+            "postgres://local-authority",
+            &[],
+        )
         .unwrap();
-        assert_eq!(ports.egress_broker, 19_099);
-        assert_eq!(ports.egress_broker_observability, 19_100);
-        assert_eq!(ports.model_worker_observability, 19_101);
-        assert_eq!(ports.remote_context_worker_observability, 19_102);
-        assert_eq!(ports.mcp_host, 19_103);
-        assert_eq!(ports.mcp_host_observability, 19_104);
-        assert_eq!(ports.mcp_resource_host, 19_105);
-        assert_eq!(ports.mcp_resource_host_observability, 19_106);
-        assert_eq!(ports.capability_remote_observability, 19_107);
-        assert_eq!(ports.mcp_discovery_observability, 19_108);
-        assert_eq!(ports.mcp_subscription_observability, 19_109);
-        assert_eq!(ports.mcp_cleanup_observability, 19_110);
-        assert_eq!(ports.context_subscription_observability, 19_111);
-        assert_eq!(ports.callback_api, 19_112);
-        assert_eq!(ports.context_dataset_observability, 19_113);
+        assert_eq!(
+            scoped_launches
+                .iter()
+                .map(|launch| launch.role)
+                .collect::<Vec<_>>(),
+            vec!["security-authority", "egress-broker", "model-worker"]
+        );
     }
 }

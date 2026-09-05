@@ -17,11 +17,14 @@ use insight_platform_sandbox::opensandbox::{
     SandboxCandidateMetadataV1, SandboxCandidatePurposeV1, SandboxCandidateV1,
     SandboxExecutionRequestV1, SandboxNetworkMode, SandboxPhysicalEvidenceV1, SandboxProviderError,
     SandboxProvisioningLimitsV1, SandboxResourceLimitsV1, SandboxRunnerPhaseV1,
-    SandboxRunnerStateFrameV1, MAX_SANDBOX_CANDIDATES, MAX_SANDBOX_CANDIDATE_PAGE_ITEMS,
-    MAX_SANDBOX_INPUT_BYTES, MAX_SANDBOX_ORPHAN_PAGE_ITEMS, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    SandboxRunnerRequestProofV1, SandboxRunnerStateFrameV1, MAX_SANDBOX_CANDIDATES,
+    MAX_SANDBOX_CANDIDATE_PAGE_ITEMS, MAX_SANDBOX_INPUT_BYTES, MAX_SANDBOX_ORPHAN_PAGE_ITEMS,
+    OPENSANDBOX_EXECD_ACCESS_TOKEN_ENV, SANDBOX_CONTRACT_SCHEMA_VERSION,
     SANDBOX_RUNNER_CONFIG_DIGEST_ENV, SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PORT,
+    SANDBOX_RUNNER_PROOF_HEADER,
 };
 use reqwest::{header, Client, Method, RequestBuilder, StatusCode};
+use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
 use url::Url;
@@ -41,7 +44,7 @@ const METADATA_NETWORK: &str = "platform.insight.dev/network";
 const METADATA_PURPOSE: &str = "platform.insight.dev/purpose";
 const METADATA_TEMPLATE: &str = "insight.platform/sandbox-template";
 const METADATA_SCHEMA_VALUE: &str = "v1";
-const METADATA_TEMPLATE_VALUE: &str = "armed-runner-v1";
+const METADATA_TEMPLATE_VALUE: &str = "armed-runner-v2";
 const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 262_144;
 const MAX_API_KEY_BYTES: usize = 256;
 const MIN_API_KEY_BYTES: usize = 32;
@@ -229,8 +232,17 @@ impl OpenSandboxHttpClient {
                 return Err(SandboxProviderError::InvalidResponse);
             }
             let mut armed = None;
+            let proof = SandboxRunnerRequestProofV1::for_state(
+                &evidence.activation_token,
+                &candidate.sandbox_id,
+                &request.request_digest,
+            )
+            .map_err(|_| SandboxProviderError::InvalidResponse)?;
             for _ in 0..60 {
-                match self.runner_state(&candidate.sandbox_id).await {
+                match self
+                    .runner_state(&candidate.sandbox_id, proof.clone())
+                    .await
+                {
                     Ok(frame) if frame.phase == SandboxRunnerPhaseV1::Armed => {
                         armed = Some(frame);
                         break;
@@ -421,7 +433,7 @@ impl OpenSandboxHttpClient {
         operation: &str,
     ) -> Result<Url, SandboxProviderError> {
         self.lifecycle_url(&format!(
-            "sandboxes/{}/proxy/{}/v1/{operation}",
+            "sandboxes/{}/proxy/{}/v2/{operation}",
             sandbox_id.as_str(),
             SANDBOX_RUNNER_PORT
         ))
@@ -538,6 +550,7 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
             .map_err(|_| SandboxProviderError::InvalidResponse)?;
         let expected_metadata = request.metadata.clone();
         let expected_entrypoint = request.entrypoint.clone();
+        let execd_access_token = random_execd_access_token()?;
         let body = VendorCreateRequest {
             image: VendorImageRequest {
                 uri: request.image_uri,
@@ -546,6 +559,10 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
             resource_limits: VendorResourceLimits::from_limits(&request.resource_limits),
             resource_requests: VendorResourceLimits::from_limits(&request.resource_limits),
             env: BTreeMap::from([
+                (
+                    OPENSANDBOX_EXECD_ACCESS_TOKEN_ENV.to_owned(),
+                    execd_access_token,
+                ),
                 (SANDBOX_RUNNER_CONFIG_ENV.to_owned(), runner_config),
                 (
                     SANDBOX_RUNNER_CONFIG_DIGEST_ENV.to_owned(),
@@ -621,10 +638,16 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
     async fn runner_state(
         &self,
         sandbox_id: &OpenSandboxId,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
         let url = self.runner_url(sandbox_id, "state")?;
         let frame: SandboxRunnerStateFrameV1 = self
-            .json_exchange(self.request(Method::GET, url), StatusCode::OK, 65_536)
+            .json_exchange(
+                self.request(Method::GET, url)
+                    .header(SANDBOX_RUNNER_PROOF_HEADER, proof.header_value()),
+                StatusCode::OK,
+                65_536,
+            )
             .await?;
         frame
             .validate()
@@ -639,16 +662,20 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
         &self,
         sandbox_id: &OpenSandboxId,
         frame: SandboxActivationFrameV1,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
         frame
             .validate_wire(MAX_SANDBOX_INPUT_BYTES)
             .map_err(|_| SandboxProviderError::InvalidResponse)?;
-        let bytes = canonical_body(&frame)?;
+        let bytes = frame
+            .canonical_bytes()
+            .map_err(|_| SandboxProviderError::InvalidResponse)?;
         let maximum = bytes.len().saturating_add(65_536);
         let url = self.runner_url(sandbox_id, "activate")?;
         let response: SandboxRunnerStateFrameV1 = self
             .json_exchange(
                 self.request(Method::POST, url)
+                    .header(SANDBOX_RUNNER_PROOF_HEADER, proof.header_value())
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::CONTENT_LENGTH, bytes.len())
                     .body(bytes),
@@ -679,12 +706,17 @@ impl OpenSandboxProvider for OpenSandboxHttpClient {
         &self,
         sandbox_id: &OpenSandboxId,
         maximum_bytes: u64,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<Vec<u8>, SandboxProviderError> {
         let maximum =
             usize::try_from(maximum_bytes).map_err(|_| SandboxProviderError::InvalidResponse)?;
         let url = self.runner_url(sandbox_id, "result")?;
         let exchange = self
-            .exchange(self.request(Method::GET, url), maximum)
+            .exchange(
+                self.request(Method::GET, url)
+                    .header(SANDBOX_RUNNER_PROOF_HEADER, proof.header_value()),
+                maximum,
+            )
             .await?;
         if exchange.status == StatusCode::TOO_EARLY {
             return Err(SandboxProviderError::NotReady);
@@ -1040,6 +1072,20 @@ fn zero_digest() -> Sha256Digest {
     format!("sha256:{}", "0".repeat(64))
         .parse()
         .expect("zero digest has a valid shape")
+}
+
+fn random_execd_access_token() -> Result<String, SandboxProviderError> {
+    use std::fmt::Write as _;
+
+    let mut bytes = [0_u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| SandboxProviderError::Unavailable)?;
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").map_err(|_| SandboxProviderError::Unavailable)?;
+    }
+    Ok(encoded)
 }
 
 #[derive(Debug, Serialize)]
@@ -1424,11 +1470,11 @@ mod tests {
                     )
                 }
             }
-            (Method::GET, "/v1/sandboxes/sandbox-one/proxy/18080/v1/state") => json_response(
+            (Method::GET, "/v1/sandboxes/sandbox-one/proxy/18080/v2/state") => json_response(
                 StatusCode::OK,
                 serde_json::to_value(state.runner_state.lock().await.clone()).unwrap(),
             ),
-            (Method::POST, "/v1/sandboxes/sandbox-one/proxy/18080/v1/activate") => {
+            (Method::POST, "/v1/sandboxes/sandbox-one/proxy/18080/v2/activate") => {
                 let activation: SandboxActivationFrameV1 = serde_json::from_slice(&body).unwrap();
                 let current = state.runner_state.lock().await.clone();
                 let next = SandboxRunnerStateFrameV1 {
@@ -1445,7 +1491,7 @@ mod tests {
                 *state.runner_state.lock().await = next.clone();
                 json_response(StatusCode::OK, serde_json::to_value(next).unwrap())
             }
-            (Method::GET, "/v1/sandboxes/sandbox-one/proxy/18080/v1/result") => {
+            (Method::GET, "/v1/sandboxes/sandbox-one/proxy/18080/v2/result") => {
                 if !state.result_ready.load(Ordering::SeqCst) {
                     return json_response(
                         StatusCode::TOO_EARLY,
@@ -1694,6 +1740,14 @@ mod tests {
         assert!(body.get("volumes").is_none());
         assert!(body.get("extensions").is_none());
         assert!(body["env"].get(OPENSANDBOX_ID_ENV).is_none());
+        assert_eq!(body["env"].as_object().unwrap().len(), 3);
+        let execd_access_token = body["env"][OPENSANDBOX_EXECD_ACCESS_TOKEN_ENV]
+            .as_str()
+            .unwrap();
+        assert_eq!(execd_access_token.len(), 64);
+        assert!(execd_access_token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
         assert!(!String::from_utf8_lossy(&create_record.body).contains("answer"));
         assert!(body["metadata"]
             .as_object()
@@ -1758,14 +1812,14 @@ mod tests {
             .any(|record| record.method == Method::POST && record.path == "/v1/sandboxes"));
         assert!(records.iter().any(|record| {
             record.method == Method::GET
-                && record.path == "/v1/sandboxes/sandbox-one/proxy/18080/v1/state"
+                && record.path == "/v1/sandboxes/sandbox-one/proxy/18080/v2/state"
         }));
         assert!(records.iter().any(|record| {
             record.method == Method::DELETE && record.path == "/v1/sandboxes/sandbox-one"
         }));
         assert!(!records
             .iter()
-            .any(|record| record.path.ends_with("/v1/activate")));
+            .any(|record| record.path.ends_with("/v2/activate")));
     }
 
     #[tokio::test]
@@ -1777,10 +1831,18 @@ mod tests {
             .await
             .unwrap()
             .sandbox_id;
-        let armed = client.runner_state(&sandbox_id).await.unwrap();
+        let signing_seed = evidence.activation_token;
+        let request_digest = create.runner_config.execution_request_digest.clone();
+        let armed = client
+            .runner_state(
+                &sandbox_id,
+                SandboxRunnerRequestProofV1::for_state(&signing_seed, &sandbox_id, &request_digest)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
         let request = execution_request();
-        let signing_seed = evidence.activation_token;
         let frame = SandboxActivationFrameV1 {
             magic: String::new(),
             schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
@@ -1796,18 +1858,66 @@ mod tests {
         }
         .seal_with(&signing_seed)
         .unwrap();
-        let activated = client.activate(&sandbox_id, frame).await.unwrap();
+        let body = frame.canonical_bytes().unwrap();
+        let activated = client
+            .activate(
+                &sandbox_id,
+                frame,
+                SandboxRunnerRequestProofV1::for_activate(
+                    &signing_seed,
+                    &sandbox_id,
+                    &request_digest,
+                    &body,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(activated.phase, SandboxRunnerPhaseV1::ActivationLatched);
         assert_eq!(
-            client.read_result(&sandbox_id, 1_114_112).await,
+            client
+                .read_result(
+                    &sandbox_id,
+                    1_114_112,
+                    SandboxRunnerRequestProofV1::for_result(
+                        &signing_seed,
+                        &sandbox_id,
+                        &request_digest,
+                    )
+                    .unwrap(),
+                )
+                .await,
             Err(SandboxProviderError::NotReady)
         );
         state.result_ready.store(true, Ordering::SeqCst);
         assert_eq!(
-            client.read_result(&sandbox_id, 16).await,
+            client
+                .read_result(
+                    &sandbox_id,
+                    16,
+                    SandboxRunnerRequestProofV1::for_result(
+                        &signing_seed,
+                        &sandbox_id,
+                        &request_digest,
+                    )
+                    .unwrap(),
+                )
+                .await,
             Err(SandboxProviderError::InvalidResponse)
         );
-        let result = client.read_result(&sandbox_id, 1_114_112).await.unwrap();
+        let result = client
+            .read_result(
+                &sandbox_id,
+                1_114_112,
+                SandboxRunnerRequestProofV1::for_result(
+                    &signing_seed,
+                    &sandbox_id,
+                    &request_digest,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(result, client_result(&create, &armed.boot_id));
 
         let observation = client.terminate(&sandbox_id).await.unwrap();

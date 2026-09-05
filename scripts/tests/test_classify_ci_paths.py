@@ -51,10 +51,9 @@ class ClassifyCiPathsTests(unittest.TestCase):
         self.assertTrue(result["cli"])
         self.assertFalse(result["runtime"])
 
-    def test_runtime_and_mcp_changes_select_full_and_interop(self) -> None:
+    def test_runtime_mcp_changes_select_full_workspace(self) -> None:
         result = MODULE.classify(["crates/platform-mcp-service/src/main.rs"])
         self.assertTrue(result["runtime"])
-        self.assertTrue(result["mcp_interop"])
 
     def test_dependency_change_selects_runtime_and_policy(self) -> None:
         result = MODULE.classify(["Cargo.lock"])

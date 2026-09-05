@@ -85,8 +85,10 @@ insight reset --path ./my-agent --confirm my-agent
 ```
 
 默认 profile 名为 `starter`。closed feature 是 `model`、`remote-capability`、`context`、`mcp`、`sandbox` 和其
-canonical union `all`。增加 feature 只追加 identity/config/role；隐式移除被拒绝。`--offline` 只使用已验证 cache，
-缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
+canonical union `all`。同一 release/source 内增加 feature 只追加 identity/config/role；隐式移除被拒绝。切换 exact
+release/source 时必须先以 persisted feature 集合运行一次 `dev`，不能在同一次操作中同时切 identity 和增加 feature。`start` 从已验证的
+runtime profile 恢复 exact feature/release/source closure，并在安全 running 点修复 project summary；它不会从可能滞后的 summary 反向切换。
+`--offline` 只使用已验证 cache，缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
 
 `status` 明确输出 `single-node-development`、`production=false` 和 L4～L6 `not_run`。
 
@@ -99,4 +101,5 @@ insight update apply --version <exact-stable-version>
 ```
 
 update 验证组织 Ed25519 trust root、canonical ReleaseBundle、目标平台、CLI size/digest、profile/schema digest 与 exact
-image manifest，再以同目录原子 rename 替换 binary。它不自动重启本地环境。
+image manifest，再以同目录原子 rename 替换 binary。它不自动变更 project-local runtime identity；先 `insight stop`，再以
+原 feature 集合运行一次 `insight dev` 完成 release transition，之后才可在另一次 `dev` 增加 feature。

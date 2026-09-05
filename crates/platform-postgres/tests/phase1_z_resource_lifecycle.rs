@@ -981,7 +981,10 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     ));
 
     let draft_digest = draft.document_digest().unwrap();
-    let now = Utc::now();
+    let database_now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let validation_request = RequestResourceValidation {
         audit: audit(TENANT_ID, PRINCIPAL_ID, "7c20", 'c', 'd'),
         resource_id: id(RESOURCE_ID),
@@ -990,8 +993,8 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
         validator_digest: digest('e'),
         validation_profile_digest: digest('f'),
         attempt_limit: 3,
-        scheduled_at: now,
-        deadline: now + Duration::minutes(5),
+        scheduled_at: database_now - Duration::seconds(1),
+        deadline: database_now + Duration::minutes(5),
     };
     let validation_job = applied(
         registry_command!(
@@ -1005,7 +1008,13 @@ async fn resource_lifecycle_is_typed_atomic_and_not_auto_activated() {
     assert_eq!(validation_job.work_class, "registry_validation");
     assert_eq!(validation_job.owner_kind, "job");
     sqlx::query(
-        "UPDATE insight_platform.jobs SET version = 2, updated_at = clock_timestamp() WHERE tenant_id = $1 AND job_id = $2",
+        r#"
+        UPDATE insight_platform.jobs
+        SET version = 2,
+            scheduled_at = clock_timestamp() - interval '1 second',
+            updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND job_id = $2
+        "#,
     )
     .bind(TENANT_ID)
     .bind(JOB_ID)

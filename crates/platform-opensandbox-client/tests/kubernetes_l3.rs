@@ -17,7 +17,8 @@ use insight_platform_sandbox::opensandbox::{
     OpenSandboxCreateV1, OpenSandboxProvider, SandboxActivationFrameV1, SandboxExecutionRequestV1,
     SandboxNetworkMode, SandboxPhysicalEvidenceV1, SandboxProviderError,
     SandboxProvisioningLimitsV1, SandboxResourceLimitsV1, SandboxRunnerOutcomeV1,
-    SandboxRunnerPhaseV1, SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_PACKAGE_UID,
+    SandboxRunnerPhaseV1, SandboxRunnerRequestProofV1, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    SANDBOX_PACKAGE_UID,
 };
 use serde_json::{json, Value};
 use std::{env, time::Duration};
@@ -167,7 +168,7 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
         SandboxNetworkMode::Disabled,
         vec!["/opt/insight/package".to_owned(), "echo".to_owned()],
     );
-    let (first, second, token_digest) = two_authorized_creates(&concurrent, 'c', 60);
+    let (first, second, token_digest, signing_seed) = two_authorized_creates(&concurrent, 'c', 60);
     let (first_result, second_result) = tokio::join!(
         client.create_candidate(first),
         client.create_candidate(second),
@@ -179,7 +180,14 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
     assert_eq!(candidates.len(), 2);
     for sandbox_id in candidates {
         assert_eq!(
-            wait_for_runner(&client, &sandbox_id).await.phase,
+            wait_for_runner(
+                &client,
+                &sandbox_id,
+                &signing_seed,
+                &concurrent.request_digest,
+            )
+            .await
+            .phase,
             SandboxRunnerPhaseV1::Armed
         );
         delete_and_wait(&client, &sandbox_id).await;
@@ -191,13 +199,20 @@ async fn opensandbox_kubernetes_l3_concurrent_response_loss_and_network_modes() 
         SandboxNetworkMode::Disabled,
         vec!["/opt/insight/package".to_owned(), "echo".to_owned()],
     );
-    let (create, token_digest, _) = authorized_create(&response_loss, 'd', 1, 60);
+    let (create, token_digest, evidence) = authorized_create(&response_loss, 'd', 1, 60);
     let short_client = context.client(100);
     assert!(short_client.create_candidate(create).await.is_err());
     let recovered = wait_for_candidates(&client, token_digest, 1).await;
     assert_eq!(recovered.len(), 1);
     assert_eq!(
-        wait_for_runner(&client, &recovered[0]).await.phase,
+        wait_for_runner(
+            &client,
+            &recovered[0],
+            &evidence.activation_token,
+            &response_loss.request_digest,
+        )
+        .await
+        .phase,
         SandboxRunnerPhaseV1::Armed
     );
     delete_and_wait(&client, &recovered[0]).await;
@@ -244,8 +259,20 @@ async fn opensandbox_kubernetes_l3_signed_activation_is_candidate_bound() {
     );
     let first = first.unwrap();
     let second = second.unwrap();
-    let first_armed = wait_for_runner(&client, &first.sandbox_id).await;
-    let second_armed = wait_for_runner(&client, &second.sandbox_id).await;
+    let first_armed = wait_for_runner(
+        &client,
+        &first.sandbox_id,
+        &evidence.activation_token,
+        &request.request_digest,
+    )
+    .await;
+    let second_armed = wait_for_runner(
+        &client,
+        &second.sandbox_id,
+        &evidence.activation_token,
+        &request.request_digest,
+    )
+    .await;
     let activation = SandboxActivationFrameV1 {
         magic: String::new(),
         schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
@@ -261,15 +288,45 @@ async fn opensandbox_kubernetes_l3_signed_activation_is_candidate_bound() {
     }
     .seal_with(&evidence.activation_token)
     .unwrap();
+    let activation_proof = SandboxRunnerRequestProofV1::for_activate(
+        &evidence.activation_token,
+        &second.sandbox_id,
+        &request.request_digest,
+        &activation.canonical_bytes().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        client.activate(&second.sandbox_id, activation).await,
+        client
+            .activate(&second.sandbox_id, activation, activation_proof)
+            .await,
         Err(SandboxProviderError::InvalidResponse)
     );
-    let second_after = client.runner_state(&second.sandbox_id).await.unwrap();
+    let second_after = client
+        .runner_state(
+            &second.sandbox_id,
+            state_proof(
+                &evidence.activation_token,
+                &second.sandbox_id,
+                &request.request_digest,
+            ),
+        )
+        .await
+        .unwrap();
     assert_eq!(second_after.phase, SandboxRunnerPhaseV1::Armed);
     assert_eq!(second_after.boot_id, second_armed.boot_id);
     assert_eq!(
-        client.runner_state(&first.sandbox_id).await.unwrap().phase,
+        client
+            .runner_state(
+                &first.sandbox_id,
+                state_proof(
+                    &evidence.activation_token,
+                    &first.sandbox_id,
+                    &request.request_digest,
+                ),
+            )
+            .await
+            .unwrap()
+            .phase,
         SandboxRunnerPhaseV1::Armed
     );
     delete_and_wait(&client, &first.sandbox_id).await;
@@ -344,7 +401,13 @@ async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recrea
         delete_and_wait(&client, &sandbox_id).await;
     }
     let candidate = client.create_candidate(create).await.unwrap();
-    let armed = wait_for_runner(&client, &candidate.sandbox_id).await;
+    let armed = wait_for_runner(
+        &client,
+        &candidate.sandbox_id,
+        &evidence.activation_token,
+        &request.request_digest,
+    )
+    .await;
     assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
     let signing_seed = evidence.activation_token;
     let activation = SandboxActivationFrameV1 {
@@ -362,8 +425,15 @@ async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recrea
     }
     .seal_with(&signing_seed)
     .unwrap();
+    let activation_proof = SandboxRunnerRequestProofV1::for_activate(
+        &signing_seed,
+        &candidate.sandbox_id,
+        &request.request_digest,
+        &activation.canonical_bytes().unwrap(),
+    )
+    .unwrap();
     client
-        .activate(&candidate.sandbox_id, activation)
+        .activate(&candidate.sandbox_id, activation, activation_proof)
         .await
         .unwrap();
     wait_for_runner_phase(
@@ -371,6 +441,8 @@ async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recrea
         &candidate.sandbox_id,
         &armed.boot_id,
         SandboxRunnerPhaseV1::Started,
+        &signing_seed,
+        &request.request_digest,
     )
     .await;
 
@@ -393,6 +465,8 @@ async fn opensandbox_kubernetes_l3_runner_boot_changes_after_workload_pod_recrea
         &candidate.sandbox_id,
         &old_pod_uid,
         &armed.boot_id,
+        &signing_seed,
+        &request.request_digest,
     )
     .await;
     assert_eq!(recreated.phase, SandboxRunnerPhaseV1::Armed);
@@ -413,13 +487,20 @@ async fn opensandbox_kubernetes_l3_persistent_candidate_create() {
         SandboxNetworkMode::Disabled,
         vec!["/opt/insight/package".to_owned(), "echo".to_owned()],
     );
-    let (create, token_digest, _) = authorized_create(&request, 'e', 1, 120);
+    let (create, token_digest, evidence) = authorized_create(&request, 'e', 1, 120);
     for sandbox_id in list_candidates(&client, token_digest.clone()).await {
         delete_and_wait(&client, &sandbox_id).await;
     }
     let candidate = client.create_candidate(create).await.unwrap();
     assert_eq!(
-        wait_for_runner(&client, &candidate.sandbox_id).await.phase,
+        wait_for_runner(
+            &client,
+            &candidate.sandbox_id,
+            &evidence.activation_token,
+            &request.request_digest,
+        )
+        .await
+        .phase,
         SandboxRunnerPhaseV1::Armed
     );
     assert_eq!(list_candidates(&client, token_digest).await.len(), 1);
@@ -438,11 +519,18 @@ async fn opensandbox_kubernetes_l3_persistent_candidate_recovers_after_provider_
         SandboxNetworkMode::Disabled,
         vec!["/opt/insight/package".to_owned(), "echo".to_owned()],
     );
-    let (_, token_digest, _) = authorized_create(&request, 'e', 1, 120);
+    let (_, token_digest, evidence) = authorized_create(&request, 'e', 1, 120);
     let candidates = wait_for_candidates(&client, token_digest, 1).await;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        wait_for_runner(&client, &candidates[0]).await.phase,
+        wait_for_runner(
+            &client,
+            &candidates[0],
+            &evidence.activation_token,
+            &request.request_digest,
+        )
+        .await
+        .phase,
         SandboxRunnerPhaseV1::Armed
     );
     delete_and_wait(&client, &candidates[0]).await;
@@ -531,7 +619,13 @@ async fn execute_retained(
 ) -> (insight_platform_sandbox::opensandbox::OpenSandboxId, Value) {
     let (create, _, evidence) = authorized_create(request, token_character, 1, 60);
     let candidate = client.create_candidate(create).await.unwrap();
-    let armed = wait_for_runner(client, &candidate.sandbox_id).await;
+    let armed = wait_for_runner(
+        client,
+        &candidate.sandbox_id,
+        &evidence.activation_token,
+        &request.request_digest,
+    )
+    .await;
     assert_eq!(armed.phase, SandboxRunnerPhaseV1::Armed);
     let signing_seed = evidence.activation_token;
     let activation = SandboxActivationFrameV1 {
@@ -549,8 +643,15 @@ async fn execute_retained(
     }
     .seal_with(&signing_seed)
     .unwrap();
+    let activation_proof = SandboxRunnerRequestProofV1::for_activate(
+        &signing_seed,
+        &candidate.sandbox_id,
+        &request.request_digest,
+        &activation.canonical_bytes().unwrap(),
+    )
+    .unwrap();
     let activated = client
-        .activate(&candidate.sandbox_id, activation)
+        .activate(&candidate.sandbox_id, activation, activation_proof)
         .await
         .unwrap();
     assert!(matches!(
@@ -559,12 +660,25 @@ async fn execute_retained(
             | SandboxRunnerPhaseV1::Started
             | SandboxRunnerPhaseV1::Succeeded
     ));
-    let result = wait_for_result(client, &candidate.sandbox_id).await;
+    let result = wait_for_result(
+        client,
+        &candidate.sandbox_id,
+        &signing_seed,
+        &request.request_digest,
+    )
+    .await;
     let frame = parse_result_frame(&result, request, &armed.boot_id).unwrap();
     let output = match frame.result {
         SandboxRunnerOutcomeV1::Succeeded { output, .. } => output,
-        SandboxRunnerOutcomeV1::Failed { failure_class, .. } => {
-            panic!("L3 Package failed: {failure_class:?}")
+        SandboxRunnerOutcomeV1::Failed {
+            failure_class,
+            diagnostic_digest,
+            diagnostic_bytes,
+        } => {
+            panic!(
+                "L3 Package failed: class={failure_class:?} diagnostic_digest={diagnostic_digest} diagnostic_bytes={diagnostic_bytes} sandbox_id={:?}",
+                candidate.sandbox_id
+            )
         }
     };
     (candidate.sandbox_id, output)
@@ -642,21 +756,39 @@ fn two_authorized_creates(
     request: &SandboxExecutionRequestV1,
     token_character: char,
     ttl_seconds: u32,
-) -> (OpenSandboxCreateV1, OpenSandboxCreateV1, Sha256Digest) {
-    let (first, token_digest, _) = authorized_create(request, token_character, 1, ttl_seconds);
+) -> (
+    OpenSandboxCreateV1,
+    OpenSandboxCreateV1,
+    Sha256Digest,
+    OpaqueActivationToken,
+) {
+    let (first, token_digest, evidence) =
+        authorized_create(request, token_character, 1, ttl_seconds);
     let (second, second_token_digest, _) =
         authorized_create(request, token_character, 2, ttl_seconds);
     assert_eq!(token_digest, second_token_digest);
-    (first, second, token_digest)
+    (first, second, token_digest, evidence.activation_token)
+}
+
+fn state_proof(
+    signing_seed: &OpaqueActivationToken,
+    sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+    execution_request_digest: &Sha256Digest,
+) -> SandboxRunnerRequestProofV1 {
+    SandboxRunnerRequestProofV1::for_state(signing_seed, sandbox_id, execution_request_digest)
+        .unwrap()
 }
 
 async fn wait_for_runner(
     client: &OpenSandboxHttpClient,
     sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+    signing_seed: &OpaqueActivationToken,
+    execution_request_digest: &Sha256Digest,
 ) -> insight_platform_sandbox::opensandbox::SandboxRunnerStateFrameV1 {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let proof = state_proof(signing_seed, sandbox_id, execution_request_digest);
     loop {
-        if let Ok(frame) = client.runner_state(sandbox_id).await {
+        if let Ok(frame) = client.runner_state(sandbox_id, proof.clone()).await {
             return frame;
         }
         assert!(Instant::now() < deadline, "runner did not become reachable");
@@ -669,11 +801,14 @@ async fn wait_for_runner_phase(
     sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
     boot_id: &insight_platform_sandbox::opensandbox::RunnerBootId,
     expected_phase: SandboxRunnerPhaseV1,
+    signing_seed: &OpaqueActivationToken,
+    execution_request_digest: &Sha256Digest,
 ) {
     let deadline = Instant::now() + Duration::from_secs(30);
+    let proof = state_proof(signing_seed, sandbox_id, execution_request_digest);
     loop {
         if client
-            .runner_state(sandbox_id)
+            .runner_state(sandbox_id, proof.clone())
             .await
             .is_ok_and(|frame| frame.boot_id == *boot_id && frame.phase == expected_phase)
         {
@@ -693,14 +828,17 @@ async fn wait_for_recreated_runner(
     sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
     old_pod_uid: &str,
     old_boot_id: &insight_platform_sandbox::opensandbox::RunnerBootId,
+    signing_seed: &OpaqueActivationToken,
+    execution_request_digest: &Sha256Digest,
 ) -> insight_platform_sandbox::opensandbox::SandboxRunnerStateFrameV1 {
     let deadline = Instant::now() + Duration::from_secs(90);
+    let proof = state_proof(signing_seed, sandbox_id, execution_request_digest);
     loop {
         let pod_was_recreated = workload_pod_uid(workloads_namespace, sandbox_id)
             .await
             .is_some_and(|uid| uid != old_pod_uid);
         if pod_was_recreated {
-            if let Ok(frame) = client.runner_state(sandbox_id).await {
+            if let Ok(frame) = client.runner_state(sandbox_id, proof.clone()).await {
                 if frame.boot_id != *old_boot_id {
                     return frame;
                 }
@@ -781,10 +919,18 @@ async fn kubectl(arguments: &[&str]) -> Vec<u8> {
 async fn wait_for_result(
     client: &OpenSandboxHttpClient,
     sandbox_id: &insight_platform_sandbox::opensandbox::OpenSandboxId,
+    signing_seed: &OpaqueActivationToken,
+    execution_request_digest: &Sha256Digest,
 ) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let proof =
+        SandboxRunnerRequestProofV1::for_result(signing_seed, sandbox_id, execution_request_digest)
+            .unwrap();
     loop {
-        if let Ok(result) = client.read_result(sandbox_id, 1_114_112).await {
+        if let Ok(result) = client
+            .read_result(sandbox_id, 1_114_112, proof.clone())
+            .await
+        {
             return result;
         }
         assert!(

@@ -1576,7 +1576,11 @@ async fn run_capability_phase3_fixture() {
         plaintext_digest: digest('8'),
     };
     let callback_binding_digest = digest('9');
-    let next_poll_at = Utc::now() + Duration::seconds(1);
+    let next_poll_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '1 second'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let deferred_fence = JobFence {
         expected_version: u64::try_from(progress_job.version).unwrap(),
         ..first_claim.fence()
@@ -1652,7 +1656,21 @@ async fn run_capability_phase3_fixture() {
     .unwrap();
     assert_eq!(stale_callback_durable_rows, 0);
 
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let poll_due_deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+    loop {
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if database_now >= next_poll_at {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < poll_due_deadline,
+            "the PostgreSQL authority clock reaches the deferred poll window"
+        );
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
     let callback_command = WakeCapabilityInvocation {
         audit: signal_audit(&fixture.tenant_id, 0x490, 'c', 'd'),
         invocation_id: deferred.invocation.invocation_id.clone(),
@@ -1680,8 +1698,6 @@ async fn run_capability_phase3_fixture() {
         CommandOutcome::Applied(record) => record,
         CommandOutcome::Replayed(_) => panic!("fresh poll replayed"),
     };
-    assert_eq!(callback_record.invocation, poll_record.invocation);
-    assert_eq!(callback_record.job, poll_record.job);
     let wake_winner_rows: (i64, i64) = sqlx::query_as(
         r#"
         SELECT
@@ -1700,7 +1716,58 @@ async fn run_capability_phase3_fixture() {
     .await
     .unwrap();
     assert_eq!(wake_winner_rows, (1, 1));
-    let woken = callback_record;
+    let callback_receipt_id = id(ResourceKind::Receipt, 0x490).to_string();
+    let poll_receipt_id = id(ResourceKind::Receipt, 0x498).to_string();
+    let wake_receipts: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT receipt_id, state, disposition
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_id IN ($2, $3)
+        ORDER BY receipt_id
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(&callback_receipt_id)
+    .bind(&poll_receipt_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(wake_receipts.len(), 2);
+    assert!(wake_receipts
+        .iter()
+        .all(|(_, state, _)| state == "succeeded"));
+    assert_eq!(
+        wake_receipts
+            .iter()
+            .filter(|(_, _, disposition)| disposition.as_deref() == Some("applied"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        wake_receipts
+            .iter()
+            .filter(|(_, _, disposition)| disposition.as_deref() == Some("rejected_stale"))
+            .count(),
+        1
+    );
+    let callback_applied = wake_receipts.iter().any(|(receipt_id, _, disposition)| {
+        receipt_id == &callback_receipt_id && disposition.as_deref() == Some("applied")
+    });
+    let poll_applied = wake_receipts.iter().any(|(receipt_id, _, disposition)| {
+        receipt_id == &poll_receipt_id && disposition.as_deref() == Some("applied")
+    });
+    assert_ne!(callback_applied, poll_applied);
+    let (woken, rejected) = if callback_applied {
+        (&callback_record, &poll_record)
+    } else {
+        (&poll_record, &callback_record)
+    };
+    assert_eq!(rejected.invocation, woken.invocation);
+    assert_eq!(rejected.job, woken.job);
+    assert_eq!(
+        woken.invocation.state,
+        insight_platform_contracts::InvocationState::InFlight
+    );
     assert_eq!(woken.job.state, "ready");
     let second_claim = claim_one(&repository, &fixture.tenant_id, 0x4a0).await;
     assert_eq!(second_claim.claimed.job.job_id, deferred_job_id.to_string());

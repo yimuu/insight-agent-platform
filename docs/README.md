@@ -27,6 +27,7 @@ Platform v2 是架构代号，不会产生 `/v2` API。OpenSandbox 仓库实现�
 公开或跨进程边界以 OpenAPI、JSON Schema、protobuf 和生成 registry 为 authority；持久化结构以 migration 为 authority；
 进程内语义以 owning Rust type 与 domain test 为 authority；ADR 记录架构取舍。`docs/current` 解释当前行为，不建立第二套
 字段或状态机。Git 历史只用于追溯，不能恢复旧 DSL、单进程 runtime、fallback 或双写。
+旧实现、配置、Schema、镜像内容与可执行资格 harness 已从活跃工作树删除，不作为 archive 或兼容入口保留。
 
 ## 设计与验证
 
@@ -35,4 +36,5 @@ Platform v2 是架构代号，不会产生 `/v2` API。OpenSandbox 仓库实现�
 - [PostgreSQL 基线决策](adr/0001-platform-v2-postgres-baseline.md)
 - [产品入口边界决策](adr/0004-product-surface-boundaries.md)
 - [OpenSandbox 执行决策](adr/0007-opensandbox-execution-provider.md)
+- [Sandbox runner capability 与镜像闭包决策](adr/0008-sandbox-runner-capability-boundary.md)
 - [开发阶段验证状态](qualifications/README.md)

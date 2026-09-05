@@ -5,13 +5,10 @@ WORKDIR /workspace
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-COPY src ./src
-COPY catalog ./catalog
 COPY contracts ./contracts
 COPY deploy ./deploy
 COPY release ./release
 COPY proto ./proto
-COPY database ./database
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
@@ -44,17 +41,13 @@ RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin platform-artifact-maintenance \
     --bin platform-egress-broker \
     --bin platform-security-authority \
-    --bin platform-sandbox-dispatcher \
-    --bin platform-sandbox-runner
+    --bin platform-sandbox-dispatcher
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
-COPY src ./src
-COPY catalog ./catalog
 COPY contracts ./contracts
 COPY deploy ./deploy
 COPY release ./release
-COPY database ./database
 
 RUN cargo build --locked --release --workspace \
     --bin insight \
@@ -81,8 +74,30 @@ RUN cargo build --locked --release --workspace \
     --bin platform-artifact-maintenance \
     --bin platform-egress-broker \
     --bin platform-security-authority \
-    --bin platform-sandbox-dispatcher \
-    --bin platform-sandbox-runner
+    --bin platform-sandbox-dispatcher
+
+# The capability handoff enters the Rust runner before any runtime thread exists. Both the
+# credential-scrubbing launcher and the runner core are static so package layers cannot interpose a
+# loader or constructor while either process holds the runner capability set.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends musl-tools binutils \
+    && rm -rf /var/lib/apt/lists/*
+RUN runner_target="$(rustc -vV | sed -n 's/^host: //p' | sed 's/-gnu$/-musl/')" \
+    && rustup target add "$runner_target" \
+    && CC=musl-gcc CXX=musl-gcc AR=ar \
+       RUSTFLAGS='-C linker=musl-gcc -C target-feature=+crt-static' \
+       cargo build --locked --release --target "$runner_target" \
+         -p insight-platform-sandbox-runner --bin platform-sandbox-runner \
+    && cp "target/$runner_target/release/platform-sandbox-runner" \
+         /workspace/platform-sandbox-runner-core
+RUN musl-gcc -std=c11 -O2 -Wall -Wextra -Werror -fPIE -static -pie \
+      -Wl,-z,relro,-z,now,-z,noexecstack \
+      -o /workspace/platform-sandbox-launcher \
+      crates/platform-sandbox-runner/native/launcher.c
+RUN ! readelf -l /workspace/platform-sandbox-runner-core | grep -q INTERP
+RUN ! readelf -d /workspace/platform-sandbox-runner-core | grep -q NEEDED
+RUN ! readelf -l /workspace/platform-sandbox-launcher | grep -q INTERP
+RUN ! readelf -d /workspace/platform-sandbox-launcher | grep -q NEEDED
 
 FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
 
@@ -121,11 +136,6 @@ COPY --from=builder /workspace/target/release/platform-artifact-maintenance /usr
 COPY --from=builder /workspace/target/release/platform-egress-broker /usr/local/bin/platform-egress-broker
 COPY --from=builder /workspace/target/release/platform-security-authority /usr/local/bin/platform-security-authority
 COPY --from=builder /workspace/target/release/platform-sandbox-dispatcher /usr/local/bin/platform-sandbox-dispatcher
-COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner
-COPY database /app/database
-
-RUN mkdir -p /data/artifacts \
-    && chown -R insight:insight /app /data
 
 USER 10001:10001
 
@@ -134,11 +144,36 @@ EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/platform-gateway"]
 
 # Published Sandbox Package images derive from this target, add only their immutable package
-# payload/runtime, and retain this exact entrypoint. OpenSandbox execd supervises the runner as
-# PID 1; the runner remains inert until the Dispatcher sends its one-shot activation frame.
+# payload, and retain this exact entrypoint. OpenSandbox execd is PID 1 and supervises the static
+# launcher/core pair; the core remains inert until the Dispatcher sends its one-shot activation.
 FROM runtime-base AS sandbox-runner
 
-COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner
+USER root
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && find / -xdev -perm /6000 -exec chmod a-s '{}' +
+COPY --from=builder --chown=0:0 /workspace/platform-sandbox-launcher /usr/local/bin/platform-sandbox-runner
+COPY --from=builder --chown=0:0 /workspace/platform-sandbox-runner-core /usr/local/libexec/platform-sandbox-runner-core
+RUN chmod 0555 /usr/local/bin/platform-sandbox-runner \
+    /usr/local/libexec/platform-sandbox-runner-core \
+    && install -d -o 0 -g 0 -m 0755 /opt/insight \
+    && setcap cap_kill,cap_setgid,cap_setuid=ep /usr/local/bin/platform-sandbox-runner \
+    && test "$(getcap /usr/local/bin/platform-sandbox-runner)" = \
+       '/usr/local/bin/platform-sandbox-runner cap_kill,cap_setgid,cap_setuid=ep' \
+    && test -z "$(find / -xdev -perm /6000 -print -quit)"
 USER 65532:65532
 EXPOSE 18080
 ENTRYPOINT ["/usr/local/bin/platform-sandbox-runner"]
+
+# Source-mode qualification derives its Package image from the exact runner stage in this build
+# graph. The released Package flow uses the separately verified, digest-pinned runner image.
+FROM builder AS sandbox-l3-package-builder
+COPY tests/fixtures/platform-sandbox-l3-package.rs /workspace/platform-sandbox-l3-package.rs
+RUN rustc --edition=2021 -C opt-level=2 -C strip=symbols \
+      -o /workspace/platform-sandbox-l3-package \
+      /workspace/platform-sandbox-l3-package.rs
+
+FROM sandbox-runner AS sandbox-l3-package
+COPY --from=sandbox-l3-package-builder --chown=65533:65532 \
+  /workspace/platform-sandbox-l3-package /opt/insight/package

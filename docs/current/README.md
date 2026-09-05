@@ -12,7 +12,8 @@ feature 闭包。仓库资格证明覆盖 L1～L3；真实发行与生产 L4～L
 - [部署与运维](operations.md)
 - [可观测性与告警处置](observability.md)
 
-旧 `insight.agent/v1` DSL、单进程 runtime 和 terminal-only 路径已经退出默认产品合同；历史设计可从 Git 查看。
+旧 `insight.agent/v1` DSL、单进程 runtime、terminal-only 与 SQLite 业务状态路径已从活跃 workspace、image、配置、
+Schema 和资格 harness 删除；历史只能从 Git 查看，不能作为兼容入口恢复。
 
 公开与跨进程边界以 `contracts/platform-v1` 中的 OpenAPI、JSON Schema、protobuf和生成registry为authority；持久化结构以
 migration为authority；进程内语义由owning Rust type与domain test约束。真实多节点OpenSandbox/Kubernetes production topology

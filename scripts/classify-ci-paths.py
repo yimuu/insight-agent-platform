@@ -25,7 +25,6 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
             "cli": True,
             "console": True,
             "runtime": True,
-            "mcp_interop": True,
             "policy": True,
         }
     normalized: list[PurePosixPath] = []
@@ -108,26 +107,11 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
         )
         for path in normalized
     )
-    mcp_interop = runtime and any(
-        is_under(path, prefix)
-        for path in normalized
-        for prefix in (
-            "crates/mcp",
-            "crates/platform-mcp-host",
-            "crates/platform-mcp-rpc",
-            "crates/platform-mcp-service",
-            "crates/platform-mcp-cleanup-worker",
-            "proto",
-            "contracts/platform-v1",
-            "tests/interop",
-        )
-    )
     return {
         "quick": True,
         "cli": cli,
         "console": console,
         "runtime": runtime,
-        "mcp_interop": mcp_interop,
         "policy": policy,
     }
 

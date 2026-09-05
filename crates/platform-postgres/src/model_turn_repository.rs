@@ -13,13 +13,13 @@ use crate::{
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_contracts::{
     canonical_digest, AgentResourceSpec, ArtifactRef, CommandOutcome, DeploymentClosure,
-    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget,
-    JobState, ModelBudgetPolicyDocument, ModelDeploymentClosure, ModelProfileResourceSpec,
-    ModelProviderDeploymentClosure, ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument,
-    ModelSafetyPolicyDocument, ModelTurnState, NodeExecutionState, Permission, PlanNodeKind,
-    PolicyKind, PolicyResourceSpec, QuotaDimension, RegistryResourceKind, ResourceDocument,
-    ResourceId, ResourceKind, RunBindingsSnapshot, RunState, Sha256Digest, SkillResourceSpec,
-    ValueRef, WorkClass,
+    EntityLifecycle, ExactDeploymentRef, ExactVersionRef, ExternalLeafFailureMutationIds,
+    FrozenSlotBinding, FrozenSlotTarget, JobState, ModelBudgetPolicyDocument,
+    ModelDeploymentClosure, ModelProfileResourceSpec, ModelProviderDeploymentClosure,
+    ModelProviderResourceSpec, ModelPublicProjectionPolicyDocument, ModelSafetyPolicyDocument,
+    ModelTurnState, NodeExecutionState, Permission, PlanNodeKind, PolicyKind, PolicyResourceSpec,
+    QuotaDimension, RegistryResourceKind, ResourceDocument, ResourceId, ResourceKind,
+    RunBindingsSnapshot, RunState, Sha256Digest, SkillResourceSpec, ValueRef, WorkClass,
 };
 use insight_platform_invocations::InvocationValueStorage;
 use insight_platform_jobs::{JobFence, JobProjection, LeasePolicy};
@@ -50,11 +50,12 @@ pub struct ExpiredModelRecoverySlot {
     pub quota_entry_ids: Vec<ResourceId>,
     pub event_id: ResourceId,
     pub outbox_id: ResourceId,
+    pub failure_mutations: ExternalLeafFailureMutationIds,
 }
 
 impl ExpiredModelRecoverySlot {
     fn validate(&self) -> Result<(), RepositoryError> {
-        let unique = self
+        let mut unique = self
             .quota_entry_ids
             .iter()
             .map(ToString::to_string)
@@ -67,10 +68,28 @@ impl ExpiredModelRecoverySlot {
                 .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
             || self.event_id.kind() != ResourceKind::Event
             || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.failure_mutations.validate().is_err()
         {
             return Err(RepositoryError::InvalidInput(
                 "expired Model recovery identity is invalid".to_owned(),
             ));
+        }
+        for id in [
+            &self.event_id,
+            &self.outbox_id,
+            &self.failure_mutations.convergence_job_id,
+            &self.failure_mutations.run_event_id,
+            &self.failure_mutations.run_outbox_id,
+            &self.failure_mutations.leaf_node_event_id,
+            &self.failure_mutations.leaf_node_outbox_id,
+            &self.failure_mutations.convergence_job_event_id,
+            &self.failure_mutations.convergence_job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "expired Model recovery identities must be globally unique".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -104,11 +123,17 @@ impl DriveExpiredModelJobs {
         let mut unique = BTreeSet::new();
         for slot in &self.slots {
             slot.validate()?;
-            for id in slot
-                .quota_entry_ids
-                .iter()
-                .chain([&slot.event_id, &slot.outbox_id])
-            {
+            for id in slot.quota_entry_ids.iter().chain([
+                &slot.event_id,
+                &slot.outbox_id,
+                &slot.failure_mutations.convergence_job_id,
+                &slot.failure_mutations.run_event_id,
+                &slot.failure_mutations.run_outbox_id,
+                &slot.failure_mutations.leaf_node_event_id,
+                &slot.failure_mutations.leaf_node_outbox_id,
+                &slot.failure_mutations.convergence_job_event_id,
+                &slot.failure_mutations.convergence_job_outbox_id,
+            ]) {
                 if !unique.insert(id.to_string()) {
                     return Err(RepositoryError::InvalidInput(
                         "expired Model recovery identities must be globally unique".to_owned(),
@@ -1853,7 +1878,7 @@ impl PgRepository {
               ON turn.tenant_id = job.tenant_id AND turn.invocation_id = job.owner_id
             WHERE job.work_class = 'model' AND job.owner_kind = 'model_turn'
               AND job.state = 'running' AND job.terminal_at IS NULL
-              AND job.lease_expires_at <= $1 AND job.attempt_no < job.attempt_limit
+              AND job.lease_expires_at <= $1
               AND job.deadline > $1 AND turn.state = 'in_flight' AND turn.terminal_at IS NULL
               AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $4) = $3
               AND ($5::timestamptz IS NULL OR
@@ -1932,6 +1957,16 @@ impl PgRepository {
             ResourceKind::Tenant,
             "expired Model tenant",
         )?;
+        let run_id = parse_required_id(
+            observed.run_id.as_deref(),
+            ResourceKind::Run,
+            "expired Model Run",
+        )?;
+        let node_id = parse_required_id(
+            observed.node_id.as_deref(),
+            ResourceKind::NodeExecution,
+            "expired Model NodeExecution",
+        )?;
         let model_turn_id = parse_required_id(
             Some(&observed.owner_id),
             ResourceKind::ModelTurn,
@@ -1942,6 +1977,10 @@ impl PgRepository {
             ResourceKind::Job,
             "expired Model Job",
         )?;
+        // Preserve the required quota -> Run -> Node -> owner -> Job lock order. Exhausted
+        // recovery may hand the Plan leaf back to orchestration in this transaction.
+        let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
+        let node = load_model_node_for_update(&mut transaction, &tenant_id, &node_id).await?;
         let current_turn = load_model_turn(
             &mut transaction,
             &tenant_id,
@@ -1952,7 +1991,19 @@ impl PgRepository {
         .await?;
         let current_job = load_model_job(&mut transaction, &tenant_id, &job_id, true).await?;
         let database_now = database_now(&mut transaction).await?;
+        let node_id_text = node_id.to_string();
         if database_now < scan_now
+            || run.terminal_at.is_some()
+            || node.run_id != run.run_id
+            || node.node_kind != PlanNodeKind::ModelLoop
+            || !matches!(
+                node.state,
+                NodeExecutionState::Running | NodeExecutionState::Waiting
+            )
+            || current_turn.run_id != run_id
+            || current_turn.node_execution_id != node_id
+            || current_job.run_id.as_deref() != Some(run.run_id.as_str())
+            || current_job.node_id.as_deref() != Some(node_id_text.as_str())
             || current_job.version != observed.version
             || current_job.lease_epoch != observed.lease_epoch
             || current_job.lease_token_digest != observed.lease_token_digest
@@ -1968,14 +2019,22 @@ impl PgRepository {
         }
         let projection = job_projection(&current_job)?;
         let payload: ModelJobPayload = decode_versioned_payload(&current_job.payload, "Model Job")?;
-        let retry_at = database_now
-            .checked_add_signed(Duration::milliseconds(
-                i64::try_from(retry_backoff_milliseconds).map_err(|_| {
-                    RepositoryError::InvalidInput("Model retry backoff exceeds bigint".to_owned())
-                })?,
-            ))
-            .filter(|retry_at| *retry_at < current_turn.deadline)
-            .ok_or_else(|| RepositoryError::Conflict("expired Model retry deadline"))?;
+        let retry_at = if projection.attempt_count < projection.attempt_limit {
+            Some(
+                database_now
+                    .checked_add_signed(Duration::milliseconds(
+                        i64::try_from(retry_backoff_milliseconds).map_err(|_| {
+                            RepositoryError::InvalidInput(
+                                "Model retry backoff exceeds bigint".to_owned(),
+                            )
+                        })?,
+                    ))
+                    .filter(|retry_at| *retry_at < current_turn.deadline)
+                    .ok_or_else(|| RepositoryError::Conflict("expired Model retry deadline"))?,
+            )
+        } else {
+            None
+        };
         let observation_digest: Sha256Digest = canonical_digest(&serde_json::json!({
             "job_id": job_id,
             "lease_generation": projection.lease_generation,
@@ -2026,8 +2085,29 @@ impl PgRepository {
             self.model_turn_limits(),
         )
         .await?;
-        release_model_plan_leaf_permit(&mut transaction, &current_job, &current_turn, database_now)
+        let plan_leaf_waiting = node.state == NodeExecutionState::Waiting;
+        if decision.turn.state == ModelTurnState::Failed && plan_leaf_waiting {
+            let failure = decision.turn.payload.failure.as_ref().ok_or_else(|| {
+                RepositoryError::CorruptRow("failed ModelTurn has no failure".to_owned())
+            })?;
+            crate::repository::settle_model_leaf_failure_in_transaction(
+                &mut transaction,
+                &decision.turn,
+                &job_id,
+                failure,
+                &slot.failure_mutations,
+                database_now,
+            )
             .await?;
+        } else {
+            release_model_plan_leaf_permit(
+                &mut transaction,
+                &current_job,
+                &current_turn,
+                database_now,
+            )
+            .await?;
+        }
         append_scheduler_event(
             &mut transaction,
             &current_job.tenant_id,

@@ -1773,6 +1773,15 @@ where
             quota_entry_ids: self.quota_entry_ids()?,
             event_id: self.new_id(ResourceKind::Event)?,
             outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds {
+                convergence_job_id: self.new_id(ResourceKind::Job)?,
+                run_event_id: self.new_id(ResourceKind::Event)?,
+                run_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                leaf_node_event_id: self.new_id(ResourceKind::Event)?,
+                leaf_node_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+                convergence_job_event_id: self.new_id(ResourceKind::Event)?,
+                convergence_job_outbox_id: self.new_id(ResourceKind::OutboxEvent)?,
+            },
         })
     }
 

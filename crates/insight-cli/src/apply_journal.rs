@@ -14,7 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const JOURNAL_KIND: &str = "insight.platform.apply-journal/v1";
+const JOURNAL_KIND: &str = "insight.platform.apply-journal/v2";
 const MAX_JOURNAL_BYTES: u64 = 131_072;
 
 #[derive(Debug)]
@@ -76,13 +76,12 @@ pub struct JournalPublishResult {
 pub struct JournalDeployment {
     pub deployment_id: ResourceId,
     pub etag: String,
-    #[serde(default)]
-    pub resource_etag: Option<String>,
+    pub resource_etag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ApplyJournalV1 {
+pub struct ApplyJournalV2 {
     pub schema_version: u16,
     pub kind: String,
     pub manifest_digest: Sha256Digest,
@@ -100,10 +99,10 @@ pub struct ApplyJournalV1 {
     pub step_trace_ids: BTreeMap<String, TraceId>,
 }
 
-impl ApplyJournalV1 {
+impl ApplyJournalV2 {
     pub fn new(manifest_digest: Sha256Digest, create_receipt: String) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             kind: JOURNAL_KIND.to_owned(),
             manifest_digest,
             create_intent: JournalIntent {
@@ -128,7 +127,7 @@ impl ApplyJournalV1 {
         &self,
         expected_manifest_digest: &Sha256Digest,
     ) -> Result<(), ApplyJournalError> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.kind != JOURNAL_KIND
             || &self.manifest_digest != expected_manifest_digest
             || !valid_intent(&self.create_intent, false)
@@ -172,11 +171,7 @@ impl ApplyJournalV1 {
             || self.deployment_intent.is_some() && self.publish.is_none()
             || self.deployment.is_some() && self.deployment_intent.is_none()
             || self.deployment.as_ref().is_some_and(|deployment| {
-                !valid_etag(&deployment.etag)
-                    || deployment
-                        .resource_etag
-                        .as_ref()
-                        .is_some_and(|etag| !valid_etag(etag))
+                !valid_etag(&deployment.etag) || !valid_etag(&deployment.resource_etag)
             })
             || self
                 .activation_intent
@@ -218,7 +213,7 @@ pub fn journal_path(directory: &Path, digest: &Sha256Digest) -> PathBuf {
     ))
 }
 
-pub fn load(path: &Path) -> Result<Option<ApplyJournalV1>, ApplyJournalError> {
+pub fn load(path: &Path) -> Result<Option<ApplyJournalV2>, ApplyJournalError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -235,7 +230,7 @@ pub fn load(path: &Path) -> Result<Option<ApplyJournalV1>, ApplyJournalError> {
         .map_err(|_| ApplyJournalError::Invalid("journal is not closed JSON".to_owned()))
 }
 
-pub fn save(path: &Path, journal: &ApplyJournalV1) -> Result<(), ApplyJournalError> {
+pub fn save(path: &Path, journal: &ApplyJournalV2) -> Result<(), ApplyJournalError> {
     journal.validate(&journal.manifest_digest)?;
     let directory = path.parent().ok_or_else(|| {
         ApplyJournalError::Invalid("journal path has no parent directory".to_owned())
@@ -319,9 +314,15 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let digest = digest();
         let path = journal_path(directory.path(), &digest);
-        let mut journal = ApplyJournalV1::new(digest.clone(), "receipt-create".to_owned());
+        let mut journal = ApplyJournalV2::new(digest.clone(), "receipt-create".to_owned());
         save(&path, &journal).unwrap();
         assert_eq!(load(&path).unwrap(), Some(journal.clone()));
+        assert_eq!(journal.schema_version, 2);
+        assert_eq!(journal.kind, "insight.platform.apply-journal/v2");
+        let mut legacy = journal.clone();
+        legacy.schema_version = 1;
+        legacy.kind = "insight.platform.apply-journal/v1".to_owned();
+        assert!(legacy.validate(&digest).is_err());
 
         journal.validation_intent = Some(JournalIntent {
             receipt: "receipt-validate".to_owned(),
@@ -334,5 +335,19 @@ mod tests {
             version: 1,
         });
         assert!(journal.validate(&digest).is_ok());
+    }
+
+    #[test]
+    fn deployment_resource_etag_is_required_without_legacy_fallback() {
+        let deployment_id =
+            ResourceId::from_uuid_v7(ResourceKind::PolicyDeployment, Uuid::now_v7()).unwrap();
+        let mut encoded = serde_json::to_value(JournalDeployment {
+            deployment_id,
+            etag: "\"pdep_example-1\"".to_owned(),
+            resource_etag: "\"pol_example-4\"".to_owned(),
+        })
+        .unwrap();
+        encoded.as_object_mut().unwrap().remove("resource_etag");
+        assert!(serde_json::from_value::<JournalDeployment>(encoded).is_err());
     }
 }

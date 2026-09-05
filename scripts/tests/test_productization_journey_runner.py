@@ -39,7 +39,7 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
     def test_north_star_precedes_the_heavy_scenario_test(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
         qualifier = "python3 scripts/qualify-productization-first-run.py"
-        scenario = "cargo test --locked -p insight-agent-platform --test productization"
+        scenario = "cargo test --locked -p insight-platform-qualification-tests --test productization"
         self.assertIn(qualifier, source)
         self.assertIn(scenario, source)
         self.assertLess(source.index(qualifier), source.index(scenario))

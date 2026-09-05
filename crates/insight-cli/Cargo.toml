@@ -15,6 +15,7 @@ base64.workspace = true
 chrono.workspace = true
 insight-platform-contracts.workspace = true
 jsonwebtoken.workspace = true
+libc.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 reqwest.workspace = true
 ring.workspace = true
@@ -23,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
-x509-parser.workspace = true
+x509-parser = { workspace = true, features = ["verify-aws"] }
 yaml-rust2.workspace = true
 yaml_serde.workspace = true
 

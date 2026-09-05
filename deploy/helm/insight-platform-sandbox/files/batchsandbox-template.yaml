@@ -3,13 +3,13 @@
 # OpenSandbox then explicitly merges only these fixed volumes, mounts, and main-container security.
 metadata:
   labels:
-    insight.platform/sandbox-template: armed-runner-v1
+    insight.platform/sandbox-template: armed-runner-v2
 spec:
   replicas: 1
   template:
     metadata:
       labels:
-        insight.platform/sandbox-template: armed-runner-v1
+        insight.platform/sandbox-template: armed-runner-v2
     spec:
       serviceAccountName: sandbox-workload
       automountServiceAccountToken: false
@@ -25,19 +25,20 @@ spec:
         runAsGroup: 65532
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
+        supplementalGroupsPolicy: Strict
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: sandbox
           securityContext:
-            allowPrivilegeEscalation: false
+            allowPrivilegeEscalation: true
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65532
             runAsGroup: 65532
             capabilities:
               drop: [ALL]
-              add: [KILL, SETUID]
+              add: [KILL, SETGID, SETUID]
           volumeMounts:
             - name: runner-state
               mountPath: /run/insight-sandbox

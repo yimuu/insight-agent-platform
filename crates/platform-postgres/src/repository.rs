@@ -31889,7 +31889,6 @@ pub(crate) struct StoredModelTurnWaitPayload {
     pub(crate) deadline: DateTime<Utc>,
     pub(crate) round_ordinal: u16,
     pub(crate) maximum_rounds: u16,
-    #[serde(default)]
     pub(crate) total_capability_calls: u32,
     pub(crate) maximum_capability_calls: u32,
     pub(crate) maximum_parallel_calls_per_round: u16,
@@ -38327,6 +38326,49 @@ mod tests {
     fn typed_payload_rejects_non_object_and_oversize() {
         assert!(TypedPayload::new(1, &vec![1, 2, 3]).is_err());
         assert!(TypedPayload::with_limit(1, &serde_json::json!({"large": "abcd"}), 4).is_err());
+    }
+
+    #[test]
+    fn model_turn_wait_requires_explicit_total_capability_calls() {
+        let id = |kind| ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap();
+        let digest = |marker: char| {
+            format!("sha256:{}", marker.to_string().repeat(64))
+                .parse()
+                .unwrap()
+        };
+        let wait = StoredModelTurnWaitPayload {
+            plan_node_key: PlanNodeKey::new("model-loop".to_owned()).unwrap(),
+            plan_digest: digest('a'),
+            source_orchestration_job_id: id(ResourceKind::Job),
+            model_turn_id: id(ResourceKind::ModelTurn),
+            model_job_id: id(ResourceKind::Job),
+            output_port: ExactDataPortRef::RunInput {
+                schema_digest: digest('b'),
+            },
+            resume_plan_node_key: PlanNodeKey::new("resume".to_owned()).unwrap(),
+            resume_node_kind: PlanNodeKind::Return,
+            root_scope_id: id(ResourceKind::ScopeInstance),
+            continuation_attempt_limit: 3,
+            retry_backoff_milliseconds: 100,
+            priority: SchedulerPriority::Normal,
+            deadline: Utc::now() + Duration::minutes(1),
+            round_ordinal: 2,
+            maximum_rounds: 4,
+            total_capability_calls: 3,
+            maximum_capability_calls: 8,
+            maximum_parallel_calls_per_round: 2,
+            token_budget: 1_024,
+        };
+        let mut value = serde_json::to_value(&wait).unwrap();
+        assert_eq!(
+            serde_json::from_value::<StoredModelTurnWaitPayload>(value.clone()).unwrap(),
+            wait
+        );
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("total_capability_calls");
+        assert!(serde_json::from_value::<StoredModelTurnWaitPayload>(value).is_err());
     }
 
     #[test]

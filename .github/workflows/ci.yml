@@ -28,7 +28,6 @@ jobs:
       cli: ${{ steps.classify.outputs.cli }}
       console: ${{ steps.classify.outputs.console }}
       runtime: ${{ steps.classify.outputs.runtime }}
-      mcp_interop: ${{ steps.classify.outputs.mcp_interop }}
       policy: ${{ steps.classify.outputs.policy }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -79,6 +78,9 @@ jobs:
             scripts/tests/test_productization_http_lifecycle.py \
             scripts/tests/test_productization_north_star_report.py \
             scripts/tests/test_productization_scenario_reports.py \
+            scripts/tests/test_inspect_platform_oci_image.py \
+            scripts/tests/test_verify_platform_sandbox_package_image.py \
+            scripts/tests/test_platform_kind_l4_opensandbox_probe.py \
             scripts/tests/test_development_profile_performance.py \
             scripts/tests/test_product_release.py
 
@@ -121,6 +123,8 @@ jobs:
         run: bash scripts/check-crate-boundaries.sh
       - name: Install Helm for Sandbox deployment contract
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.19.0
       - name: Check closed ComponentRole workload closure
         run: ruby scripts/check-platform-component-workload-closure.rb
       - name: Check Sandbox deployment contract
@@ -145,8 +149,6 @@ jobs:
         run: bash scripts/check-platform-callback-deployment.sh
       - name: Check MCP cleanup worker deployment boundary
         run: bash scripts/check-platform-mcp-cleanup-deployment.sh
-      - name: Check root public API baseline
-        run: CARGO_TARGET_DIR=target bash scripts/check-public-api-baseline.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
@@ -164,14 +166,10 @@ jobs:
       # identities; each fixture exercises its own internal concurrency, but fixture processes
       # must not race one another for the same authority rows or tracing dispatcher.
       RUST_TEST_THREADS: "1"
-      RUN_HISTORY_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-      # All durable PostgreSQL gates exercise the same real PG16 service in CI.
-      TEST_POSTGRES_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
       # Model conformance performs consecutive global WDRR claims and therefore needs an
       # independent durable authority rather than competing with earlier fixture tenants.
       PLATFORM_MODEL_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
-      TEST_NATS_URL: nats://localhost:4222
       PLATFORM_TEST_NATS_URL: nats://localhost:4222
     services:
       postgres:
@@ -271,7 +269,7 @@ jobs:
       - name: Test CLI and compile Productization journeys
         run: |
           cargo test --locked -p insight-cli
-          cargo test --locked -p insight-agent-platform --test productization --no-run
+          cargo test --locked -p insight-platform-qualification-tests --test productization --no-run
 
   console:
     name: Affected Console
@@ -284,7 +282,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          node-version: "24.11.1"
       - name: Enable pinned pnpm
         run: |
           corepack enable
@@ -297,42 +295,6 @@ jobs:
           corepack pnpm --dir web/console build
           corepack pnpm --dir web/console lint
           corepack pnpm --dir web/console browser:fixture:qualify
-
-  mcp-interop:
-    name: MCP external SDK interoperability
-    needs: changes
-    if: needs.changes.outputs.mcp_interop == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
-        with:
-          toolchain: 1.94.1
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "24"
-      - name: Enable pinned pnpm
-        run: |
-          corepack enable
-          corepack install --global pnpm@11.9.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26"
-          cache-dependency-path: tests/interop/go/go.sum
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          prefix-key: "v1-registry-only"
-          shared-key: "registry-only"
-          cache-targets: "false"
-          cache-on-failure: "false"
-      - name: Qualify modern MCP and Tasks against two pinned SDKs
-        run: bash scripts/qualify-mcp-external-sdk.sh
-      - name: Preserve qualification report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: mcp-external-sdk-qualification
-          path: target/mcp-qualification/report.json
-          if-no-files-found: error
 
   policy:
     name: Dependency policy
@@ -362,7 +324,7 @@ jobs:
   required:
     name: Required CI summary
     if: always()
-    needs: [changes, quick, lint, test, cli, console, mcp-interop, policy]
+    needs: [changes, quick, lint, test, cli, console, policy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -373,20 +335,17 @@ jobs:
           RUNTIME_SELECTED: ${{ needs.changes.outputs.runtime }}
           CLI_SELECTED: ${{ needs.changes.outputs.cli }}
           CONSOLE_SELECTED: ${{ needs.changes.outputs.console }}
-          MCP_SELECTED: ${{ needs.changes.outputs.mcp_interop }}
           POLICY_SELECTED: ${{ needs.changes.outputs.policy }}
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
           CLI_RESULT: ${{ needs.cli.result }}
           CONSOLE_RESULT: ${{ needs.console.result }}
-          MCP_RESULT: ${{ needs.mcp-interop.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
         run: |
           python3 scripts/check-required-ci-results.py \
             --runtime-selected "$RUNTIME_SELECTED" \
             --cli-selected "$CLI_SELECTED" \
             --console-selected "$CONSOLE_SELECTED" \
-            --mcp-interop-selected "$MCP_SELECTED" \
             --policy-selected "$POLICY_SELECTED" \
             --changes-result "$CHANGES_RESULT" \
             --quick-result "$QUICK_RESULT" \
@@ -394,5 +353,4 @@ jobs:
             --test-result "$TEST_RESULT" \
             --cli-result "$CLI_RESULT" \
             --console-result "$CONSOLE_RESULT" \
-            --mcp-interop-result "$MCP_RESULT" \
             --policy-result "$POLICY_RESULT"

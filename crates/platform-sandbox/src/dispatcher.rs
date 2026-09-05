@@ -12,7 +12,8 @@ use crate::opensandbox::{
     SandboxCleanupObservationV1, SandboxContractError, SandboxDurableObservationV1,
     SandboxFencedIdentityV1, SandboxJobRepository, SandboxPhysicalPhaseV1, SandboxProviderError,
     SandboxRepositoryDecisionV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
-    SandboxTerminalOutcomeV1, SelectSandboxCandidateV1, SANDBOX_CONTRACT_SCHEMA_VERSION,
+    SandboxRunnerRequestProofV1, SandboxTerminalOutcomeV1, SelectSandboxCandidateV1,
+    SANDBOX_CONTRACT_SCHEMA_VERSION,
 };
 use insight_platform_contracts::{canonical_digest, JobState, Sha256Digest};
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
@@ -226,9 +227,11 @@ where
                 }
                 SandboxPhysicalPhaseV1::CandidateSelected => {
                     let sandbox_id = selected_sandbox_id(&leased)?;
+                    let proof = state_proof(&leased, &sandbox_id)
+                        .map_err(SandboxDispatchError::Contract)?;
                     let state = self
                         .provider
-                        .runner_state(&sandbox_id)
+                        .runner_state(&sandbox_id, proof)
                         .await
                         .map_err(SandboxDispatchError::Provider)?;
                     if state.phase != SandboxRunnerPhaseV1::Armed {
@@ -251,9 +254,11 @@ where
                 }
                 SandboxPhysicalPhaseV1::ActivationAuthorized => {
                     let sandbox_id = selected_sandbox_id(&leased)?;
+                    let proof = state_proof(&leased, &sandbox_id)
+                        .map_err(SandboxDispatchError::Contract)?;
                     let state = self
                         .provider
-                        .runner_state(&sandbox_id)
+                        .runner_state(&sandbox_id, proof)
                         .await
                         .map_err(SandboxDispatchError::Provider)?;
                     if runner_boot_changed(&leased, &state)? {
@@ -281,8 +286,13 @@ where
                             )?,
                         )
                         .map_err(SandboxDispatchError::Contract)?;
+                        let body = frame
+                            .canonical_bytes()
+                            .map_err(SandboxDispatchError::Contract)?;
+                        let proof = activate_proof(&leased, &sandbox_id, &body)
+                            .map_err(SandboxDispatchError::Contract)?;
                         self.provider
-                            .activate(&sandbox_id, frame)
+                            .activate(&sandbox_id, frame, proof)
                             .await
                             .map_err(SandboxDispatchError::Provider)?
                     } else {
@@ -301,9 +311,11 @@ where
                 }
                 SandboxPhysicalPhaseV1::Started => {
                     let sandbox_id = selected_sandbox_id(&leased)?;
+                    let proof = state_proof(&leased, &sandbox_id)
+                        .map_err(SandboxDispatchError::Contract)?;
                     let state = self
                         .provider
-                        .runner_state(&sandbox_id)
+                        .runner_state(&sandbox_id, proof)
                         .await
                         .map_err(SandboxDispatchError::Provider)?;
                     if runner_boot_changed(&leased, &state)? {
@@ -580,7 +592,11 @@ where
             ));
         let bytes = self
             .provider
-            .read_result(&sandbox_id, maximum)
+            .read_result(
+                &sandbox_id,
+                maximum,
+                result_proof(leased, &sandbox_id).map_err(SandboxDispatchError::Contract)?,
+            )
             .await
             .map_err(SandboxDispatchError::Provider)?;
         let frame = parse_result_frame(&bytes, &leased.request, &boot_id)
@@ -648,6 +664,61 @@ fn leased_identity(leased: &LeasedSandboxJobV1) -> SandboxFencedIdentityV1 {
         job_id: leased.job.job_id.clone(),
         fence: leased.fence.clone(),
     }
+}
+
+fn state_proof(
+    leased: &LeasedSandboxJobV1,
+    sandbox_id: &crate::opensandbox::OpenSandboxId,
+) -> Result<SandboxRunnerRequestProofV1, SandboxContractError> {
+    let physical = selected_physical_evidence(leased, sandbox_id)?;
+    SandboxRunnerRequestProofV1::for_state(
+        &physical.activation_token,
+        sandbox_id,
+        &leased.request.request_digest,
+    )
+}
+
+fn activate_proof(
+    leased: &LeasedSandboxJobV1,
+    sandbox_id: &crate::opensandbox::OpenSandboxId,
+    canonical_body: &[u8],
+) -> Result<SandboxRunnerRequestProofV1, SandboxContractError> {
+    let physical = selected_physical_evidence(leased, sandbox_id)?;
+    SandboxRunnerRequestProofV1::for_activate(
+        &physical.activation_token,
+        sandbox_id,
+        &leased.request.request_digest,
+        canonical_body,
+    )
+}
+
+fn result_proof(
+    leased: &LeasedSandboxJobV1,
+    sandbox_id: &crate::opensandbox::OpenSandboxId,
+) -> Result<SandboxRunnerRequestProofV1, SandboxContractError> {
+    let physical = selected_physical_evidence(leased, sandbox_id)?;
+    SandboxRunnerRequestProofV1::for_result(
+        &physical.activation_token,
+        sandbox_id,
+        &leased.request.request_digest,
+    )
+}
+
+fn selected_physical_evidence<'a>(
+    leased: &'a LeasedSandboxJobV1,
+    sandbox_id: &crate::opensandbox::OpenSandboxId,
+) -> Result<&'a crate::opensandbox::SandboxPhysicalEvidenceV1, SandboxContractError> {
+    let physical = leased
+        .payload
+        .physical
+        .as_deref()
+        .ok_or(SandboxContractError::InvalidPhysicalTransition)?;
+    if physical.selected_sandbox_id.as_ref() != Some(sandbox_id)
+        || physical.provisioning_token.execution_request_digest != leased.request.request_digest
+    {
+        return Err(SandboxContractError::InvalidPhysicalTransition);
+    }
+    Ok(physical)
 }
 
 fn selected_sandbox_id<E>(
@@ -910,6 +981,7 @@ mod tests {
         async fn runner_state(
             &self,
             _sandbox_id: &OpenSandboxId,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             panic!("runner state is not reached")
         }
@@ -918,6 +990,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _frame: crate::opensandbox::SandboxActivationFrameV1,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             panic!("activation is not reached")
         }
@@ -926,6 +999,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _maximum_bytes: u64,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<Vec<u8>, SandboxProviderError> {
             panic!("result is not reached")
         }
@@ -989,6 +1063,7 @@ mod tests {
         async fn runner_state(
             &self,
             _sandbox_id: &OpenSandboxId,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             panic!("runner state is not reached by orphan sweep")
         }
@@ -997,6 +1072,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _frame: crate::opensandbox::SandboxActivationFrameV1,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             panic!("activation is not reached by orphan sweep")
         }
@@ -1005,6 +1081,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _maximum_bytes: u64,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<Vec<u8>, SandboxProviderError> {
             panic!("result is not reached by orphan sweep")
         }
@@ -1255,6 +1332,7 @@ mod tests {
         async fn runner_state(
             &self,
             _sandbox_id: &OpenSandboxId,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             Ok(self.state.clone())
         }
@@ -1263,6 +1341,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _frame: crate::opensandbox::SandboxActivationFrameV1,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError> {
             self.activate_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.state.clone())
@@ -1272,6 +1351,7 @@ mod tests {
             &self,
             _sandbox_id: &OpenSandboxId,
             _maximum_bytes: u64,
+            _proof: SandboxRunnerRequestProofV1,
         ) -> Result<Vec<u8>, SandboxProviderError> {
             panic!("result reading is not used by this rollover fixture")
         }

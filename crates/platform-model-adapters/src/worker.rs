@@ -196,8 +196,7 @@ where
                         failure.class = ModelAdapterFailureClass::Permanent;
                         failure.request_sent = true;
                         failure.retry_at = None;
-                        failure_outcome(&command.execution, failure, Utc::now())
-                            .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
+                        failure_outcome(&command.execution, failure, Utc::now())?
                     }
                 }
             }
@@ -206,8 +205,7 @@ where
                     "Model adapter execution failed: class={:?} safe_code={} request_sent={}",
                     failure.class, failure.safe_code, failure.request_sent
                 );
-                failure_outcome(&command.execution, failure, Utc::now())
-                    .map_err(|_| ModelAdapterWorkerContractError::InvalidCommand)?
+                failure_outcome(&command.execution, failure, Utc::now())?
             }
         };
         let resume_mutations = matches!(
@@ -256,12 +254,22 @@ where
 
 fn failure_outcome(
     execution: &ModelAdapterExecutionRequest,
-    failure: ModelAdapterFailure,
+    mut failure: ModelAdapterFailure,
     now: DateTime<Utc>,
 ) -> Result<ModelDispatchOutcome, ModelAdapterWorkerContractError> {
     failure
         .validate_for(execution, now)
         .map_err(|_| ModelAdapterWorkerContractError::InvalidFailure)?;
+    if execution.attempt_no >= execution.attempt_limit
+        && matches!(
+            failure.class,
+            ModelAdapterFailureClass::RetryableBeforeDispatch
+                | ModelAdapterFailureClass::RetryableAfterDispatch
+        )
+    {
+        failure.class = ModelAdapterFailureClass::Permanent;
+        failure.retry_at = None;
+    }
     let measurement = failure_measurement(execution, &failure)?;
     let retryable = matches!(
         failure.class,
@@ -353,10 +361,15 @@ fn host_failure(
     execution: &ModelAdapterExecutionRequest,
     now: DateTime<Utc>,
 ) -> ModelAdapterFailure {
+    let retry_at = (failure == ModelAdapterHostError::AdapterNotInstalled
+        && execution.attempt_no < execution.attempt_limit)
+        .then(|| now + chrono::Duration::milliseconds(250))
+        .filter(|retry_at| *retry_at < execution.request.deadline);
     let (class, request_sent) = match failure {
-        ModelAdapterHostError::AdapterNotInstalled => {
+        ModelAdapterHostError::AdapterNotInstalled if retry_at.is_some() => {
             (ModelAdapterFailureClass::RetryableBeforeDispatch, false)
         }
+        ModelAdapterHostError::AdapterNotInstalled => (ModelAdapterFailureClass::Permanent, false),
         ModelAdapterHostError::InvalidNormalizedStream
         | ModelAdapterHostError::InvalidNormalizedResponse
         | ModelAdapterHostError::InvalidAdapterFailure => {
@@ -369,10 +382,6 @@ fn host_failure(
             (ModelAdapterFailureClass::RejectedBeforeDispatch, false)
         }
     };
-    let retry_at = (class == ModelAdapterFailureClass::RetryableBeforeDispatch).then(|| {
-        (now + chrono::Duration::milliseconds(250))
-            .min(execution.request.deadline - chrono::Duration::milliseconds(1))
-    });
     let code = match failure {
         ModelAdapterHostError::InvalidInstalledAdapter => "model_invalid_installed_adapter",
         ModelAdapterHostError::DuplicateInstalledAdapter => "model_duplicate_installed_adapter",

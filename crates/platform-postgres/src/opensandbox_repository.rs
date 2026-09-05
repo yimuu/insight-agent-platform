@@ -934,7 +934,15 @@ impl SandboxJobRepository for PgRepository {
                 OR payload #>> '{cleanup,owner_process_generation_id}' IS NULL
                 OR (payload #>> '{cleanup,expires_at}')::timestamptz <= $2
               )
-            ORDER BY updated_at, job_id
+            ORDER BY
+              CASE
+                WHEN payload #>> '{cleanup,owner_process_generation_id}' = $4
+                  AND (payload #>> '{cleanup,expires_at}')::timestamptz > $2
+                THEN 0
+                ELSE 1
+              END,
+              updated_at,
+              job_id
             LIMIT $3
             FOR UPDATE SKIP LOCKED
             "#,

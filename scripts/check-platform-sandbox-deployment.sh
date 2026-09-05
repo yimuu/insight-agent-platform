@@ -22,6 +22,12 @@ for binary in platform-sandbox-dispatcher platform-sandbox-runner; do
     exit 1
   fi
 done
+if grep -Fq \
+  'COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner' \
+  "$root/Dockerfile"; then
+  echo "sandbox deployment: generic runtime still contains the non-launcher runner binary" >&2
+  exit 1
+fi
 
 helm lint "$chart" >/dev/null
 helm template sandbox "$chart" >"$rendered"
@@ -34,6 +40,9 @@ reject_values() {
 }
 
 reject_values --set-string images.server.digest=latest
+reject_values --set-string images.sandboxRunner.digest=latest
+reject_values --set-string images.sandboxRunner.repository=registry.invalid/alternate-runner-name \
+  --set-string images.sandboxRunner.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 reject_values --set-string runtimeContract.runnerProtocolDigest=not-a-digest
 reject_values --set-string global.deploymentConfigDigest=not-a-digest
 reject_values --set-string global.sourceCommit=0000000000000000000000000000000000000000
@@ -56,6 +65,7 @@ reject_values --set-string sandbox.serviceAccountName=default
 reject_values --set sandbox.runnerPort=8080
 reject_values --set sandbox.runAsUser=0
 reject_values --set sandbox.packageRunAsUser=65532
+reject_values --set sandbox.packageRunAsGroup=65532
 
 ruby - "$root" "$chart" "$rendered" <<'RUBY'
 require "digest"
@@ -93,8 +103,8 @@ expected_hashes = {
   "lifecycleSchemaDigest" => "vendor/opensandbox/sandbox-lifecycle.yml",
   "batchSandboxCrdDigest" => "templates/crds/batchsandboxes.yaml",
   "kubernetesProviderTemplateDigest" => "files/batchsandbox-template.yaml",
-  "runnerProtocolDigest" => "vendor/runner-protocol-v1.schema.json",
-  "containerRuntimeDigest" => "vendor/containerd-runc-runtime-v1.json",
+  "runnerProtocolDigest" => "vendor/runner-protocol-v2.schema.json",
+  "containerRuntimeDigest" => "vendor/containerd-runc-runtime-v2.json",
   "networkPolicyDigest" => "templates/networkpolicies.yaml",
 }
 expected_hashes.each do |key, relative_path|
@@ -106,7 +116,7 @@ end
 expected_images = {
   "server" => "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778",
   "controller" => "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a",
-  "execd" => "sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684",
+  "execd" => "sha256:6cf7dba2f21f0b536e100563d841ac58a9f31c2b0a081b7ac76796a24d6f47e2",
 }
 expected_images.each do |name, digest|
   failures << "official #{name} image digest drifted" unless values.dig("images", name, "digest") == digest
@@ -258,7 +268,7 @@ end
 failures << "admission policy count drifted" unless admissions.length == 3 && bindings.length == 3
 admission_text = admissions.flat_map { |doc| doc.dig("spec", "validations") || [] }
                            .map { |validation| validation["expression"] }.join("\n")
-%w[sandbox-workload armed-runner-v1 execd-installer platform-sandbox-runner platform.insight.dev/purpose readiness runtimeClassName hostPath persistentVolumeClaim].each do |term|
+%w[sandbox-workload armed-runner-v2 execd-installer platform-sandbox-runner platform.insight.dev/purpose readiness runtimeClassName hostPath persistentVolumeClaim EXECD_ACCESS_TOKEN supplementalGroupsPolicy SETGID].each do |term|
   failures << "admission closure omits #{term}" unless admission_text.include?(term)
 end
 failures << "BatchSandbox admission does not bind Server identity" unless admission_text.include?("system:serviceaccount:#{control}:opensandbox-server")
@@ -277,7 +287,7 @@ required_toml.each { |line| failures << "Server config omits #{line}" unless tom
   failures << "Server config enabled forbidden #{section} surface" if toml.include?(section)
 end
 template = server_config&.dig("data", "batchsandbox-template.yaml") || ""
-%w[sandbox-workload armed-runner-v1 automountServiceAccountToken readOnlyRootFilesystem runner-state sandbox-tmp].each do |term|
+%w[sandbox-workload armed-runner-v2 automountServiceAccountToken readOnlyRootFilesystem runner-state sandbox-tmp supplementalGroupsPolicy SETGID].each do |term|
   failures << "BatchSandbox template omits #{term}" unless template.include?(term)
 end
 
@@ -290,6 +300,10 @@ begin
   failures << "Dispatcher worker role drifted" unless config.dig("worker_manifest", "worker_role") == "sandbox-dispatcher"
   expected_url = "http://opensandbox-server.#{control}.svc.cluster.local:8080/v1/"
   failures << "Dispatcher lifecycle URL is not private Server service" unless config.dig("opensandbox", "lifecycle_base_url") == expected_url
+  expected_readiness_image = "#{values.dig('images', 'sandboxRunner', 'repository')}@#{values.dig('images', 'sandboxRunner', 'digest')}"
+  failures << "Dispatcher readiness is not bound to the dedicated Sandbox runner image" unless config.dig("opensandbox", "readiness_image_uri") == expected_readiness_image
+  platform_image = "#{values.dig('images', 'platform', 'repository')}@#{values.dig('images', 'platform', 'digest')}"
+  failures << "Dispatcher readiness still uses the generic Platform runtime image" if config.dig("opensandbox", "readiness_image_uri") == platform_image
   expected_runtime_fields = {
     "opensandbox_server_release_digest" => values.dig("images", "server", "digest"),
     "batchsandbox_controller_digest" => values.dig("images", "controller", "digest"),

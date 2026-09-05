@@ -86,6 +86,8 @@ registry_container=""
 node_stopped=""
 port_forward_pid=""
 sandbox_id=""
+opensandbox_probe_secret_dir=""
+opensandbox_probe_provisioning_label=""
 
 stop_port_forward() {
   if [[ -n "$port_forward_pid" ]]; then
@@ -129,10 +131,19 @@ cleanup() {
       deployment/insight-platform-registry-validation-worker \
       "$registry_container=$registry_original_image" >/dev/null 2>&1
   fi
-  if [[ -n "$sandbox_id" && -n "$port_forward_pid" ]]; then
-    curl --silent --max-time 3 -X DELETE \
-      -H "OPEN-SANDBOX-API-KEY: $opensandbox_api_key" \
-      "http://127.0.0.1:$opensandbox_forward_port/v1/sandboxes/$sandbox_id" >/dev/null 2>&1
+  if [[ -n "$sandbox_id" && "$sandbox_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+    "$kubectl_bin" -n platform-sandbox-workloads delete batchsandbox "$sandbox_id" \
+      --ignore-not-found --wait=false >/dev/null 2>&1
+  elif [[ "$opensandbox_probe_provisioning_label" =~ ^v1-[A-Za-z0-9_-]{43}$ ]]; then
+    "$kubectl_bin" -n platform-sandbox-workloads delete batchsandboxes \
+      -l "platform.insight.dev/provision=$opensandbox_probe_provisioning_label" \
+      --ignore-not-found --wait=false >/dev/null 2>&1
+  fi
+  if [[ -n "$opensandbox_probe_secret_dir" && -d "$opensandbox_probe_secret_dir" ]]; then
+    rm -f "$opensandbox_probe_secret_dir/create-request.json" \
+      "$opensandbox_probe_secret_dir/signing-seed" \
+      "$opensandbox_probe_secret_dir/state-response.json"
+    rmdir "$opensandbox_probe_secret_dir" >/dev/null 2>&1 || true
   fi
   stop_port_forward
   "$kubectl_bin" delete -f "$root/deploy/kind/probes/mtls.yaml" \
@@ -416,15 +427,130 @@ opensandbox_api_key=$(
   "$kubectl_bin" -n platform-sandbox get secret opensandbox-api-key \
     -o jsonpath='{.data.api-key}' | base64 --decode
 )
+opensandbox_probe="$root/deploy/kind/probes/opensandbox-l4-probe.py"
+opensandbox_package_repository=${INSIGHT_KIND_SANDBOX_PACKAGE_REPOSITORY:-}
+opensandbox_package_digest=${INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST:-}
+opensandbox_package_image="$opensandbox_package_repository@$opensandbox_package_digest"
+[[ -n "$opensandbox_package_repository" && \
+   "$opensandbox_package_repository" =~ ^([a-z0-9.-]+(:[0-9]+)?/)?[a-z0-9._/-]+$ && \
+   "$opensandbox_package_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || \
+  fail opensandbox-recovery "exact Sandbox Package repository and manifest digest are required"
+runtime_contract_digest=$(
+  "$kubectl_bin" -n platform-sandbox get configmap sandbox-dispatcher-config \
+    -o jsonpath='{.metadata.annotations.insight\.platform/runtime-contract-digest}'
+)
+profile_deployment_digest=$(jq -er '.deployment_config_digest' "$bootstrap_output/environment.json")
+[[ "$runtime_contract_digest" =~ ^sha256:[0-9a-f]{64}$ && \
+   "$profile_deployment_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || \
+  fail opensandbox-recovery "installed Sandbox contract digests are malformed"
+
+opensandbox_probe_secret_dir=$(mktemp -d "${TMPDIR:-/tmp}/insight-l4-opensandbox.XXXXXX")
+chmod 0700 "$opensandbox_probe_secret_dir"
+opensandbox_create_request="$opensandbox_probe_secret_dir/create-request.json"
+opensandbox_signing_seed="$opensandbox_probe_secret_dir/signing-seed"
+python3 "$opensandbox_probe" create \
+  --image-uri "$opensandbox_package_image" \
+  --runtime-contract-digest "$runtime_contract_digest" \
+  --profile-deployment-digest "$profile_deployment_digest" \
+  --signing-seed-output "$opensandbox_signing_seed" \
+  --output "$opensandbox_create_request" || \
+  fail opensandbox-recovery "could not generate the bounded Armed candidate request"
+execution_request_digest=$(
+  jq -er '.env.INSIGHT_SANDBOX_RUNNER_CONFIG | fromjson | .execution_request_digest' \
+    "$opensandbox_create_request"
+)
+opensandbox_probe_provisioning_label=$(
+  jq -er '.metadata["platform.insight.dev/provision"]' "$opensandbox_create_request"
+)
+[[ "$opensandbox_probe_provisioning_label" =~ ^v1-[A-Za-z0-9_-]{43}$ ]] || \
+  fail opensandbox-recovery "generated candidate provisioning identity is malformed"
+jq '.env.EXECD_ACCESS_TOKEN = "[redacted]"' "$opensandbox_create_request" \
+  >"$output/faults/opensandbox-create-contract.json"
+
 start_port_forward || fail opensandbox-recovery "could not establish Server port-forward"
 curl --fail --silent --show-error --max-time 90 \
   -H "OPEN-SANDBOX-API-KEY: $opensandbox_api_key" \
   -H 'Content-Type: application/json' \
-  --data-binary "@$root/deploy/kind/probes/opensandbox-smoke-request.json" \
+  --data-binary "@$opensandbox_create_request" \
   "http://127.0.0.1:$opensandbox_forward_port/v1/sandboxes" \
   >"$output/faults/opensandbox-create.json"
 sandbox_id=$(jq -r '.id // empty' "$output/faults/opensandbox-create.json")
-[[ -n "$sandbox_id" ]] || fail opensandbox-recovery "create response had no sandbox id"
+[[ "$sandbox_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || \
+  fail opensandbox-recovery "create response had no bounded sandbox id"
+jq -e --slurpfile request "$output/faults/opensandbox-create-contract.json" '
+  .status.state == "Running" and
+  .entrypoint == $request[0].entrypoint and
+  .metadata == $request[0].metadata
+' "$output/faults/opensandbox-create.json" >/dev/null || \
+  fail opensandbox-recovery "create response did not preserve the bounded candidate"
+
+runner_state_proof=$(
+  python3 "$opensandbox_probe" state-proof \
+    --signing-seed "$opensandbox_signing_seed" \
+    --sandbox-id "$sandbox_id" \
+    --execution-request-digest "$execution_request_digest"
+) || fail opensandbox-recovery "could not authenticate the v2 Armed-state probe"
+rm -f "$opensandbox_create_request" "$opensandbox_signing_seed"
+
+"$kubectl_bin" -n platform-sandbox-workloads get batchsandbox "$sandbox_id" -o json | jq '
+  del(.metadata.managedFields) |
+  .spec.template.spec.containers |= map(
+    if .name == "sandbox" then
+      .env |= map(if .name == "EXECD_ACCESS_TOKEN" then .value = "[redacted]" else . end)
+    else . end
+  )
+' >"$output/faults/opensandbox-before-restart.json"
+batchsandbox_uid=$(jq -er '.metadata.uid' "$output/faults/opensandbox-before-restart.json")
+jq -e \
+  --arg sandbox_id "$sandbox_id" \
+  --slurpfile request "$output/faults/opensandbox-create-contract.json" '
+  . as $candidate |
+  ($request[0].metadata | to_entries) as $expected_metadata |
+  ($candidate.spec.template.spec.containers | map(select(.name == "sandbox"))) as $containers |
+  ($containers[0].env | map({key:.name,value:.value}) | from_entries) as $environment |
+  $candidate.metadata.name == $sandbox_id and
+  all($expected_metadata[]; $candidate.metadata.labels[.key] == .value) and
+  ($containers | length) == 1 and
+  $containers[0].image == $request[0].image.uri and
+  $containers[0].command == ["/opt/opensandbox/bootstrap.sh", "/usr/local/bin/platform-sandbox-runner"] and
+  $environment.INSIGHT_SANDBOX_RUNNER_CONFIG == $request[0].env.INSIGHT_SANDBOX_RUNNER_CONFIG and
+  $environment.INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST == $request[0].env.INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST
+' "$output/faults/opensandbox-before-restart.json" >/dev/null || \
+  fail opensandbox-recovery "BatchSandbox projection drifted from the current candidate contract"
+
+read_armed_state() {
+  local destination=$1
+  local expected_boot_id=${2:-}
+  local observed_boot_id=""
+  local arguments=(
+    validate-armed-state
+    --state "$opensandbox_probe_secret_dir/state-response.json"
+    --sandbox-id "$sandbox_id"
+    --execution-request-digest "$execution_request_digest"
+  )
+  if [[ -n "$expected_boot_id" ]]; then
+    arguments+=(--expected-boot-id "$expected_boot_id")
+  fi
+  for _ in $(seq 1 120); do
+    if curl --fail --silent --max-time 2 \
+      -H "OPEN-SANDBOX-API-KEY: $opensandbox_api_key" \
+      -H "X-Insight-Sandbox-Runner-Proof: $runner_state_proof" \
+      "http://127.0.0.1:$opensandbox_forward_port/v1/sandboxes/$sandbox_id/proxy/18080/v2/state" \
+      >"$opensandbox_probe_secret_dir/state-response.json"; then
+      if observed_boot_id=$(python3 "$opensandbox_probe" "${arguments[@]}" 2>/dev/null); then
+        mv "$opensandbox_probe_secret_dir/state-response.json" "$destination"
+        printf '%s\n' "$observed_boot_id"
+        return 0
+      fi
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+runner_boot_id=$(
+  read_armed_state "$output/faults/opensandbox-armed-before-restart.json"
+) || fail opensandbox-recovery "candidate did not reach authenticated v2 Armed state"
 "$kubectl_bin" -n platform-sandbox rollout restart \
   deployment/opensandbox-server deployment/opensandbox-controller >/dev/null
 stop_port_forward
@@ -435,18 +561,47 @@ curl --fail --silent --show-error --max-time 10 \
   -H "OPEN-SANDBOX-API-KEY: $opensandbox_api_key" \
   "http://127.0.0.1:$opensandbox_forward_port/v1/sandboxes/$sandbox_id" \
   >"$output/faults/opensandbox-after-restart.json"
+jq -e \
+  --arg sandbox_id "$sandbox_id" \
+  --slurpfile request "$output/faults/opensandbox-create-contract.json" '
+  .id == $sandbox_id and
+  .status.state == "Running" and
+  .entrypoint == $request[0].entrypoint and
+  .metadata == $request[0].metadata
+' "$output/faults/opensandbox-after-restart.json" >/dev/null || \
+  fail opensandbox-recovery "lifecycle read after restart returned a different candidate"
+"$kubectl_bin" -n platform-sandbox-workloads get batchsandbox "$sandbox_id" -o json \
+  >"$opensandbox_probe_secret_dir/state-response.json"
+after_batchsandbox_uid=$(jq -er '.metadata.uid' "$opensandbox_probe_secret_dir/state-response.json")
+[[ "$after_batchsandbox_uid" == "$batchsandbox_uid" ]] || \
+  fail opensandbox-recovery "Server/Controller restart replaced the durable BatchSandbox"
+after_runner_boot_id=$(
+  read_armed_state "$output/faults/opensandbox-armed-after-restart.json" "$runner_boot_id"
+) || fail opensandbox-recovery "the same inert Armed runner did not survive control-plane restart"
+[[ "$after_runner_boot_id" == "$runner_boot_id" ]] || \
+  fail opensandbox-recovery "runner boot identity changed during control-plane restart"
 curl --fail --silent --show-error --max-time 10 -X DELETE \
   -H "OPEN-SANDBOX-API-KEY: $opensandbox_api_key" \
   "http://127.0.0.1:$opensandbox_forward_port/v1/sandboxes/$sandbox_id" >/dev/null
-sandbox_id=""
+removed=false
 for _ in $(seq 1 60); do
-  remaining=$("$kubectl_bin" -n platform-sandbox-workloads get batchsandboxes -o json | jq '.items | length')
-  [[ "$remaining" -eq 0 ]] && break
+  if ! "$kubectl_bin" -n platform-sandbox-workloads get batchsandbox "$sandbox_id" \
+    >/dev/null 2>&1; then
+    removed=true
+    break
+  fi
   sleep 1
 done
-[[ "$remaining" -eq 0 ]] || fail opensandbox-recovery "BatchSandbox was not removed"
+[[ "$removed" == true ]] || fail opensandbox-recovery "probe BatchSandbox was not removed"
+sandbox_id=""
+opensandbox_probe_provisioning_label=""
+runner_state_proof=""
+rm -f "$opensandbox_probe_secret_dir/state-response.json"
+rmdir "$opensandbox_probe_secret_dir"
+opensandbox_probe_secret_dir=""
 stop_port_forward
-pass opensandbox-recovery "physical object survived Server/Controller restart and deleted cleanly"
+pass opensandbox-recovery \
+  "same BatchSandbox UID and inert v2 Armed boot survived Server/Controller restart; no activation was sent"
 
 wait_platform_ready || fail final-readiness "Platform has non-Ready deployments"
 non_ready=$(

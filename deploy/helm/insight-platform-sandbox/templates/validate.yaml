@@ -7,6 +7,9 @@
     {{- fail (printf "%s image repository must not contain a tag or digest" $name) -}}
   {{- end -}}
 {{- end -}}
+{{- if eq .Values.images.platform.digest .Values.images.sandboxRunner.digest -}}
+  {{- fail "Dispatcher readiness must use the dedicated Sandbox runner image, not the generic Platform runtime" -}}
+{{- end -}}
 {{- range $name, $digest := .Values.runtimeContract -}}
   {{- if not (regexMatch $digestPattern $digest) -}}
     {{- fail (printf "runtimeContract.%s must be an exact sha256 digest" $name) -}}
@@ -51,11 +54,14 @@
   {{- fail "sandbox.serviceAccountName is closed by the Armed runner admission contract" -}}
 {{- end -}}
 {{- if ne (int .Values.sandbox.runnerPort) 18080 -}}
-  {{- fail "sandbox.runnerPort is closed by runner protocol v1" -}}
+  {{- fail "sandbox.runnerPort is closed by runner protocol v2" -}}
 {{- end -}}
 {{- if or (ne (int .Values.sandbox.runAsUser) 65532) (ne (int .Values.sandbox.runAsGroup) 65532) -}}
   {{- fail "the Armed runner UID and GID are closed values" -}}
 {{- end -}}
 {{- if ne (int .Values.sandbox.packageRunAsUser) 65533 -}}
   {{- fail "the untrusted Package UID is a closed value distinct from the runner" -}}
+{{- end -}}
+{{- if ne (int .Values.sandbox.packageRunAsGroup) 65533 -}}
+  {{- fail "the untrusted Package GID is a closed value distinct from the runner" -}}
 {{- end -}}

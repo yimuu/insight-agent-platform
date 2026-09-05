@@ -2,20 +2,10 @@ import difflib
 import json
 import re
 import sys
-from collections import deque
 from pathlib import Path
 
 
 INTERNAL_ROLES = {
-    "insight-agent-platform": "root",
-    "insight-engine": "engine",
-    "insight-dsl": "dsl",
-    "insight-durable": "durable",
-    "insight-resources": "resources",
-    "insight-mcp": "mcp",
-    "insight-storage": "storage",
-    "insight-runtime": "runtime",
-    "insight-api": "api",
     "insight-cli": "cli",
     "insight-platform-artifacts": "artifacts_domain",
     "insight-platform-artifact-broker": "artifact_broker",
@@ -64,15 +54,6 @@ INTERNAL_ROLES = {
 }
 
 ALLOWED_INTERNAL = {
-    "root": {"engine", "dsl", "durable", "resources", "mcp", "storage", "runtime", "api", "artifacts_domain", "platform_api", "capability_adapters", "contracts", "context_domain", "egress_core", "invocations_domain", "jobs_domain", "mcp_host", "model_adapters", "models_domain", "orchestrator_domain", "registry_domain", "sandbox_domain", "scheduler_domain", "secret_broker", "security_domain", "tasks_domain", "platform_postgres", "platform_runtime", "platform_worker"},
-    "engine": set(),
-    "dsl": {"engine"},
-    "durable": {"engine", "dsl"},
-    "resources": {"engine", "mcp"},
-    "mcp": set(),
-    "storage": {"engine", "durable", "dsl"},
-    "runtime": {"engine", "durable", "dsl", "resources", "mcp"},
-    "api": {"engine", "dsl", "durable", "resources", "runtime", "mcp"},
     "cli": {"contracts"},
     "artifacts_domain": {"contracts", "jobs_domain"},
     "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
@@ -144,7 +125,17 @@ ALLOWED_DEV_INTERNAL = {
     "platform_postgres": {"artifact_rpc", "egress_core", "egress_rpc"},
     # Cross-plane qualification targets compose real durable authority with physical execution
     # adapters. This package has no production targets or normal internal dependencies.
-    "qualification_tests": {"artifact_broker", "artifacts_domain", "contracts", "invocations_domain", "platform_postgres", "sandbox_domain"},
+    "qualification_tests": {
+        "artifact_broker",
+        "artifacts_domain",
+        "contracts",
+        "invocations_domain",
+        "jobs_domain",
+        "mcp_host",
+        "opensandbox_client",
+        "platform_postgres",
+        "sandbox_domain",
+    },
     "cli": {"platform_api"},
 }
 
@@ -164,26 +155,6 @@ ALLOWED_INTERNAL_FEATURES = {
 }
 
 FORBIDDEN_DIRECT = {
-    "engine": {
-        "axum",
-        "sqlx",
-        "reqwest",
-        "dotenvy",
-        "tracing-subscriber",
-        "yaml-rust2",
-        "yaml_serde",
-        "serde_yaml",
-    },
-    "dsl": {"axum", "sqlx", "reqwest"},
-    "durable": {"axum", "sqlx", "reqwest"},
-    "resources": {"axum", "sqlx"},
-    "mcp": {"axum", "sqlx", "dotenvy", "tracing-subscriber", "yaml-rust2", "yaml_serde", "serde_yaml"},
-    "storage": {"axum", "reqwest"},
-    "runtime": {"axum", "sqlx", "reqwest"},
-    # MCP HTTP authorization lives at the API transport boundary and uses the
-    # shared pinned/SSRF-restricted client from insight-mcp for issuer/JWKS
-    # discovery. Direct SQL remains forbidden.
-    "api": {"sqlx"},
     # The CLI is a public `/v1` client. Its bounded native HTTP dependency is the only
     # business mutation channel and does not grant SQL or server authority.
     "cli": {"axum", "sqlx", "dotenvy", "tracing-subscriber"},
@@ -231,105 +202,9 @@ FORBIDDEN_DIRECT = {
     "platform_worker": {"axum", "sqlx", "reqwest", "dotenvy", "tracing-subscriber"},
 }
 
-TRANSITIVELY_FORBIDDEN = {"axum", "sqlx", "reqwest"}
 CRITICAL_FEATURE_PACKAGES = {"axum", "hyper", "hyper-rustls", "hyper-util", "sqlx", "reqwest", "tokio"}
 REQUIRED_RUSTLS_PROVIDER_FEATURE = "aws_lc_rs"
 FORBIDDEN_RUSTLS_PROVIDER_FEATURE = "ring"
-
-IO_PATTERNS = (
-    (
-        "std filesystem/environment/network/process API",
-        re.compile(r"\bstd\s*::\s*(?:fs|env|net|process)\b"),
-    ),
-    (
-        "std grouped filesystem/environment/network/process import",
-        re.compile(
-            r"\bstd\s*::\s*\{[^;]{0,4000}\b(?:fs|env|net|process)\b[^;]{0,4000};",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "Tokio filesystem/network/process API",
-        re.compile(r"\btokio\s*::\s*(?:fs|net|process)\b"),
-    ),
-    (
-        "Tokio grouped filesystem/network/process import",
-        re.compile(
-            r"\btokio\s*::\s*\{[^;]{0,4000}\b(?:fs|net|process)\b[^;]{0,4000};",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "compile-time environment access",
-        re.compile(r"\b(?:env|option_env)!\s*\("),
-    ),
-)
-
-CLOCK_PATTERNS = (
-    (
-        "wall-clock import",
-        re.compile(
-            r"\buse\s+chrono\s*::[^;]{0,4000}\b(?:Utc|Local)\b[^;]{0,4000};",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "aliased wall-clock crate import",
-        re.compile(r"\buse\s+(?:chrono|time)\s+as\s+[A-Za-z_][A-Za-z0-9_]*\s*;"),
-    ),
-    (
-        "instant/system/timer import",
-        re.compile(
-            r"\buse\s+(?:std|tokio)\s*::[^;]{0,4000}\b(?:time|thread)\b"
-            r"[^;]{0,4000}\b(?:Instant|SystemTime|UNIX_EPOCH|sleep|sleep_until|"
-            r"interval|interval_at|timeout|timeout_at)\b[^;]{0,4000};",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "aliased time module import",
-        re.compile(
-            r"\buse\s+(?:std|tokio)\s*::[^;]{0,4000}\btime\b\s+as\s+"
-            r"[A-Za-z_][A-Za-z0-9_]*\s*;",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "time crate wall-clock import",
-        re.compile(
-            r"\buse\s+time\s*::[^;]{0,4000}\bOffsetDateTime\b[^;]{0,4000};",
-            re.DOTALL,
-        ),
-    ),
-    (
-        "wall clock access",
-        re.compile(r"\b(?:chrono\s*::\s*)?(?:Utc|Local)\s*::\s*(?:now|today)\s*\("),
-    ),
-    (
-        "instant/system clock access",
-        re.compile(
-            r"\b(?:(?:std|tokio)\s*::\s*time\s*::\s*)?(?:Instant|SystemTime)\s*::\s*now\s*\("
-        ),
-    ),
-    (
-        "time crate wall clock access",
-        re.compile(r"\bOffsetDateTime\s*::\s*now_(?:utc|local)\s*\("),
-    ),
-    (
-        "implicit elapsed wall clock access",
-        re.compile(r"\bUNIX_EPOCH\s*\.\s*elapsed\s*\("),
-    ),
-    (
-        "scheduler timer access",
-        re.compile(
-            r"\b(?:tokio\s*::\s*time\s*::\s*(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)|std\s*::\s*thread\s*::\s*sleep)\s*\("
-        ),
-    ),
-)
-
-RUNTIME_STACK_PATTERN = re.compile(
-    r"\b(?:sqlx|axum|reqwest)\s*::|\bextern\s+crate\s+(?:sqlx|axum|reqwest)\b|\buse\s+(?:sqlx|axum|reqwest)\s*(?:;|as\b)"
-)
 
 ROOT_FACADE_PATTERN = re.compile(r"\binsight_agent_platform\b")
 DEEP_ASSET_INCLUDE_PATTERN = re.compile(
@@ -348,9 +223,6 @@ ALLOWED_FIXED_ASSET_LOCATORS = {
     # The product CLI supervisor embeds the reviewed dependency Compose closure and copies those
     # exact bytes to project-local runtime state; no member crate reads it independently.
     "crates/insight-cli/src/lib.rs",
-    # Test-only Schema provisioning reads the workspace-owned baseline at
-    # runtime; production storage builds contain no embedded DDL.
-    "crates/storage/src/repository/schema_contract.rs",
 }
 
 
@@ -389,42 +261,6 @@ def source_files(source_dir):
     if not source_dir.is_dir():
         return []
     return sorted(source_dir.rglob("*.rs"))
-
-
-def scan_patterns(errors, role, source_dir, patterns, file_filter=lambda _path: True):
-    for path in source_files(source_dir):
-        if not file_filter(path):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            errors.append(f"{role}: Rust source is not UTF-8: {path}")
-            continue
-        for label, pattern in patterns:
-            for match in pattern.finditer(text):
-                errors.append(
-                    f"{role}: {label}: {path}:{line_number(text, match.start())}"
-                )
-
-
-def dependency_path(start_id, target_name, nodes, packages):
-    queue = deque([start_id])
-    parent = {start_id: None}
-    while queue:
-        current = queue.popleft()
-        for dependency in nodes[current].get("deps", []):
-            dependency_id = dependency["pkg"]
-            if dependency_id in parent:
-                continue
-            parent[dependency_id] = current
-            if packages[dependency_id]["name"] == target_name:
-                path = [dependency_id]
-                while parent[path[-1]] is not None:
-                    path.append(parent[path[-1]])
-                path.reverse()
-                return path
-            queue.append(dependency_id)
-    return None
 
 
 def format_package(package):
@@ -466,9 +302,6 @@ def check(metadata, baseline_path, workspace_root):
             continue
         role_by_id[package_id] = role
         id_by_role[role] = package_id
-
-    if "root" not in id_by_role:
-        errors.append("workspace does not contain the insight-agent-platform root package")
 
     for package_id, package in sorted(packages.items()):
         if package_id not in workspace_ids and package.get("source") is None:
@@ -538,67 +371,13 @@ def check(metadata, baseline_path, workspace_root):
 
         features = set(package.get("features", {}))
         allowed_features = ALLOWED_INTERNAL_FEATURES.get(role, set())
-        if role != "root" and features != allowed_features:
+        if features != allowed_features:
             errors.append(
                 f"{role}: internal crate feature matrix is not allowed in the first cutover: "
                 f"actual={sorted(features)}, allowed={sorted(allowed_features)}"
             )
 
-    for role in ("engine", "dsl", "durable"):
-        package_id = id_by_role.get(role)
-        if package_id is None:
-            continue
-        for target_name in sorted(TRANSITIVELY_FORBIDDEN):
-            path = dependency_path(package_id, target_name, nodes, packages)
-            if path is not None:
-                rendered = " -> ".join(format_package(packages[item]) for item in path)
-                errors.append(f"{role}: forbidden transitive reachability: {rendered}")
-
-    for role in ("engine", "dsl", "durable", "runtime"):
-        package_id = id_by_role.get(role)
-        if package_id is None:
-            continue
-        package = packages[package_id]
-        manifest_dir = Path(package["manifest_path"]).parent
-        source_dir = manifest_dir / "src"
-        if not source_dir.is_dir():
-            errors.append(f"{role}: expected production source directory is absent: {source_dir}")
-            continue
-
-        if role in {"engine", "dsl", "durable"}:
-            custom_builds = [
-                target["src_path"]
-                for target in package.get("targets", [])
-                if "custom-build" in target.get("kind", [])
-            ]
-            if custom_builds or (manifest_dir / "build.rs").exists():
-                locations = custom_builds or [str(manifest_dir / "build.rs")]
-                errors.append(f"{role}: lower crate must not have build.rs: {', '.join(locations)}")
-            scan_patterns(errors, role, source_dir, IO_PATTERNS)
-
-        if role == "engine":
-            scan_patterns(
-                errors,
-                role,
-                source_dir,
-                CLOCK_PATTERNS,
-                lambda path: any("scheduler" in part.lower() for part in path.parts),
-            )
-        elif role == "runtime":
-            scan_patterns(
-                errors,
-                role,
-                source_dir,
-                (("direct SQLx/Axum/Reqwest source use", RUNTIME_STACK_PATTERN),),
-            )
-
-    shared_asset_helper = workspace_root / "tests/support/workspace_assets.rs"
-    if not shared_asset_helper.is_file():
-        errors.append(f"shared workspace asset helper is absent: {shared_asset_helper}")
-
     for package_id, role in sorted(role_by_id.items(), key=lambda item: item[1]):
-        if role == "root":
-            continue
         package = packages[package_id]
         manifest_dir = Path(package["manifest_path"]).parent
         for path in source_files(manifest_dir):

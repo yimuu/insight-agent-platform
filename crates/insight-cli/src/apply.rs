@@ -7,7 +7,7 @@
 
 use crate::{
     apply_journal::{
-        self, ApplyJournalError, ApplyJournalV1, JournalDeployment, JournalIntent,
+        self, ApplyJournalError, ApplyJournalV2, JournalDeployment, JournalIntent,
         JournalPublishResult, JournalPublishedVersion, JournalResource,
     },
     public_client::{PublicClientError, PublicHttpClient, PublicJsonResponse},
@@ -809,7 +809,7 @@ pub fn apply_manifest(
     let mut journal = match apply_journal::load(&journal_path)? {
         Some(journal) => journal,
         None => {
-            let journal = ApplyJournalV1::new(
+            let journal = ApplyJournalV2::new(
                 manifest_digest.clone(),
                 receipt_key(&manifest_digest, "create"),
             );
@@ -1068,42 +1068,15 @@ pub fn apply_manifest(
         journal.deployment = Some(JournalDeployment {
             deployment_id: deployment.body.deployment_id,
             etag: deployment.etag,
-            resource_etag: Some(deployed_resource.etag),
+            resource_etag: deployed_resource.etag,
         });
-        apply_journal::save(&journal_path, &journal)?;
-    }
-    if journal
-        .deployment
-        .as_ref()
-        .is_some_and(|deployment| deployment.resource_etag.is_none())
-    {
-        let deployed_resource: PublicJsonResponse<ResourceViewV1> =
-            client.get_json(&format!("{base_path}/{resource_id}"), StatusCode::OK)?;
-        validate_resource_response(&deployed_resource, kind, Some(&resource_id))?;
-        require_post_deployment_resource_version(
-            &resource_id,
-            &publish.resource_etag,
-            deployed_resource.body.version,
-        )?;
-        journal
-            .step_trace_ids
-            .insert("read_deployed".to_owned(), deployed_resource.trace_id);
-        journal
-            .deployment
-            .as_mut()
-            .expect("deployment presence was checked")
-            .resource_etag = Some(deployed_resource.etag);
         apply_journal::save(&journal_path, &journal)?;
     }
     let deployment = journal.deployment.as_ref().ok_or_else(|| {
         ApplyError::InvalidResponse("apply journal omitted Deployment result".to_owned())
     })?;
     let deployment_id = deployment.deployment_id.clone();
-    let deployed_resource_etag = deployment.resource_etag.clone().ok_or_else(|| {
-        ApplyError::InvalidResponse(
-            "apply journal omitted post-Deployment Resource ETag".to_owned(),
-        )
-    })?;
+    let deployed_resource_etag = deployment.resource_etag.clone();
 
     let activation_intent = JournalIntent {
         receipt: receipt_key(&manifest_digest, "activate"),
@@ -1300,7 +1273,7 @@ enum JournalStep {
 
 fn persist_intent(
     path: &Path,
-    journal: &mut ApplyJournalV1,
+    journal: &mut ApplyJournalV2,
     step: JournalStep,
     expected: JournalIntent,
 ) -> Result<(), ApplyError> {
@@ -1333,7 +1306,7 @@ fn require_intent<'a>(
 }
 
 fn validate_resume_journal(
-    journal: &ApplyJournalV1,
+    journal: &ApplyJournalV2,
     manifest: &ApplyManifestV1,
 ) -> Result<(), ApplyError> {
     let digest = &journal.manifest_digest;
@@ -1384,15 +1357,13 @@ fn validate_resume_journal(
             receipt_key(digest, "deploy"),
             &publish.resource_etag,
         )?;
-        validate_optional_intent(
-            journal.activation_intent.as_ref(),
-            receipt_key(digest, "activate"),
-            journal
-                .deployment
-                .as_ref()
-                .and_then(|deployment| deployment.resource_etag.as_deref())
-                .unwrap_or(&publish.resource_etag),
-        )?;
+        if let Some(deployment) = &journal.deployment {
+            validate_optional_intent(
+                journal.activation_intent.as_ref(),
+                receipt_key(digest, "activate"),
+                &deployment.resource_etag,
+            )?;
+        }
     }
     if journal.deployment.as_ref().is_some_and(|deployment| {
         noun.resource_kind().deployment_kind() != Some(deployment.deployment_id.kind())

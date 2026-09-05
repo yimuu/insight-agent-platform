@@ -67,7 +67,8 @@ admission、硬限制或隔离。
 ## InsightPlatformModelExpiredLeaseRecoveryLagHigh
 
 检查 Worker 重启、PostgreSQL 时间、critical-control permits 和 provider cancellation/recovery。保留 ModelTurn、
-quota 与 Job fence，由 Model owner 恢复丢失 attempt。
+quota 与 Job fence，由 Model owner 恢复丢失 attempt；仍有尝试额度时保守结算并重试，额度耗尽时保守结算并
+原子推进失败收敛。
 
 ## InsightPlatformCapabilityDurableJobLagHigh
 

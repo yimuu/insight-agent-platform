@@ -68,7 +68,7 @@ for needle in (
     'allowPrivilegeEscalation: false',
     'PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL',
     'PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH',
-    'app.kubernetes.io/component: data-worker',
+    'app.kubernetes.io/component: artifact-data-worker',
 ):
     if needle not in rendered:
         failures.append(f"rendered Orchestration Worker contract is missing {needle}")

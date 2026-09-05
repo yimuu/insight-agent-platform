@@ -11,6 +11,10 @@ images:
     repository: insight-agent-platform
     digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
     pullPolicy: IfNotPresent
+  sandboxRunner:
+    repository: insight-platform-sandbox-runner
+    digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    pullPolicy: IfNotPresent
   server:
     repository: docker.io/opensandbox/server
     digest: sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778
@@ -21,16 +25,16 @@ images:
     pullPolicy: IfNotPresent
   execd:
     repository: docker.io/opensandbox/execd
-    digest: sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684
+    digest: sha256:6cf7dba2f21f0b536e100563d841ac58a9f31c2b0a081b7ac76796a24d6f47e2
 
 imagePullSecrets: []
 
 runtimeContract:
   lifecycleSchemaDigest: sha256:97dbdff2dbbf571c8e3ac77acd24454bc774275478decc1990918cbf7c518351
   batchSandboxCrdDigest: sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4
-  kubernetesProviderTemplateDigest: sha256:f37195db789a3f39d603e6c3985b707db51ae08e6240312acf4fd500dba21af1
-  runnerProtocolDigest: sha256:b029329284e7ab4ae19ee92ee344381ef009658fc900f0dcc26a68e8e816efd6
-  containerRuntimeDigest: sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e
+  kubernetesProviderTemplateDigest: sha256:be829c7a936867d7aff62bf76d5e897b75c65628563ad2d354f4ccb36b30cc4c
+  runnerProtocolDigest: sha256:b5eac79a3b4f66179341408d811ccfd82978279facbf30f503eb504be0638a4b
+  containerRuntimeDigest: sha256:b2c15f4bdafaa05a3a60919a4e9ea9825cc03f8a09a63a2b603c3c42a7d849cc
   networkPolicyDigest: sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e
 
 dispatcher:
@@ -101,6 +105,7 @@ sandbox:
   runAsUser: 65532
   runAsGroup: 65532
   packageRunAsUser: 65533
+  packageRunAsGroup: 65533
   ttlMaximumSeconds: 3600
 
 crds:

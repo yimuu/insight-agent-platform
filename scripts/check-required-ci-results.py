@@ -19,7 +19,6 @@ def expected_results(selections: Mapping[str, bool]) -> dict[str, str]:
         "test": "success" if runtime else "skipped",
         "cli": "success" if selections["cli"] and not runtime else "skipped",
         "console": "success" if selections["console"] else "skipped",
-        "mcp-interop": "success" if selections["mcp-interop"] else "skipped",
         "policy": "success" if selections["policy"] else "skipped",
     }
 
@@ -45,18 +44,18 @@ def selection(value: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    for lane in ("runtime", "cli", "console", "mcp-interop", "policy"):
+    for lane in ("runtime", "cli", "console", "policy"):
         parser.add_argument(f"--{lane}-selected", type=selection, required=True)
-    for lane in ("changes", "quick", "lint", "test", "cli", "console", "mcp-interop", "policy"):
+    for lane in ("changes", "quick", "lint", "test", "cli", "console", "policy"):
         parser.add_argument(f"--{lane}-result", choices=RESULTS, required=True)
     arguments = vars(parser.parse_args())
     selections = {
         lane: arguments[f"{lane.replace('-', '_')}_selected"]
-        for lane in ("runtime", "cli", "console", "mcp-interop", "policy")
+        for lane in ("runtime", "cli", "console", "policy")
     }
     actual = {
         lane: arguments[f"{lane.replace('-', '_')}_result"]
-        for lane in ("changes", "quick", "lint", "test", "cli", "console", "mcp-interop", "policy")
+        for lane in ("changes", "quick", "lint", "test", "cli", "console", "policy")
     }
     failures = validate_results(selections, actual)
     if failures:

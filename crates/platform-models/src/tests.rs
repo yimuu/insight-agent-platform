@@ -762,6 +762,86 @@ fn retry_consumes_a_new_physical_attempt_and_reservation() {
 }
 
 #[test]
+fn expired_final_model_attempt_fails_terminally_and_settles_conservatively() {
+    let mut fixture = fixture();
+    fixture.command.requested_attempt_limit = 1;
+    let (fixture, started, reservation, _) = started(fixture);
+    let expired_at = started.job.lease.as_ref().unwrap().expires_at;
+    let observation_digest = sha('6');
+    let mut expected_failure = model_failure(
+        insight_platform_contracts::FailureClass::Platform,
+        insight_platform_contracts::Retryability::Never,
+    );
+    expected_failure.safe_code = "model_worker_lease_expired".to_owned();
+    expected_failure.evidence_digest = observation_digest.clone();
+    let expected_failure_digest = crate::types::digest(&expected_failure).unwrap();
+    let decision = decide_expired_model_lease(
+        &started.turn,
+        &started.job,
+        &started.job_payload,
+        &ExpiredModelLeaseObservation {
+            observed_job_version: started.job.version,
+            observed_lease_generation: started.job.lease_generation,
+            retry_at: None,
+            observation_digest: observation_digest.clone(),
+        },
+        expired_at,
+        fixture.limits,
+    )
+    .unwrap();
+
+    assert_eq!(
+        decision.turn.state,
+        insight_platform_contracts::ModelTurnState::Failed
+    );
+    assert_eq!(decision.turn.terminal_at, Some(expired_at));
+    assert_eq!(decision.turn.retry_at, None);
+    assert_eq!(
+        decision.job.state,
+        insight_platform_contracts::JobState::Failed
+    );
+    assert!(decision.job.lease.is_none());
+    assert_eq!(decision.job_payload.active_usage_reservation_id, None);
+    assert!(matches!(
+        decision.job_payload.physical_outcome,
+        Some(ModelPhysicalOutcomeEvidence::Failed { ref failure_digest })
+            if failure_digest == &expected_failure_digest
+    ));
+    assert_eq!(
+        decision.turn.payload.failure.as_ref(),
+        Some(&expected_failure.failure)
+    );
+    assert_eq!(
+        decision.turn.payload.failure.as_ref().unwrap().class,
+        insight_platform_contracts::FailureClass::Platform
+    );
+    assert_eq!(
+        decision.turn.payload.failure.as_ref().unwrap().retryability,
+        insight_platform_contracts::Retryability::Never
+    );
+    assert_eq!(decision.turn.payload.attempts.len(), 1);
+    assert_eq!(
+        decision.turn.payload.attempts[0].outcome,
+        ModelAttemptOutcomeKind::Failed
+    );
+    assert_eq!(
+        decision.turn.payload.attempts[0].usage_reservation_id,
+        reservation
+    );
+    assert!(decision.turn.payload.attempts[0].request_sent);
+    assert_eq!(decision.settlement.requests_used, 1);
+    assert_eq!(
+        decision.settlement.tokens_used,
+        decision.turn.payload.admission.quota_ceiling.tokens
+    );
+    decision.turn.validate(fixture.limits).unwrap();
+    decision
+        .job_payload
+        .validate_for(&decision.turn, &decision.job, fixture.limits)
+        .unwrap();
+}
+
+#[test]
 fn cancel_wins_against_late_completion_and_stream_is_fenced() {
     let (fixture, started, reservation, fence) = started(fixture());
     let controlled = decide_model_control(

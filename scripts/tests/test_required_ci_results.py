@@ -17,7 +17,6 @@ def selections(**overrides: bool) -> dict[str, bool]:
         "runtime": False,
         "cli": False,
         "console": False,
-        "mcp-interop": False,
         "policy": False,
     }
     selected.update(overrides)
@@ -53,10 +52,10 @@ class RequiredCiResultsTests(unittest.TestCase):
     def test_unselected_lane_cannot_run_instead_of_skipping(self) -> None:
         selected = selections()
         actual = MODULE.expected_results(selected)
-        actual["mcp-interop"] = "success"
+        actual["policy"] = "success"
         self.assertEqual(
             MODULE.validate_results(selected, actual),
-            ["mcp-interop lane expected skipped but was 'success'"],
+            ["policy lane expected skipped but was 'success'"],
         )
 
     def test_failure_and_cancelled_results_are_rejected(self) -> None:

@@ -1,4 +1,4 @@
-use chrono::{Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use insight_platform_artifacts::{
     encode_canonical_skill_package, ArtifactObjectReadAuthority, ArtifactObjectReadAuthorityError,
     SchedulerRunValueLease, SchedulerRunValueRequestResolver, SchedulerSkillPackageLease,
@@ -96,6 +96,14 @@ const AGENT_AUTHORING_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c28367
 const TYPED_PLAN_ARTIFACT_ID: &str = "art_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
 const TYPED_PLAN_BLOB_ID: &str = "blb_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
 const TYPED_PLAN_ENCRYPTION_DOMAIN_ID: &str = "enc_0198f1c3-9a00-7c3e-b1f3-773c2836702c";
+
+type RunDeadlineSnapshot = (
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
 
 fn id(value: &str) -> ResourceId {
     value.parse().unwrap()
@@ -560,14 +568,14 @@ fn runtime_plan() -> RuntimePlan {
                         port_id: DataPortKey::new("response".to_owned()).unwrap(),
                         schema_digest: digest('3'),
                     },
-                    timeout_milliseconds: 4_000,
+                    timeout_milliseconds: 30_000,
                     resume: finish.clone(),
                 },
             ),
             (
                 timer_wait,
                 RuntimeNode::TimerWait {
-                    delay_milliseconds: 200,
+                    delay_milliseconds: 30_000,
                     resume: finish.clone(),
                 },
             ),
@@ -591,7 +599,7 @@ fn runtime_plan() -> RuntimePlan {
                 RuntimeNode::SignalWait {
                     signal_key: "short_lived_release".to_owned(),
                     payload: None,
-                    timeout_milliseconds: 200,
+                    timeout_milliseconds: 30_000,
                     resume: finish.clone(),
                 },
             ),
@@ -924,7 +932,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         1
     );
 
-    let recovery_command = admission(
+    let mut recovery_command = admission(
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367a00",
             scope: "scp_0198f1c3-9a00-7c3e-b1f3-773c28367a01",
@@ -936,6 +944,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         bindings.clone(),
         Utc::now() + Duration::minutes(5),
     );
+    recovery_command.retry_backoff_milliseconds = 30_000;
     applied(run_command!(repository, admit_run, recovery_command.clone()).unwrap());
     let mut short_claim = orchestration_claim_with_ids(
         WORKER_D_ID,
@@ -945,8 +954,8 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ["7a0b", "7a0c", "7a0d"],
     );
     // Keep the negative pre-expiry assertion outside normal CI scheduling jitter. The fixture
-    // still observes the database lease deadline and then crosses it deliberately below.
-    short_claim.lease_milliseconds = 1_000;
+    // still observes the database lease deadline and then crosses it explicitly below.
+    short_claim.lease_milliseconds = 30_000;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let leased_for_recovery = scheduler
         .claim_orchestration_jobs(short_claim)
@@ -989,7 +998,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .is_empty());
     scheduler.commit().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    expire_orchestration_lease(
+        &pool,
+        &recovery_command.orchestration_job_id.to_string(),
+        "leased",
+        WORKER_D_ID,
+        leased_for_recovery[0].job.lease_epoch,
+    )
+    .await;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let first_page = scheduler
         .drive_expired_orchestration_jobs(leased_recovery.clone())
@@ -1071,7 +1087,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ["7a16", "7a17", "7a18", "7a19"],
         ["7a1a", "7a1b", "7a1c"],
     );
-    running_claim.lease_milliseconds = 5_000;
+    running_claim.lease_milliseconds = 120_000;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let claimed_for_running_recovery = scheduler
         .claim_orchestration_jobs(running_claim)
@@ -1108,6 +1124,21 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(running_for_recovery.attempt_no, 1);
+    let (artifact_read_deadline, artifact_read_database_now): (DateTime<Utc>, DateTime<Utc>) =
+        sqlx::query_as(
+            r#"
+            SELECT LEAST(lease_expires_at, deadline) - interval '5 seconds',
+                   clock_timestamp()
+            FROM insight_platform.jobs
+            WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'
+            "#,
+        )
+        .bind(TENANT_ID)
+        .bind(&running_for_recovery.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(artifact_read_deadline > artifact_read_database_now);
     let typed_plan_bytes = canonical_json(&serde_json::to_value(runtime_plan()).unwrap()).unwrap();
     let expected_typed_plan_artifact = ArtifactRef::new(
         id(TYPED_PLAN_ARTIFACT_ID),
@@ -1128,7 +1159,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         lease_token_digest: digest('0'),
         request_digest: digest('3'),
         maximum_bytes: typed_plan_bytes.len(),
-        deadline: Utc::now() + Duration::milliseconds(400),
+        deadline: artifact_read_deadline,
     })
         .await
         .unwrap();
@@ -1156,7 +1187,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         skill_deployment_id: id(SKILL_DEPLOYMENT_ID),
         request_digest: digest('8'),
         maximum_bytes: MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
-        deadline: Utc::now() + Duration::milliseconds(400),
+        deadline: artifact_read_deadline,
     };
     let skill_package_read = repository
         .resolve_skill_package_read(skill_package_lease.clone())
@@ -1274,7 +1305,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         run_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02"),
         request_digest: digest('7'),
         maximum_bytes: artifact_value_bytes.len(),
-        deadline: Utc::now() + Duration::milliseconds(400),
+        deadline: artifact_read_deadline,
     };
     let run_value_read = repository
         .resolve_run_value_read(run_value_lease.clone())
@@ -1300,7 +1331,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         repository.resolve_run_value_read(wrong_value).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
-    sqlx::query(
+    let expired_running_job = sqlx::query(
         r#"
         UPDATE insight_platform.jobs
         SET lease_expires_at = clock_timestamp() - interval '1 millisecond'
@@ -1312,6 +1343,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .execute(&pool)
     .await
     .unwrap();
+    assert_eq!(expired_running_job.rows_affected(), 1);
+    assert!(sqlx::query_scalar::<_, bool>("SELECT $1 > clock_timestamp()")
+        .bind(artifact_read_deadline)
+        .fetch_one(&pool)
+        .await
+        .unwrap());
     assert!(matches!(
         repository.authorize_object_read(&typed_plan_read).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
@@ -1346,6 +1383,14 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(recovered_running[0].job.state, "retry_scheduled");
     assert_eq!(recovered_running[0].job.attempt_no, 1);
     assert_eq!(recovered_running[0].run.active_work_count, 0);
+    let expected_recovery_retry_at = recovered_running[0].job.updated_at
+        + Duration::milliseconds(
+            i64::try_from(recovery_command.retry_backoff_milliseconds).unwrap(),
+        );
+    assert_eq!(
+        recovered_running[0].job.retry_at,
+        Some(expected_recovery_retry_at)
+    );
     let recovery_due = DriveDueOrchestrationRetries {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -1364,7 +1409,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .is_empty());
     scheduler.commit().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+    force_orchestration_retry_due(
+        &pool,
+        &recovered_running[0].job.job_id,
+        expected_recovery_retry_at,
+    )
+    .await;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let recovered_ready = scheduler
         .drive_due_orchestration_retries(recovery_due)
@@ -1789,6 +1839,25 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     assert_eq!(waited.run.active_work_count, 0);
     assert_eq!(waited.settled_quota_account_ids, vec![QUOTA_ACCOUNT_ID]);
     assert_eq!(waited.job.wake_kind.as_deref(), Some("timer"));
+    let timer_delay_milliseconds = match &wait_yield.outcome {
+        OrchestrationYield::TimerWait { plan } => match plan
+            .nodes
+            .get(&PlanNodeKey::new("timer_wait".to_owned()).unwrap())
+            .unwrap()
+        {
+            RuntimeNode::TimerWait {
+                delay_milliseconds, ..
+            } => *delay_milliseconds,
+            _ => unreachable!("fixture Timer node exists"),
+        },
+        _ => unreachable!("fixture uses a Timer wait"),
+    };
+    let expected_timer_payload_due_at = waited.job.updated_at
+        + Duration::milliseconds(i64::try_from(timer_delay_milliseconds).unwrap());
+    let expected_timer_due_at = expected_timer_payload_due_at
+        .min(waited.job.deadline)
+        .min(waited.run.deadline);
+    assert_eq!(waited.job.scheduled_at, expected_timer_due_at);
 
     // A ChildAgentCall may admit a child with one physical attempt. Entering a
     // durable wait does not consume another attempt, so the convergence scan
@@ -1860,7 +1929,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         Err(RepositoryError::Conflict("Timer is not due"))
     ));
     scheduler.rollback().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    force_timer_wait_due(
+        &pool,
+        &waited.job.job_id,
+        expected_timer_due_at,
+        expected_timer_payload_due_at,
+    )
+    .await;
     let due_wait = DriveDueOrchestrationWaits {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -1991,7 +2066,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     .execute(&pool)
     .await
     .unwrap();
-    let retry_at = Utc::now() + Duration::milliseconds(500);
+    let retry_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '30 seconds'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let retry_yield = YieldOrchestrationJob {
         fence: JobFence {
             expected_job_version: retry_started.version,
@@ -2026,6 +2105,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     scheduler.commit().await.unwrap();
     assert_eq!(retried.job.state, "retry_scheduled");
     assert_eq!(retried.run.active_work_count, 0);
+    assert_eq!(retried.job.retry_at, Some(retry_at));
     let due_retry = DriveDueOrchestrationRetries {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -2044,7 +2124,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .is_empty());
     scheduler.commit().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    force_orchestration_retry_due(&pool, &retried.job.job_id, retry_at).await;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     assert_eq!(
         scheduler
@@ -2537,7 +2617,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let timeout_waited = match scheduler
-        .yield_orchestration_job(timeout_yield)
+        .yield_orchestration_job(timeout_yield.clone())
         .await
         .unwrap()
     {
@@ -2545,6 +2625,25 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Replayed(_) => panic!("Signal timeout wait must apply"),
     };
     scheduler.commit().await.unwrap();
+    let signal_timeout_milliseconds = match &timeout_yield.outcome {
+        OrchestrationYield::SignalWait { plan } => match plan
+            .nodes
+            .get(&PlanNodeKey::new("signal_timeout".to_owned()).unwrap())
+            .unwrap()
+        {
+            RuntimeNode::SignalWait {
+                timeout_milliseconds,
+                ..
+            } => *timeout_milliseconds,
+            _ => unreachable!("fixture Signal node exists"),
+        },
+        _ => unreachable!("fixture uses a Signal wait"),
+    };
+    let expected_signal_due_at = (timeout_waited.job.updated_at
+        + Duration::milliseconds(i64::try_from(signal_timeout_milliseconds).unwrap()))
+    .min(timeout_waited.job.deadline)
+    .min(timeout_waited.run.deadline);
+    assert_eq!(timeout_waited.job.scheduled_at, expected_signal_due_at);
     let due_timeout = DriveDueOrchestrationWaits {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -2570,7 +2669,12 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .is_empty());
     scheduler.commit().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    force_signal_timeout_due(
+        &pool,
+        &timeout_waited.job.job_id,
+        expected_signal_due_at,
+    )
+    .await;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let timeout_woken = scheduler
         .drive_due_orchestration_waits(due_timeout)
@@ -2984,6 +3088,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         0
     );
 
+    let timeout_deadline: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '2 minutes'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let timeout_command = admission(
         AdmissionIds {
             run: "run_0198f1c3-9a00-7c3e-b1f3-773c28367500",
@@ -2994,10 +3103,16 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         },
         audit(TENANT_ID, PRINCIPAL_ID, "7505", '2', '3'),
         bindings.clone(),
-        Utc::now() + Duration::seconds(2),
+        timeout_deadline,
     );
     applied(run_command!(repository, admit_run, timeout_command.clone()).unwrap());
-    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    force_run_deadline_due(
+        &pool,
+        &timeout_command.run_id.to_string(),
+        &timeout_command.orchestration_job_id.to_string(),
+        timeout_deadline,
+    )
+    .await;
     let timed_out = applied(
         run_command!(
             repository,
@@ -3202,7 +3317,10 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         ["7c02", "7c03", "7c04", "7c05"],
         ["7c06", "7c07", "7c08"],
     );
-    exhausted_claim.lease_milliseconds = 100;
+    // Give the start transaction a comfortably bounded lease, then expire that exact Job
+    // explicitly below. A sub-second lease makes this recovery proof depend on host load and can
+    // expire before `start_orchestration_job` is even observed.
+    exhausted_claim.lease_milliseconds = 30_000;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let exhausted_claimed = scheduler
         .claim_orchestration_jobs(exhausted_claim)
@@ -3243,7 +3361,19 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(exhausted_started.attempt_no, 1);
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let expired_exhausted_job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET lease_expires_at = clock_timestamp() - interval '1 millisecond'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(exhausted_command.orchestration_job_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(expired_exhausted_job.rows_affected(), 1);
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let exhausted = scheduler
         .drive_orchestration_convergence(orchestration_convergence(
@@ -3708,6 +3838,11 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     let expiring_task_id = id("int_0198f1c3-9a00-7c3e-b1f3-773c28367d31");
+    let expiring_task_deadline: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() + interval '20 seconds'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let expiring_task = DeferOrchestrationToTask {
         fence: JobFence {
             expected_job_version: expiry_started.version,
@@ -3721,7 +3856,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
             safe_prompt_key: "short_lived_input".to_owned(),
         },
         response_schema_digest: Some(digest('3')),
-        task_deadline: Utc::now() + Duration::seconds(2),
+        task_deadline: expiring_task_deadline,
         idempotency_key_digest: digest('4'),
         request_digest: digest('5'),
         receipt_expires_at: Utc::now() + Duration::hours(1),
@@ -3751,6 +3886,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     };
     scheduler.commit().await.unwrap();
     assert_eq!(expiring.task.state, TaskState::Pending);
+    assert_eq!(expiring.task.deadline, expiring_task_deadline);
     assert_eq!(expiring.node_id, expiry_node_id);
 
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
@@ -3764,7 +3900,13 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .unwrap()
         .is_empty());
     scheduler.commit().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    force_orchestration_task_deadline_due(
+        &pool,
+        &expiring_task_id.to_string(),
+        &expiry_node_id,
+        expiring_task_deadline,
+    )
+    .await;
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let expired = scheduler
         .drive_expired_orchestration_tasks(expired_task_scan(
@@ -10277,6 +10419,370 @@ fn expired_task_scan(
             job_outbox_id: platform_id("obx", event_suffixes[3]),
         }],
     }
+}
+
+async fn expire_orchestration_lease(
+    pool: &PgPool,
+    job_id: &str,
+    state: &str,
+    worker_id: &str,
+    lease_epoch: i64,
+) {
+    let expired = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET lease_expires_at = clock_timestamp() - interval '1 millisecond'
+        WHERE tenant_id = $1 AND job_id = $2 AND work_class = 'orchestration'
+          AND state = $3 AND terminal_at IS NULL
+          AND worker_id = $4 AND lease_epoch = $5
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .bind(state)
+    .bind(worker_id)
+    .bind(lease_epoch)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(expired.rows_affected(), 1);
+}
+
+async fn force_orchestration_retry_due(
+    pool: &PgPool,
+    job_id: &str,
+    expected_retry_at: DateTime<Utc>,
+) {
+    let mut fixture = pool.begin().await.unwrap();
+    let (node_id, observed_retry_at): (String, DateTime<Utc>) = sqlx::query_as(
+        r#"
+        SELECT job.node_id, job.retry_at
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+        WHERE job.tenant_id = $1 AND job.job_id = $2
+          AND job.work_class = 'orchestration'
+          AND job.owner_kind = 'node_execution' AND job.owner_id = node.node_id
+          AND job.state = 'retry_scheduled' AND job.worker_id IS NULL
+          AND job.terminal_at IS NULL
+          AND node.record_kind = 'node_execution'
+          AND node.state = 'retry_scheduled' AND node.terminal_at IS NULL
+          AND node.retry_at = job.retry_at
+        FOR UPDATE OF job, node
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(observed_retry_at, expected_retry_at);
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *fixture)
+        .await
+        .unwrap();
+    assert!(observed_retry_at > database_now);
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 millisecond'")
+            .fetch_one(&mut *fixture)
+            .await
+            .unwrap();
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET retry_at = $3
+        WHERE tenant_id = $1 AND job_id = $2
+          AND state = 'retry_scheduled' AND worker_id IS NULL
+          AND terminal_at IS NULL AND retry_at = $4
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .bind(due_at)
+    .bind(expected_retry_at)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(job.rows_affected(), 1);
+    let node = sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET retry_at = $3
+        WHERE tenant_id = $1 AND node_id = $2
+          AND record_kind = 'node_execution' AND state = 'retry_scheduled'
+          AND terminal_at IS NULL AND retry_at = $4
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(node_id)
+    .bind(due_at)
+    .bind(expected_retry_at)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(node.rows_affected(), 1);
+    fixture.commit().await.unwrap();
+}
+
+async fn force_timer_wait_due(
+    pool: &PgPool,
+    job_id: &str,
+    expected_scheduled_at: DateTime<Utc>,
+    expected_payload_due_at: DateTime<Utc>,
+) {
+    let mut fixture = pool.begin().await.unwrap();
+    let (
+        node_id,
+        job_version,
+        node_version,
+        node_payload_schema_version,
+        mut node_payload,
+        node_payload_digest,
+        observed_due_at,
+    ): (String, i64, i64, i32, Value, String, DateTime<Utc>) = sqlx::query_as(
+        r#"
+        SELECT job.node_id, job.version, node.version, node.payload_schema_version,
+               node.payload, node.payload_digest, job.scheduled_at
+        FROM insight_platform.jobs AS job
+        JOIN insight_platform.run_nodes AS node
+          ON node.tenant_id = job.tenant_id AND node.node_id = job.node_id
+        WHERE job.tenant_id = $1 AND job.job_id = $2
+          AND job.work_class = 'orchestration'
+          AND job.state = 'waiting' AND job.worker_id IS NULL
+          AND job.wake_kind = 'timer' AND job.wake_state = 'pending'
+          AND job.terminal_at IS NULL
+          AND node.record_kind = 'node_execution' AND node.state = 'waiting'
+          AND node.terminal_at IS NULL
+        FOR UPDATE OF job, node
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    let original =
+        TypedPayload::from_versioned(node_payload_schema_version, &node_payload, 262_144).unwrap();
+    assert_eq!(original.digest, node_payload_digest);
+    let stored_due_at: DateTime<Utc> =
+        serde_json::from_value(node_payload["due_at"].clone()).unwrap();
+    assert_eq!(stored_due_at, expected_payload_due_at);
+    assert_eq!(observed_due_at, expected_scheduled_at);
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *fixture)
+        .await
+        .unwrap();
+    assert!(observed_due_at > database_now);
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 millisecond'")
+            .fetch_one(&mut *fixture)
+            .await
+            .unwrap();
+    node_payload["due_at"] = serde_json::to_value(due_at).unwrap();
+    let rewritten =
+        TypedPayload::from_versioned(node_payload_schema_version, &node_payload, 262_144).unwrap();
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET scheduled_at = $3
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $4
+          AND state = 'waiting' AND worker_id IS NULL
+          AND wake_kind = 'timer' AND wake_state = 'pending'
+          AND terminal_at IS NULL AND scheduled_at = $5
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .bind(due_at)
+    .bind(job_version)
+    .bind(expected_scheduled_at)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(job.rows_affected(), 1);
+    let node = sqlx::query(
+        r#"
+        UPDATE insight_platform.run_nodes
+        SET payload = $3, payload_digest = $4
+        WHERE tenant_id = $1 AND node_id = $2 AND version = $5
+          AND record_kind = 'node_execution' AND state = 'waiting'
+          AND terminal_at IS NULL AND payload_digest = $6
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(node_id)
+    .bind(&rewritten.value)
+    .bind(&rewritten.digest)
+    .bind(node_version)
+    .bind(node_payload_digest)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(node.rows_affected(), 1);
+    fixture.commit().await.unwrap();
+}
+
+async fn force_signal_timeout_due(pool: &PgPool, job_id: &str, expected_due_at: DateTime<Utc>) {
+    let mut fixture = pool.begin().await.unwrap();
+    let (job_version, payload_schema_version, mut payload, payload_digest, observed_due_at): (
+        i64,
+        i32,
+        Value,
+        String,
+        DateTime<Utc>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT version, payload_schema_version, payload, payload_digest, scheduled_at
+        FROM insight_platform.jobs
+        WHERE tenant_id = $1 AND job_id = $2
+          AND work_class = 'orchestration'
+          AND state = 'waiting' AND worker_id IS NULL
+          AND wake_kind = 'signal' AND wake_state = 'pending'
+          AND terminal_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    let original = TypedPayload::from_versioned(payload_schema_version, &payload, 262_144).unwrap();
+    assert_eq!(original.digest, payload_digest);
+    let stored_due_at: DateTime<Utc> =
+        serde_json::from_value(payload["wake_contract"]["deadline"].clone()).unwrap();
+    assert_eq!(stored_due_at, expected_due_at);
+    assert_eq!(observed_due_at, expected_due_at);
+    let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *fixture)
+        .await
+        .unwrap();
+    assert!(observed_due_at > database_now);
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 millisecond'")
+            .fetch_one(&mut *fixture)
+            .await
+            .unwrap();
+    payload["wake_contract"]["deadline"] = serde_json::to_value(due_at).unwrap();
+    let rewritten =
+        TypedPayload::from_versioned(payload_schema_version, &payload, 262_144).unwrap();
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET scheduled_at = $3, payload = $4, payload_digest = $5
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $6
+          AND state = 'waiting' AND worker_id IS NULL
+          AND wake_kind = 'signal' AND wake_state = 'pending'
+          AND terminal_at IS NULL AND scheduled_at = $7 AND payload_digest = $8
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .bind(due_at)
+    .bind(&rewritten.value)
+    .bind(&rewritten.digest)
+    .bind(job_version)
+    .bind(expected_due_at)
+    .bind(payload_digest)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(job.rows_affected(), 1);
+    fixture.commit().await.unwrap();
+}
+
+async fn force_run_deadline_due(
+    pool: &PgPool,
+    run_id: &str,
+    job_id: &str,
+    expected_deadline: DateTime<Utc>,
+) {
+    let mut fixture = pool.begin().await.unwrap();
+    let (run_deadline, job_deadline, run_created_at, job_created_at, database_now):
+        RunDeadlineSnapshot = sqlx::query_as(
+        r#"
+        SELECT run.deadline, job.deadline, run.created_at, job.created_at, clock_timestamp()
+        FROM insight_platform.runs AS run
+        JOIN insight_platform.jobs AS job
+          ON job.tenant_id = run.tenant_id AND job.run_id = run.run_id
+        WHERE run.tenant_id = $1 AND run.run_id = $2 AND job.job_id = $3
+          AND run.state = 'queued' AND run.terminal_at IS NULL
+          AND job.work_class = 'orchestration' AND job.state = 'ready'
+          AND job.terminal_at IS NULL
+        FOR UPDATE OF run, job
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(run_id)
+    .bind(job_id)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(run_deadline, expected_deadline);
+    assert_eq!(job_deadline, expected_deadline);
+    assert!(run_deadline > database_now);
+    let due_at = run_created_at.max(job_created_at);
+    assert!(due_at <= database_now);
+    let run = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET deadline = $3
+        WHERE tenant_id = $1 AND run_id = $2 AND state = 'queued'
+          AND terminal_at IS NULL AND deadline = $4
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(run_id)
+    .bind(due_at)
+    .bind(expected_deadline)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(run.rows_affected(), 1);
+    let job = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET deadline = $3
+        WHERE tenant_id = $1 AND job_id = $2
+          AND work_class = 'orchestration' AND state = 'ready'
+          AND terminal_at IS NULL AND deadline = $4
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(job_id)
+    .bind(due_at)
+    .bind(expected_deadline)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(job.rows_affected(), 1);
+    fixture.commit().await.unwrap();
+}
+
+async fn force_orchestration_task_deadline_due(
+    pool: &PgPool,
+    task_id: &str,
+    node_id: &str,
+    expected_deadline: DateTime<Utc>,
+) {
+    let expired = sqlx::query(
+        r#"
+        UPDATE insight_platform.tasks
+        SET deadline = created_at
+        WHERE tenant_id = $1 AND task_id = $2
+          AND owner_kind = 'node_execution' AND node_id = $3
+          AND state = 'pending' AND responded_at IS NULL
+          AND deadline = $4 AND deadline > clock_timestamp()
+        "#,
+    )
+    .bind(TENANT_ID)
+    .bind(task_id)
+    .bind(node_id)
+    .bind(expected_deadline)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(expired.rows_affected(), 1);
 }
 
 async fn claim_with_serializable_retry(

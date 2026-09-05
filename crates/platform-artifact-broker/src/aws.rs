@@ -795,6 +795,25 @@ impl AwsArtifactProviderReadiness {
             result.is_ok(),
         );
         result.map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
+        let versioning = self
+            .s3
+            .get_bucket_versioning()
+            .bucket(&*self.bucket)
+            .send()
+            .await;
+        let versioning_enabled = versioning
+            .as_ref()
+            .is_ok_and(|output| bucket_versioning_enabled(output.status()));
+        observe_external(
+            &self.observer,
+            ArtifactExternalDependency::S3,
+            versioning_enabled,
+        );
+        let versioning =
+            versioning.map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
+        if !bucket_versioning_enabled(versioning.status()) {
+            return Err(AwsArtifactProviderReadinessError::StorageInvalidEvidence);
+        }
         let result = self
             .kms
             .client
@@ -823,9 +842,14 @@ impl AwsArtifactProviderReadiness {
     }
 }
 
+fn bucket_versioning_enabled(status: Option<&aws_sdk_s3::types::BucketVersioningStatus>) -> bool {
+    status == Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AwsArtifactProviderReadinessError {
     StorageUnavailable,
+    StorageInvalidEvidence,
     KmsUnavailable,
     KmsInvalidEvidence,
 }
@@ -1385,6 +1409,13 @@ mod tests {
             metadata_from_s3(Some("version-1"), Some(9), "version-1", 8),
             Err(ArtifactObjectStoreError::TooLarge)
         );
+        assert!(bucket_versioning_enabled(Some(
+            &aws_sdk_s3::types::BucketVersioningStatus::Enabled
+        )));
+        assert!(!bucket_versioning_enabled(Some(
+            &aws_sdk_s3::types::BucketVersioningStatus::Suspended
+        )));
+        assert!(!bucket_versioning_enabled(None));
     }
 
     #[tokio::test]

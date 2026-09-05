@@ -7,7 +7,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
-    http::{header, Response, StatusCode},
+    http::{header, HeaderMap, Response, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -17,13 +17,18 @@ use insight_platform_contracts::{
 };
 use insight_platform_sandbox::opensandbox::{
     OpenSandboxId, RunnerBootId, SandboxActivationFrameV1, SandboxContractError,
-    SandboxFailureClassV1, SandboxRunnerConfigV1, SandboxRunnerOutcomeV1, SandboxRunnerPhaseV1,
-    SandboxRunnerResultFrameV1, SandboxRunnerStateFrameV1, MAX_SANDBOX_RUNNER_CONFIG_BYTES,
-    OPENSANDBOX_ID_ENV, SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_RUNNER_CONFIG_DIGEST_ENV,
-    SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_UID,
+    SandboxFailureClassV1, SandboxRunnerConfigV1, SandboxRunnerOperationV1, SandboxRunnerOutcomeV1,
+    SandboxRunnerPhaseV1, SandboxRunnerRequestProofV1, SandboxRunnerResultFrameV1,
+    SandboxRunnerStateFrameV1, MAX_SANDBOX_RUNNER_CONFIG_BYTES, OPENSANDBOX_ID_ENV,
+    SANDBOX_CONTRACT_SCHEMA_VERSION, SANDBOX_PACKAGE_GID, SANDBOX_RUNNER_CONFIG_DIGEST_ENV,
+    SANDBOX_RUNNER_CONFIG_ENV, SANDBOX_RUNNER_PROOF_HEADER,
 };
+#[cfg(target_os = "linux")]
+use insight_platform_sandbox::opensandbox::{SANDBOX_RUNNER_GID, SANDBOX_RUNNER_UID};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt as _;
 use std::{
     error::Error,
     fmt,
@@ -50,6 +55,28 @@ pub const RUNNER_LISTEN_ADDRESS: &str = "0.0.0.0:18080";
 pub const RUNNER_STATE_DIRECTORY: &str = "/run/insight-sandbox/authority";
 pub const RUNNER_LATCH_FILE: &str = "activation.latch";
 pub const RUNNER_RESULT_FILE: &str = "result.frame";
+pub const RUNNER_CORE_PATH: &str = "/usr/local/libexec/platform-sandbox-runner-core";
+#[cfg(target_os = "linux")]
+const RUNNER_CAPABILITY_MASK: u64 = 0x0000_0000_0000_00e0;
+
+#[cfg(target_os = "linux")]
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerStartupV1 {
     pub sandbox_id: OpenSandboxId,
@@ -246,6 +273,233 @@ fn read_secure_file(path: &Path, maximum: usize) -> std::io::Result<Vec<u8>> {
 fn effective_uid() -> u32 {
     // SAFETY: `geteuid` has no arguments and only reads the calling process credential.
     unsafe { libc::geteuid() }
+}
+
+#[cfg(target_os = "linux")]
+fn closed_runner_environment() -> bool {
+    let mut actual = std::env::vars_os()
+        .map(|(name, _)| name.as_os_str().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let mut expected = vec![
+        OPENSANDBOX_ID_ENV.as_bytes().to_vec(),
+        SANDBOX_RUNNER_CONFIG_DIGEST_ENV.as_bytes().to_vec(),
+        SANDBOX_RUNNER_CONFIG_ENV.as_bytes().to_vec(),
+    ];
+    actual.sort_unstable();
+    expected.sort_unstable();
+    actual == expected
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn capability_sets() -> std::io::Result<(u64, u64, u64)> {
+    let header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    // SAFETY: capget reads the fixed v3 header and two result words for the current process.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &header as *const CapabilityHeader,
+            data.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let join = |low: u32, high: u32| u64::from(low) | (u64::from(high) << 32);
+    Ok((
+        join(data[0].effective, data[1].effective),
+        join(data[0].permitted, data[1].permitted),
+        join(data[0].inheritable, data[1].inheritable),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn set_capability_sets(
+    effective: u64,
+    permitted: u64,
+    inheritable: u64,
+) -> std::io::Result<()> {
+    let header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        CapabilityData {
+            effective: effective as u32,
+            permitted: permitted as u32,
+            inheritable: inheritable as u32,
+        },
+        CapabilityData {
+            effective: (effective >> 32) as u32,
+            permitted: (permitted >> 32) as u32,
+            inheritable: (inheritable >> 32) as u32,
+        },
+    ];
+    // SAFETY: capset reads the fixed v3 header and two words and changes only this process.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            &header as *const CapabilityHeader,
+            data.as_ptr(),
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn bounding_capabilities() -> std::io::Result<u64> {
+    let mut mask = 0_u64;
+    for capability in 0..64 {
+        // SAFETY: PR_CAPBSET_READ is a read-only query for one capability number.
+        let present = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
+        if present < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(error);
+        }
+        if present != 0 {
+            mask |= 1_u64 << capability;
+        }
+    }
+    Ok(mask)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn ambient_capabilities() -> std::io::Result<u64> {
+    let mut mask = 0_u64;
+    for capability in 0..64 {
+        // SAFETY: PR_CAP_AMBIENT_IS_SET is a read-only query for one capability number.
+        let present = unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_IS_SET,
+                capability,
+                0,
+                0,
+            )
+        };
+        if present < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(error);
+        }
+        if present != 0 {
+            mask |= 1_u64 << capability;
+        }
+    }
+    Ok(mask)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn identities_match(uid: u32, gid: u32) -> bool {
+    let mut real_uid = 0;
+    let mut effective_uid = 0;
+    let mut saved_uid = 0;
+    let mut real_gid = 0;
+    let mut effective_gid = 0;
+    let mut saved_gid = 0;
+    // SAFETY: the calls write to six valid scalar pointers and query the current process only.
+    unsafe {
+        libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) == 0
+            && libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid) == 0
+            && real_uid == uid
+            && effective_uid == uid
+            && saved_uid == uid
+            && real_gid == gid
+            && effective_gid == gid
+            && saved_gid == gid
+            && libc::setfsuid(u32::MAX) as u32 == uid
+            && libc::setfsgid(u32::MAX) as u32 == gid
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn supplementary_groups_are_empty() -> bool {
+    // SAFETY: a zero-size getgroups call with a null pointer only returns the group count.
+    unsafe { libc::getgroups(0, std::ptr::null_mut()) == 0 }
+}
+
+#[cfg(target_os = "linux")]
+fn boundary_error() -> RunnerError {
+    RunnerError::PrivilegeBoundary
+}
+
+/// Closes and verifies the launcher-to-runner privilege handoff before Tokio starts.
+#[cfg(target_os = "linux")]
+pub fn prepare_runner_boundary() -> Result<(), RunnerError> {
+    if !closed_runner_environment()
+        || std::env::args_os().count() != 1
+        || std::fs::read_link("/proc/self/exe").ok().as_deref() != Some(Path::new(RUNNER_CORE_PATH))
+    {
+        return Err(boundary_error());
+    }
+    // SAFETY: every operation below reads or monotonically narrows the current process boundary.
+    unsafe {
+        if libc::getpid() == 1
+            || libc::getppid() != 1
+            || libc::getpgrp() != libc::getpid()
+            || !identities_match(SANDBOX_RUNNER_UID, SANDBOX_RUNNER_GID)
+            || !supplementary_groups_are_empty()
+            || capability_sets().map_err(|_| boundary_error())?
+                != (
+                    RUNNER_CAPABILITY_MASK,
+                    RUNNER_CAPABILITY_MASK,
+                    RUNNER_CAPABILITY_MASK,
+                )
+            || bounding_capabilities().map_err(|_| boundary_error())? != RUNNER_CAPABILITY_MASK
+            || ambient_capabilities().map_err(|_| boundary_error())? != RUNNER_CAPABILITY_MASK
+            || libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+            || libc::prctl(libc::PR_GET_SECUREBITS, 0, 0, 0, 0) != 0
+            || libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) != 2
+        {
+            return Err(boundary_error());
+        }
+        if libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        ) != 0
+        {
+            return Err(boundary_error());
+        }
+        set_capability_sets(RUNNER_CAPABILITY_MASK, RUNNER_CAPABILITY_MASK, 0)
+            .map_err(|_| boundary_error())?;
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+            || libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) != 0
+            || capability_sets().map_err(|_| boundary_error())?
+                != (RUNNER_CAPABILITY_MASK, RUNNER_CAPABILITY_MASK, 0)
+            || ambient_capabilities().map_err(|_| boundary_error())? != 0
+            || bounding_capabilities().map_err(|_| boundary_error())? != RUNNER_CAPABILITY_MASK
+            || libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+            || libc::prctl(libc::PR_GET_SECUREBITS, 0, 0, 0, 0) != 0
+            || libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) != 2
+        {
+            return Err(boundary_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_runner_boundary() -> Result<(), RunnerError> {
+    Err(RunnerError::PrivilegeBoundary)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,9 +701,9 @@ impl RunnerCore {
             .unwrap_or(usize::MAX)
             .saturating_add(65_536);
         Router::new()
-            .route("/v1/state", get(get_state))
-            .route("/v1/activate", post(post_activate))
-            .route("/v1/result", get(get_result))
+            .route("/v2/state", get(get_state))
+            .route("/v2/activate", post(post_activate))
+            .route("/v2/result", get(get_result))
             .layer(DefaultBodyLimit::max(maximum_body))
             .with_state(self)
     }
@@ -469,14 +723,28 @@ impl ActivationDisposition {
     }
 }
 
-async fn get_state(State(runner): State<RunnerCore>) -> impl IntoResponse {
+async fn get_state(
+    State(runner): State<RunnerCore>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !runner_request_is_authorized(&runner, &headers, SandboxRunnerOperationV1::State, &body) {
+        return safe_problem(StatusCode::UNAUTHORIZED, "sandbox_runner_unauthorized");
+    }
     match runner.state_frame().await {
         Ok(frame) => canonical_response(StatusCode::OK, &frame),
         Err(_) => safe_problem(StatusCode::INTERNAL_SERVER_ERROR, "sandbox_runner_failure"),
     }
 }
 
-async fn post_activate(State(runner): State<RunnerCore>, body: Bytes) -> impl IntoResponse {
+async fn post_activate(
+    State(runner): State<RunnerCore>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !runner_request_is_authorized(&runner, &headers, SandboxRunnerOperationV1::Activate, &body) {
+        return safe_problem(StatusCode::UNAUTHORIZED, "sandbox_runner_unauthorized");
+    }
     let frame = match parse_activation(&body, runner.config.maximum_input_bytes) {
         Ok(frame) => frame,
         Err(_) => {
@@ -498,7 +766,14 @@ async fn post_activate(State(runner): State<RunnerCore>, body: Bytes) -> impl In
     }
 }
 
-async fn get_result(State(runner): State<RunnerCore>) -> impl IntoResponse {
+async fn get_result(
+    State(runner): State<RunnerCore>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !runner_request_is_authorized(&runner, &headers, SandboxRunnerOperationV1::Result, &body) {
+        return safe_problem(StatusCode::UNAUTHORIZED, "sandbox_runner_unauthorized");
+    }
     match runner.result_bytes().await {
         Ok(Some(bytes)) => Response::builder()
             .status(StatusCode::OK)
@@ -509,6 +784,35 @@ async fn get_result(State(runner): State<RunnerCore>) -> impl IntoResponse {
         Ok(None) => safe_problem(StatusCode::TOO_EARLY, "sandbox_result_not_ready"),
         Err(_) => safe_problem(StatusCode::INTERNAL_SERVER_ERROR, "sandbox_runner_failure"),
     }
+}
+
+fn runner_request_is_authorized(
+    runner: &RunnerCore,
+    headers: &HeaderMap,
+    operation: SandboxRunnerOperationV1,
+    body: &[u8],
+) -> bool {
+    let mut values = headers.get_all(SANDBOX_RUNNER_PROOF_HEADER).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    SandboxRunnerRequestProofV1::parse_header(value)
+        .and_then(|proof| {
+            proof.verify(
+                &runner.config.activation_verifying_key,
+                &runner.sandbox_id,
+                &runner.config.execution_request_digest,
+                operation,
+                body,
+            )
+        })
+        .is_ok()
 }
 
 fn safe_problem(status: StatusCode, code: &'static str) -> Response<Body> {
@@ -578,6 +882,7 @@ async fn execute_package(
         .kill_on_drop(true);
     let maximum_processes = libc::rlim_t::from(config.maximum_processes);
     let package_uid = config.package_uid;
+    let package_gid = SANDBOX_PACKAGE_GID;
     // SAFETY: this closure executes after fork and before exec. It captures only Copy integers and
     // performs credential, capability, session, seccomp, and rlimit syscalls before returning the
     // OS error to `Command`; it does not touch shared application state.
@@ -587,11 +892,7 @@ async fn execute_package(
                 return Err(std::io::Error::last_os_error());
             }
             if enforce_package_boundary {
-                if libc::geteuid() != SANDBOX_RUNNER_UID || libc::setuid(package_uid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                drop_package_capabilities()?;
-                install_package_seccomp()?;
+                configure_package_boundary(package_uid, package_gid)?;
             }
             let limit = libc::rlimit {
                 rlim_cur: maximum_processes,
@@ -718,54 +1019,70 @@ async fn execute_package(
 
 #[cfg(target_os = "linux")]
 unsafe fn drop_package_capabilities() -> std::io::Result<()> {
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    // SAFETY: this post-fork child drops every process capability through the shared v3 helper.
+    unsafe { set_capability_sets(0, 0, 0) }
+}
 
-    #[repr(C)]
-    struct CapabilityHeader {
-        version: u32,
-        pid: i32,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CapabilityData {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
-
-    let header = CapabilityHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let empty = CapabilityData {
-        effective: 0,
-        permitted: 0,
-        inheritable: 0,
-    };
-    let data = [empty; 2];
-    // SAFETY: the kernel reads one fixed header and the two v3 capability words from these
-    // stack-resident values and applies them only to the calling post-fork child.
-    if unsafe {
-        libc::syscall(
-            libc::SYS_capset,
-            &header as *const CapabilityHeader,
-            data.as_ptr(),
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+#[cfg(target_os = "linux")]
+unsafe fn configure_package_boundary(package_uid: u32, package_gid: u32) -> std::io::Result<()> {
+    // SAFETY: this runs in the single-threaded post-fork child. Each operation either narrows the
+    // child's credentials or installs a monotonic kernel boundary before the package image starts.
+    unsafe {
+        if libc::setgroups(0, std::ptr::null()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::setresgid(package_gid, package_gid, package_gid) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::setresuid(package_uid, package_uid, package_uid) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        drop_package_capabilities()?;
+        if libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        ) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        install_package_seccomp()?;
+        verify_package_boundary(package_uid, package_gid)
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-unsafe fn drop_package_capabilities() -> std::io::Result<()> {
+unsafe fn configure_package_boundary(_package_uid: u32, _package_gid: u32) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "package capability boundary requires Linux",
+        "package boundary configuration requires Linux",
     ))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn verify_package_boundary(package_uid: u32, package_gid: u32) -> std::io::Result<()> {
+    // SAFETY: every operation is a read-only query of the current post-fork child.
+    let valid = unsafe {
+        identities_match(package_uid, package_gid)
+            && supplementary_groups_are_empty()
+            && capability_sets()? == (0, 0, 0)
+            && ambient_capabilities()? == 0
+            && bounding_capabilities()? == RUNNER_CAPABILITY_MASK
+            && libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1
+            && libc::prctl(libc::PR_GET_SECUREBITS, 0, 0, 0, 0) == 0
+            && libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) == 2
+            && libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) == 0
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(libc::EPERM))
+    }
 }
 
 async fn read_bounded<R>(mut reader: R, maximum_bytes: u64) -> Result<Vec<u8>, RunnerError>
@@ -928,14 +1245,6 @@ unsafe fn install_package_seccomp() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-unsafe fn install_package_seccomp() -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "package seccomp boundary requires Linux",
-    ))
-}
-
 fn join_bounded(
     result: Result<Result<Vec<u8>, RunnerError>, tokio::task::JoinError>,
 ) -> Result<Vec<u8>, RunnerError> {
@@ -1070,6 +1379,7 @@ pub enum RunnerError {
     Storage,
     PackageIo,
     PackageBoundary,
+    PrivilegeBoundary,
     ResultTooLarge,
     Contract(SandboxContractError),
 }
@@ -1084,6 +1394,7 @@ impl fmt::Display for RunnerError {
             Self::Storage => "runner durable state is unavailable",
             Self::PackageIo => "runner package I/O failed",
             Self::PackageBoundary => "runner package boundary failed",
+            Self::PrivilegeBoundary => "runner privilege boundary failed",
             Self::ResultTooLarge => "runner output exceeded its hard limit",
             Self::Contract(_) => "runner contract is invalid",
         })
@@ -1115,10 +1426,12 @@ pub async fn serve(startup: RunnerStartupV1) -> Result<(), RunnerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderValue, Method, Request};
     use insight_platform_sandbox::opensandbox::{
         ActivationSignature, OpaqueActivationToken, SANDBOX_PACKAGE_UID,
     };
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     fn digest(character: char) -> Sha256Digest {
         format!("sha256:{}", character.to_string().repeat(64))
@@ -1177,6 +1490,214 @@ mod tests {
         }
         .seal_with(&token())
         .unwrap()
+    }
+
+    fn request_proof(
+        runner: &RunnerCore,
+        operation: SandboxRunnerOperationV1,
+        body: &[u8],
+    ) -> SandboxRunnerRequestProofV1 {
+        match operation {
+            SandboxRunnerOperationV1::State => SandboxRunnerRequestProofV1::for_state(
+                &token(),
+                &runner.sandbox_id,
+                &runner.config.execution_request_digest,
+            ),
+            SandboxRunnerOperationV1::Activate => SandboxRunnerRequestProofV1::for_activate(
+                &token(),
+                &runner.sandbox_id,
+                &runner.config.execution_request_digest,
+                body,
+            ),
+            SandboxRunnerOperationV1::Result => SandboxRunnerRequestProofV1::for_result(
+                &token(),
+                &runner.sandbox_id,
+                &runner.config.execution_request_digest,
+            ),
+        }
+        .unwrap()
+    }
+
+    fn request(
+        method: Method,
+        path: &'static str,
+        body: Vec<u8>,
+        proof: Option<&SandboxRunnerRequestProofV1>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(proof) = proof {
+            builder = builder.header(SANDBOX_RUNNER_PROOF_HEADER, proof.header_value());
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    fn test_runner(temporary: &TempDir) -> RunnerCore {
+        RunnerCore::new(
+            startup(),
+            RunnerStorage::test(temporary.path().to_path_buf()),
+        )
+        .unwrap()
+    }
+
+    async fn assert_armed_without_latch(runner: &RunnerCore, temporary: &TempDir) {
+        assert_eq!(
+            runner.state_frame().await.unwrap().phase,
+            SandboxRunnerPhaseV1::Armed
+        );
+        assert!(!temporary.path().join(RUNNER_LATCH_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn v2_router_accepts_operation_and_body_bound_proofs() {
+        let temporary = TempDir::new().unwrap();
+        let runner = test_runner(&temporary);
+        let router = runner.clone().router();
+
+        let state_proof = request_proof(&runner, SandboxRunnerOperationV1::State, &[]);
+        let state = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/v2/state",
+                Vec::new(),
+                Some(&state_proof),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(state.status(), StatusCode::OK);
+
+        let result_proof = request_proof(&runner, SandboxRunnerOperationV1::Result, &[]);
+        let result = router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/v2/result",
+                Vec::new(),
+                Some(&result_proof),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_EARLY);
+
+        let frame = activation(runner.state_frame().await.unwrap().boot_id);
+        let body = frame.canonical_bytes().unwrap();
+        let activate_proof = request_proof(&runner, SandboxRunnerOperationV1::Activate, &body);
+        let activate = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/activate",
+                body,
+                Some(&activate_proof),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(activate.status(), StatusCode::OK);
+
+        let removed_v1_route = router
+            .oneshot(request(Method::GET, "/v1/state", Vec::new(), None))
+            .await
+            .unwrap();
+        assert_eq!(removed_v1_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_malformed_and_duplicate_proofs_fail_before_activation_parsing() {
+        let temporary = TempDir::new().unwrap();
+        let runner = test_runner(&temporary);
+        let router = runner.clone().router();
+        let malformed_body = b"not-json".to_vec();
+
+        let missing = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/activate",
+                malformed_body.clone(),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let mut malformed = request(Method::POST, "/v2/activate", malformed_body.clone(), None);
+        malformed.headers_mut().insert(
+            SANDBOX_RUNNER_PROOF_HEADER,
+            HeaderValue::from_static("v1.not-a-signature"),
+        );
+        let malformed = router.clone().oneshot(malformed).await.unwrap();
+        assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
+
+        let proof = request_proof(&runner, SandboxRunnerOperationV1::Activate, &malformed_body);
+        let mut duplicate = request(Method::POST, "/v2/activate", malformed_body, Some(&proof));
+        duplicate.headers_mut().append(
+            SANDBOX_RUNNER_PROOF_HEADER,
+            HeaderValue::from_str(&proof.header_value()).unwrap(),
+        );
+        let duplicate = router.oneshot(duplicate).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::UNAUTHORIZED);
+
+        assert_armed_without_latch(&runner, &temporary).await;
+    }
+
+    #[tokio::test]
+    async fn wrong_candidate_operation_and_body_proofs_fail_without_latching_activation() {
+        let temporary = TempDir::new().unwrap();
+        let runner = test_runner(&temporary);
+        let router = runner.clone().router();
+        let frame = activation(runner.state_frame().await.unwrap().boot_id);
+        let body = frame.canonical_bytes().unwrap();
+
+        let wrong_candidate = SandboxRunnerRequestProofV1::for_activate(
+            &token(),
+            &OpenSandboxId::parse("sandbox-two").unwrap(),
+            &runner.config.execution_request_digest,
+            &body,
+        )
+        .unwrap();
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/activate",
+                body.clone(),
+                Some(&wrong_candidate),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_armed_without_latch(&runner, &temporary).await;
+
+        let wrong_operation = request_proof(&runner, SandboxRunnerOperationV1::State, &[]);
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/v2/activate",
+                body.clone(),
+                Some(&wrong_operation),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_armed_without_latch(&runner, &temporary).await;
+
+        let wrong_body = request_proof(
+            &runner,
+            SandboxRunnerOperationV1::Activate,
+            b"different-body",
+        );
+        let response = router
+            .oneshot(request(
+                Method::POST,
+                "/v2/activate",
+                body,
+                Some(&wrong_body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_armed_without_latch(&runner, &temporary).await;
     }
 
     #[tokio::test]

@@ -85,11 +85,27 @@ production_bins = (
     "platform-mcp-discovery-worker", "platform-mcp-subscription-worker",
     "platform-artifact-data-worker", "platform-artifact-gateway",
     "platform-artifact-maintenance", "platform-egress-broker",
-    "platform-security-authority", "platform-sandbox-dispatcher", "platform-sandbox-runner",
+    "platform-security-authority", "platform-sandbox-dispatcher",
 )
-if dockerfile.count("cargo build --locked --release") != 1:
+docker_run_instructions = re.findall(
+    r"^RUN\s+.*?(?=^[A-Z][A-Z0-9_-]*(?:\s|$)|\Z)",
+    dockerfile,
+    flags=re.MULTILINE | re.DOTALL,
+)
+production_builds = [
+    instruction
+    for instruction in docker_run_instructions
+    if "cargo build --locked --release --workspace" in instruction
+]
+dependency_builds = [
+    instruction
+    for instruction in docker_run_instructions
+    if "cargo chef cook --locked --release --workspace --recipe-path recipe.json"
+    in instruction
+]
+if len(production_builds) != 1:
     failures.append("Dockerfile must compile the production closure in one Cargo invocation")
-if "cargo build --locked --release --workspace" not in dockerfile:
+if not production_builds:
     failures.append("Dockerfile production build must select binaries across the workspace")
 for build_cache_marker in (
     "cargo install --locked --version 0.1.78 cargo-chef",
@@ -99,11 +115,20 @@ for build_cache_marker in (
     if build_cache_marker not in dockerfile:
         failures.append(f"Dockerfile production build misses dependency cache stage {build_cache_marker}")
 for binary in production_bins:
-    if dockerfile.count(f"--bin {binary}") != 2:
+    if (
+        len(production_builds) != 1
+        or len(dependency_builds) != 1
+        or f"--bin {binary}" not in production_builds[0]
+        or f"--bin {binary}" not in dependency_builds[0]
+    ):
         failures.append(f"Dockerfile production build misses binary {binary}")
 for runner_boundary in ("FROM runtime-base AS sandbox-runner", "ENTRYPOINT [\"/usr/local/bin/platform-sandbox-runner\"]"):
     if runner_boundary not in dockerfile:
         failures.append(f"Dockerfile sandbox runner misses {runner_boundary}")
+if "-p insight-platform-sandbox-runner --bin platform-sandbox-runner" not in dockerfile:
+    failures.append("Dockerfile sandbox runner misses the isolated static Rust core build")
+if "COPY --from=builder /workspace/target/release/platform-sandbox-runner /usr/local/bin/platform-sandbox-runner" in dockerfile:
+    failures.append("generic runtime image still contains the unusable non-launcher Sandbox runner")
 
 if failures:
     raise SystemExit("\n".join(failures))

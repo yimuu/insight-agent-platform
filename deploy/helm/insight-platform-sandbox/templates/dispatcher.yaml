@@ -16,7 +16,7 @@
   "candidate_page_items" (int .Values.dispatcher.opensandbox.candidatePageItems)
   "orphan_page_items" (int .Values.dispatcher.opensandbox.orphanPageItems)
   "readiness_request_timeout_milliseconds" (int .Values.dispatcher.opensandbox.readinessRequestTimeoutMilliseconds)
-  "readiness_image_uri" (printf "%s@%s" .Values.images.platform.repository .Values.images.platform.digest)
+  "readiness_image_uri" (printf "%s@%s" .Values.images.sandboxRunner.repository .Values.images.sandboxRunner.digest)
   "readiness_profile_digest" .Values.global.deploymentConfigDigest
   "readiness_success_ttl_milliseconds" (int .Values.dispatcher.opensandbox.readinessSuccessTtlMilliseconds) -}}
 {{- $config := dict

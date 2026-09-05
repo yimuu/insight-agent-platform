@@ -171,7 +171,7 @@ failures << "Artifact roles share a storage identity" unless identities.map(&:la
 data_policy = policies.find { |doc| doc.dig("metadata", "name") == "insight-platform-artifact-data-worker" }
 data_ingress = data_policy.to_h.dig("spec", "ingress").to_a
 data_ports = data_ingress.flat_map { |entry| entry.fetch("ports", []).map { |port| port["port"] } }.sort
-failures << "Data Worker ingress must contain only monitoring, Scheduler, and discovery listeners" unless data_ports == [9090, 9443, 9443]
+failures << "Data Worker ingress must contain only monitoring, Orchestration, Context Dataset, and discovery listeners" unless data_ports == [9090, 9443, 9443, 9443]
 discovery_ingress = data_ingress.find do |entry|
   entry.fetch("from", []).any? do |source|
     source.dig("podSelector", "matchLabels", "insight.platform/workload-role") == "mcp-discovery-worker"

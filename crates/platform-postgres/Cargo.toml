@@ -59,7 +59,6 @@ insight-platform-artifact-broker.workspace = true
 insight-platform-artifact-rpc.workspace = true
 insight-platform-egress = { workspace = true, features = ["protocol-fixtures"] }
 insight-platform-egress-rpc.workspace = true
-insight-platform-opensandbox-client.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 ring.workspace = true
 rustls.workspace = true

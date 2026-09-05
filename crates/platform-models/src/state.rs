@@ -1255,13 +1255,14 @@ pub struct ModelOutcomeDecision {
 pub struct ExpiredModelLeaseObservation {
     pub observed_job_version: u64,
     pub observed_lease_generation: u64,
-    pub retry_at: DateTime<Utc>,
+    pub retry_at: Option<DateTime<Utc>>,
     pub observation_digest: Sha256Digest,
 }
 
 /// Recovers a dispatched Model request whose Worker lease expired without a durable outcome.
 /// The old attempt is conservatively charged at its frozen ceiling because Provider execution
-/// may have happened, then the same durable Job is made retryable with its lease cleared.
+/// may have happened. The same durable Job is made retryable when attempts remain; exhaustion
+/// terminally fails both the Job and ModelTurn so no running owner can be stranded.
 pub fn decide_expired_model_lease(
     current_turn: &ModelTurnRecord,
     current_job: &JobProjection,
@@ -1279,18 +1280,30 @@ pub fn decide_expired_model_lease(
     if current_turn.state != ModelTurnState::InFlight
         || current_turn.payload.current_job_id.as_ref() != Some(&current_job.job_id)
         || current_job.state != insight_platform_contracts::JobState::Running
-        || current_job.attempt_count >= current_job.attempt_limit
         || database_now >= current_turn.deadline
     {
         return Err(ModelTurnError::FirstWinnerLost);
     }
+    let exhausted = current_job.attempt_count >= current_job.attempt_limit;
+    let retry_at = if exhausted {
+        if observation.retry_at.is_some() {
+            return Err(ModelTurnError::InvalidCommand);
+        }
+        None
+    } else {
+        Some(observation.retry_at.ok_or(ModelTurnError::InvalidCommand)?)
+    };
     let job = decide_expired_lease(
         current_job,
         observation.observed_job_version,
         observation.observed_lease_generation,
         database_now,
-        insight_platform_contracts::JobState::RetryScheduled,
-        Some(observation.retry_at),
+        if exhausted {
+            insight_platform_contracts::JobState::Failed
+        } else {
+            insight_platform_contracts::JobState::RetryScheduled
+        },
+        retry_at,
     )
     .map_err(|_| ModelTurnError::FirstWinnerLost)?;
     let measurement =
@@ -1298,14 +1311,35 @@ pub fn decide_expired_model_lease(
     let (usage, quality) = measurement.validate_for(&current_turn.payload.admission, limits)?;
     let settlement =
         ModelQuotaSettlement::from_usage(usage, current_turn.payload.admission.quota_ceiling)?;
+    let exhausted_failure = if exhausted {
+        let mut failure = model_failure(FailureClass::Platform, Retryability::Never);
+        failure.safe_code = "model_worker_lease_expired".to_owned();
+        failure.evidence_digest = observation.observation_digest.clone();
+        failure.validate()?;
+        Some(failure)
+    } else {
+        None
+    };
     let mut turn = current_turn.clone();
-    turn.state = ModelTurnState::RetryScheduled;
-    turn.retry_at = Some(observation.retry_at);
+    turn.state = if exhausted {
+        ModelTurnState::Failed
+    } else {
+        ModelTurnState::RetryScheduled
+    };
+    turn.retry_at = retry_at;
+    if let Some(failure) = &exhausted_failure {
+        turn.payload.failure = Some(failure.failure.clone());
+        turn.terminal_at = Some(database_now);
+    }
     turn.payload.attempts.push(ModelAttemptAccounting {
         attempt_no: current_job.attempt_count,
         lease_generation: current_job.lease_generation,
         usage_reservation_id: usage_reservation_id.clone(),
-        outcome: ModelAttemptOutcomeKind::RetryScheduled,
+        outcome: if exhausted {
+            ModelAttemptOutcomeKind::Failed
+        } else {
+            ModelAttemptOutcomeKind::RetryScheduled
+        },
         usage,
         accounting_quality: quality,
         request_sent: true,
@@ -1316,8 +1350,18 @@ pub fn decide_expired_model_lease(
     turn.updated_at = database_now;
     let mut job_payload = current_payload.clone();
     job_payload.active_usage_reservation_id = None;
-    job_payload.physical_outcome = Some(ModelPhysicalOutcomeEvidence::RetryScheduled {
-        failure_digest: observation.observation_digest.clone(),
+    job_payload.physical_outcome = Some(if exhausted {
+        ModelPhysicalOutcomeEvidence::Failed {
+            failure_digest: digest(
+                exhausted_failure
+                    .as_ref()
+                    .ok_or(ModelTurnError::InvalidFailure)?,
+            )?,
+        }
+    } else {
+        ModelPhysicalOutcomeEvidence::RetryScheduled {
+            failure_digest: observation.observation_digest.clone(),
+        }
     });
     turn.validate(limits)?;
     job_payload.validate_for(&turn, &job, limits)?;

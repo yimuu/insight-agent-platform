@@ -86,10 +86,10 @@ def main() -> None:
         "opensandbox_source_commit": "c39b814f36ded4c61d5ac6f9332ee4dfbab86c00",
         "opensandbox_server_image_digest": "sha256:ae8dfbb277f40a39ff01ef35e5e1c10675acfe0fa9db15259b8f323e5efab778",
         "opensandbox_controller_image_digest": "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a",
-        "opensandbox_execd_image_digest": "sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684",
+        "opensandbox_execd_image_digest": "sha256:6cf7dba2f21f0b536e100563d841ac58a9f31c2b0a081b7ac76796a24d6f47e2",
         "batchsandbox_crd_digest": "sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4",
-        "kubernetes_provider_template_digest": "sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a",
-        "sandbox_network_policy_digest": "sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0",
+        "kubernetes_provider_template_digest": "sha256:be829c7a936867d7aff62bf76d5e897b75c65628563ad2d354f4ccb36b30cc4c",
+        "sandbox_network_policy_digest": "sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e",
     }
     for field, value in expected.items():
         if deployment[field] != value:

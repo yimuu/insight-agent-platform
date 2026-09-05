@@ -610,32 +610,36 @@ mod tests {
     #[test]
     fn cursor_binds_route_tenant_principal_filter_page_snapshot_and_expiry() {
         let codec = HmacListCursorCodec::install(&[7_u8; 32]).unwrap();
-        let now = Utc::now();
+        let clock_now = DateTime::parse_from_rfc3339("2026-09-05T12:34:56.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let snapshot_at = parse_timestamp(&UtcTimestamp::from_datetime(clock_now)).unwrap();
+        assert_ne!(snapshot_at, clock_now);
         let context = ListCursorContext {
             purpose: ListRoutePurpose::Agents,
             filter_digest: digest('b'),
             page_size: 25,
         };
         let boundary = ListKeysetBoundary::Agent {
-            updated_at: UtcTimestamp::from_datetime(now - chrono::Duration::seconds(1)),
+            updated_at: UtcTimestamp::from_datetime(clock_now - chrono::Duration::seconds(1)),
             agent_id: id(ResourceKind::Agent, 3),
         };
         let cursor = codec
             .encode(
                 &principal(),
                 &context,
-                now,
+                clock_now,
                 boundary.clone(),
-                now + chrono::Duration::minutes(15),
+                clock_now + chrono::Duration::minutes(15),
             )
             .unwrap();
         assert_eq!(
-            codec.decode(cursor.as_str(), &principal(), &context, now),
+            codec.decode(cursor.as_str(), &principal(), &context, clock_now),
             Ok(DecodedListCursor {
-                snapshot_at: now,
+                snapshot_at,
                 boundary,
                 expires_at: DateTime::from_timestamp(
-                    (now + chrono::Duration::minutes(15)).timestamp(),
+                    (clock_now + chrono::Duration::minutes(15)).timestamp(),
                     0,
                 )
                 .unwrap(),
@@ -645,26 +649,26 @@ mod tests {
         let mut wrong_context = context.clone();
         wrong_context.purpose = ListRoutePurpose::Runs;
         assert_eq!(
-            codec.decode(cursor.as_str(), &principal(), &wrong_context, now),
+            codec.decode(cursor.as_str(), &principal(), &wrong_context, clock_now),
             Err(ListError::Invalid)
         );
         wrong_context = context.clone();
         wrong_context.filter_digest = digest('c');
         assert_eq!(
-            codec.decode(cursor.as_str(), &principal(), &wrong_context, now),
+            codec.decode(cursor.as_str(), &principal(), &wrong_context, clock_now),
             Err(ListError::Invalid)
         );
         wrong_context = context.clone();
         wrong_context.page_size = 24;
         assert_eq!(
-            codec.decode(cursor.as_str(), &principal(), &wrong_context, now),
+            codec.decode(cursor.as_str(), &principal(), &wrong_context, clock_now),
             Err(ListError::Invalid)
         );
 
         let mut wrong_principal = principal();
         wrong_principal.binding_version += 1;
         assert_eq!(
-            codec.decode(cursor.as_str(), &wrong_principal, &context, now),
+            codec.decode(cursor.as_str(), &wrong_principal, &context, clock_now),
             Err(ListError::Invalid)
         );
         assert_eq!(
@@ -672,7 +676,7 @@ mod tests {
                 cursor.as_str(),
                 &principal(),
                 &context,
-                now + chrono::Duration::minutes(15),
+                clock_now + chrono::Duration::minutes(15),
             ),
             Err(ListError::Expired)
         );

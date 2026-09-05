@@ -13,6 +13,7 @@ use insight_platform_contracts::{
 use insight_platform_jobs::{JobFence, JobProjection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use std::{error::Error, fmt};
 
 pub const SANDBOX_CONTRACT_SCHEMA_VERSION: u16 = 1;
@@ -32,11 +33,15 @@ pub const SANDBOX_RUNNER_PORT: u16 = 18_080;
 pub const SANDBOX_RUNNER_CONFIG_ENV: &str = "INSIGHT_SANDBOX_RUNNER_CONFIG";
 pub const SANDBOX_RUNNER_CONFIG_DIGEST_ENV: &str = "INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST";
 pub const OPENSANDBOX_ID_ENV: &str = "OPENSANDBOX_ID";
+pub const OPENSANDBOX_EXECD_ACCESS_TOKEN_ENV: &str = "EXECD_ACCESS_TOKEN";
 pub const MAX_SANDBOX_RUNNER_CONFIG_BYTES: usize = 65_536;
 pub const SANDBOX_RUNNER_FRAME_MAGIC: &str = "insight.sandbox.runner/v1";
+pub const SANDBOX_RUNNER_PROOF_HEADER: &str = "x-insight-sandbox-runner-proof";
 pub const MAX_SANDBOX_JOB_PAYLOAD_BYTES: usize = 1_048_576;
 pub const SANDBOX_RUNNER_UID: u32 = 65_532;
+pub const SANDBOX_RUNNER_GID: u32 = 65_532;
 pub const SANDBOX_PACKAGE_UID: u32 = 65_533;
+pub const SANDBOX_PACKAGE_GID: u32 = 65_533;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -697,6 +702,153 @@ impl ActivationSignature {
             "signature": self.0,
         }))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxRunnerOperationV1 {
+    State,
+    Activate,
+    Result,
+}
+
+impl SandboxRunnerOperationV1 {
+    fn method(self) -> &'static str {
+        match self {
+            Self::State | Self::Result => "GET",
+            Self::Activate => "POST",
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::State => "/v2/state",
+            Self::Activate => "/v2/activate",
+            Self::Result => "/v2/result",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SandboxRunnerRequestProofV1 {
+    signature: ActivationSignature,
+}
+
+impl fmt::Debug for SandboxRunnerRequestProofV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SandboxRunnerRequestProofV1([redacted])")
+    }
+}
+
+impl SandboxRunnerRequestProofV1 {
+    pub fn for_state(
+        signing_seed: &OpaqueActivationToken,
+        sandbox_id: &OpenSandboxId,
+        execution_request_digest: &Sha256Digest,
+    ) -> Result<Self, SandboxContractError> {
+        Self::sign(
+            signing_seed,
+            sandbox_id,
+            execution_request_digest,
+            SandboxRunnerOperationV1::State,
+            &[],
+        )
+    }
+
+    pub fn for_activate(
+        signing_seed: &OpaqueActivationToken,
+        sandbox_id: &OpenSandboxId,
+        execution_request_digest: &Sha256Digest,
+        canonical_body: &[u8],
+    ) -> Result<Self, SandboxContractError> {
+        Self::sign(
+            signing_seed,
+            sandbox_id,
+            execution_request_digest,
+            SandboxRunnerOperationV1::Activate,
+            canonical_body,
+        )
+    }
+
+    pub fn for_result(
+        signing_seed: &OpaqueActivationToken,
+        sandbox_id: &OpenSandboxId,
+        execution_request_digest: &Sha256Digest,
+    ) -> Result<Self, SandboxContractError> {
+        Self::sign(
+            signing_seed,
+            sandbox_id,
+            execution_request_digest,
+            SandboxRunnerOperationV1::Result,
+            &[],
+        )
+    }
+
+    fn sign(
+        signing_seed: &OpaqueActivationToken,
+        sandbox_id: &OpenSandboxId,
+        execution_request_digest: &Sha256Digest,
+        operation: SandboxRunnerOperationV1,
+        body: &[u8],
+    ) -> Result<Self, SandboxContractError> {
+        Ok(Self {
+            signature: signing_seed.sign(&runner_request_preimage(
+                sandbox_id,
+                execution_request_digest,
+                operation,
+                body,
+            )?)?,
+        })
+    }
+
+    pub fn parse_header(value: &str) -> Result<Self, SandboxContractError> {
+        let signature = value
+            .strip_prefix("v1.")
+            .ok_or(SandboxContractError::InvalidActivation)?;
+        if value.len() != 131 {
+            return Err(SandboxContractError::InvalidActivation);
+        }
+        Ok(Self {
+            signature: ActivationSignature::parse(signature)?,
+        })
+    }
+
+    pub fn header_value(&self) -> String {
+        format!("v1.{}", self.signature.0)
+    }
+
+    pub fn verify(
+        &self,
+        verifying_key: &ActivationVerifyingKey,
+        sandbox_id: &OpenSandboxId,
+        execution_request_digest: &Sha256Digest,
+        operation: SandboxRunnerOperationV1,
+        body: &[u8],
+    ) -> Result<(), SandboxContractError> {
+        verifying_key.verify(
+            &runner_request_preimage(sandbox_id, execution_request_digest, operation, body)?,
+            &self.signature,
+        )
+    }
+}
+
+fn runner_request_preimage(
+    sandbox_id: &OpenSandboxId,
+    execution_request_digest: &Sha256Digest,
+    operation: SandboxRunnerOperationV1,
+    body: &[u8],
+) -> Result<Vec<u8>, SandboxContractError> {
+    let body_digest: Sha256Digest = format!("sha256:{}", encode_hex(&Sha256::digest(body)))
+        .parse()
+        .map_err(|_| SandboxContractError::InvalidActivation)?;
+    canonical_json(&serde_json::json!({
+        "domain": "insight.sandbox.runner-http-request/v1",
+        "sandbox_id": sandbox_id,
+        "execution_request_digest": execution_request_digest,
+        "method": operation.method(),
+        "path": operation.path(),
+        "body_digest": body_digest,
+    }))
+    .map_err(|_| SandboxContractError::InvalidActivation)
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], SandboxContractError> {
@@ -2836,6 +2988,14 @@ impl SandboxActivationFrameV1 {
         Ok(self)
     }
 
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SandboxContractError> {
+        self.validate_wire(MAX_SANDBOX_INPUT_BYTES)?;
+        canonical_json(
+            &serde_json::to_value(self).map_err(|_| SandboxContractError::InvalidActivation)?,
+        )
+        .map_err(|_| SandboxContractError::InvalidActivation)
+    }
+
     fn signature_preimage(&self) -> Result<Vec<u8>, SandboxContractError> {
         canonical_json(&serde_json::json!({
             "domain": "insight.sandbox.activation-frame/v1",
@@ -3303,18 +3463,21 @@ pub trait OpenSandboxProvider: Send + Sync {
     async fn runner_state(
         &self,
         sandbox_id: &OpenSandboxId,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError>;
 
     async fn activate(
         &self,
         sandbox_id: &OpenSandboxId,
         frame: SandboxActivationFrameV1,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<SandboxRunnerStateFrameV1, SandboxProviderError>;
 
     async fn read_result(
         &self,
         sandbox_id: &OpenSandboxId,
         maximum_bytes: u64,
+        proof: SandboxRunnerRequestProofV1,
     ) -> Result<Vec<u8>, SandboxProviderError>;
 
     async fn terminate(
@@ -3573,6 +3736,100 @@ mod tests {
         }
         .seal()
         .unwrap()
+    }
+
+    #[test]
+    fn runner_http_proof_is_candidate_operation_and_body_bound() {
+        let signing_seed = OpaqueActivationToken::parse("1".repeat(64)).unwrap();
+        let verifying_key = signing_seed.verifying_key().unwrap();
+        let sandbox_id = OpenSandboxId::parse("sandbox-one").unwrap();
+        let other_sandbox_id = OpenSandboxId::parse("sandbox-two").unwrap();
+        let request_digest = digest('a');
+        let other_request_digest = digest('b');
+
+        let state =
+            SandboxRunnerRequestProofV1::for_state(&signing_seed, &sandbox_id, &request_digest)
+                .unwrap();
+        assert_eq!(
+            state.header_value(),
+            "v1.f0b61d9e192dde01e1aa67fb59e3ea9c3b4171c881778efddca7609ab5fe9fb982cd3559e488ae60044c76a8e1b96d6cb3186be7e28baeb6b2b347de760fc100"
+        );
+        assert_eq!(
+            SandboxRunnerRequestProofV1::parse_header(&state.header_value()).unwrap(),
+            state
+        );
+        assert_eq!(
+            format!("{state:?}"),
+            "SandboxRunnerRequestProofV1([redacted])"
+        );
+        assert!(!format!("{state:?}").contains(&state.header_value()));
+        state
+            .verify(
+                &verifying_key,
+                &sandbox_id,
+                &request_digest,
+                SandboxRunnerOperationV1::State,
+                &[],
+            )
+            .unwrap();
+        assert!(state
+            .verify(
+                &verifying_key,
+                &other_sandbox_id,
+                &request_digest,
+                SandboxRunnerOperationV1::State,
+                &[],
+            )
+            .is_err());
+        assert!(state
+            .verify(
+                &verifying_key,
+                &sandbox_id,
+                &other_request_digest,
+                SandboxRunnerOperationV1::State,
+                &[],
+            )
+            .is_err());
+        assert!(state
+            .verify(
+                &verifying_key,
+                &sandbox_id,
+                &request_digest,
+                SandboxRunnerOperationV1::Result,
+                &[],
+            )
+            .is_err());
+
+        let body = br#"{"magic":"insight.sandbox.runner/v1"}"#;
+        let activation = SandboxRunnerRequestProofV1::for_activate(
+            &signing_seed,
+            &sandbox_id,
+            &request_digest,
+            body,
+        )
+        .unwrap();
+        activation
+            .verify(
+                &verifying_key,
+                &sandbox_id,
+                &request_digest,
+                SandboxRunnerOperationV1::Activate,
+                body,
+            )
+            .unwrap();
+        assert!(activation
+            .verify(
+                &verifying_key,
+                &sandbox_id,
+                &request_digest,
+                SandboxRunnerOperationV1::Activate,
+                br#"{"magic":"tampered"}"#,
+            )
+            .is_err());
+        assert!(SandboxRunnerRequestProofV1::parse_header("v2.00").is_err());
+        assert!(
+            SandboxRunnerRequestProofV1::parse_header(&format!("v1.{}", "A".repeat(128))).is_err()
+        );
     }
 
     fn candidate(request: &SandboxExecutionRequestV1, sandbox_id: &str) -> SandboxCandidateV1 {

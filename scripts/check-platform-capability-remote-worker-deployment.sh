@@ -44,7 +44,7 @@ for required in (
     "GrpcCapabilityAdapter",
     "McpCapabilityAdapter",
     "McpHostGrpcClient",
-    "connect_lazy",
+    "connect_mcp_host(&config).await?",
     "business_max_connections",
     "critical_control_max_connections",
     "verify_schema",

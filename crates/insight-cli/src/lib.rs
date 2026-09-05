@@ -20,7 +20,6 @@ mod run_journal;
 mod task;
 mod task_journal;
 #[cfg(test)]
-#[path = "../../../tests/support/workspace_assets.rs"]
 mod workspace_assets;
 
 pub use dev_profile::DevProfile;
@@ -40,9 +39,15 @@ use rcgen::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 #[cfg(unix)]
+use std::os::fd::AsRawFd as _;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -52,7 +57,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
-use x509_parser::{prelude::FromDer as _, public_key::PublicKey, x509::SubjectPublicKeyInfo};
+use x509_parser::{
+    extensions::GeneralName, pem::parse_x509_pem, prelude::FromDer as _, public_key::PublicKey,
+    x509::SubjectPublicKeyInfo,
+};
 
 const PROJECT_DIRECTORY: &str = ".insight";
 const PROJECT_STATE_FILE: &str = "project.json";
@@ -91,8 +99,14 @@ const RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE: &str = "registry-validation.json"
 const RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE: &str = "sandbox-kubernetes.json";
 const RUNTIME_CURSOR_KEY_FILE: &str = "run-event-cursor-key";
 const RUNTIME_PROFILE_STATE_FILE: &str = "profile.json";
+const RUNTIME_PROFILE_SCHEMA_VERSION: u32 = 3;
+const RUNTIME_PROFILE_KIND: &str = "insight.dev.runtime-profile/v2";
 const RUNTIME_BUILD_STATE_FILE: &str = "build.json";
 const RUNTIME_PROCESS_STATE_FILE: &str = "processes.json";
+const RUNTIME_PROCESS_SCHEMA_VERSION: u32 = 3;
+const RUNTIME_PROCESS_KIND: &str = "insight.dev.process-state/v3";
+const RUNTIME_PROCESS_GENERATION_PREFIX: &str = "insight-platform-process-v3-";
+const RUNTIME_LIFECYCLE_LOCK_FILE: &str = "lifecycle.lock";
 const RUNTIME_COMPOSE_FILE: &str = "compose.yaml";
 const RUNTIME_LOG_DIRECTORY: &str = "logs";
 const DEV_COMPOSE_BYTES: &[u8] = include_bytes!("../../../deploy/dev/compose.yaml");
@@ -100,8 +114,9 @@ const LOCAL_ARTIFACT_BUCKET: &str = "insight-platform-artifacts";
 const LOCAL_AWS_ENDPOINT: &str = "https://localhost.localstack.cloud:4566";
 const LOCAL_SECRET_READINESS_NAME: &str = "insight/platform/readiness";
 const LOCAL_SECRET_NAME_PREFIX: &str = "insight/platform/prepared";
+#[cfg(test)]
 const LOCAL_TEST_SECRET_READINESS_ARN: &str =
-    "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-local";
+    "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-local0";
 const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
 const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
 const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
@@ -119,7 +134,7 @@ const OPENSANDBOX_SERVER_IMAGE_DIGEST: &str =
 const OPENSANDBOX_CONTROLLER_IMAGE_DIGEST: &str =
     "sha256:a9a5f73c1785ebd955336ffa313973a35c1a1b662cb7afc4ea82d92021b3532a";
 const OPENSANDBOX_EXECD_IMAGE_DIGEST: &str =
-    "sha256:0d8f44cf4194732719aa79999d4b120c98bdab02bc61e9ad13f75f83af4c2684";
+    "sha256:6cf7dba2f21f0b536e100563d841ac58a9f31c2b0a081b7ac76796a24d6f47e2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -1234,7 +1249,6 @@ fn valid_runtime_role(value: &str) -> bool {
             | "capability-native"
             | "registry-validation"
             | "context-native"
-            | "artifact-maintenance"
             | "security-authority"
             | "egress-broker"
             | "model-worker"
@@ -1247,6 +1261,7 @@ fn valid_runtime_role(value: &str) -> bool {
             | "mcp-cleanup"
             | "context-subscription"
             | "callback-api"
+            | "context-dataset"
     )
 }
 
@@ -1585,6 +1600,7 @@ fn lossy(value: &OsString) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalProjectState {
     pub schema_version: u32,
     pub kind: String,
@@ -1595,6 +1611,7 @@ pub struct LocalProjectState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalIdentityState {
     pub schema_version: u32,
     pub issuer: String,
@@ -1605,9 +1622,7 @@ pub struct LocalIdentityState {
     pub tenant_id: String,
     pub developer_principal_id: String,
     pub developer_subject: String,
-    #[serde(default)]
     pub registry_validator_principal_id: String,
-    #[serde(default)]
     pub egress_broker_principal_id: String,
     pub installation_principal_id: String,
     pub installation_request_id: String,
@@ -1616,38 +1631,36 @@ pub struct LocalIdentityState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalProfileState {
     pub state: String,
-    #[serde(default)]
     pub features: Vec<String>,
-    #[serde(default)]
     pub profile_digest: Option<String>,
-    #[serde(default)]
     pub release_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeProfileState {
     schema_version: u32,
     kind: String,
-    /// Provenance of the source tree that first generated this immutable local profile closure.
-    /// Build reuse is tracked separately; ordinary source edits must not rotate authority IDs,
-    /// ports, TLS material, cursor keys, or policy bindings.
-    #[serde(default)]
+    tenant_id: String,
+    identity_digest: String,
+    /// Exact release/source provenance currently selected for this project-local closure.
+    /// Identity transitions are explicit and cannot be combined with feature-set changes.
     source_fingerprint: String,
-    #[serde(default)]
     features: Vec<String>,
-    #[serde(default)]
     profile_digest: String,
-    #[serde(default)]
     release_identity: String,
     kms_key_arn: String,
-    #[serde(default)]
+    secret_provider_id: ResourceId,
+    capability_protocol_profile_revision_id: ResourceId,
     secret_readiness_arn: String,
     s3_bucket: String,
-    #[serde(default = "RuntimePortBindings::legacy_defaults")]
     ports: RuntimePortBindings,
     config_digests: BTreeMap<String, String>,
+    tls_identity_digests: BTreeMap<String, String>,
+    closure_digest: String,
 }
 
 /// The loopback listeners assigned to one local profile.
@@ -1656,6 +1669,7 @@ struct RuntimeProfileState {
 /// same endpoints.  They deliberately are not the well-known dependency ports (PostgreSQL/NATS),
 /// which remain part of the fixed Docker development contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimePortBindings {
     gateway_management: u16,
     gateway_runtime: u16,
@@ -1666,7 +1680,6 @@ struct RuntimePortBindings {
     orchestration_observability: u16,
     capability_native_observability: u16,
     registry_validation_observability: u16,
-    #[serde(default)]
     full: full_profile::PortBindings,
 }
 
@@ -1706,7 +1719,41 @@ impl RuntimePortBindings {
         Ok(ports)
     }
 
-    const fn legacy_defaults() -> Self {
+    fn all_ports(&self) -> [u16; 28] {
+        [
+            self.gateway_management,
+            self.gateway_runtime,
+            self.artifact_gateway,
+            self.artifact_gateway_observability,
+            self.artifact_data_controller,
+            self.artifact_data_observability,
+            self.orchestration_observability,
+            self.capability_native_observability,
+            self.registry_validation_observability,
+            self.full.context_native_observability,
+            self.full.artifact_maintenance_observability,
+            self.full.security_authority,
+            self.full.security_authority_observability,
+            self.full.egress_broker,
+            self.full.egress_broker_observability,
+            self.full.model_worker_observability,
+            self.full.remote_context_worker_observability,
+            self.full.mcp_host,
+            self.full.mcp_host_observability,
+            self.full.mcp_resource_host,
+            self.full.mcp_resource_host_observability,
+            self.full.capability_remote_observability,
+            self.full.mcp_discovery_observability,
+            self.full.mcp_subscription_observability,
+            self.full.mcp_cleanup_observability,
+            self.full.context_subscription_observability,
+            self.full.callback_api,
+            self.full.context_dataset_observability,
+        ]
+    }
+
+    #[cfg(test)]
+    const fn static_test_ports() -> Self {
         Self {
             gateway_management: 8081,
             gateway_runtime: 8080,
@@ -1717,12 +1764,13 @@ impl RuntimePortBindings {
             orchestration_observability: 19092,
             capability_native_observability: 19093,
             registry_validation_observability: 19094,
-            full: full_profile::PortBindings::legacy_defaults(),
+            full: full_profile::PortBindings::static_test_ports(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeBuildState {
     schema_version: u32,
     source_fingerprint: String,
@@ -1736,20 +1784,75 @@ struct RuntimeProfileSelection<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeProcessState {
     schema_version: u32,
     kind: String,
+    tenant_id: String,
     profile: String,
+    profile_digest: String,
+    release_identity: String,
     compose_project: String,
     source_fingerprint: String,
+    lifecycle: RuntimeProcessLifecycle,
     processes: BTreeMap<String, RuntimeProcessRecord>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeProcessLifecycle {
+    Starting,
+    Running,
+    Stopped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct RuntimeProcessRecord {
     pid: u32,
+    generation: String,
     ready_address: String,
     log_file: String,
+}
+
+struct RuntimeProcessBinding {
+    tenant_id: String,
+    profile: String,
+    profile_digest: String,
+    release_identity: String,
+    compose_project: String,
+    source_fingerprint: String,
+    expected_processes: BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+struct RuntimeLifecycleLock {
+    _file: fs::File,
+}
+
+struct RuntimeRestartIdentity {
+    release_identity: String,
+    source_fingerprint: String,
+}
+
+#[derive(Clone, Copy)]
+enum LocalTlsUsage {
+    Server,
+    Client,
+}
+
+#[derive(Clone, Copy)]
+struct LocalTlsIdentitySpec {
+    certificate: &'static str,
+    private_key: &'static str,
+    dns_names: &'static [&'static str],
+    workload_identity: Option<&'static str>,
+    usage: LocalTlsUsage,
+}
+
+struct ExpectedRuntimeClosure {
+    config_files: BTreeMap<String, &'static str>,
+    processes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2037,13 +2140,13 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
             "cannot sign local development certificate CA",
         )
     })?;
-    write_new(
-        &tls_directory.join(RUNTIME_CA_CERTIFICATE_FILE),
-        ca_certificate.pem().as_bytes(),
-    )?;
     write_sensitive_new(
         &tls_directory.join(RUNTIME_CA_PRIVATE_KEY_FILE),
         ca_key.serialize_pem().as_bytes(),
+    )?;
+    write_new(
+        &tls_directory.join(RUNTIME_CA_CERTIFICATE_FILE),
+        ca_certificate.pem().as_bytes(),
     )?;
     let issuer = Issuer::new(ca_params, ca_key);
 
@@ -2120,6 +2223,229 @@ fn local_runtime_ca_parameters(tls_directory: &Path) -> Result<CertificateParams
     Ok(params)
 }
 
+fn read_local_tls_file(path: &Path, sensitive: bool) -> Result<Vec<u8>, String> {
+    const MAX_LOCAL_TLS_FILE_BYTES: u64 = 65_536;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_LOCAL_TLS_FILE_BYTES
+    {
+        return Err(format!("{} is not a bounded physical file", path.display()));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if !opened.file_type().is_file()
+        || opened.len() == 0
+        || opened.len() > MAX_LOCAL_TLS_FILE_BYTES
+        || {
+            #[cfg(unix)]
+            {
+                opened.nlink() != 1
+                    || opened.dev() != metadata.dev()
+                    || opened.ino() != metadata.ino()
+                    || (sensitive && opened.mode() & 0o077 != 0)
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    {
+        return Err(format!(
+            "{} is not a bounded private single-link file",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    file.take(MAX_LOCAL_TLS_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_LOCAL_TLS_FILE_BYTES {
+        return Err(format!("{} exceeds the TLS size limit", path.display()));
+    }
+    Ok(bytes)
+}
+
+fn validate_local_tls_directory(tls_directory: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(tls_directory)
+        .map_err(|error| format!("cannot inspect {}: {error}", tls_directory.display()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "{} is not a physical TLS directory",
+            tls_directory.display()
+        ));
+    }
+    Ok(())
+}
+
+fn local_tls_pair_digest(certificate: &[u8], private_key: &[u8]) -> Result<String, String> {
+    canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "certificate_sha256": format!("sha256:{}", lower_hex(&Sha256::digest(certificate))),
+        "private_key_sha256": format!("sha256:{}", lower_hex(&Sha256::digest(private_key))),
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn parse_single_x509_pem(bytes: &[u8], purpose: &str) -> Result<x509_parser::pem::Pem, String> {
+    let (remaining, pem) =
+        parse_x509_pem(bytes).map_err(|_| format!("{purpose} is not a PEM-encoded certificate"))?;
+    if pem.label != "CERTIFICATE" || !remaining.iter().all(u8::is_ascii_whitespace) {
+        return Err(format!("{purpose} is not one exact certificate"));
+    }
+    Ok(pem)
+}
+
+fn validate_local_tls_ca_pair(tls_directory: &Path) -> Result<String, String> {
+    validate_local_tls_directory(tls_directory)?;
+    let certificate_bytes =
+        read_local_tls_file(&tls_directory.join(RUNTIME_CA_CERTIFICATE_FILE), false)?;
+    let private_key_bytes =
+        read_local_tls_file(&tls_directory.join(RUNTIME_CA_PRIVATE_KEY_FILE), true)?;
+    let pem = parse_single_x509_pem(&certificate_bytes, "local TLS CA")?;
+    let certificate = pem
+        .parse_x509()
+        .map_err(|_| "local TLS CA certificate is invalid".to_owned())?;
+    let key = KeyPair::from_pem(
+        std::str::from_utf8(&private_key_bytes)
+            .map_err(|_| "local TLS CA key is not UTF-8 PEM".to_owned())?,
+    )
+    .map_err(|_| "local TLS CA key is invalid".to_owned())?;
+    let basic = certificate
+        .basic_constraints()
+        .map_err(|_| "local TLS CA has invalid BasicConstraints".to_owned())?;
+    let usage = certificate
+        .key_usage()
+        .map_err(|_| "local TLS CA has invalid KeyUsage".to_owned())?;
+    if certificate.issuer() != certificate.subject()
+        || !certificate.validity().is_valid()
+        || !basic.is_some_and(|constraint| {
+            constraint.value.ca && constraint.value.path_len_constraint.is_none()
+        })
+        || !usage.is_some_and(|usage| {
+            usage.value.digital_signature()
+                && usage.value.key_cert_sign()
+                && usage.value.crl_sign()
+                && usage.value.flags == 0b1100001
+        })
+        || key.subject_public_key_info().as_slice() != certificate.public_key().raw
+        || certificate.verify_signature(None).is_err()
+    {
+        return Err("local TLS CA certificate/key authority is invalid".to_owned());
+    }
+    local_tls_pair_digest(&certificate_bytes, &private_key_bytes)
+}
+
+fn validate_local_tls_leaf_pair(
+    tls_directory: &Path,
+    spec: LocalTlsIdentitySpec,
+) -> Result<String, String> {
+    validate_local_tls_ca_pair(tls_directory)?;
+    let ca_bytes = read_local_tls_file(&tls_directory.join(RUNTIME_CA_CERTIFICATE_FILE), false)?;
+    let ca_pem = parse_single_x509_pem(&ca_bytes, "local TLS CA")?;
+    let ca = ca_pem
+        .parse_x509()
+        .map_err(|_| "local TLS CA certificate is invalid".to_owned())?;
+    let certificate_bytes = read_local_tls_file(&tls_directory.join(spec.certificate), false)?;
+    let private_key_bytes = read_local_tls_file(&tls_directory.join(spec.private_key), true)?;
+    let pem = parse_single_x509_pem(&certificate_bytes, spec.certificate)?;
+    let certificate = pem
+        .parse_x509()
+        .map_err(|_| format!("{} is not a valid X.509 certificate", spec.certificate))?;
+    let key = KeyPair::from_pem(
+        std::str::from_utf8(&private_key_bytes)
+            .map_err(|_| format!("{} is not UTF-8 PEM", spec.private_key))?,
+    )
+    .map_err(|_| format!("{} is not a valid private key", spec.private_key))?;
+    let basic = certificate
+        .basic_constraints()
+        .map_err(|_| format!("{} has invalid BasicConstraints", spec.certificate))?;
+    let key_usage = certificate
+        .key_usage()
+        .map_err(|_| format!("{} has invalid KeyUsage", spec.certificate))?;
+    let extended = certificate
+        .extended_key_usage()
+        .map_err(|_| format!("{} has invalid ExtendedKeyUsage", spec.certificate))?
+        .ok_or_else(|| format!("{} omits ExtendedKeyUsage", spec.certificate))?;
+    let san = certificate
+        .subject_alternative_name()
+        .map_err(|_| format!("{} has invalid SubjectAlternativeName", spec.certificate))?
+        .ok_or_else(|| format!("{} omits SubjectAlternativeName", spec.certificate))?;
+    let actual_names = san
+        .value
+        .general_names
+        .iter()
+        .map(|name| match name {
+            GeneralName::DNSName(value) => Ok(format!("dns:{value}")),
+            GeneralName::URI(value) => Ok(format!("uri:{value}")),
+            _ => Err(format!(
+                "{} contains an unsupported subject alternative name",
+                spec.certificate
+            )),
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut expected_names = spec
+        .dns_names
+        .iter()
+        .map(|name| format!("dns:{name}"))
+        .collect::<BTreeSet<_>>();
+    if let Some(identity) = spec.workload_identity {
+        expected_names.insert(format!("uri:{identity}"));
+    }
+    let expected_server = matches!(spec.usage, LocalTlsUsage::Server);
+    let expected_client = matches!(spec.usage, LocalTlsUsage::Client);
+    if certificate.issuer() != ca.subject()
+        || !certificate.validity().is_valid()
+        || basic.is_some_and(|constraint| constraint.value.ca)
+        || key_usage.is_none_or(|usage| usage.value.flags != 1)
+        || extended.value.any
+        || extended.value.server_auth != expected_server
+        || extended.value.client_auth != expected_client
+        || extended.value.code_signing
+        || extended.value.email_protection
+        || extended.value.time_stamping
+        || extended.value.ocsp_signing
+        || !extended.value.other.is_empty()
+        || san.value.general_names.len() != expected_names.len()
+        || actual_names != expected_names
+        || key.subject_public_key_info().as_slice() != certificate.public_key().raw
+        || certificate.verify_signature(Some(ca.public_key())).is_err()
+    {
+        return Err(format!(
+            "{} does not match its key, CA, SAN, or EKU authority",
+            spec.certificate
+        ));
+    }
+    local_tls_pair_digest(&certificate_bytes, &private_key_bytes)
+}
+
+fn inspect_local_tls_identity_closure(
+    tls_directory: &Path,
+    selected_profile: DevProfile,
+) -> Result<BTreeMap<String, String>, String> {
+    validate_local_tls_directory(tls_directory)?;
+    let mut digests = BTreeMap::from([(
+        RUNTIME_CA_CERTIFICATE_FILE.to_owned(),
+        validate_local_tls_ca_pair(tls_directory)?,
+    )]);
+    for spec in expected_local_tls_leaf_identities(selected_profile).values() {
+        digests.insert(
+            spec.certificate.to_owned(),
+            validate_local_tls_leaf_pair(tls_directory, *spec)?,
+        );
+    }
+    Ok(digests)
+}
+
 fn write_local_leaf_certificate(
     tls_directory: &Path,
     certificate_name: &str,
@@ -2152,43 +2478,112 @@ fn write_local_leaf_certificate(
     let certificate = params
         .signed_by(&key, issuer)
         .map_err(|_| invalid_local_identity(tls_directory, "cannot sign local TLS certificate"))?;
-    write_new(
-        &tls_directory.join(certificate_name),
-        certificate.pem().as_bytes(),
-    )?;
     write_sensitive_new(
         &tls_directory.join(private_key_name),
         key.serialize_pem().as_bytes(),
+    )?;
+    write_new(
+        &tls_directory.join(certificate_name),
+        certificate.pem().as_bytes(),
     )
+}
+
+fn local_tls_orphan_exists(path: &Path, sensitive: bool) -> Result<bool, CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() > 0
+                && metadata.len() <= 65_536
+                && {
+                    #[cfg(unix)]
+                    {
+                        metadata.nlink() == 1 && (!sensitive || metadata.mode() & 0o077 == 0)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                } =>
+        {
+            Ok(true)
+        }
+        Ok(_) => Err(invalid_local_identity(
+            path,
+            "uncommitted TLS residue is not a bounded physical single-link file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+fn remove_local_tls_orphan(path: &Path, sensitive: bool) -> Result<(), CliError> {
+    if local_tls_orphan_exists(path, sensitive)? {
+        fs::remove_file(path).map_err(|source| CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        })?;
+        sync_parent_directory(path)?;
+    }
+    Ok(())
 }
 
 fn ensure_local_leaf_certificate(
     tls_directory: &Path,
-    certificate_name: &str,
-    private_key_name: &str,
-    dns_names: &[&str],
-    workload_identity: Option<&str>,
-    usage: ExtendedKeyUsagePurpose,
+    spec: LocalTlsIdentitySpec,
     issuer: &Issuer<'_, KeyPair>,
+    committed_digest: Option<&str>,
 ) -> Result<(), CliError> {
-    let certificate = tls_directory.join(certificate_name);
-    let private_key = tls_directory.join(private_key_name);
-    match (certificate.exists(), private_key.exists()) {
-        (true, true) => Ok(()),
-        (false, false) => write_local_leaf_certificate(
-            tls_directory,
-            certificate_name,
-            private_key_name,
-            dns_names,
-            workload_identity,
-            usage,
-            issuer,
-        ),
-        _ => Err(invalid_local_identity(
-            tls_directory,
-            "local feature TLS certificate/key pair is incomplete",
-        )),
+    let certificate = tls_directory.join(spec.certificate);
+    let private_key = tls_directory.join(spec.private_key);
+    let certificate_exists = local_tls_orphan_exists(&certificate, false)?;
+    let private_key_exists = local_tls_orphan_exists(&private_key, true)?;
+    let observed = (certificate_exists && private_key_exists)
+        .then(|| validate_local_tls_leaf_pair(tls_directory, spec));
+    if let Some(expected) = committed_digest {
+        let observed = observed
+            .ok_or_else(|| {
+                CliError::RuntimeState(format!(
+                    "committed TLS identity {:?} is incomplete",
+                    spec.certificate
+                ))
+            })?
+            .map_err(|reason| {
+                CliError::RuntimeState(format!(
+                    "committed TLS identity {:?} is invalid: {reason}",
+                    spec.certificate
+                ))
+            })?;
+        if observed != expected {
+            return Err(CliError::RuntimeState(format!(
+                "committed TLS identity {:?} drifted from the runtime profile",
+                spec.certificate
+            )));
+        }
+        return Ok(());
     }
+    if observed.is_some_and(|result| result.is_ok()) {
+        return Ok(());
+    }
+    remove_local_tls_orphan(&certificate, false)?;
+    remove_local_tls_orphan(&private_key, true)?;
+    write_local_leaf_certificate(
+        tls_directory,
+        spec.certificate,
+        spec.private_key,
+        spec.dns_names,
+        spec.workload_identity,
+        match spec.usage {
+            LocalTlsUsage::Server => ExtendedKeyUsagePurpose::ServerAuth,
+            LocalTlsUsage::Client => ExtendedKeyUsagePurpose::ClientAuth,
+        },
+        issuer,
+    )?;
+    validate_local_tls_leaf_pair(tls_directory, spec)
+        .map(|_| ())
+        .map_err(|reason| invalid_local_identity(tls_directory, &reason))
 }
 
 fn ensure_sensitive_random_file(path: &Path, value: &[u8]) -> Result<(), CliError> {
@@ -2205,186 +2600,267 @@ fn ensure_sensitive_random_file(path: &Path, value: &[u8]) -> Result<(), CliErro
     write_sensitive_new(path, value)
 }
 
-type LocalFeatureIdentity<'a> = (
-    &'a str,
-    &'a str,
-    &'a [&'a str],
-    Option<&'a str>,
-    ExtendedKeyUsagePurpose,
-);
+fn expected_local_tls_leaf_identities(
+    selected_profile: DevProfile,
+) -> BTreeMap<&'static str, LocalTlsIdentitySpec> {
+    let mut identities = BTreeMap::from([
+        (
+            RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
+                private_key: RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+        ),
+        (
+            RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
+                private_key: RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+        ),
+        (
+            RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
+                private_key: RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(PUBLIC_GATEWAY_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+        ),
+        (
+            RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+                private_key: RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(SCHEDULER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+        ),
+        (
+            RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
+                private_key: RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+        ),
+        (
+            RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+            LocalTlsIdentitySpec {
+                certificate: RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+                private_key: RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some("spiffe://insight.platform/workload/local-nats-client"),
+                usage: LocalTlsUsage::Client,
+            },
+        ),
+    ]);
+    let mut insert = |spec: LocalTlsIdentitySpec| {
+        identities.insert(spec.certificate, spec);
+    };
+    if selected_profile.needs_egress() {
+        for spec in [
+            LocalTlsIdentitySpec {
+                certificate: full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
+                private_key: full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::EGRESS_BROKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
+                private_key: full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+        ] {
+            insert(spec);
+        }
+    }
+    if selected_profile.has_model() {
+        insert(LocalTlsIdentitySpec {
+            certificate: full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
+            private_key: full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
+            dns_names: &[],
+            workload_identity: Some(full_profile::MODEL_WORKER_WORKLOAD_IDENTITY),
+            usage: LocalTlsUsage::Client,
+        });
+    }
+    if selected_profile.has_context() {
+        for spec in [
+            LocalTlsIdentitySpec {
+                certificate: full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+        ] {
+            insert(spec);
+        }
+    }
+    if selected_profile.has_remote_capability() {
+        insert(LocalTlsIdentitySpec {
+            certificate: full_profile::CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE,
+            private_key: full_profile::CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE,
+            dns_names: &[],
+            workload_identity: Some(full_profile::CAPABILITY_WORKER_WORKLOAD_IDENTITY),
+            usage: LocalTlsUsage::Client,
+        });
+    }
+    if selected_profile.has_mcp() {
+        for spec in [
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_HOST_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_HOST_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
+                dns_names: &["localhost"],
+                workload_identity: None,
+                usage: LocalTlsUsage::Server,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+            LocalTlsIdentitySpec {
+                certificate: full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
+                private_key: full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
+                dns_names: &[],
+                workload_identity: Some(full_profile::MCP_CALLBACK_WORKLOAD_IDENTITY),
+                usage: LocalTlsUsage::Client,
+            },
+        ] {
+            insert(spec);
+        }
+    }
+    identities
+}
 
 fn ensure_selected_feature_identity(
     state_directory: &Path,
     selected_profile: DevProfile,
-) -> Result<(), CliError> {
-    if !selected_profile.has_features() {
-        return Ok(());
-    }
+    committed_digests: Option<&BTreeMap<String, String>>,
+) -> Result<BTreeMap<String, String>, CliError> {
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
     let tls_directory = runtime.join(RUNTIME_TLS_DIRECTORY);
-    let ca_key_path = tls_directory.join(RUNTIME_CA_PRIVATE_KEY_FILE);
-    let ca_key_pem =
-        fs::read_to_string(&ca_key_path).map_err(|source| CliError::InitializeProject {
-            path: ca_key_path.display().to_string(),
-            source,
+    validate_local_tls_directory(&tls_directory)
+        .map_err(|reason| invalid_local_identity(&tls_directory, &reason))?;
+    let ca_digest = validate_local_tls_ca_pair(&tls_directory)
+        .map_err(|reason| invalid_local_identity(&tls_directory, &reason))?;
+    if let Some(expected) =
+        committed_digests.and_then(|digests| digests.get(RUNTIME_CA_CERTIFICATE_FILE))
+    {
+        if &ca_digest != expected {
+            return Err(CliError::RuntimeState(
+                "committed TLS CA drifted from the runtime profile".to_owned(),
+            ));
+        }
+    }
+    if selected_profile.has_features() {
+        let ca_key_path = tls_directory.join(RUNTIME_CA_PRIVATE_KEY_FILE);
+        let ca_key_pem =
+            fs::read_to_string(&ca_key_path).map_err(|source| CliError::InitializeProject {
+                path: ca_key_path.display().to_string(),
+                source,
+            })?;
+        let ca_key = KeyPair::from_pem(&ca_key_pem).map_err(|_| {
+            invalid_local_identity(&ca_key_path, "local development CA key is invalid")
         })?;
-    let ca_key = KeyPair::from_pem(&ca_key_pem)
-        .map_err(|_| invalid_local_identity(&ca_key_path, "local development CA key is invalid"))?;
-    let issuer = Issuer::new(local_runtime_ca_parameters(&tls_directory)?, ca_key);
+        let issuer = Issuer::new(local_runtime_ca_parameters(&tls_directory)?, ca_key);
 
-    let mut identities: Vec<LocalFeatureIdentity<'_>> = Vec::new();
-    if selected_profile.needs_egress() {
-        identities.extend([
-            (
-                full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
-                full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
-                full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::EGRESS_BROKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
-                full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-        ]);
-    }
-    if selected_profile.has_model() {
-        identities.push((
-            full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
-            full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
-            &[],
-            Some(full_profile::MODEL_WORKER_WORKLOAD_IDENTITY),
-            ExtendedKeyUsagePurpose::ClientAuth,
-        ));
-    }
-    if selected_profile.has_context() {
-        identities.extend([
-            (
-                full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
-                full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE,
-                full_profile::CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
-                full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
-                full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-        ]);
-    }
-    if selected_profile.has_remote_capability() {
-        identities.push((
-            full_profile::CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE,
-            full_profile::CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE,
-            &[],
-            Some(full_profile::CAPABILITY_WORKER_WORKLOAD_IDENTITY),
-            ExtendedKeyUsagePurpose::ClientAuth,
-        ));
-    }
-    if selected_profile.has_mcp() {
-        identities.extend([
-            (
-                full_profile::MCP_HOST_CERTIFICATE_FILE,
-                full_profile::MCP_HOST_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
-                full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
-                &["localhost"][..],
-                None,
-                ExtendedKeyUsagePurpose::ServerAuth,
-            ),
-            (
-                full_profile::MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
-                full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-            (
-                full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
-                full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
-                &[][..],
-                Some(full_profile::MCP_CALLBACK_WORKLOAD_IDENTITY),
-                ExtendedKeyUsagePurpose::ClientAuth,
-            ),
-        ]);
-    }
-    for (certificate, private_key, dns_names, workload_identity, usage) in identities {
-        ensure_local_leaf_certificate(
-            &tls_directory,
-            certificate,
-            private_key,
-            dns_names,
-            workload_identity,
-            usage,
-            &issuer,
-        )?;
+        for spec in expected_local_tls_leaf_identities(selected_profile).values() {
+            ensure_local_leaf_certificate(
+                &tls_directory,
+                *spec,
+                &issuer,
+                committed_digests
+                    .and_then(|digests| digests.get(spec.certificate))
+                    .map(String::as_str),
+            )?;
+        }
     }
     if selected_profile.needs_egress() {
         ensure_sensitive_random_file(
@@ -2400,12 +2876,24 @@ fn ensure_selected_feature_identity(
             &Sha256::digest(Uuid::now_v7().as_bytes()),
         )?;
     }
-    Ok(())
+    let observed = inspect_local_tls_identity_closure(&tls_directory, selected_profile)
+        .map_err(|reason| invalid_local_identity(&tls_directory, &reason))?;
+    if let Some(committed) = committed_digests {
+        for (name, expected) in committed {
+            if observed.get(name) != Some(expected) {
+                return Err(CliError::RuntimeState(format!(
+                    "committed TLS identity {name:?} changed during feature preparation"
+                )));
+            }
+        }
+    }
+    Ok(observed)
 }
 
 /// Writes the closed, digest-bound configuration that the independent local Platform roles read.
 /// The caller obtains `kms_key_arn` from the pinned local S3/KMS dependency; this function never
 /// discovers storage state itself and does not connect to PostgreSQL or any internal RPC.
+#[cfg(test)]
 pub fn prepare_runtime_profile(
     root: &Path,
     kms_key_arn: &str,
@@ -2416,7 +2904,7 @@ pub fn prepare_runtime_profile(
         kms_key_arn,
         LOCAL_TEST_SECRET_READINESS_ARN,
         source_fingerprint,
-        &RuntimePortBindings::legacy_defaults(),
+        &RuntimePortBindings::static_test_ports(),
         DevProfile::source_starter(),
         &format!("source:{source_fingerprint}"),
     )
@@ -2431,11 +2919,7 @@ fn prepare_runtime_profile_with_ports(
     selected_profile: DevProfile,
     release_identity: &str,
 ) -> Result<BTreeMap<String, String>, CliError> {
-    if kms_key_arn.is_empty()
-        || kms_key_arn.len() > 512
-        || !kms_key_arn.is_ascii()
-        || kms_key_arn.bytes().any(|byte| byte.is_ascii_control())
-    {
+    if !local_kms_key_arn_is_valid(kms_key_arn) || !runtime_ports_are_valid(ports) {
         return Err(CliError::InvalidLocalIdentity {
             path: root.join(PROJECT_DIRECTORY).display().to_string(),
         });
@@ -2496,7 +2980,10 @@ fn prepare_runtime_profile_inner(
             path: state_directory.display().to_string(),
         })?;
     let catalog = local_artifact_provider_catalog(kms_key_arn)?;
-    let secret_provider_catalog = local_secret_provider_catalog(kms_key_arn, secret_readiness_arn)?;
+    let secret_provider_id = fresh_resource_id(ResourceKind::SecretProvider);
+    let capability_protocol_profile_revision_id = fresh_resource_id(ResourceKind::PolicyRevision);
+    let secret_provider_catalog =
+        local_secret_provider_catalog(kms_key_arn, secret_readiness_arn, &secret_provider_id)?;
     let scanner_contract_digest = local_digest("artifact-scanner-contract")?;
     let write_storage_binding_digest = catalog["write_storage_binding_digest"]
         .as_str()
@@ -2794,6 +3281,7 @@ fn prepare_runtime_profile_inner(
         identity,
         &catalog,
         &secret_provider_catalog,
+        &capability_protocol_profile_revision_id,
         selected_profile,
     )?;
     configs.extend(feature_configs);
@@ -2815,9 +3303,20 @@ fn prepare_runtime_profile_inner(
     }
     let cursor_key = Sha256::digest(Uuid::now_v7().as_bytes());
     write_sensitive_new(&runtime.join(RUNTIME_CURSOR_KEY_FILE), &cursor_key)?;
-    let profile = RuntimeProfileState {
-        schema_version: 2,
-        kind: "insight.dev.runtime-profile/v1".to_owned(),
+    let identity_digest =
+        local_identity_digest(identity).map_err(|_| CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        })?;
+    let tls_identity_digests =
+        inspect_local_tls_identity_closure(&runtime.join(RUNTIME_TLS_DIRECTORY), selected_profile)
+            .map_err(|reason| {
+                invalid_local_identity(&runtime.join(RUNTIME_TLS_DIRECTORY), &reason)
+            })?;
+    let mut profile = RuntimeProfileState {
+        schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+        kind: RUNTIME_PROFILE_KIND.to_owned(),
+        tenant_id: identity.tenant_id.clone(),
+        identity_digest,
         source_fingerprint: source_fingerprint.to_owned(),
         features: selected_profile
             .feature_names()
@@ -2829,11 +3328,16 @@ fn prepare_runtime_profile_inner(
             .map_err(CliError::RuntimeState)?,
         release_identity: release_identity.to_owned(),
         kms_key_arn: kms_key_arn.to_owned(),
+        secret_provider_id,
+        capability_protocol_profile_revision_id,
         secret_readiness_arn: secret_readiness_arn.to_owned(),
         s3_bucket: LOCAL_ARTIFACT_BUCKET.to_owned(),
         ports: ports.clone(),
         config_digests: digests.clone(),
+        tls_identity_digests,
+        closure_digest: String::new(),
     };
+    refresh_runtime_profile_closure_digest(&mut profile)?;
     let profile_bytes =
         serde_json::to_vec_pretty(&profile).map_err(|error| CliError::InitializeProject {
             path: runtime
@@ -2852,6 +3356,7 @@ fn selected_feature_configs(
     identity: &LocalIdentityState,
     artifact_provider_catalog: &serde_json::Value,
     secret_provider_catalog: &serde_json::Value,
+    capability_protocol_profile_revision_id: &ResourceId,
     selected_profile: DevProfile,
 ) -> Result<BTreeMap<String, (&'static str, serde_json::Value)>, CliError> {
     let mcp_state_key_root = runtime.join(full_profile::MCP_STATE_KEY_DIRECTORY);
@@ -2884,6 +3389,7 @@ fn selected_feature_configs(
     let mut configs = full_profile::initial_configs(
         &ports.full,
         artifact_provider_catalog,
+        capability_protocol_profile_revision_id,
         full_profile::WorkerDigests {
             context_adapter: &local_digest("context-native-adapter")?,
             context_contract: &local_digest("context-native-contract")?,
@@ -2935,10 +3441,10 @@ fn sandbox_kubernetes_config() -> serde_json::Value {
         "runtime_contract": {
             "lifecycle_schema_digest": "sha256:97dbdff2dbbf571c8e3ac77acd24454bc774275478decc1990918cbf7c518351",
             "batchsandbox_crd_digest": "sha256:6a56fbec00a33acf30a4a9c3418172ad6ac1eba34d081881e6b5dd941cfa59d4",
-            "kubernetes_provider_template_digest": "sha256:4203a99badbdd23d7d2684d316ac4011d7df424987c518f899750026f0b7de5a",
-            "runner_protocol_digest": "sha256:4a8df3b9f4469e1e4781ff6831a23c5c60b139a8cabc128121a0832d203b4bf7",
-            "container_runtime_digest": "sha256:258e04829fc977575f5e6f0938273e376f93d6fa6b926ac8e9d267ae686ca83e",
-            "network_policy_digest": "sha256:8e81f38951ef624c530650d5490ed2c8f7f0a058a42c5e87bb9463a43bbb5de0",
+            "kubernetes_provider_template_digest": "sha256:be829c7a936867d7aff62bf76d5e897b75c65628563ad2d354f4ccb36b30cc4c",
+            "runner_protocol_digest": "sha256:b5eac79a3b4f66179341408d811ccfd82978279facbf30f503eb504be0638a4b",
+            "container_runtime_digest": "sha256:b2c15f4bdafaa05a3a60919a4e9ea9825cc03f8a09a63a2b603c3c42a7d849cc",
+            "network_policy_digest": "sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e",
         },
         "namespaces": {
             "control": "platform-sandbox",
@@ -2968,14 +3474,18 @@ fn append_selected_feature_configs(
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
     let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
     let artifact_catalog = local_artifact_provider_catalog(&state.kms_key_arn)?;
-    let secret_catalog =
-        local_secret_provider_catalog(&state.kms_key_arn, &state.secret_readiness_arn)?;
+    let secret_catalog = local_secret_provider_catalog(
+        &state.kms_key_arn,
+        &state.secret_readiness_arn,
+        &state.secret_provider_id,
+    )?;
     let configs = selected_feature_configs(
         &runtime,
         &state.ports,
         identity,
         &artifact_catalog,
         &secret_catalog,
+        &state.capability_protocol_profile_revision_id,
         selected_profile,
     )?;
     for (role, (file_name, config)) in configs {
@@ -3011,12 +3521,50 @@ fn append_selected_feature_configs(
             let bytes = serde_json::to_vec_pretty(&config).map_err(|error| {
                 CliError::RuntimeState(format!("cannot serialize feature config {role}: {error}"))
             })?;
-            write_new(&path, &bytes)?;
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    let invalid = |detail: &str| {
+                        CliError::RuntimeState(format!(
+                            "cannot recover additive feature config {}: {detail}",
+                            path.display()
+                        ))
+                    };
+                    let observed = canonical_runtime_config_digest(&path, &invalid)?;
+                    if observed != digest {
+                        return Err(CliError::RuntimeState(format!(
+                            "persisted additive feature config {} does not match the generated closure",
+                            path.display()
+                        )));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    write_new(&path, &bytes)?;
+                }
+                Err(source) => {
+                    return Err(CliError::InitializeProject {
+                        path: path.display().to_string(),
+                        source,
+                    });
+                }
+            }
             state.config_digests.insert(role.clone(), digest);
-            write_runtime_json_replace(&runtime.join(RUNTIME_PROFILE_STATE_FILE), state)?;
         }
     }
     Ok(())
+}
+
+fn local_kms_key_arn_is_valid(value: &str) -> bool {
+    const PREFIX: &str = "arn:aws:kms:us-east-1:000000000000:key/";
+    value
+        .strip_prefix(PREFIX)
+        .and_then(|suffix| Uuid::parse_str(suffix).ok().map(|uuid| (suffix, uuid)))
+        .is_some_and(|(suffix, uuid)| suffix == uuid.hyphenated().to_string())
+}
+
+fn runtime_ports_are_valid(ports: &RuntimePortBindings) -> bool {
+    let values = ports.all_ports();
+    values.iter().all(|port| *port != 0)
+        && values.into_iter().collect::<BTreeSet<_>>().len() == values.len()
 }
 
 fn local_oidc_config(identity: &LocalIdentityState, jwks: serde_json::Value) -> serde_json::Value {
@@ -3086,16 +3634,7 @@ fn local_artifact_provider_catalog(kms_key_arn: &str) -> Result<serde_json::Valu
 }
 
 fn validate_local_secret_readiness_arn(root: &Path, value: &str) -> Result<(), CliError> {
-    let valid = value.len() <= 2_048
-        && value.is_ascii()
-        && value.bytes().all(|byte| byte.is_ascii_graphic())
-        && value
-            .split_once(":secret:")
-            .is_some_and(|(authority, name)| {
-                authority.starts_with("arn:aws:secretsmanager:us-east-1:")
-                    && name.starts_with("insight/platform/readiness-")
-            });
-    if valid {
+    if local_secret_readiness_arn_is_valid(value) {
         Ok(())
     } else {
         Err(CliError::InvalidLocalIdentity {
@@ -3104,10 +3643,24 @@ fn validate_local_secret_readiness_arn(root: &Path, value: &str) -> Result<(), C
     }
 }
 
+fn local_secret_readiness_arn_is_valid(value: &str) -> bool {
+    const PREFIX: &str =
+        "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-";
+    value.strip_prefix(PREFIX).is_some_and(|suffix| {
+        suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
+}
+
 fn local_secret_provider_catalog(
     kms_key_arn: &str,
     readiness_secret_arn: &str,
+    provider_id: &ResourceId,
 ) -> Result<serde_json::Value, CliError> {
+    if provider_id.kind() != ResourceKind::SecretProvider {
+        return Err(CliError::InvalidLocalIdentity {
+            path: "local Secret provider configuration".to_owned(),
+        });
+    }
     let (authority, _) = readiness_secret_arn.split_once(":secret:").ok_or_else(|| {
         CliError::InvalidLocalIdentity {
             path: "local Secret provider configuration".to_owned(),
@@ -3115,7 +3668,7 @@ fn local_secret_provider_catalog(
     })?;
     let mut provider = serde_json::json!({
         "schema_version": 1,
-        "provider_id": fresh_resource_id(ResourceKind::SecretProvider),
+        "provider_id": provider_id,
         "region": "us-east-1",
         "secrets_endpoint": LOCAL_AWS_ENDPOINT,
         "kms_endpoint": LOCAL_AWS_ENDPOINT,
@@ -3216,6 +3769,154 @@ fn lower_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+fn validate_runtime_profile_transition(
+    current: &RuntimeProfileState,
+    requested: DevProfile,
+    requested_release_identity: &str,
+    requested_source_fingerprint: &str,
+) -> Result<(), CliError> {
+    let requested_features = requested
+        .feature_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let identity_changed = current.release_identity != requested_release_identity
+        || current.source_fingerprint != requested_source_fingerprint;
+    if identity_changed {
+        if current.features != requested_features {
+            return Err(CliError::RuntimeState(
+                "an exact release/source transition cannot add or remove development features in the same `insight dev`; first run the new verified release/source with the currently persisted feature set, then run `insight dev` again to add features"
+                    .to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    if !requested.is_additive_from(&current.features) {
+        return Err(CliError::RuntimeState(format!(
+            "removing development features is not implicit; stop the profile and use reset after reviewing project-local data (current: {}, requested: {})",
+            current.features.join(","),
+            requested.feature_names().join(",")
+        )));
+    }
+    Ok(())
+}
+
+fn clear_quiescent_runtime_process_state(
+    runtime: &Path,
+    binding: &RuntimeProcessBinding,
+) -> Result<(), CliError> {
+    let Some(state) = read_runtime_process_state(runtime, binding)? else {
+        return Ok(());
+    };
+    for process in state.processes.values() {
+        match observe_runtime_process(process)? {
+            RuntimeProcessObservation::Owned => {
+                let detail = if state.lifecycle == RuntimeProcessLifecycle::Starting {
+                    "the previous start journal is incomplete and still owns a live Platform process; run `insight stop` to recover it"
+                } else {
+                    "a local Platform process is already running; use `insight status` or `insight stop`"
+                };
+                return Err(CliError::RuntimeUnavailable(detail.to_owned()));
+            }
+            RuntimeProcessObservation::IdentityMismatch => {
+                // The numeric PID is live but is not proven to be the recorded Platform process.
+                // Never signal it; the exact journal record is stale and may be discarded once
+                // every still-owned record has been reconciled.
+            }
+            RuntimeProcessObservation::Stopped => {}
+        }
+    }
+    remove_runtime_state_file(&runtime.join(RUNTIME_PROCESS_STATE_FILE))
+}
+
+fn acquire_runtime_lifecycle_lock(root: &Path) -> Result<RuntimeLifecycleLock, CliError> {
+    #[cfg(unix)]
+    {
+        let state_directory = root.join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        for directory in [&state_directory, &runtime] {
+            let metadata =
+                fs::symlink_metadata(directory).map_err(|source| CliError::InitializeProject {
+                    path: directory.display().to_string(),
+                    source,
+                })?;
+            if !metadata.file_type().is_dir() {
+                return Err(CliError::RuntimeState(format!(
+                    "{} is not a physical project-local directory",
+                    directory.display()
+                )));
+            }
+        }
+        let path = runtime.join(RUNTIME_LIFECYCLE_LOCK_FILE);
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let mut file = options
+            .open(&path)
+            .map_err(|source| CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            })?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(CliError::RuntimeUnavailable(
+                    "another local lifecycle command is already mutating this project; retry after it completes"
+                        .to_owned(),
+                ));
+            }
+            return Err(CliError::InitializeProject {
+                path: path.display().to_string(),
+                source: error,
+            });
+        }
+        let opened = file
+            .metadata()
+            .map_err(|source| CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            })?;
+        let current =
+            fs::symlink_metadata(&path).map_err(|source| CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            })?;
+        if !opened.file_type().is_file()
+            || opened.nlink() != 1
+            || opened.dev() != current.dev()
+            || opened.ino() != current.ino()
+            || opened.mode() & 0o077 != 0
+        {
+            return Err(CliError::RuntimeState(format!(
+                "{} is not the private single-link lifecycle lock file",
+                path.display()
+            )));
+        }
+        let owner = format!("schema_version=2 pid={}\n", std::process::id());
+        file.set_len(0)
+            .and_then(|_| file.write_all(owner.as_bytes()))
+            .and_then(|_| file.sync_all())
+            .map_err(|source| CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            })?;
+        sync_parent_directory(&path)?;
+        Ok(RuntimeLifecycleLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err(CliError::RuntimeUnavailable(
+            "local lifecycle locking is currently supported on Unix hosts".to_owned(),
+        ))
+    }
+}
+
 fn run_development_profile(
     workspace: &Path,
     root: &Path,
@@ -3225,25 +3926,22 @@ fn run_development_profile(
         path: root.display().to_string(),
         source,
     })?;
+    let _lock = acquire_runtime_lifecycle_lock(&root)?;
+    run_development_profile_locked(workspace, &root, profile, None)
+}
+
+fn run_development_profile_locked(
+    workspace: &Path,
+    root: &Path,
+    profile: DevProfile,
+    restart_identity: Option<&RuntimeRestartIdentity>,
+) -> Result<String, CliError> {
     let state_directory = root.join(PROJECT_DIRECTORY);
     let mut project = load_local_project_state(&state_directory)?;
     validate_loaded_local_identity(&state_directory, &project.identity)?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
     ensure_embedded_compose(&runtime)?;
     let compose_project = compose_project_name(&project.identity.tenant_id)?;
-    if let Some(existing) = read_runtime_process_state(&runtime)? {
-        if existing
-            .processes
-            .values()
-            .any(|process| process_is_running(process.pid))
-        {
-            return Err(CliError::RuntimeUnavailable(
-                "a local Platform process is already running; use `insight status` or `insight stop`"
-                    .to_owned(),
-            ));
-        }
-    }
-
     let (workspace, fingerprint, release_identity, verified_release) = if profile.is_from_source() {
         let workspace = workspace_root(workspace)?;
         let fingerprint = workspace_fingerprint(&workspace)?;
@@ -3255,7 +3953,7 @@ fn run_development_profile(
                 .map_err(CliError::Release)?;
         let identity = format!("release:{}:{}", release.version, release.bundle_digest);
         (
-            root.clone(),
+            root.to_path_buf(),
             release.bundle_digest.clone(),
             identity,
             Some(release),
@@ -3264,43 +3962,36 @@ fn run_development_profile(
     let expected_profile_digest = profile
         .profile_digest(&release_identity)
         .map_err(CliError::RuntimeState)?;
-    let mut existing_profile_state = read_runtime_profile_state(&runtime)?;
+    if let Some(expected) = restart_identity {
+        validate_restart_identity(expected, &release_identity, &fingerprint)?;
+    }
+    let mut existing_profile_state = read_runtime_profile_state(&runtime, &project.identity)?;
     if let Some(state) = &existing_profile_state {
-        if !profile.is_additive_from(&state.features) {
-            return Err(CliError::RuntimeState(format!(
-                "removing development features is not implicit; stop the profile and use reset after reviewing project-local data (current: {}, requested: {})",
-                state.features.join(","),
-                profile.feature_names().join(",")
-            )));
-        }
-        let same_features = state.features
-            == profile
-                .feature_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-        if same_features
-            && !state.profile_digest.is_empty()
-            && state.profile_digest != expected_profile_digest
-            && !profile.is_from_source()
-        {
-            return Err(CliError::RuntimeState(
-                "release/profile drift detected before service start; run `insight update check` and apply one exact version"
-                    .to_owned(),
-            ));
-        }
+        let binding = runtime_process_binding(
+            &runtime,
+            &project.identity.tenant_id,
+            &compose_project,
+            state,
+            &project.identity,
+        )?;
+        validate_runtime_profile_transition(state, profile, &release_identity, &fingerprint)?;
+        clear_quiescent_runtime_process_state(&runtime, &binding)?;
+    } else if runtime.join(RUNTIME_PROCESS_STATE_FILE).exists() {
+        return Err(CliError::RuntimeState(
+            "runtime process state exists without its owning runtime profile".to_owned(),
+        ));
     }
     if profile.has_sandbox() {
         ensure_sandbox_kubernetes_dependency()?;
     }
-    ensure_selected_feature_identity(&state_directory, profile)?;
+    let prepared_tls_identity_digests = ensure_selected_feature_identity(
+        &state_directory,
+        profile,
+        existing_profile_state
+            .as_ref()
+            .map(|state| &state.tls_identity_digests),
+    )?;
     if let Some(state) = existing_profile_state.as_mut() {
-        if profile.has_features() && state.secret_readiness_arn.is_empty() {
-            return Err(CliError::RuntimeUnavailable(
-                "the persisted local profile predates feature-scoped Secret authority; initialize a fresh local project before enabling network features"
-                    .to_owned(),
-            ));
-        }
         append_selected_feature_configs(&state_directory, &project.identity, state, profile)?;
     }
     let binary_directory = ensure_runtime_binaries(
@@ -3321,6 +4012,13 @@ fn run_development_profile(
             state.profile_digest = expected_profile_digest.clone();
             state.release_identity.clone_from(&release_identity);
             state.source_fingerprint.clone_from(&fingerprint);
+            state.tls_identity_digests = prepared_tls_identity_digests;
+            refresh_runtime_profile_closure_digest(&mut state)?;
+            validate_runtime_profile_state(
+                &runtime.join(RUNTIME_PROFILE_STATE_FILE),
+                &state,
+                &project.identity,
+            )?;
             write_runtime_json_replace(&runtime.join(RUNTIME_PROFILE_STATE_FILE), &state)?;
             state
         }
@@ -3329,7 +4027,7 @@ fn run_development_profile(
                 initialize_localstack_artifact_dependency(&workspace, &compose_project, &runtime)?;
             let ports = RuntimePortBindings::allocate()?;
             prepare_runtime_profile_with_ports(
-                &root,
+                root,
                 &kms_key_arn,
                 &secret_readiness_arn,
                 &fingerprint,
@@ -3337,7 +4035,7 @@ fn run_development_profile(
                 profile,
                 &release_identity,
             )?;
-            read_runtime_profile_state(&runtime)?.ok_or_else(|| {
+            read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
                 CliError::RuntimeState(
                     "runtime profile was not persisted after generation".to_owned(),
                 )
@@ -3362,6 +4060,7 @@ fn run_development_profile(
             &compose_project,
             &runtime,
             &profile_state.secret_readiness_arn,
+            &profile_state.kms_key_arn,
         )?;
     }
     provision_and_bootstrap_authority(
@@ -3370,31 +4069,60 @@ fn run_development_profile(
         &project.identity,
         &profile_state,
     )?;
-    let processes = start_profile_processes(&binary_directory, &runtime, &profile_state, profile)?;
-    let state = RuntimeProcessState {
-        schema_version: 1,
-        kind: "insight.dev.process-state/v1".to_owned(),
+    let binding = runtime_process_binding(
+        &runtime,
+        &project.identity.tenant_id,
+        &compose_project,
+        &profile_state,
+        &project.identity,
+    )?;
+    let mut state = RuntimeProcessState {
+        schema_version: RUNTIME_PROCESS_SCHEMA_VERSION,
+        kind: RUNTIME_PROCESS_KIND.to_owned(),
+        tenant_id: project.identity.tenant_id.clone(),
         profile: profile.label(),
-        compose_project,
-        source_fingerprint: fingerprint,
-        processes,
+        profile_digest: profile_state.profile_digest.clone(),
+        release_identity: profile_state.release_identity.clone(),
+        compose_project: compose_project.clone(),
+        source_fingerprint: profile_state.source_fingerprint.clone(),
+        lifecycle: RuntimeProcessLifecycle::Starting,
+        processes: BTreeMap::new(),
     };
     write_runtime_json_replace(&runtime.join(RUNTIME_PROCESS_STATE_FILE), &state)?;
-    project.profiles = BTreeMap::from([(
-        "starter".to_owned(),
-        LocalProfileState {
-            state: "ready".to_owned(),
-            features: profile
-                .feature_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            profile_digest: Some(expected_profile_digest),
-            release_identity: Some(release_identity),
-        },
-    )]);
-    write_runtime_json_replace(&state_directory.join(PROJECT_STATE_FILE), &project)?;
-    render_runtime_status(&state)
+    if let Err(error) = start_profile_processes(
+        &binary_directory,
+        &runtime,
+        &profile_state,
+        profile,
+        &binding,
+        &mut state,
+    ) {
+        return Err(abort_runtime_start(&runtime, &mut state, error));
+    }
+    project.profiles = runtime_project_profile_summary(&profile_state, "ready");
+    if let Err(error) =
+        write_runtime_json_replace(&state_directory.join(PROJECT_STATE_FILE), &project)
+    {
+        return Err(abort_runtime_start(&runtime, &mut state, error));
+    }
+    render_runtime_status(&state, &binding)
+}
+
+fn validate_restart_identity(
+    expected: &RuntimeRestartIdentity,
+    release_identity: &str,
+    source_fingerprint: &str,
+) -> Result<(), CliError> {
+    if expected.release_identity == release_identity
+        && expected.source_fingerprint == source_fingerprint
+    {
+        Ok(())
+    } else {
+        Err(CliError::RuntimeState(
+            "`insight start` cannot change the persisted release/source identity; use an explicit `insight dev` transition after reviewing the verified source or release"
+                .to_owned(),
+        ))
+    }
 }
 
 fn runtime_status(root: &Path) -> Result<String, CliError> {
@@ -3402,13 +4130,29 @@ fn runtime_status(root: &Path) -> Result<String, CliError> {
         path: root.display().to_string(),
         source,
     })?;
-    let runtime = root.join(PROJECT_DIRECTORY).join(RUNTIME_DIRECTORY);
-    let state = read_runtime_process_state(&runtime)?.ok_or_else(|| {
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity(&state_directory, &project.identity)?;
+    let runtime = state_directory.join(RUNTIME_DIRECTORY);
+    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
+        CliError::RuntimeState(
+            "no local runtime profile exists; run `insight dev` first".to_owned(),
+        )
+    })?;
+    let compose_project = compose_project_name(&project.identity.tenant_id)?;
+    let binding = runtime_process_binding(
+        &runtime,
+        &project.identity.tenant_id,
+        &compose_project,
+        &profile,
+        &project.identity,
+    )?;
+    let state = read_runtime_process_state(&runtime, &binding)?.ok_or_else(|| {
         CliError::RuntimeState(
             "no local Platform process state exists; run `insight dev` first".to_owned(),
         )
     })?;
-    render_runtime_status(&state)
+    render_runtime_status(&state, &binding)
 }
 
 fn runtime_logs(root: &Path, role: Option<&str>) -> Result<String, CliError> {
@@ -3416,8 +4160,24 @@ fn runtime_logs(root: &Path, role: Option<&str>) -> Result<String, CliError> {
         path: root.display().to_string(),
         source,
     })?;
-    let runtime = root.join(PROJECT_DIRECTORY).join(RUNTIME_DIRECTORY);
-    let state = read_runtime_process_state(&runtime)?.ok_or_else(|| {
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity(&state_directory, &project.identity)?;
+    let runtime = state_directory.join(RUNTIME_DIRECTORY);
+    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
+        CliError::RuntimeState(
+            "no local runtime profile exists; run `insight dev` first".to_owned(),
+        )
+    })?;
+    let compose_project = compose_project_name(&project.identity.tenant_id)?;
+    let binding = runtime_process_binding(
+        &runtime,
+        &project.identity.tenant_id,
+        &compose_project,
+        &profile,
+        &project.identity,
+    )?;
+    let state = read_runtime_process_state(&runtime, &binding)?.ok_or_else(|| {
         CliError::RuntimeState(
             "no local Platform process state exists; run `insight dev` first".to_owned(),
         )
@@ -3426,10 +4186,25 @@ fn runtime_logs(root: &Path, role: Option<&str>) -> Result<String, CliError> {
         Some(role) => vec![role.to_owned()],
         None => state.processes.keys().cloned().collect(),
     };
-    let mut output = String::new();
+    let mut output = format!(
+        "lifecycle={} complete={}\n",
+        match state.lifecycle {
+            RuntimeProcessLifecycle::Starting => "starting",
+            RuntimeProcessLifecycle::Running => "running",
+            RuntimeProcessLifecycle::Stopped => "stopped",
+        },
+        state.lifecycle != RuntimeProcessLifecycle::Starting,
+    );
     for role in roles {
         let process = state.processes.get(&role).ok_or_else(|| {
-            CliError::RuntimeState(format!("no log is registered for role {role}"))
+            let detail = if state.lifecycle == RuntimeProcessLifecycle::Starting
+                && binding.expected_processes.contains_key(&role)
+            {
+                format!("role {role} has not yet been recorded by the incomplete start journal")
+            } else {
+                format!("no log is registered for role {role}")
+            };
+            CliError::RuntimeState(detail)
         })?;
         let path = runtime.join(&process.log_file);
         let bytes = fs::read(&path).map_err(|source| CliError::InitializeProject {
@@ -3452,50 +4227,109 @@ fn restart_development_profile(workspace: &Path, root: &Path) -> Result<String, 
         path: root.display().to_string(),
         source,
     })?;
-    let project = load_local_project_state(&root.join(PROJECT_DIRECTORY))?;
-    let selected = project.profiles.get("starter").ok_or_else(|| {
+    let _lock = acquire_runtime_lifecycle_lock(&root)?;
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let mut project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity(&state_directory, &project.identity)?;
+    let runtime = state_directory.join(RUNTIME_DIRECTORY);
+    let persisted = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
         CliError::RuntimeState(
-            "project has no clean-cut starter profile; initialize a fresh local project".to_owned(),
+            "no local runtime profile exists; run `insight dev` first".to_owned(),
         )
     })?;
-    let features = (!selected.features.is_empty()).then(|| selected.features.join(","));
-    let from_source = selected
-        .release_identity
-        .as_deref()
-        .is_some_and(|value| value.starts_with("source:"));
-    let profile = DevProfile::parse(features.as_deref(), false, from_source)
-        .map_err(CliError::UnsupportedProfile)?;
-    run_development_profile(workspace, &root, profile)
+    let profile = restart_profile_selection(&persisted)?;
+    let compose_project = compose_project_name(&project.identity.tenant_id)?;
+    let binding = runtime_process_binding(
+        &runtime,
+        &project.identity.tenant_id,
+        &compose_project,
+        &persisted,
+        &project.identity,
+    )?;
+    if let Some(processes) = read_runtime_process_state(&runtime, &binding)? {
+        if processes.lifecycle == RuntimeProcessLifecycle::Running
+            && processes.processes.values().all(|process| {
+                observe_runtime_process(process).ok() == Some(RuntimeProcessObservation::Owned)
+                    && http_ready(&process.ready_address)
+            })
+        {
+            let expected_summary = runtime_project_profile_summary(&persisted, "ready");
+            if project.profiles != expected_summary {
+                project.profiles = expected_summary;
+                write_runtime_json_replace(&state_directory.join(PROJECT_STATE_FILE), &project)?;
+            }
+            return render_runtime_status(&processes, &binding);
+        }
+    }
+    let restart_identity = RuntimeRestartIdentity {
+        release_identity: persisted.release_identity,
+        source_fingerprint: persisted.source_fingerprint,
+    };
+    run_development_profile_locked(workspace, &root, profile, Some(&restart_identity))
 }
 
-fn stop_development_profile(workspace: &Path, root: &Path) -> Result<String, CliError> {
-    let _ = workspace;
+fn restart_profile_selection(persisted: &RuntimeProfileState) -> Result<DevProfile, CliError> {
+    let features = (!persisted.features.is_empty()).then(|| persisted.features.join(","));
+    let from_source = persisted.release_identity.starts_with("source:");
+    DevProfile::parse(features.as_deref(), false, from_source).map_err(CliError::UnsupportedProfile)
+}
+
+fn runtime_project_profile_summary(
+    persisted: &RuntimeProfileState,
+    state: &str,
+) -> BTreeMap<String, LocalProfileState> {
+    BTreeMap::from([(
+        "starter".to_owned(),
+        LocalProfileState {
+            state: state.to_owned(),
+            features: persisted.features.clone(),
+            profile_digest: Some(persisted.profile_digest.clone()),
+            release_identity: Some(persisted.release_identity.clone()),
+        },
+    )])
+}
+
+fn stop_development_profile(_workspace: &Path, root: &Path) -> Result<String, CliError> {
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
         source,
     })?;
-    let runtime = root.join(PROJECT_DIRECTORY).join(RUNTIME_DIRECTORY);
-    let mut state = read_runtime_process_state(&runtime)?.ok_or_else(|| {
+    let _lock = acquire_runtime_lifecycle_lock(&root)?;
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let mut project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity_for_cleanup(&state_directory, &project.identity)?;
+    let runtime = state_directory.join(RUNTIME_DIRECTORY);
+    let profile =
+        read_runtime_profile_state_for_cleanup(&runtime, &project.identity)?.ok_or_else(|| {
+            CliError::RuntimeState(
+                "no local runtime profile exists; run `insight dev` first".to_owned(),
+            )
+        })?;
+    let compose_project = compose_project_name(&project.identity.tenant_id)?;
+    let binding = runtime_process_binding_for_cleanup(
+        &runtime,
+        &project.identity.tenant_id,
+        &compose_project,
+        &profile,
+        &project.identity,
+    )?;
+    let mut state = read_runtime_process_state(&runtime, &binding)?.ok_or_else(|| {
         CliError::RuntimeState(
             "no local Platform process state exists; run `insight dev` first".to_owned(),
         )
     })?;
     for process in state.processes.values() {
-        stop_process(process.pid)?;
+        stop_process(process)?;
     }
     state.processes.clear();
+    state.lifecycle = RuntimeProcessLifecycle::Stopped;
     write_runtime_json_replace(&runtime.join(RUNTIME_PROCESS_STATE_FILE), &state)?;
-    let mut compose = compose_command(workspace, &state.compose_project, &runtime);
-    compose.args(["down", "--remove-orphans"]);
-    run_external(compose, "stop the exact local dependency closure")?;
-    let state_directory = root.join(PROJECT_DIRECTORY);
-    let mut project = load_local_project_state(&state_directory)?;
     if let Some(profile) = project.profiles.get_mut("starter") {
         profile.state = "stopped".to_owned();
     }
     write_runtime_json_replace(&state_directory.join(PROJECT_STATE_FILE), &project)?;
     Ok(
-        "stopped the exact local Platform and dependency closure; project data is retained\n"
+        "stopped local Platform roles; PostgreSQL, NATS and LocalStack dependencies remain ready for durable restart\n"
             .to_owned(),
     )
 }
@@ -3509,8 +4343,13 @@ fn reset_local_project(
         path: root.display().to_string(),
         source,
     })?;
+    let _lock = confirm
+        .is_some()
+        .then(|| acquire_runtime_lifecycle_lock(&root))
+        .transpose()?;
     let state_directory = root.join(PROJECT_DIRECTORY);
     let project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity_for_cleanup(&state_directory, &project.identity)?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
     let compose_project = compose_project_name(&project.identity.tenant_id)?;
     if confirm.is_none() {
@@ -3529,15 +4368,37 @@ fn reset_local_project(
             value: confirm.unwrap_or_default().to_owned(),
         });
     }
-    if read_runtime_process_state(&runtime)?.is_some_and(|state| {
-        state
-            .processes
-            .values()
-            .any(|process| process_is_running(process.pid))
-    }) {
-        return Err(CliError::RuntimeUnavailable(
-            "local Platform roles are still running; run `insight stop` before reset".to_owned(),
-        ));
+    if runtime.join(RUNTIME_PROCESS_STATE_FILE).exists() {
+        let profile = read_runtime_profile_state_for_cleanup(&runtime, &project.identity)?
+            .ok_or_else(|| {
+                CliError::RuntimeState(
+                    "runtime process state exists without its owning runtime profile".to_owned(),
+                )
+            })?;
+        let binding = runtime_process_binding_for_cleanup(
+            &runtime,
+            &project.identity.tenant_id,
+            &compose_project,
+            &profile,
+            &project.identity,
+        )?;
+        if let Some(state) = read_runtime_process_state(&runtime, &binding)? {
+            for process in state.processes.values() {
+                match observe_runtime_process(process)? {
+                    RuntimeProcessObservation::Owned => {
+                        return Err(CliError::RuntimeUnavailable(
+                            "local Platform roles are still running; run `insight stop` before reset"
+                                .to_owned(),
+                        ));
+                    }
+                    RuntimeProcessObservation::IdentityMismatch => {
+                        // This PID is not owned by the journal and is never signalled. The stale
+                        // record cannot block cleanup of the exact project-local state.
+                    }
+                    RuntimeProcessObservation::Stopped => {}
+                }
+            }
+        }
     }
     let mut compose = compose_command(workspace, &compose_project, &runtime);
     compose.args(["down", "--volumes", "--remove-orphans"]);
@@ -3683,7 +4544,7 @@ fn initialize_localstack_artifact_dependency(
         ],
     )?;
     let arn = arn.trim();
-    if arn.is_empty() || arn.len() > 512 || !arn.is_ascii() {
+    if !local_kms_key_arn_is_valid(arn) {
         return Err(CliError::RuntimeUnavailable(
             "local KMS did not return a valid key ARN".to_owned(),
         ));
@@ -3724,7 +4585,7 @@ fn ensure_localstack_artifact_dependency(
         runtime,
         &["s3api", "head-bucket", "--bucket", LOCAL_ARTIFACT_BUCKET],
     )?;
-    compose_awslocal(
+    let versioning = compose_awslocal(
         workspace,
         compose_project,
         runtime,
@@ -3733,14 +4594,77 @@ fn ensure_localstack_artifact_dependency(
             "get-bucket-versioning",
             "--bucket",
             LOCAL_ARTIFACT_BUCKET,
+            "--output",
+            "json",
         ],
     )?;
-    compose_awslocal(
+    ensure_local_bucket_versioning_enabled(&versioning)?;
+    let kms_metadata = compose_awslocal(
         workspace,
         compose_project,
         runtime,
-        &["kms", "describe-key", "--key-id", kms_key_arn],
+        &[
+            "kms",
+            "describe-key",
+            "--key-id",
+            kms_key_arn,
+            "--output",
+            "json",
+        ],
     )?;
+    ensure_local_kms_metadata(&kms_metadata, kms_key_arn)?;
+    Ok(())
+}
+
+fn strict_dependency_json(response: &str, authority: &str) -> Result<serde_json::Value, CliError> {
+    const MAX_DEPENDENCY_RESPONSE_BYTES: usize = 65_536;
+    parse_strict_json(
+        response.as_bytes(),
+        JsonLimits {
+            max_bytes: MAX_DEPENDENCY_RESPONSE_BYTES,
+            max_depth: 32,
+            max_properties_per_object: 256,
+            max_items_per_array: 256,
+            max_string_bytes: 8_192,
+        },
+    )
+    .map_err(|_| {
+        CliError::RuntimeUnavailable(format!(
+            "local {authority} authority response was not bounded strict JSON"
+        ))
+    })
+}
+
+fn ensure_local_kms_metadata(response: &str, kms_key_arn: &str) -> Result<(), CliError> {
+    let response = strict_dependency_json(response, "KMS")?;
+    let metadata = response.get("KeyMetadata").ok_or_else(|| {
+        CliError::RuntimeUnavailable("local KMS response omitted KeyMetadata".to_owned())
+    })?;
+    if metadata.get("Arn").and_then(serde_json::Value::as_str) != Some(kms_key_arn)
+        || metadata.get("Enabled").and_then(serde_json::Value::as_bool) != Some(true)
+        || metadata.get("KeyState").and_then(serde_json::Value::as_str) != Some("Enabled")
+        || metadata.get("KeyUsage").and_then(serde_json::Value::as_str) != Some("ENCRYPT_DECRYPT")
+        || metadata.get("Origin").and_then(serde_json::Value::as_str) != Some("AWS_KMS")
+    {
+        return Err(CliError::RuntimeUnavailable(
+            "local KMS metadata does not match the persisted enabled encryption authority"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_local_bucket_versioning_enabled(response: &str) -> Result<(), CliError> {
+    let response: serde_json::Value = serde_json::from_str(response).map_err(|_| {
+        CliError::RuntimeUnavailable(
+            "local S3 bucket versioning response was not valid JSON".to_owned(),
+        )
+    })?;
+    if response.get("Status").and_then(serde_json::Value::as_str) != Some("Enabled") {
+        return Err(CliError::RuntimeUnavailable(
+            "local S3 bucket versioning is not enabled".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -3749,8 +4673,9 @@ fn ensure_localstack_secret_dependency(
     compose_project: &str,
     runtime: &Path,
     readiness_secret_arn: &str,
+    kms_key_arn: &str,
 ) -> Result<(), CliError> {
-    compose_awslocal(
+    let metadata = compose_awslocal(
         workspace,
         compose_project,
         runtime,
@@ -3759,8 +4684,33 @@ fn ensure_localstack_secret_dependency(
             "describe-secret",
             "--secret-id",
             readiness_secret_arn,
+            "--output",
+            "json",
         ],
     )?;
+    ensure_local_secret_metadata(&metadata, readiness_secret_arn, kms_key_arn)
+}
+
+fn ensure_local_secret_metadata(
+    response: &str,
+    readiness_secret_arn: &str,
+    kms_key_arn: &str,
+) -> Result<(), CliError> {
+    let response = strict_dependency_json(response, "Secrets Manager")?;
+    let observed_kms = response.get("KmsKeyId").and_then(serde_json::Value::as_str);
+    let expected_key_id = kms_key_arn.rsplit('/').next();
+    let kms_matches = observed_kms == Some(kms_key_arn)
+        || observed_kms.is_some_and(|value| Some(value) == expected_key_id);
+    if response.get("ARN").and_then(serde_json::Value::as_str) != Some(readiness_secret_arn)
+        || response.get("Name").and_then(serde_json::Value::as_str)
+            != Some(LOCAL_SECRET_READINESS_NAME)
+        || !kms_matches
+    {
+        return Err(CliError::RuntimeUnavailable(
+            "local Secrets Manager metadata does not match the persisted readiness/KMS authority"
+                .to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -4167,7 +5117,9 @@ fn start_profile_processes(
     runtime: &Path,
     profile: &RuntimeProfileState,
     selected_profile: DevProfile,
-) -> Result<BTreeMap<String, RuntimeProcessRecord>, CliError> {
+    binding: &RuntimeProcessBinding,
+    state: &mut RuntimeProcessState,
+) -> Result<(), CliError> {
     let binaries = runtime_binary_paths(binary_directory, selected_profile);
     let logs = runtime.join(RUNTIME_LOG_DIRECTORY);
     fs::create_dir_all(&logs).map_err(|source| CliError::InitializeProject {
@@ -4413,51 +5365,90 @@ fn start_profile_processes(
         ),
     ];
     if selected_profile.has_features() {
-        specs.extend(
-            full_profile_launch_specs(
-                binary_directory,
-                runtime,
-                profile,
-                database_url,
-                &common_aws,
-            )
-            .into_iter()
-            .filter(|spec| selected_profile.includes_role(spec.role)),
-        );
+        specs.extend(full_profile_launch_specs(
+            binary_directory,
+            runtime,
+            profile,
+            selected_profile,
+            database_url,
+            &common_aws,
+        )?);
     }
-    let mut started: BTreeMap<String, RuntimeProcessRecord> = BTreeMap::new();
+    let observed_specs = specs
+        .iter()
+        .map(|spec| (spec.role.to_owned(), spec.ready_address.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if observed_specs != binding.expected_processes {
+        return Err(CliError::RuntimeState(
+            "runtime launch specs do not match the selected process closure".to_owned(),
+        ));
+    }
+    let process_path = runtime.join(RUNTIME_PROCESS_STATE_FILE);
     for spec in specs {
-        let record = match spawn_runtime_process(&logs, &spec) {
-            Ok(record) => record,
-            Err(error) => {
-                for process in started.values() {
-                    let _ = stop_process(process.pid);
-                }
-                return Err(error);
+        let role = spec.role.to_owned();
+        let record = spawn_runtime_process(&logs, &spec, |record| {
+            if state.processes.contains_key(&role) {
+                return Err(CliError::RuntimeState(format!(
+                    "duplicate runtime launch role {role}"
+                )));
             }
-        };
-        if let Err(error) = wait_for_ready(&record) {
-            let _ = stop_process(record.pid);
-            for process in started.values() {
-                let _ = stop_process(process.pid);
-            }
-            return Err(error);
-        }
-        started.insert(spec.role.to_owned(), record);
+            state.processes.insert(role.clone(), record.clone());
+            write_runtime_json_replace(&process_path, state)
+        })?;
+        wait_for_ready(&record)?;
     }
-    Ok(started)
+    state.lifecycle = RuntimeProcessLifecycle::Running;
+    write_runtime_json_replace(&process_path, state)?;
+    Ok(())
+}
+
+fn abort_runtime_start(
+    runtime: &Path,
+    state: &mut RuntimeProcessState,
+    cause: CliError,
+) -> CliError {
+    state.lifecycle = RuntimeProcessLifecycle::Starting;
+    let process_path = runtime.join(RUNTIME_PROCESS_STATE_FILE);
+    let journal_error = write_runtime_json_replace(&process_path, state).err();
+    let mut stop_errors = Vec::new();
+    for process in state.processes.values() {
+        if let Err(error) = stop_process(process) {
+            stop_errors.push(error.to_string());
+        }
+    }
+    if !stop_errors.is_empty() {
+        if let Some(error) = journal_error {
+            stop_errors.push(format!("persist recovery journal: {error}"));
+        }
+        return CliError::RuntimeUnavailable(format!(
+            "{cause}; start recovery is incomplete and the process journal was retained: {}",
+            stop_errors.join("; ")
+        ));
+    }
+    state.processes.clear();
+    state.lifecycle = RuntimeProcessLifecycle::Stopped;
+    if let Err(error) = write_runtime_json_replace(&process_path, state) {
+        let journal_detail = journal_error
+            .map(|journal| format!("; recovery journal also failed: {journal}"))
+            .unwrap_or_default();
+        return CliError::RuntimeUnavailable(format!(
+            "{cause}; started processes were stopped but the stopped journal could not be persisted: {error}{journal_detail}"
+        ));
+    }
+    cause
 }
 
 fn full_profile_launch_specs(
     binary_directory: &Path,
     runtime: &Path,
     profile: &RuntimeProfileState,
+    selected_profile: DevProfile,
     database_url: &str,
     common_aws: &[(&str, &str)],
-) -> Vec<RuntimeLaunchSpec> {
+) -> Result<Vec<RuntimeLaunchSpec>, CliError> {
     let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
     let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
-    full_profile::initial_process_launches(
+    let launches = full_profile::initial_process_launches(
         full_profile::ProcessPaths {
             release: binary_directory,
             configuration: &configuration,
@@ -4468,9 +5459,11 @@ fn full_profile_launch_specs(
         },
         &profile.ports.full,
         &profile.config_digests,
+        selected_profile,
         database_url,
         common_aws,
     )
+    .map_err(CliError::RuntimeState)?
     .into_iter()
     .map(|launch| RuntimeLaunchSpec {
         role: launch.role,
@@ -4479,7 +5472,8 @@ fn full_profile_launch_specs(
         environment: launch.environment,
         extra_environment: launch.extra_environment,
     })
-    .collect()
+    .collect::<Vec<_>>();
+    Ok(launches)
 }
 
 struct RuntimeLaunchSpec {
@@ -4522,10 +5516,14 @@ fn cursor_key_digest(path: &Path) -> Result<String, CliError> {
     Ok(format!("sha256:{}", lower_hex(&Sha256::digest(key))))
 }
 
-fn spawn_runtime_process(
+fn spawn_runtime_process<F>(
     logs: &Path,
     spec: &RuntimeLaunchSpec,
-) -> Result<RuntimeProcessRecord, CliError> {
+    before_exec: F,
+) -> Result<RuntimeProcessRecord, CliError>
+where
+    F: FnOnce(&RuntimeProcessRecord) -> Result<(), CliError>,
+{
     let log_file = format!("{}/{}.log", RUNTIME_LOG_DIRECTORY, spec.role);
     let path = logs.join(format!("{}.log", spec.role));
     let stdout = OpenOptions::new()
@@ -4543,7 +5541,10 @@ fn spawn_runtime_process(
             path: path.display().to_string(),
             source,
         })?;
+    let generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
     let mut command = ProcessCommand::new(&spec.binary);
+    #[cfg(unix)]
+    command.arg0(&generation);
     command
         .envs(spec.environment.iter().map(|(key, value)| (*key, value)))
         .envs(
@@ -4554,31 +5555,166 @@ fn spawn_runtime_process(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     #[cfg(unix)]
-    command.process_group(0);
-    let child = command
-        .spawn()
-        .map_err(|error| CliError::RuntimeUnavailable(format!("start {}: {error}", spec.role)))?;
-    Ok(RuntimeProcessRecord {
-        pid: child.id(),
-        ready_address: spec.ready_address.clone(),
-        log_file,
-    })
+    {
+        command.process_group(0);
+        let (mut parent_gate, child_gate) = UnixStream::pair().map_err(|error| {
+            CliError::RuntimeUnavailable(format!("create {} start gate: {error}", spec.role))
+        })?;
+        let parent_fd = parent_gate.as_raw_fd();
+        let child_fd = child_gate.as_raw_fd();
+        // SAFETY: after fork this closure only invokes async-signal-safe libc operations. The
+        // parent runs `spawn` on a helper thread because `Command::spawn` waits for pre-exec to
+        // finish; the main thread journals the reported PID before sending the one-byte GO.
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(parent_fd);
+                let pid = libc::getpid();
+                let pid_bytes = std::slice::from_raw_parts(
+                    (&raw const pid).cast::<u8>(),
+                    std::mem::size_of::<libc::pid_t>(),
+                );
+                let mut written = 0;
+                while written < pid_bytes.len() {
+                    let result = libc::write(
+                        child_fd,
+                        pid_bytes[written..].as_ptr().cast(),
+                        pid_bytes.len() - written,
+                    );
+                    if result < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if result == 0 {
+                        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    written += result as usize;
+                }
+                let mut go = 0_u8;
+                loop {
+                    let result = libc::read(child_fd, (&raw mut go).cast(), 1);
+                    if result < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if result == 0 || go != 1 {
+                        return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+                    }
+                    break;
+                }
+                libc::close(child_fd);
+                Ok(())
+            });
+        }
+        std::thread::scope(|scope| {
+            let spawn = scope.spawn(move || {
+                let _child_gate = child_gate;
+                command.spawn()
+            });
+            let mut pid_bytes = [0_u8; std::mem::size_of::<libc::pid_t>()];
+            if let Err(handshake_error) = parent_gate.read_exact(&mut pid_bytes) {
+                drop(parent_gate);
+                let spawned = spawn.join().map_err(|_| {
+                    CliError::RuntimeUnavailable(format!(
+                        "start {}: start gate thread panicked",
+                        spec.role
+                    ))
+                })?;
+                return match spawned {
+                    Err(error) => Err(CliError::RuntimeUnavailable(format!(
+                        "start {}: {error}",
+                        spec.role
+                    ))),
+                    Ok(_) => Err(CliError::RuntimeUnavailable(format!(
+                        "start {}: PID gate failed: {handshake_error}",
+                        spec.role
+                    ))),
+                };
+            }
+            let raw_pid = libc::pid_t::from_ne_bytes(pid_bytes);
+            let pid = u32::try_from(raw_pid).map_err(|_| {
+                CliError::RuntimeUnavailable(format!(
+                    "start {}: child reported an invalid PID",
+                    spec.role
+                ))
+            })?;
+            let record = RuntimeProcessRecord {
+                pid,
+                generation,
+                ready_address: spec.ready_address.clone(),
+                log_file,
+            };
+            if let Err(error) = before_exec(&record) {
+                drop(parent_gate);
+                let _ = spawn.join();
+                return Err(error);
+            }
+            if let Err(error) = parent_gate.write_all(&[1]) {
+                drop(parent_gate);
+                let _ = spawn.join();
+                return Err(CliError::RuntimeUnavailable(format!(
+                    "release {} after persisting its start journal: {error}",
+                    spec.role
+                )));
+            }
+            drop(parent_gate);
+            let child = spawn
+                .join()
+                .map_err(|_| {
+                    CliError::RuntimeUnavailable(format!(
+                        "start {}: start gate thread panicked",
+                        spec.role
+                    ))
+                })?
+                .map_err(|error| {
+                    CliError::RuntimeUnavailable(format!("start {}: {error}", spec.role))
+                })?;
+            if child.id() != record.pid {
+                return Err(CliError::RuntimeUnavailable(format!(
+                    "start {}: PID gate reported a different process",
+                    spec.role
+                )));
+            }
+            Ok(record)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (command, before_exec, generation, log_file);
+        Err(CliError::RuntimeUnavailable(
+            "local process supervision is currently supported on Unix hosts".to_owned(),
+        ))
+    }
 }
 
 fn wait_for_ready(process: &RuntimeProcessRecord) -> Result<(), CliError> {
     let deadline = SystemTime::now() + Duration::from_secs(30);
     while SystemTime::now() < deadline {
-        if !process_is_running(process.pid) {
-            return Err(CliError::RuntimeUnavailable(format!(
-                "{} exited before readiness; inspect `insight logs --role {}`",
-                process.log_file,
-                process
-                    .log_file
-                    .trim_end_matches(".log")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("unknown")
-            )));
+        match observe_runtime_process(process)? {
+            RuntimeProcessObservation::Owned => {}
+            RuntimeProcessObservation::Stopped => {
+                return Err(CliError::RuntimeUnavailable(format!(
+                    "{} exited before readiness; inspect `insight logs --role {}`",
+                    process.log_file,
+                    process
+                        .log_file
+                        .trim_end_matches(".log")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("unknown")
+                )));
+            }
+            RuntimeProcessObservation::IdentityMismatch => {
+                return Err(CliError::RuntimeUnavailable(format!(
+                    "process {} no longer matches its recorded generation",
+                    process.pid
+                )));
+            }
         }
         if http_ready(&process.ready_address) {
             return Ok(());
@@ -4612,80 +5748,162 @@ fn http_ready(address: &str) -> bool {
         .is_ok_and(|length| response[..length].starts_with(b"HTTP/1.1 200"))
 }
 
-fn render_runtime_status(state: &RuntimeProcessState) -> Result<String, CliError> {
+fn render_runtime_status(
+    state: &RuntimeProcessState,
+    binding: &RuntimeProcessBinding,
+) -> Result<String, CliError> {
+    let complete = state.lifecycle != RuntimeProcessLifecycle::Starting;
     let mut output = format!(
-        "profile={} environment=single-node-development production=false L4=not_run L5=not_run L6=not_run\n",
-        state.profile
+        "profile={} lifecycle={} complete={} environment=single-node-development production=false L4=not_run L5=not_run L6=not_run\n",
+        state.profile,
+        match state.lifecycle {
+            RuntimeProcessLifecycle::Starting => "starting",
+            RuntimeProcessLifecycle::Running => "running",
+            RuntimeProcessLifecycle::Stopped => "stopped",
+        },
+        complete,
     );
-    for (role, process) in &state.processes {
-        let running = process_is_running(process.pid);
-        let ready = running && http_ready(&process.ready_address);
-        let status = if ready {
-            "ready"
-        } else if running {
-            "starting_or_unready"
-        } else {
-            "stopped"
-        };
-        output.push_str(&format!(
-            "{status:20} {role:22} pid={} readiness={}\n",
-            process.pid, process.ready_address
-        ));
+    for (role, expected_address) in &binding.expected_processes {
+        if let Some(process) = state.processes.get(role) {
+            let status = match observe_runtime_process(process)? {
+                RuntimeProcessObservation::Owned if http_ready(&process.ready_address) => "ready",
+                RuntimeProcessObservation::Owned => "starting_or_unready",
+                RuntimeProcessObservation::Stopped => "stopped",
+                RuntimeProcessObservation::IdentityMismatch => "identity_mismatch",
+            };
+            output.push_str(&format!(
+                "{status:20} {role:22} pid={} readiness={}\n",
+                process.pid, process.ready_address
+            ));
+        } else if state.lifecycle == RuntimeProcessLifecycle::Starting {
+            output.push_str(&format!(
+                "{:<20} {role:22} pid=- readiness={expected_address}\n",
+                "not_started"
+            ));
+        }
     }
-    if state.processes.is_empty() {
+    if state.lifecycle == RuntimeProcessLifecycle::Stopped {
         output.push_str("stopped                 selected profile has no running role\n");
     }
     Ok(output)
 }
 
-fn process_is_running(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        ProcessCommand::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeProcessObservation {
+    Stopped,
+    Owned,
+    IdentityMismatch,
+}
+
+fn observe_runtime_process(
+    process: &RuntimeProcessRecord,
+) -> Result<RuntimeProcessObservation, CliError> {
+    let Some(argv0) = process_argv0(process.pid)? else {
+        return Ok(RuntimeProcessObservation::Stopped);
+    };
+    if argv0 == process.generation {
+        Ok(RuntimeProcessObservation::Owned)
+    } else {
+        Ok(RuntimeProcessObservation::IdentityMismatch)
     }
 }
 
-fn stop_process(pid: u32) -> Result<(), CliError> {
+fn process_argv0(pid: u32) -> Result<Option<String>, CliError> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = PathBuf::from(format!("/proc/{pid}/cmdline"));
+        return match fs::read(&path) {
+            Ok(bytes) => {
+                let argv0 = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+                let argv0 = std::str::from_utf8(argv0).map_err(|_| {
+                    CliError::RuntimeUnavailable(format!(
+                        "inspect process {pid} generation: argv0 is not UTF-8"
+                    ))
+                })?;
+                Ok(Some(argv0.to_owned()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(CliError::RuntimeUnavailable(format!(
+                "inspect process {pid} generation: {error}"
+            ))),
+        };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = ProcessCommand::new("/bin/ps")
+            .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .map_err(|error| {
+                CliError::RuntimeUnavailable(format!("inspect process {pid} generation: {error}"))
+            })?;
+        if !output.status.success() {
+            if output.stdout.is_empty() && output.stderr.is_empty() {
+                return Ok(None);
+            }
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .take(256)
+                .collect::<String>();
+            return Err(CliError::RuntimeUnavailable(format!(
+                "inspect process {pid} generation: ps rejected the query: {detail}"
+            )));
+        }
+        let command = std::str::from_utf8(&output.stdout).map_err(|_| {
+            CliError::RuntimeUnavailable(format!(
+                "inspect process {pid} generation: argv0 is not UTF-8"
+            ))
+        })?;
+        Ok(command.split_whitespace().next().map(str::to_owned))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(CliError::RuntimeUnavailable(
+            "local process identity inspection is supported on macOS and Linux".to_owned(),
+        ))
+    }
+}
+
+fn stop_process(process: &RuntimeProcessRecord) -> Result<(), CliError> {
     #[cfg(unix)]
     {
-        if !process_is_running(pid) {
-            return Ok(());
+        match observe_runtime_process(process)? {
+            RuntimeProcessObservation::Stopped => return Ok(()),
+            RuntimeProcessObservation::Owned => {}
+            RuntimeProcessObservation::IdentityMismatch => {
+                return Ok(());
+            }
         }
         let status = ProcessCommand::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-TERM", &process.pid.to_string()])
             .status()
             .map_err(|error| {
-                CliError::RuntimeUnavailable(format!("stop process {pid}: {error}"))
+                CliError::RuntimeUnavailable(format!("stop process {}: {error}", process.pid))
             })?;
         if !status.success() {
             return Err(CliError::RuntimeUnavailable(format!(
-                "stop process {pid}: signal was rejected"
+                "stop process {}: signal was rejected",
+                process.pid
             )));
         }
         let deadline = SystemTime::now() + Duration::from_secs(10);
         while SystemTime::now() < deadline {
-            if !process_is_running(pid) {
-                return Ok(());
+            match observe_runtime_process(process)? {
+                RuntimeProcessObservation::Owned => {}
+                RuntimeProcessObservation::Stopped
+                | RuntimeProcessObservation::IdentityMismatch => return Ok(()),
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         Err(CliError::RuntimeUnavailable(format!(
-            "process {pid} did not stop after SIGTERM"
+            "process {} did not stop after SIGTERM",
+            process.pid
         )))
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = process;
         Err(CliError::RuntimeUnavailable(
             "local process supervision is currently supported on macOS and Linux".to_owned(),
         ))
@@ -4711,25 +5929,794 @@ fn run_external(mut command: ProcessCommand, purpose: &str) -> Result<String, Cl
     Err(CliError::RuntimeUnavailable(format!("{purpose}: {detail}")))
 }
 
-fn read_runtime_profile_state(runtime: &Path) -> Result<Option<RuntimeProfileState>, CliError> {
-    read_runtime_json(&runtime.join(RUNTIME_PROFILE_STATE_FILE))
+fn expected_runtime_closure(
+    profile: &RuntimeProfileState,
+    selected: DevProfile,
+) -> ExpectedRuntimeClosure {
+    let mut config_files = BTreeMap::from([
+        (
+            "artifact-bootstrap".to_owned(),
+            RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE,
+        ),
+        (
+            "artifact-data".to_owned(),
+            RUNTIME_ARTIFACT_DATA_CONFIG_FILE,
+        ),
+        (
+            "artifact-gateway".to_owned(),
+            RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE,
+        ),
+        (
+            "capability-native".to_owned(),
+            RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE,
+        ),
+        (
+            "gateway-management".to_owned(),
+            RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE,
+        ),
+        (
+            "gateway-runtime".to_owned(),
+            RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE,
+        ),
+        (
+            "orchestration".to_owned(),
+            RUNTIME_ORCHESTRATION_CONFIG_FILE,
+        ),
+        (
+            "registry-validation".to_owned(),
+            RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
+        ),
+    ]);
+    let optional_configs = [
+        ("context-native", full_profile::CONTEXT_NATIVE_CONFIG_FILE),
+        (
+            "security-authority",
+            full_profile::SECURITY_AUTHORITY_CONFIG_FILE,
+        ),
+        ("egress-broker", full_profile::EGRESS_BROKER_CONFIG_FILE),
+        ("model-worker", full_profile::MODEL_WORKER_CONFIG_FILE),
+        ("context-remote", full_profile::CONTEXT_REMOTE_CONFIG_FILE),
+        ("mcp-host", full_profile::MCP_HOST_CONFIG_FILE),
+        (
+            "mcp-resource-host",
+            full_profile::MCP_RESOURCE_HOST_CONFIG_FILE,
+        ),
+        (
+            "capability-remote",
+            full_profile::CAPABILITY_REMOTE_CONFIG_FILE,
+        ),
+        ("mcp-discovery", full_profile::MCP_DISCOVERY_CONFIG_FILE),
+        (
+            "mcp-subscription",
+            full_profile::MCP_SUBSCRIPTION_CONFIG_FILE,
+        ),
+        ("mcp-cleanup", full_profile::MCP_CLEANUP_CONFIG_FILE),
+        (
+            "context-subscription",
+            full_profile::CONTEXT_SUBSCRIPTION_CONFIG_FILE,
+        ),
+        ("callback-api", full_profile::CALLBACK_API_CONFIG_FILE),
+        ("context-dataset", full_profile::CONTEXT_DATASET_CONFIG_FILE),
+    ];
+    for (role, file) in optional_configs {
+        if selected.includes_role(role) {
+            config_files.insert(role.to_owned(), file);
+        }
+    }
+    if selected.has_sandbox() {
+        config_files.insert(
+            "sandbox-kubernetes".to_owned(),
+            RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE,
+        );
+    }
+
+    let mut processes = BTreeMap::from([
+        (
+            "artifact-data".to_owned(),
+            loopback_address(profile.ports.artifact_data_observability),
+        ),
+        (
+            "artifact-gateway".to_owned(),
+            loopback_address(profile.ports.artifact_gateway_observability),
+        ),
+        (
+            "capability-native".to_owned(),
+            loopback_address(profile.ports.capability_native_observability),
+        ),
+        (
+            "gateway-management".to_owned(),
+            loopback_address(profile.ports.gateway_management),
+        ),
+        (
+            "gateway-runtime".to_owned(),
+            loopback_address(profile.ports.gateway_runtime),
+        ),
+        (
+            "orchestration".to_owned(),
+            loopback_address(profile.ports.orchestration_observability),
+        ),
+        (
+            "registry-validation".to_owned(),
+            loopback_address(profile.ports.registry_validation_observability),
+        ),
+    ]);
+    let optional_processes = [
+        (
+            "context-native",
+            profile.ports.full.context_native_observability,
+        ),
+        (
+            "security-authority",
+            profile.ports.full.security_authority_observability,
+        ),
+        (
+            "egress-broker",
+            profile.ports.full.egress_broker_observability,
+        ),
+        (
+            "model-worker",
+            profile.ports.full.model_worker_observability,
+        ),
+        (
+            "context-remote",
+            profile.ports.full.remote_context_worker_observability,
+        ),
+        ("mcp-host", profile.ports.full.mcp_host_observability),
+        (
+            "mcp-resource-host",
+            profile.ports.full.mcp_resource_host_observability,
+        ),
+        (
+            "capability-remote",
+            profile.ports.full.capability_remote_observability,
+        ),
+        (
+            "mcp-discovery",
+            profile.ports.full.mcp_discovery_observability,
+        ),
+        (
+            "mcp-subscription",
+            profile.ports.full.mcp_subscription_observability,
+        ),
+        ("mcp-cleanup", profile.ports.full.mcp_cleanup_observability),
+        (
+            "context-subscription",
+            profile.ports.full.context_subscription_observability,
+        ),
+        ("callback-api", profile.ports.full.callback_api),
+        (
+            "context-dataset",
+            profile.ports.full.context_dataset_observability,
+        ),
+    ];
+    for (role, port) in optional_processes {
+        if selected.includes_role(role) {
+            processes.insert(role.to_owned(), loopback_address(port));
+        }
+    }
+    ExpectedRuntimeClosure {
+        config_files,
+        processes,
+    }
 }
 
-fn read_runtime_process_state(runtime: &Path) -> Result<Option<RuntimeProcessState>, CliError> {
-    read_runtime_json(&runtime.join(RUNTIME_PROCESS_STATE_FILE))
+fn known_runtime_config_files() -> BTreeSet<&'static str> {
+    BTreeSet::from([
+        RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE,
+        RUNTIME_ARTIFACT_DATA_CONFIG_FILE,
+        RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE,
+        RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE,
+        RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE,
+        RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE,
+        RUNTIME_ORCHESTRATION_CONFIG_FILE,
+        RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
+        RUNTIME_SANDBOX_KUBERNETES_CONFIG_FILE,
+        full_profile::CONTEXT_NATIVE_CONFIG_FILE,
+        full_profile::SECURITY_AUTHORITY_CONFIG_FILE,
+        full_profile::EGRESS_BROKER_CONFIG_FILE,
+        full_profile::MODEL_WORKER_CONFIG_FILE,
+        full_profile::CONTEXT_REMOTE_CONFIG_FILE,
+        full_profile::MCP_HOST_CONFIG_FILE,
+        full_profile::MCP_RESOURCE_HOST_CONFIG_FILE,
+        full_profile::CAPABILITY_REMOTE_CONFIG_FILE,
+        full_profile::MCP_DISCOVERY_CONFIG_FILE,
+        full_profile::MCP_SUBSCRIPTION_CONFIG_FILE,
+        full_profile::MCP_CLEANUP_CONFIG_FILE,
+        full_profile::CONTEXT_SUBSCRIPTION_CONFIG_FILE,
+        full_profile::CALLBACK_API_CONFIG_FILE,
+        full_profile::CONTEXT_DATASET_CONFIG_FILE,
+    ])
+}
+
+fn runtime_profile_closure_digest(state: &RuntimeProfileState) -> Result<String, CliError> {
+    canonical_digest(&serde_json::json!({
+        "schema_version": state.schema_version,
+        "kind": state.kind,
+        "tenant_id": state.tenant_id,
+        "identity_digest": state.identity_digest,
+        "source_fingerprint": state.source_fingerprint,
+        "features": state.features,
+        "profile_digest": state.profile_digest,
+        "release_identity": state.release_identity,
+        "kms_key_arn": state.kms_key_arn,
+        "secret_provider_id": state.secret_provider_id,
+        "capability_protocol_profile_revision_id": state.capability_protocol_profile_revision_id,
+        "secret_readiness_arn": state.secret_readiness_arn,
+        "s3_bucket": state.s3_bucket,
+        "ports": state.ports,
+        "config_digests": state.config_digests,
+        "tls_identity_digests": state.tls_identity_digests,
+    }))
+    .map_err(|error| CliError::RuntimeState(error.to_string()))
+}
+
+fn local_identity_digest(identity: &LocalIdentityState) -> Result<String, CliError> {
+    let value = serde_json::to_value(identity)
+        .map_err(|error| CliError::RuntimeState(error.to_string()))?;
+    canonical_digest(&value).map_err(|error| CliError::RuntimeState(error.to_string()))
+}
+
+fn refresh_runtime_profile_closure_digest(state: &mut RuntimeProfileState) -> Result<(), CliError> {
+    state.closure_digest = runtime_profile_closure_digest(state)?;
+    Ok(())
+}
+
+fn read_runtime_profile_state(
+    runtime: &Path,
+    identity: &LocalIdentityState,
+) -> Result<Option<RuntimeProfileState>, CliError> {
+    let path = runtime.join(RUNTIME_PROFILE_STATE_FILE);
+    let Some(state) = read_runtime_json::<RuntimeProfileState>(&path)? else {
+        return Ok(None);
+    };
+    validate_runtime_profile_state(&path, &state, identity)?;
+    Ok(Some(state))
+}
+
+fn read_runtime_profile_state_for_cleanup(
+    runtime: &Path,
+    identity: &LocalIdentityState,
+) -> Result<Option<RuntimeProfileState>, CliError> {
+    let path = runtime.join(RUNTIME_PROFILE_STATE_FILE);
+    let Some(state) = read_runtime_json::<RuntimeProfileState>(&path)? else {
+        return Ok(None);
+    };
+    validate_runtime_profile_state_for_cleanup(&path, &state, identity)?;
+    Ok(Some(state))
+}
+
+fn validate_runtime_profile_state(
+    path: &Path,
+    state: &RuntimeProfileState,
+    identity: &LocalIdentityState,
+) -> Result<DevProfile, CliError> {
+    validate_runtime_profile_state_inner(path, state, identity, true)
+}
+
+fn validate_runtime_profile_state_for_cleanup(
+    path: &Path,
+    state: &RuntimeProfileState,
+    identity: &LocalIdentityState,
+) -> Result<DevProfile, CliError> {
+    validate_runtime_profile_state_inner(path, state, identity, false)
+}
+
+fn validate_runtime_profile_state_inner(
+    path: &Path,
+    state: &RuntimeProfileState,
+    identity: &LocalIdentityState,
+    validate_config_files: bool,
+) -> Result<DevProfile, CliError> {
+    let invalid = |detail: &str| {
+        CliError::RuntimeState(format!(
+            "{} is not a valid current runtime profile: {detail}",
+            path.display()
+        ))
+    };
+    if state.schema_version != RUNTIME_PROFILE_SCHEMA_VERSION {
+        return Err(CliError::RuntimeState(format!(
+            "{} has unsupported runtime profile schema_version {}; expected {}",
+            path.display(),
+            state.schema_version,
+            RUNTIME_PROFILE_SCHEMA_VERSION
+        )));
+    }
+    if state.kind != RUNTIME_PROFILE_KIND {
+        return Err(CliError::RuntimeState(format!(
+            "{} has unsupported runtime profile kind {:?}; expected {:?}",
+            path.display(),
+            state.kind,
+            RUNTIME_PROFILE_KIND
+        )));
+    }
+    let expected_identity_digest =
+        local_identity_digest(identity).map_err(|_| invalid("local identity is not canonical"))?;
+    if state.tenant_id != identity.tenant_id || state.identity_digest != expected_identity_digest {
+        return Err(invalid(
+            "tenant_id or identity_digest does not match the current local project identity",
+        ));
+    }
+    if state
+        .source_fingerprint
+        .parse::<insight_platform_contracts::Sha256Digest>()
+        .is_err()
+    {
+        return Err(invalid("source_fingerprint is not an exact SHA-256 digest"));
+    }
+    let from_source = if let Some(source) = state.release_identity.strip_prefix("source:") {
+        if source != state.source_fingerprint {
+            return Err(invalid(
+                "source release_identity does not match source_fingerprint",
+            ));
+        }
+        true
+    } else if let Some(release) = state.release_identity.strip_prefix("release:") {
+        let Some((version, digest)) = release.split_once(':') else {
+            return Err(invalid("release_identity is malformed"));
+        };
+        semver::Version::parse(version)
+            .ok()
+            .filter(|parsed| {
+                parsed.to_string() == version && parsed.pre.is_empty() && parsed.build.is_empty()
+            })
+            .ok_or_else(|| invalid("release_identity version is not an exact stable version"))?;
+        if digest != state.source_fingerprint {
+            return Err(invalid(
+                "release bundle digest does not match source_fingerprint",
+            ));
+        }
+        false
+    } else {
+        return Err(invalid("release_identity has an unsupported identity kind"));
+    };
+    let features = (!state.features.is_empty()).then(|| state.features.join(","));
+    let selected_profile = DevProfile::parse(features.as_deref(), false, from_source)
+        .map_err(|_| invalid("features are not a closed development feature set"))?;
+    let canonical_features = selected_profile
+        .feature_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if state.features != canonical_features {
+        return Err(invalid("features are not in canonical order"));
+    }
+    if state
+        .profile_digest
+        .parse::<insight_platform_contracts::Sha256Digest>()
+        .is_err()
+    {
+        return Err(invalid("profile_digest is not an exact SHA-256 digest"));
+    }
+    let expected_profile_digest = selected_profile
+        .profile_digest(&state.release_identity)
+        .map_err(|_| invalid("development profile registry is invalid"))?;
+    if state.profile_digest != expected_profile_digest {
+        return Err(invalid(
+            "profile_digest does not match release_identity and features",
+        ));
+    }
+    if !local_kms_key_arn_is_valid(&state.kms_key_arn) {
+        return Err(invalid("kms_key_arn is not the exact local KMS key ARN"));
+    }
+    if state.secret_provider_id.kind() != ResourceKind::SecretProvider {
+        return Err(invalid(
+            "secret_provider_id is not a SecretProvider identity",
+        ));
+    }
+    if state.capability_protocol_profile_revision_id.kind() != ResourceKind::PolicyRevision {
+        return Err(invalid(
+            "capability_protocol_profile_revision_id is not a PolicyRevision identity",
+        ));
+    }
+    if !local_secret_readiness_arn_is_valid(&state.secret_readiness_arn) {
+        return Err(invalid("secret_readiness_arn is empty or invalid"));
+    }
+    if state.s3_bucket != LOCAL_ARTIFACT_BUCKET {
+        return Err(invalid("s3_bucket is not the local Artifact authority"));
+    }
+    if !runtime_ports_are_valid(&state.ports) {
+        return Err(invalid("ports must be non-zero and globally unique"));
+    }
+    if state.config_digests.values().any(|digest| {
+        digest
+            .parse::<insight_platform_contracts::Sha256Digest>()
+            .is_err()
+    }) {
+        return Err(invalid("config_digests contains an invalid digest"));
+    }
+    let closure = expected_runtime_closure(state, selected_profile);
+    if state
+        .config_digests
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != closure
+            .config_files
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    {
+        return Err(invalid(
+            "config_digests does not match the selected feature closure",
+        ));
+    }
+    if state.tls_identity_digests.values().any(|digest| {
+        digest
+            .parse::<insight_platform_contracts::Sha256Digest>()
+            .is_err()
+    }) {
+        return Err(invalid("tls_identity_digests contains an invalid digest"));
+    }
+    let mut expected_tls_identities = expected_local_tls_leaf_identities(selected_profile)
+        .keys()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    expected_tls_identities.insert(RUNTIME_CA_CERTIFICATE_FILE.to_owned());
+    if state
+        .tls_identity_digests
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != expected_tls_identities
+    {
+        return Err(invalid(
+            "tls_identity_digests does not match the selected feature closure",
+        ));
+    }
+    if state
+        .closure_digest
+        .parse::<insight_platform_contracts::Sha256Digest>()
+        .is_err()
+        || runtime_profile_closure_digest(state).ok().as_deref()
+            != Some(state.closure_digest.as_str())
+    {
+        return Err(invalid(
+            "closure_digest does not match the runtime profile closure",
+        ));
+    }
+    if !validate_config_files {
+        return Ok(selected_profile);
+    }
+    let configuration = path
+        .parent()
+        .ok_or_else(|| invalid("profile path has no runtime parent"))?
+        .join(RUNTIME_CONFIGURATION_DIRECTORY);
+    let configuration_metadata = fs::symlink_metadata(&configuration)
+        .map_err(|_| invalid("runtime config directory is unavailable"))?;
+    if !configuration_metadata.file_type().is_dir() {
+        return Err(invalid(
+            "runtime config directory is not a physical directory",
+        ));
+    }
+    let known_files = known_runtime_config_files();
+    let entries = fs::read_dir(&configuration)
+        .map_err(|_| invalid("runtime config directory is unavailable"))?;
+    for entry in entries {
+        let entry = entry.map_err(|_| invalid("runtime config directory is unreadable"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| invalid("runtime config filename is not UTF-8"))?;
+        if !known_files.contains(name.as_str()) {
+            return Err(invalid(&format!(
+                "runtime config directory contains unexpected file {name:?}"
+            )));
+        }
+        canonical_runtime_config_digest(&entry.path(), &invalid)?;
+    }
+    for (role, file) in &closure.config_files {
+        let expected = state
+            .config_digests
+            .get(role)
+            .ok_or_else(|| invalid("selected config digest is unavailable"))?;
+        let observed = canonical_runtime_config_digest(&configuration.join(file), &invalid)?;
+        if &observed != expected {
+            return Err(invalid(&format!(
+                "config_digests[{role:?}] does not match {}",
+                configuration.join(file).display()
+            )));
+        }
+    }
+    let observed_tls = inspect_local_tls_identity_closure(
+        &path
+            .parent()
+            .ok_or_else(|| invalid("profile path has no runtime parent"))?
+            .join(RUNTIME_TLS_DIRECTORY),
+        selected_profile,
+    )
+    .map_err(|reason| invalid(&format!("runtime TLS identity is invalid: {reason}")))?;
+    if observed_tls != state.tls_identity_digests {
+        return Err(invalid(
+            "tls_identity_digests does not match the runtime TLS identity closure",
+        ));
+    }
+    Ok(selected_profile)
+}
+
+fn canonical_runtime_config_digest(
+    path: &Path,
+    invalid: &impl Fn(&str) -> CliError,
+) -> Result<String, CliError> {
+    const MAX_RUNTIME_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| invalid(&format!("cannot read runtime config {}", path.display())))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_RUNTIME_CONFIG_BYTES {
+        return Err(invalid(&format!(
+            "runtime config {} is not a bounded regular file",
+            path.display()
+        )));
+    }
+    let bytes = fs::read(path)
+        .map_err(|_| invalid(&format!("cannot read runtime config {}", path.display())))?;
+    let value = parse_strict_json(
+        &bytes,
+        JsonLimits {
+            max_bytes: MAX_RUNTIME_CONFIG_BYTES as usize,
+            max_depth: 64,
+            max_properties_per_object: 4_096,
+            max_items_per_array: 4_096,
+            max_string_bytes: 1_048_576,
+        },
+    )
+    .map_err(|_| {
+        invalid(&format!(
+            "runtime config {} is not strict JSON",
+            path.display()
+        ))
+    })?;
+    canonical_digest(&value).map_err(|_| {
+        invalid(&format!(
+            "runtime config {} is not canonical",
+            path.display()
+        ))
+    })
+}
+
+fn runtime_process_binding(
+    runtime: &Path,
+    tenant_id: &str,
+    compose_project: &str,
+    profile: &RuntimeProfileState,
+    identity: &LocalIdentityState,
+) -> Result<RuntimeProcessBinding, CliError> {
+    let selected = validate_runtime_profile_state(
+        &runtime.join(RUNTIME_PROFILE_STATE_FILE),
+        profile,
+        identity,
+    )?;
+    Ok(runtime_process_binding_from_selected(
+        tenant_id,
+        compose_project,
+        profile,
+        selected,
+    ))
+}
+
+fn runtime_process_binding_for_cleanup(
+    runtime: &Path,
+    tenant_id: &str,
+    compose_project: &str,
+    profile: &RuntimeProfileState,
+    identity: &LocalIdentityState,
+) -> Result<RuntimeProcessBinding, CliError> {
+    let selected = validate_runtime_profile_state_for_cleanup(
+        &runtime.join(RUNTIME_PROFILE_STATE_FILE),
+        profile,
+        identity,
+    )?;
+    Ok(runtime_process_binding_from_selected(
+        tenant_id,
+        compose_project,
+        profile,
+        selected,
+    ))
+}
+
+fn runtime_process_binding_from_selected(
+    tenant_id: &str,
+    compose_project: &str,
+    profile: &RuntimeProfileState,
+    selected: DevProfile,
+) -> RuntimeProcessBinding {
+    let expected_processes = expected_runtime_closure(profile, selected).processes;
+    RuntimeProcessBinding {
+        tenant_id: tenant_id.to_owned(),
+        profile: selected.label(),
+        profile_digest: profile.profile_digest.clone(),
+        release_identity: profile.release_identity.clone(),
+        compose_project: compose_project.to_owned(),
+        source_fingerprint: profile.source_fingerprint.clone(),
+        expected_processes,
+    }
+}
+
+fn read_runtime_process_state(
+    runtime: &Path,
+    expected: &RuntimeProcessBinding,
+) -> Result<Option<RuntimeProcessState>, CliError> {
+    let path = runtime.join(RUNTIME_PROCESS_STATE_FILE);
+    let Some(state) = read_runtime_json::<RuntimeProcessState>(&path)? else {
+        return Ok(None);
+    };
+    if state.schema_version != RUNTIME_PROCESS_SCHEMA_VERSION {
+        return Err(CliError::RuntimeState(format!(
+            "{} has unsupported runtime process schema_version {}; expected {}",
+            path.display(),
+            state.schema_version,
+            RUNTIME_PROCESS_SCHEMA_VERSION
+        )));
+    }
+    if state.kind != RUNTIME_PROCESS_KIND {
+        return Err(CliError::RuntimeState(format!(
+            "{} has unsupported runtime process kind {:?}; expected {:?}",
+            path.display(),
+            state.kind,
+            RUNTIME_PROCESS_KIND
+        )));
+    }
+    if state.tenant_id != expected.tenant_id
+        || state.profile != expected.profile
+        || state.profile_digest != expected.profile_digest
+        || state.release_identity != expected.release_identity
+        || state.compose_project != expected.compose_project
+        || state.source_fingerprint != expected.source_fingerprint
+    {
+        return Err(CliError::RuntimeState(format!(
+            "{} does not match the current tenant/profile/release/source binding",
+            path.display()
+        )));
+    }
+    let mut pids = BTreeSet::new();
+    let mut generations = BTreeSet::new();
+    let mut ready_addresses = BTreeSet::new();
+    for (role, process) in &state.processes {
+        let valid_role = !role.is_empty()
+            && role.len() <= 64
+            && role
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let valid_log_file = process.log_file == format!("{RUNTIME_LOG_DIRECTORY}/{role}.log");
+        let valid_ready_address = expected
+            .expected_processes
+            .get(role)
+            .is_some_and(|address| address == &process.ready_address);
+        if process.pid == 0
+            || !valid_role
+            || !valid_log_file
+            || !valid_ready_address
+            || !runtime_process_generation_is_valid(&process.generation)
+            || !pids.insert(process.pid)
+            || !generations.insert(&process.generation)
+            || !ready_addresses.insert(&process.ready_address)
+        {
+            return Err(CliError::RuntimeState(format!(
+                "{} contains an invalid or duplicate process identity",
+                path.display()
+            )));
+        }
+    }
+    let actual_roles = state.processes.keys().cloned().collect::<BTreeSet<_>>();
+    let expected_roles = expected
+        .expected_processes
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    match state.lifecycle {
+        RuntimeProcessLifecycle::Starting if actual_roles.is_subset(&expected_roles) => {}
+        RuntimeProcessLifecycle::Running if actual_roles == expected_roles => {}
+        RuntimeProcessLifecycle::Stopped if actual_roles.is_empty() => {}
+        RuntimeProcessLifecycle::Starting => {
+            return Err(CliError::RuntimeState(format!(
+                "{} starting journal is not a subset of the selected process closure",
+                path.display()
+            )));
+        }
+        RuntimeProcessLifecycle::Running => {
+            return Err(CliError::RuntimeState(format!(
+                "{} running state does not contain the exact selected process closure",
+                path.display()
+            )));
+        }
+        RuntimeProcessLifecycle::Stopped => {
+            return Err(CliError::RuntimeState(format!(
+                "{} stopped state must not contain process records",
+                path.display()
+            )));
+        }
+    }
+    Ok(Some(state))
+}
+
+fn runtime_process_generation_is_valid(value: &str) -> bool {
+    value
+        .strip_prefix(RUNTIME_PROCESS_GENERATION_PREFIX)
+        .and_then(|value| Uuid::parse_str(value).ok().map(|uuid| (value, uuid)))
+        .is_some_and(|(value, uuid)| {
+            uuid.get_version_num() == 7 && value == uuid.hyphenated().to_string()
+        })
 }
 
 fn read_runtime_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, CliError> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| {
-            CliError::RuntimeState(format!("{} is not valid closed JSON", path.display()))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(CliError::InitializeProject {
+    const MAX_RUNTIME_STATE_BYTES: u64 = 4 * 1024 * 1024;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_RUNTIME_STATE_BYTES {
+        return Err(CliError::RuntimeState(format!(
+            "{} is not a bounded regular runtime state file",
+            path.display()
+        )));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .map_err(|source| CliError::InitializeProject {
             path: path.display().to_string(),
             source,
-        }),
+        })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|source| CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > MAX_RUNTIME_STATE_BYTES
+        || {
+            #[cfg(unix)]
+            {
+                opened_metadata.nlink() != 1
+                    || opened_metadata.dev() != metadata.dev()
+                    || opened_metadata.ino() != metadata.ino()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    {
+        return Err(CliError::RuntimeState(format!(
+            "{} is not a bounded single-link runtime state file",
+            path.display()
+        )));
     }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(MAX_RUNTIME_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::InitializeProject {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_RUNTIME_STATE_BYTES {
+        return Err(CliError::RuntimeState(format!(
+            "{} exceeds the runtime state size limit",
+            path.display()
+        )));
+    }
+    let value = parse_strict_json(
+        &bytes,
+        JsonLimits {
+            max_bytes: MAX_RUNTIME_STATE_BYTES as usize,
+            max_depth: 64,
+            max_properties_per_object: 4_096,
+            max_items_per_array: 4_096,
+            max_string_bytes: 1_048_576,
+        },
+    )
+    .map_err(|_| CliError::RuntimeState(format!("{} is not valid closed JSON", path.display())))?;
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(|_| CliError::RuntimeState(format!("{} is not valid closed JSON", path.display())))
 }
 
 fn write_runtime_json_replace<T: Serialize>(path: &Path, value: &T) -> Result<(), CliError> {
@@ -4754,12 +6741,45 @@ fn write_runtime_json_replace<T: Serialize>(path: &Path, value: &T) -> Result<()
         fs::rename(&temporary, path).map_err(|source| CliError::InitializeProject {
             path: path.display().to_string(),
             source,
-        })
+        })?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| CliError::InitializeProject {
+                    path: parent.display().to_string(),
+                    source,
+                })?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn remove_runtime_state_file(path: &Path) -> Result<(), CliError> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(CliError::InitializeProject {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| CliError::InitializeProject {
+                path: parent.display().to_string(),
+                source,
+            })?;
+    }
+    Ok(())
 }
 
 fn workspace_fingerprint(workspace: &Path) -> Result<String, CliError> {
@@ -5026,19 +7046,57 @@ fn rotate_local_access_token(root: &Path, issued_at: SystemTime) -> Result<Strin
 fn load_local_project_state(state_directory: &Path) -> Result<LocalProjectState, CliError> {
     let path = state_directory.join(PROJECT_STATE_FILE);
     let bytes = read_bounded_identity_file(&path)?;
-    serde_json::from_slice(&bytes).map_err(|_| CliError::InvalidLocalIdentity {
-        path: state_directory.display().to_string(),
-    })
+    let state: LocalProjectState =
+        serde_json::from_slice(&bytes).map_err(|_| CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        })?;
+    if state.schema_version != 1 || state.kind != PROJECT_KIND {
+        return Err(CliError::InvalidLocalIdentity {
+            path: state_directory.display().to_string(),
+        });
+    }
+    Ok(state)
 }
 
 fn validate_loaded_local_identity(
     state_directory: &Path,
     identity: &LocalIdentityState,
 ) -> Result<(), CliError> {
+    validate_loaded_local_identity_for_cleanup(state_directory, identity)?;
     let invalid = || CliError::InvalidLocalIdentity {
         path: state_directory.display().to_string(),
     };
-    if !matches!(identity.schema_version, 2 | 3)
+
+    let jwks_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_JWKS_FILE);
+    let jwks: serde_json::Value =
+        serde_json::from_slice(&read_bounded_identity_file(&jwks_path)?).map_err(|_| invalid())?;
+    if canonical_digest(&jwks).ok().as_deref() != Some(identity.jwks_digest.as_str()) {
+        return Err(invalid());
+    }
+    let bootstrap_path = state_directory
+        .join(IDENTITY_DIRECTORY)
+        .join(IDENTITY_BOOTSTRAP_CONFIG_FILE);
+    let bootstrap: serde_json::Value =
+        serde_json::from_slice(&read_bounded_identity_file(&bootstrap_path)?)
+            .map_err(|_| invalid())?;
+    if canonical_digest(&bootstrap).ok().as_deref()
+        != Some(identity.bootstrap_config_digest.as_str())
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_loaded_local_identity_for_cleanup(
+    state_directory: &Path,
+    identity: &LocalIdentityState,
+) -> Result<(), CliError> {
+    let invalid = || CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    };
+    if identity.schema_version != 3
         || identity.issuer.is_empty()
         || identity.audience != LOCAL_OIDC_AUDIENCE
         || identity.key_id.is_empty()
@@ -5048,13 +7106,11 @@ fn validate_loaded_local_identity(
             ResourceKind::Principal,
         )
         .is_err()
-        || (identity.schema_version == 2 && !identity.egress_broker_principal_id.is_empty())
-        || (identity.schema_version == 3
-            && ResourceId::parse_expected(
-                &identity.egress_broker_principal_id,
-                ResourceKind::Principal,
-            )
-            .is_err())
+        || ResourceId::parse_expected(
+            &identity.egress_broker_principal_id,
+            ResourceKind::Principal,
+        )
+        .is_err()
         || ResourceId::parse_expected(&identity.tenant_id, ResourceKind::Tenant).is_err()
         || ResourceId::parse_expected(&identity.developer_principal_id, ResourceKind::Principal)
             .is_err()
@@ -5082,25 +7138,6 @@ fn validate_loaded_local_identity(
             .bootstrap_config_digest
             .parse::<insight_platform_contracts::Sha256Digest>()
             .is_err()
-    {
-        return Err(invalid());
-    }
-    let jwks_path = state_directory
-        .join(IDENTITY_DIRECTORY)
-        .join(IDENTITY_JWKS_FILE);
-    let jwks: serde_json::Value =
-        serde_json::from_slice(&read_bounded_identity_file(&jwks_path)?).map_err(|_| invalid())?;
-    if canonical_digest(&jwks).ok().as_deref() != Some(identity.jwks_digest.as_str()) {
-        return Err(invalid());
-    }
-    let bootstrap_path = state_directory
-        .join(IDENTITY_DIRECTORY)
-        .join(IDENTITY_BOOTSTRAP_CONFIG_FILE);
-    let bootstrap: serde_json::Value =
-        serde_json::from_slice(&read_bounded_identity_file(&bootstrap_path)?)
-            .map_err(|_| invalid())?;
-    if canonical_digest(&bootstrap).ok().as_deref()
-        != Some(identity.bootstrap_config_digest.as_str())
     {
         return Err(invalid());
     }
@@ -5132,6 +7169,19 @@ fn invalid_local_identity(identity_directory: &Path, reason: &str) -> CliError {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), CliError> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| CliError::InitializeProject {
+                path: parent.display().to_string(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
 fn write_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -5146,7 +7196,8 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
         .map_err(|source| CliError::InitializeProject {
             path: path.display().to_string(),
             source,
-        })
+        })?;
+    sync_parent_directory(path)
 }
 
 fn write_sensitive_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
@@ -5168,7 +7219,8 @@ fn write_sensitive_new(path: &Path, contents: &[u8]) -> Result<(), CliError> {
         .map_err(|source| CliError::InitializeProject {
             path: path.display().to_string(),
             source,
-        })
+        })?;
+    sync_parent_directory(path)
 }
 
 fn write_sensitive_replace(path: &Path, contents: &[u8]) -> Result<(), CliError> {
@@ -5217,23 +7269,26 @@ impl DoctorProbe for SystemDoctorProbe {
         let output = run_bounded_doctor_command(program, arguments, DOCTOR_COMMAND_TIMEOUT)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stdout
-            .lines()
-            .chain(stderr.lines())
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("command completed without output");
-        if output.status.success() {
-            Ok(truncate_detail(detail))
-        } else {
-            Err(truncate_detail(detail))
-        }
+        doctor_command_result(output.status.success(), &stdout, &stderr)
     }
 
     fn port_available(&self, port: u16) -> Result<(), String> {
         TcpListener::bind(("127.0.0.1", port))
             .map(drop)
             .map_err(|error| error.to_string())
+    }
+}
+
+fn doctor_command_result(success: bool, stdout: &str, stderr: &str) -> Result<String, String> {
+    let detail = [stdout, stderr]
+        .into_iter()
+        .map(str::trim)
+        .find(|detail| !detail.is_empty())
+        .unwrap_or("command completed without output");
+    if success {
+        Ok(detail.to_owned())
+    } else {
+        Err(concise_doctor_detail(detail))
     }
 }
 
@@ -5453,6 +7508,16 @@ fn ensure_sandbox_kubernetes_dependency() -> Result<(), CliError> {
 
 fn truncate_detail(detail: &str) -> String {
     detail.chars().take(160).collect()
+}
+
+fn concise_doctor_detail(detail: &str) -> String {
+    truncate_detail(
+        detail
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("command completed without output"),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -5677,22 +7742,25 @@ fn version_check(
 ) -> DoctorCheck {
     match result {
         Ok(detail) if detail.starts_with(required_prefix) => {
-            DoctorCheck::passed(name, required, detail)
+            DoctorCheck::passed(name, required, concise_doctor_detail(&detail))
         }
         Ok(detail) => DoctorCheck {
             name: name.to_owned(),
             required,
             status: DoctorStatus::Failed,
-            detail: format!("expected {required_prefix}; found {detail}"),
+            detail: format!(
+                "expected {required_prefix}; found {}",
+                concise_doctor_detail(&detail)
+            ),
         },
-        Err(detail) => DoctorCheck::failed(name, required, detail),
+        Err(detail) => DoctorCheck::failed(name, required, concise_doctor_detail(&detail)),
     }
 }
 
 fn command_check(name: &str, required: bool, result: Result<String, String>) -> DoctorCheck {
     match result {
-        Ok(detail) => DoctorCheck::passed(name, required, detail),
-        Err(detail) => DoctorCheck::failed(name, required, detail),
+        Ok(detail) => DoctorCheck::passed(name, required, concise_doctor_detail(&detail)),
+        Err(detail) => DoctorCheck::failed(name, required, concise_doctor_detail(&detail)),
     }
 }
 
@@ -6151,6 +8219,9 @@ fn publish_local_agent(
 }
 
 fn ensure_agent_features_enabled(root: &Path, file: &Path) -> Result<(), CliError> {
+    let state_directory = root.join(PROJECT_DIRECTORY);
+    let project = load_local_project_state(&state_directory)?;
+    validate_loaded_local_identity(&state_directory, &project.identity)?;
     let configuration = root
         .join(PROJECT_DIRECTORY)
         .join(RUNTIME_DIRECTORY)
@@ -6159,7 +8230,7 @@ fn ensure_agent_features_enabled(root: &Path, file: &Path) -> Result<(), CliErro
         agent::offline_compiler_profile(root, &configuration).map_err(CliError::Agent)?;
     let compiled = agent::compile_project(root, file, compiler_profile).map_err(CliError::Agent)?;
     let runtime = root.join(PROJECT_DIRECTORY).join(RUNTIME_DIRECTORY);
-    let profile = read_runtime_profile_state(&runtime)?.ok_or_else(|| {
+    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
         CliError::RuntimeState(
             "no selected development feature closure exists; run `insight dev` first".to_owned(),
         )
@@ -6620,7 +8691,7 @@ fn local_public_http_client_for(
             },
         )?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    let profile = read_runtime_profile_state(&runtime)?.ok_or_else(|| {
+    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
         CliError::RuntimeState(
             "no local runtime profile exists; run `insight dev` first".to_owned(),
         )
@@ -6996,6 +9067,81 @@ mod tests {
     use std::{collections::BTreeMap, fs};
     use tempfile::TempDir;
 
+    #[test]
+    fn existing_local_bucket_requires_enabled_versioning() {
+        assert!(ensure_local_bucket_versioning_enabled(
+            r#"{"Status":"Enabled","MFADelete":"Disabled"}"#
+        )
+        .is_ok());
+
+        for response in [
+            r#"{"Status":"Suspended"}"#,
+            r#"{"MFADelete":"Disabled"}"#,
+            r#"{"Status":true}"#,
+            "not-json",
+        ] {
+            assert!(matches!(
+                ensure_local_bucket_versioning_enabled(response),
+                Err(CliError::RuntimeUnavailable(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn local_dependency_metadata_is_exact_and_strict() {
+        let kms = "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012";
+        ensure_local_kms_metadata(
+            &serde_json::json!({
+                "KeyMetadata": {
+                    "Arn": kms,
+                    "Enabled": true,
+                    "KeyState": "Enabled",
+                    "KeyUsage": "ENCRYPT_DECRYPT",
+                    "Origin": "AWS_KMS"
+                }
+            })
+            .to_string(),
+            kms,
+        )
+        .unwrap();
+        let secret = LOCAL_TEST_SECRET_READINESS_ARN;
+        ensure_local_secret_metadata(
+            &serde_json::json!({
+                "ARN": secret,
+                "Name": LOCAL_SECRET_READINESS_NAME,
+                "KmsKeyId": "12345678-1234-1234-1234-123456789012"
+            })
+            .to_string(),
+            secret,
+            kms,
+        )
+        .unwrap();
+
+        assert!(ensure_local_kms_metadata(
+            r#"{"KeyMetadata":{"Arn":"wrong","Enabled":true,"KeyState":"Enabled","KeyUsage":"ENCRYPT_DECRYPT","Origin":"AWS_KMS"}}"#,
+            kms,
+        )
+        .is_err());
+        assert!(ensure_local_secret_metadata(
+            &serde_json::json!({
+                "ARN": secret,
+                "Name": LOCAL_SECRET_READINESS_NAME,
+                "KmsKeyId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            })
+            .to_string(),
+            secret,
+            kms,
+        )
+        .is_err());
+        assert!(
+            ensure_local_kms_metadata(r#"{"KeyMetadata":{"Arn":"one","Arn":"two"}}"#, kms,)
+                .is_err()
+        );
+        assert!(!local_secret_readiness_arn_is_valid(
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-short"
+        ));
+    }
+
     #[derive(Default)]
     struct FakeProbe {
         commands: BTreeMap<(String, Vec<String>), Result<String, String>>,
@@ -7151,6 +9297,30 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.name == "development_disk" && check.status == DoctorStatus::Failed
         }));
+    }
+
+    #[test]
+    fn doctor_parses_macos_df_output_before_concising_detail() {
+        let stdout = "Filesystem   1024-blocks      Used  Available Capacity  Mounted on\n/dev/disk3s5  1948404040 540541024 1384722252    29%    /System/Volumes/Data\n";
+
+        let raw = doctor_command_result(true, stdout, "").unwrap();
+        assert_eq!(raw, stdout.trim());
+
+        let check = disk_resource_check(Ok(raw));
+        assert_eq!(check.status, DoctorStatus::Passed);
+        assert_eq!(check.detail, "1384722252 KiB available");
+    }
+
+    #[test]
+    fn command_checks_keep_multiline_success_details_concise() {
+        let check = command_check(
+            "multiline_command",
+            false,
+            doctor_command_result(true, "first line\nsecond line\n", ""),
+        );
+
+        assert_eq!(check.status, DoctorStatus::Passed);
+        assert_eq!(check.detail, "first line");
     }
 
     #[cfg(unix)]
@@ -7345,6 +9515,269 @@ mod tests {
     }
 
     #[test]
+    fn tls_identity_registry_has_the_closed_profile_counts() {
+        for (profile, expected) in [
+            (DevProfile::starter(), 7),
+            (DevProfile::parse(Some("sandbox"), false, true).unwrap(), 7),
+            (DevProfile::parse(Some("model"), false, true).unwrap(), 11),
+            (
+                DevProfile::parse(Some("remote-capability"), false, true).unwrap(),
+                11,
+            ),
+            (DevProfile::parse(Some("context"), false, true).unwrap(), 15),
+            (DevProfile::parse(Some("mcp"), false, true).unwrap(), 18),
+            (DevProfile::parse(Some("all"), false, true).unwrap(), 23),
+        ] {
+            assert_eq!(
+                expected_local_tls_leaf_identities(profile).len() + 1,
+                expected,
+                "{}",
+                profile.label()
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum InvalidLeafCase {
+        WrongKey,
+        WrongCa,
+        ExtraSan,
+        WrongUri,
+        WrongEku,
+        Expired,
+    }
+
+    fn replace_model_leaf_for_test(tls: &Path, spec: LocalTlsIdentitySpec, case: InvalidLeafCase) {
+        if matches!(case, InvalidLeafCase::WrongKey) {
+            fs::write(
+                tls.join(spec.private_key),
+                fs::read(tls.join(full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE)).unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+
+        let ca_key = if matches!(case, InvalidLeafCase::WrongCa) {
+            KeyPair::generate().unwrap()
+        } else {
+            KeyPair::from_pem(&fs::read_to_string(tls.join(RUNTIME_CA_PRIVATE_KEY_FILE)).unwrap())
+                .unwrap()
+        };
+        let issuer = Issuer::new(local_runtime_ca_parameters(tls).unwrap(), ca_key);
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let expected_uri = spec.workload_identity.unwrap();
+        let uris = match case {
+            InvalidLeafCase::ExtraSan => vec![
+                expected_uri,
+                "spiffe://insight.platform/workload/unexpected",
+            ],
+            InvalidLeafCase::WrongUri => {
+                vec!["spiffe://insight.platform/workload/unexpected"]
+            }
+            _ => vec![expected_uri],
+        };
+        for uri in uris {
+            params
+                .subject_alt_names
+                .push(SanType::URI(uri.try_into().unwrap()));
+        }
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![if matches!(case, InvalidLeafCase::WrongEku) {
+            ExtendedKeyUsagePurpose::ServerAuth
+        } else {
+            ExtendedKeyUsagePurpose::ClientAuth
+        }];
+        if matches!(case, InvalidLeafCase::Expired) {
+            params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+            params.not_after = rcgen::date_time_ymd(2001, 1, 1);
+        }
+        let key = KeyPair::generate().unwrap();
+        let certificate = params.signed_by(&key, &issuer).unwrap();
+        fs::write(tls.join(spec.private_key), key.serialize_pem()).unwrap();
+        fs::write(tls.join(spec.certificate), certificate.pem()).unwrap();
+    }
+
+    #[test]
+    fn local_tls_leaf_validation_rejects_wrong_identity_semantics() {
+        let model = DevProfile::parse(Some("model"), false, true).unwrap();
+        let spec = expected_local_tls_leaf_identities(model)
+            [full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE];
+        for case in [
+            InvalidLeafCase::WrongKey,
+            InvalidLeafCase::WrongCa,
+            InvalidLeafCase::ExtraSan,
+            InvalidLeafCase::WrongUri,
+            InvalidLeafCase::WrongEku,
+            InvalidLeafCase::Expired,
+        ] {
+            let directory = TempDir::new().unwrap();
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+            let state_directory = directory.path().join(PROJECT_DIRECTORY);
+            let tls = state_directory
+                .join(RUNTIME_DIRECTORY)
+                .join(RUNTIME_TLS_DIRECTORY);
+            ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+            replace_model_leaf_for_test(&tls, spec, case);
+            assert!(
+                validate_local_tls_leaf_pair(&tls, spec).is_err(),
+                "{case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uncommitted_feature_tls_partial_pair_is_rebuilt_but_symlink_is_rejected() {
+        let directory = TempDir::new().unwrap();
+        initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
+        let model = DevProfile::parse(Some("model"), false, true).unwrap();
+        ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+        let certificate = tls.join(full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE);
+        let private_key = tls.join(full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE);
+        let original_certificate = fs::read(&certificate).unwrap();
+        let original_key = fs::read(&private_key).unwrap();
+        ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+        assert_eq!(fs::read(&certificate).unwrap(), original_certificate);
+        assert_eq!(fs::read(&private_key).unwrap(), original_key);
+
+        fs::remove_file(&certificate).unwrap();
+        ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+        assert_ne!(fs::read(&private_key).unwrap(), original_key);
+        validate_local_tls_leaf_pair(
+            &tls,
+            expected_local_tls_leaf_identities(model)
+                [full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE],
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            fs::remove_file(&certificate).unwrap();
+            symlink(tls.join(RUNTIME_CA_CERTIFICATE_FILE), &certificate).unwrap();
+            let error =
+                ensure_selected_feature_identity(&state_directory, model, None).unwrap_err();
+            assert!(error.to_string().contains("bounded physical single-link"));
+
+            fs::remove_file(&certificate).unwrap();
+            ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+            fs::remove_file(&private_key).unwrap();
+            symlink(tls.join(RUNTIME_CA_PRIVATE_KEY_FILE), private_key.as_path()).unwrap();
+            let error =
+                ensure_selected_feature_identity(&state_directory, model, None).unwrap_err();
+            assert!(error.to_string().contains("bounded physical single-link"));
+        }
+    }
+
+    #[test]
+    fn committed_tls_identity_is_never_rebuilt_by_feature_preparation() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
+        let private_key = tls.join(RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE);
+        let wrong_key = fs::read(tls.join(RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE)).unwrap();
+        fs::write(&private_key, &wrong_key).unwrap();
+        let model = DevProfile::parse(Some("model"), false, true).unwrap();
+
+        let error = ensure_selected_feature_identity(
+            &state_directory,
+            model,
+            Some(&state.tls_identity_digests),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("committed TLS identity")
+        ));
+        assert_eq!(fs::read(private_key).unwrap(), wrong_key);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_identity_closure_rejects_a_symlinked_tls_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().unwrap();
+        initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
+        let external = directory.path().join("external-tls");
+        fs::rename(&tls, &external).unwrap();
+        symlink(&external, &tls).unwrap();
+
+        let inspect_error =
+            inspect_local_tls_identity_closure(&tls, DevProfile::starter()).unwrap_err();
+        assert!(inspect_error.contains("physical TLS directory"));
+        let ensure_error = ensure_selected_feature_identity(
+            &state_directory,
+            DevProfile::parse(Some("model"), false, true).unwrap(),
+            None,
+        )
+        .unwrap_err();
+        assert!(ensure_error.to_string().contains("physical TLS directory"));
+    }
+
+    #[test]
+    fn local_project_state_rejects_legacy_identity_and_open_shapes() {
+        let directory = TempDir::new().unwrap();
+        let state = initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+
+        let mut legacy_identity = state.identity.clone();
+        legacy_identity.schema_version = 2;
+        legacy_identity.egress_broker_principal_id.clear();
+        assert!(matches!(
+            validate_loaded_local_identity(&state_directory, &legacy_identity),
+            Err(CliError::InvalidLocalIdentity { .. })
+        ));
+
+        let mut missing_identity = serde_json::to_value(&state).unwrap();
+        missing_identity["identity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("egress_broker_principal_id");
+        assert!(serde_json::from_value::<LocalProjectState>(missing_identity).is_err());
+
+        let mut open_profile = serde_json::to_value(&state).unwrap();
+        open_profile["profiles"]["starter"]["compatibility_mode"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<LocalProjectState>(open_profile).is_err());
+
+        let project_path = state_directory.join(PROJECT_STATE_FILE);
+        let mut wrong_schema = serde_json::to_value(&state).unwrap();
+        wrong_schema["schema_version"] = serde_json::json!(0);
+        let mut wrong_kind = serde_json::to_value(&state).unwrap();
+        wrong_kind["kind"] = serde_json::json!("insight.dev.project/legacy");
+        for candidate in [wrong_schema, wrong_kind] {
+            fs::write(
+                &project_path,
+                serde_json::to_vec_pretty(&candidate).unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                load_local_project_state(&state_directory),
+                Err(CliError::InvalidLocalIdentity { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn init_refuses_to_overwrite_existing_state() {
         let directory = TempDir::new().unwrap();
         initialize_project(directory.path(), Some("demo"), UNIX_EPOCH).unwrap();
@@ -7420,7 +9853,7 @@ mod tests {
         let digests = prepare_runtime_profile(
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
-            "sha256:test-profile-source",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
         assert_eq!(digests.len(), 8);
@@ -7506,10 +9939,983 @@ mod tests {
             prepare_runtime_profile(
                 directory.path(),
                 "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
-                "sha256:test-profile-source",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
             Err(CliError::ProjectAlreadyInitialized(_))
         ));
+    }
+
+    #[test]
+    fn runtime_profile_reader_rejects_incomplete_or_non_current_state() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let profile_path = runtime.join(RUNTIME_PROFILE_STATE_FILE);
+        let current: serde_json::Value =
+            serde_json::from_slice(&fs::read(&profile_path).unwrap()).unwrap();
+        let refresh_closure = |candidate: &mut serde_json::Value| {
+            let mut state: RuntimeProfileState = serde_json::from_value(candidate.clone()).unwrap();
+            refresh_runtime_profile_closure_digest(&mut state).unwrap();
+            candidate["closure_digest"] = serde_json::Value::String(state.closure_digest);
+        };
+
+        let mut missing_ports = current.clone();
+        missing_ports.as_object_mut().unwrap().remove("ports");
+        let mut missing_full_ports = current.clone();
+        missing_full_ports["ports"]
+            .as_object_mut()
+            .unwrap()
+            .remove("full");
+        let mut missing_full_port = current.clone();
+        missing_full_port["ports"]["full"]
+            .as_object_mut()
+            .unwrap()
+            .remove("egress_broker");
+        let mut wrong_schema = current.clone();
+        wrong_schema["schema_version"] = serde_json::json!(1);
+        let mut wrong_kind = current.clone();
+        wrong_kind["kind"] = serde_json::json!("insight.dev.runtime-profile/deleted");
+        let mut empty_secret = current.clone();
+        empty_secret["secret_readiness_arn"] = serde_json::json!("");
+        let mut invalid_secret = current.clone();
+        invalid_secret["secret_readiness_arn"] = serde_json::json!(
+            "arn:aws:secretsmanager:us-west-2:000000000000:secret:insight/platform/readiness-wrong"
+        );
+        let mut empty_kms = current.clone();
+        empty_kms["kms_key_arn"] = serde_json::json!("");
+        let mut zero_port = current.clone();
+        zero_port["ports"]["gateway_runtime"] = serde_json::json!(0);
+        refresh_closure(&mut zero_port);
+        let mut duplicate_port = current.clone();
+        duplicate_port["ports"]["gateway_runtime"] =
+            duplicate_port["ports"]["gateway_management"].clone();
+        refresh_closure(&mut duplicate_port);
+        let mut wrong_tenant = current.clone();
+        wrong_tenant["tenant_id"] = serde_json::json!("ten_wrong");
+        let mut wrong_identity_digest = current.clone();
+        wrong_identity_digest["identity_digest"] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        let mut wrong_secret_provider = current.clone();
+        wrong_secret_provider["secret_provider_id"] =
+            serde_json::to_value(fresh_resource_id(ResourceKind::Principal)).unwrap();
+        let mut wrong_capability_protocol_revision = current.clone();
+        wrong_capability_protocol_revision["capability_protocol_profile_revision_id"] =
+            serde_json::to_value(fresh_resource_id(ResourceKind::Principal)).unwrap();
+        let mut mismatched_release = current.clone();
+        mismatched_release["release_identity"] = serde_json::json!(
+            "source:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        let mut wrong_profile_digest = current.clone();
+        wrong_profile_digest["profile_digest"] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        let mut noncanonical_features = current.clone();
+        noncanonical_features["features"] = serde_json::json!(["model", "context"]);
+        let mut missing_core_config = current.clone();
+        missing_core_config["config_digests"]
+            .as_object_mut()
+            .unwrap()
+            .remove("gateway-runtime");
+        let mut missing_tls_closure = current.clone();
+        missing_tls_closure
+            .as_object_mut()
+            .unwrap()
+            .remove("tls_identity_digests");
+        let mut wrong_tls_digest = current.clone();
+        wrong_tls_digest["tls_identity_digests"][RUNTIME_CA_CERTIFICATE_FILE] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        refresh_closure(&mut wrong_tls_digest);
+        let mut wrong_config_digest = current.clone();
+        wrong_config_digest["config_digests"]["gateway-runtime"] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        refresh_closure(&mut wrong_config_digest);
+        let mut wrong_closure_digest = current.clone();
+        wrong_closure_digest["closure_digest"] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        let mut unknown_field = current.clone();
+        unknown_field["compatibility_ports"] = serde_json::json!(true);
+
+        for (name, candidate, expected_error) in [
+            ("missing ports", missing_ports, "is not valid closed JSON"),
+            (
+                "missing full ports",
+                missing_full_ports,
+                "is not valid closed JSON",
+            ),
+            (
+                "missing full-profile port",
+                missing_full_port,
+                "is not valid closed JSON",
+            ),
+            (
+                "wrong schema",
+                wrong_schema,
+                "unsupported runtime profile schema_version",
+            ),
+            ("wrong kind", wrong_kind, "unsupported runtime profile kind"),
+            (
+                "empty readiness Secret",
+                empty_secret,
+                "secret_readiness_arn is empty or invalid",
+            ),
+            (
+                "invalid readiness Secret",
+                invalid_secret,
+                "secret_readiness_arn is empty or invalid",
+            ),
+            ("empty KMS ARN", empty_kms, "kms_key_arn"),
+            ("zero port", zero_port, "ports must be non-zero"),
+            ("duplicate port", duplicate_port, "globally unique"),
+            (
+                "wrong tenant",
+                wrong_tenant,
+                "does not match the current local project identity",
+            ),
+            (
+                "wrong identity digest",
+                wrong_identity_digest,
+                "does not match the current local project identity",
+            ),
+            (
+                "wrong SecretProvider identity kind",
+                wrong_secret_provider,
+                "secret_provider_id is not a SecretProvider identity",
+            ),
+            (
+                "wrong Capability protocol revision identity kind",
+                wrong_capability_protocol_revision,
+                "capability_protocol_profile_revision_id is not a PolicyRevision identity",
+            ),
+            (
+                "release/source mismatch",
+                mismatched_release,
+                "does not match source_fingerprint",
+            ),
+            (
+                "profile digest mismatch",
+                wrong_profile_digest,
+                "profile_digest does not match",
+            ),
+            (
+                "noncanonical features",
+                noncanonical_features,
+                "features are not in canonical order",
+            ),
+            (
+                "missing core config",
+                missing_core_config,
+                "config_digests does not match",
+            ),
+            (
+                "missing TLS closure",
+                missing_tls_closure,
+                "is not valid closed JSON",
+            ),
+            (
+                "valid but wrong TLS digest",
+                wrong_tls_digest,
+                "tls_identity_digests does not match",
+            ),
+            (
+                "valid but wrong config digest",
+                wrong_config_digest,
+                "does not match",
+            ),
+            (
+                "wrong closure digest",
+                wrong_closure_digest,
+                "closure_digest does not match",
+            ),
+            ("unknown field", unknown_field, "is not valid closed JSON"),
+        ] {
+            fs::write(
+                &profile_path,
+                serde_json::to_vec_pretty(&candidate).unwrap(),
+            )
+            .unwrap();
+            let error = read_runtime_profile_state(&runtime, &project.identity).expect_err(name);
+            match error {
+                CliError::RuntimeState(detail) => assert!(
+                    detail.contains(expected_error),
+                    "{name}: expected {expected_error:?}, got {detail:?}"
+                ),
+                other => panic!("{name}: unexpected error: {other}"),
+            }
+        }
+
+        fs::write(&profile_path, serde_json::to_vec_pretty(&current).unwrap()).unwrap();
+        let config_path = runtime
+            .join(RUNTIME_CONFIGURATION_DIRECTORY)
+            .join(RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE);
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        config["tampered"] = serde_json::json!(true);
+        fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let error = read_runtime_profile_state(&runtime, &project.identity).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("config_digests") && detail.contains("gateway-runtime.json")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_state_and_config_directory_reject_symlinks_and_duplicate_json() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
+        let physical_configuration = runtime.join("config-physical");
+        fs::rename(&configuration, &physical_configuration).unwrap();
+        symlink(&physical_configuration, &configuration).unwrap();
+        let error = read_runtime_profile_state(&runtime, &project.identity).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("not a physical directory")
+        ));
+        fs::remove_file(&configuration).unwrap();
+        fs::rename(&physical_configuration, &configuration).unwrap();
+
+        let profile = runtime.join(RUNTIME_PROFILE_STATE_FILE);
+        let physical_profile = runtime.join("profile-physical.json");
+        fs::rename(&profile, &physical_profile).unwrap();
+        symlink(&physical_profile, &profile).unwrap();
+        let error = read_runtime_profile_state(&runtime, &project.identity).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("bounded regular runtime state file")
+        ));
+        fs::remove_file(&profile).unwrap();
+        fs::rename(&physical_profile, &profile).unwrap();
+
+        let mut duplicate = fs::read_to_string(&profile).unwrap();
+        let closing = duplicate.rfind('}').unwrap();
+        duplicate.insert_str(closing, ",\n  \"schema_version\": 3\n");
+        fs::write(&profile, duplicate).unwrap();
+        let error = read_runtime_profile_state(&runtime, &project.identity).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("not valid closed JSON")
+        ));
+    }
+
+    #[test]
+    fn runtime_process_state_is_closed_and_bound_to_current_profile_identity() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let profile = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let compose_project = compose_project_name(&project.identity.tenant_id).unwrap();
+        let binding = runtime_process_binding(
+            &runtime,
+            &project.identity.tenant_id,
+            &compose_project,
+            &profile,
+            &project.identity,
+        )
+        .unwrap();
+        let generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let state = RuntimeProcessState {
+            schema_version: RUNTIME_PROCESS_SCHEMA_VERSION,
+            kind: RUNTIME_PROCESS_KIND.to_owned(),
+            tenant_id: binding.tenant_id.clone(),
+            profile: binding.profile.clone(),
+            profile_digest: binding.profile_digest.clone(),
+            release_identity: binding.release_identity.clone(),
+            compose_project: binding.compose_project.clone(),
+            source_fingerprint: binding.source_fingerprint.clone(),
+            lifecycle: RuntimeProcessLifecycle::Starting,
+            processes: BTreeMap::from([(
+                "gateway-runtime".to_owned(),
+                RuntimeProcessRecord {
+                    pid: std::process::id(),
+                    generation: generation.clone(),
+                    ready_address: "127.0.0.1:8080".to_owned(),
+                    log_file: "logs/gateway-runtime.log".to_owned(),
+                },
+            )]),
+        };
+        let process_path = runtime.join(RUNTIME_PROCESS_STATE_FILE);
+        write_runtime_json_replace(&process_path, &state).unwrap();
+        assert_eq!(
+            read_runtime_process_state(&runtime, &binding)
+                .unwrap()
+                .unwrap(),
+            state
+        );
+        let running_processes = binding
+            .expected_processes
+            .iter()
+            .enumerate()
+            .map(|(index, (role, ready_address))| {
+                (
+                    role.clone(),
+                    RuntimeProcessRecord {
+                        pid: 10_000 + u32::try_from(index).unwrap(),
+                        generation: format!(
+                            "{RUNTIME_PROCESS_GENERATION_PREFIX}{}",
+                            Uuid::now_v7()
+                        ),
+                        ready_address: ready_address.clone(),
+                        log_file: format!("{RUNTIME_LOG_DIRECTORY}/{role}.log"),
+                    },
+                )
+            })
+            .collect();
+        let mut running = state.clone();
+        running.lifecycle = RuntimeProcessLifecycle::Running;
+        running.processes = running_processes;
+        write_runtime_json_replace(&process_path, &running).unwrap();
+        assert_eq!(
+            read_runtime_process_state(&runtime, &binding)
+                .unwrap()
+                .unwrap(),
+            running
+        );
+        let mut stopped = state.clone();
+        stopped.lifecycle = RuntimeProcessLifecycle::Stopped;
+        stopped.processes.clear();
+        write_runtime_json_replace(&process_path, &stopped).unwrap();
+        assert_eq!(
+            read_runtime_process_state(&runtime, &binding)
+                .unwrap()
+                .unwrap(),
+            stopped
+        );
+        clear_quiescent_runtime_process_state(&runtime, &binding).unwrap();
+        assert!(!process_path.exists());
+        write_runtime_json_replace(&process_path, &state).unwrap();
+        let current = serde_json::to_value(&state).unwrap();
+        let mut wrong_schema = current.clone();
+        wrong_schema["schema_version"] = serde_json::json!(1);
+        let mut wrong_kind = current.clone();
+        wrong_kind["kind"] = serde_json::json!("insight.dev.process-state/v1");
+        let mut wrong_tenant = current.clone();
+        wrong_tenant["tenant_id"] = serde_json::json!("ten_wrong");
+        let mut wrong_profile = current.clone();
+        wrong_profile["profile_digest"] = serde_json::json!(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        let mut missing_generation = current.clone();
+        missing_generation["processes"]["gateway-runtime"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generation");
+        let mut non_v7_generation = current.clone();
+        non_v7_generation["processes"]["gateway-runtime"]["generation"] =
+            serde_json::json!("insight-platform-process-v2-00000000-0000-4000-8000-000000000000");
+        let mut duplicate_generation = current.clone();
+        duplicate_generation["processes"]["gateway-management"] = serde_json::json!({
+            "pid": std::process::id(),
+            "generation": generation,
+            "ready_address": "127.0.0.1:8081",
+            "log_file": "logs/gateway-management.log"
+        });
+        let mut missing_lifecycle = current.clone();
+        missing_lifecycle
+            .as_object_mut()
+            .unwrap()
+            .remove("lifecycle");
+        let mut partial_running = current.clone();
+        partial_running["lifecycle"] = serde_json::json!("running");
+        let mut nonempty_stopped = current.clone();
+        nonempty_stopped["lifecycle"] = serde_json::json!("stopped");
+        let mut wrong_endpoint = current.clone();
+        wrong_endpoint["processes"]["gateway-runtime"]["ready_address"] =
+            serde_json::json!("127.0.0.1:8081");
+        let mut duplicate_pid = current.clone();
+        duplicate_pid["processes"]["gateway-management"] = serde_json::json!({
+            "pid": std::process::id(),
+            "generation": format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7()),
+            "ready_address": "127.0.0.1:8081",
+            "log_file": "logs/gateway-management.log"
+        });
+        let mut duplicate_address = current.clone();
+        duplicate_address["processes"]["gateway-management"] = serde_json::json!({
+            "pid": std::process::id().saturating_add(1),
+            "generation": format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7()),
+            "ready_address": "127.0.0.1:8080",
+            "log_file": "logs/gateway-management.log"
+        });
+        let mut extra_role = current.clone();
+        extra_role["processes"]["legacy-runner"] = serde_json::json!({
+            "pid": std::process::id().saturating_add(2),
+            "generation": format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7()),
+            "ready_address": "127.0.0.1:65535",
+            "log_file": "logs/legacy-runner.log"
+        });
+        let mut unknown_field = current.clone();
+        unknown_field["processes"]["gateway-runtime"]["legacy_pid"] = serde_json::json!(true);
+
+        for (name, candidate, expected_error) in [
+            (
+                "wrong schema",
+                wrong_schema,
+                "unsupported runtime process schema_version",
+            ),
+            ("wrong kind", wrong_kind, "unsupported runtime process kind"),
+            (
+                "wrong tenant",
+                wrong_tenant,
+                "does not match the current tenant/profile/release/source binding",
+            ),
+            (
+                "wrong profile",
+                wrong_profile,
+                "does not match the current tenant/profile/release/source binding",
+            ),
+            (
+                "missing generation",
+                missing_generation,
+                "is not valid closed JSON",
+            ),
+            (
+                "non-v7 generation",
+                non_v7_generation,
+                "invalid or duplicate process identity",
+            ),
+            (
+                "duplicate generation",
+                duplicate_generation,
+                "invalid or duplicate process identity",
+            ),
+            (
+                "missing lifecycle",
+                missing_lifecycle,
+                "is not valid closed JSON",
+            ),
+            (
+                "running with fewer roles",
+                partial_running,
+                "running state does not contain the exact selected process closure",
+            ),
+            (
+                "stopped with records",
+                nonempty_stopped,
+                "stopped state must not contain process records",
+            ),
+            (
+                "wrong role endpoint",
+                wrong_endpoint,
+                "invalid or duplicate process identity",
+            ),
+            (
+                "duplicate pid",
+                duplicate_pid,
+                "invalid or duplicate process identity",
+            ),
+            (
+                "duplicate address",
+                duplicate_address,
+                "invalid or duplicate process identity",
+            ),
+            (
+                "extra role",
+                extra_role,
+                "invalid or duplicate process identity",
+            ),
+            ("unknown field", unknown_field, "is not valid closed JSON"),
+        ] {
+            fs::write(
+                &process_path,
+                serde_json::to_vec_pretty(&candidate).unwrap(),
+            )
+            .unwrap();
+            let error = read_runtime_process_state(&runtime, &binding).expect_err(name);
+            match error {
+                CliError::RuntimeState(detail) => assert!(
+                    detail.contains(expected_error),
+                    "{name}: expected {expected_error:?}, got {detail:?}"
+                ),
+                other => panic!("{name}: unexpected error: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_profile_transitions_separate_identity_changes_from_feature_additions() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let original_fingerprint =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            original_fingerprint,
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let next_fingerprint =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let next_release = format!("release:1.2.3:{next_fingerprint}");
+
+        validate_runtime_profile_transition(
+            &state,
+            DevProfile::starter(),
+            &next_release,
+            next_fingerprint,
+        )
+        .unwrap();
+        let changed_identity_and_features = validate_runtime_profile_transition(
+            &state,
+            DevProfile::parse(Some("model"), false, false).unwrap(),
+            &next_release,
+            next_fingerprint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            changed_identity_and_features,
+            CliError::RuntimeState(detail) if detail.contains("cannot add or remove development features")
+        ));
+        validate_runtime_profile_transition(
+            &state,
+            DevProfile::parse(Some("model"), false, true).unwrap(),
+            &state.release_identity,
+            &state.source_fingerprint,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cleanup_validation_ignores_only_external_config_availability() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let profile = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let compose_project = compose_project_name(&project.identity.tenant_id).unwrap();
+        let binding = runtime_process_binding_for_cleanup(
+            &runtime,
+            &project.identity.tenant_id,
+            &compose_project,
+            &profile,
+            &project.identity,
+        )
+        .unwrap();
+        let state = RuntimeProcessState {
+            schema_version: RUNTIME_PROCESS_SCHEMA_VERSION,
+            kind: RUNTIME_PROCESS_KIND.to_owned(),
+            tenant_id: binding.tenant_id.clone(),
+            profile: binding.profile.clone(),
+            profile_digest: binding.profile_digest.clone(),
+            release_identity: binding.release_identity.clone(),
+            compose_project: binding.compose_project.clone(),
+            source_fingerprint: binding.source_fingerprint.clone(),
+            lifecycle: RuntimeProcessLifecycle::Stopped,
+            processes: BTreeMap::new(),
+        };
+        write_runtime_json_replace(&runtime.join(RUNTIME_PROCESS_STATE_FILE), &state).unwrap();
+        let config = runtime
+            .join(RUNTIME_CONFIGURATION_DIRECTORY)
+            .join(RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE);
+        fs::write(&config, b"{\"tampered\":true}").unwrap();
+
+        assert!(read_runtime_profile_state(&runtime, &project.identity).is_err());
+        let cleanup_profile = read_runtime_profile_state_for_cleanup(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let cleanup_binding = runtime_process_binding_for_cleanup(
+            &runtime,
+            &project.identity.tenant_id,
+            &compose_project,
+            &cleanup_profile,
+            &project.identity,
+        )
+        .unwrap();
+        assert!(read_runtime_process_state(&runtime, &cleanup_binding)
+            .unwrap()
+            .is_some());
+        stop_development_profile(directory.path(), directory.path()).unwrap();
+
+        fs::remove_file(config).unwrap();
+        assert!(read_runtime_profile_state(&runtime, &project.identity).is_err());
+        assert!(
+            read_runtime_profile_state_for_cleanup(&runtime, &project.identity)
+                .unwrap()
+                .is_some()
+        );
+
+        let identity_directory = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(IDENTITY_DIRECTORY);
+        fs::remove_file(identity_directory.join(IDENTITY_JWKS_FILE)).unwrap();
+        fs::remove_file(identity_directory.join(IDENTITY_BOOTSTRAP_CONFIG_FILE)).unwrap();
+        assert!(validate_loaded_local_identity(
+            &directory.path().join(PROJECT_DIRECTORY),
+            &project.identity
+        )
+        .is_err());
+        validate_loaded_local_identity_for_cleanup(
+            &directory.path().join(PROJECT_DIRECTORY),
+            &project.identity,
+        )
+        .unwrap();
+        stop_development_profile(directory.path(), directory.path()).unwrap();
+        let reset_preview = reset_local_project(directory.path(), directory.path(), None).unwrap();
+        assert!(reset_preview.contains("Confirm with:"));
+    }
+
+    #[test]
+    fn committed_tls_identity_drift_fails_full_validation_only() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
+        fs::write(
+            tls.join(RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE),
+            fs::read(tls.join(RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        let error = read_runtime_profile_state(&runtime, &project.identity).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("runtime TLS identity is invalid")
+        ));
+        assert!(
+            read_runtime_profile_state_for_cleanup(&runtime, &project.identity)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn restart_selection_and_summary_follow_validated_runtime_authority() {
+        let directory = TempDir::new().unwrap();
+        let mut project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let mut state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let model = DevProfile::parse(Some("model"), false, true).unwrap();
+        ensure_selected_feature_identity(&state_directory, model, None).unwrap();
+        append_selected_feature_configs(&state_directory, &project.identity, &mut state, model)
+            .unwrap();
+        state.features = model
+            .feature_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        state.profile_digest = model.profile_digest(&state.release_identity).unwrap();
+        state.tls_identity_digests =
+            inspect_local_tls_identity_closure(&runtime.join(RUNTIME_TLS_DIRECTORY), model)
+                .unwrap();
+        refresh_runtime_profile_closure_digest(&mut state).unwrap();
+        write_runtime_json_replace(&runtime.join(RUNTIME_PROFILE_STATE_FILE), &state).unwrap();
+        let persisted = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+
+        project.profiles = BTreeMap::from([(
+            "starter".to_owned(),
+            LocalProfileState {
+                state: "stopped".to_owned(),
+                features: Vec::new(),
+                profile_digest: None,
+                release_identity: Some(
+                    "release:1.2.3:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                ),
+            },
+        )]);
+        let selected = restart_profile_selection(&persisted).unwrap();
+        assert_eq!(selected.feature_names(), model.feature_names());
+        assert!(selected.is_from_source());
+        let summary = runtime_project_profile_summary(&persisted, "ready");
+        assert_ne!(project.profiles, summary);
+        assert_eq!(summary["starter"].features, persisted.features);
+        assert_eq!(
+            summary["starter"].release_identity.as_deref(),
+            Some(persisted.release_identity.as_str())
+        );
+
+        let expected = RuntimeRestartIdentity {
+            release_identity: persisted.release_identity.clone(),
+            source_fingerprint: persisted.source_fingerprint.clone(),
+        };
+        validate_restart_identity(
+            &expected,
+            &persisted.release_identity,
+            &persisted.source_fingerprint,
+        )
+        .unwrap();
+        assert!(validate_restart_identity(
+            &expected,
+            "release:1.2.3:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_lock_is_single_owner_and_released_by_raii() {
+        let directory = TempDir::new().unwrap();
+        initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        let first = acquire_runtime_lifecycle_lock(directory.path()).unwrap();
+        let owner = fs::read_to_string(
+            directory
+                .path()
+                .join(PROJECT_DIRECTORY)
+                .join(RUNTIME_DIRECTORY)
+                .join(RUNTIME_LIFECYCLE_LOCK_FILE),
+        )
+        .unwrap();
+        assert_eq!(
+            owner,
+            format!("schema_version=2 pid={}\n", std::process::id())
+        );
+        let error = acquire_runtime_lifecycle_lock(directory.path()).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeUnavailable(detail) if detail.contains("already mutating")
+        ));
+        drop(first);
+        acquire_runtime_lifecycle_lock(directory.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_process_does_not_exec_when_start_journal_persistence_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = TempDir::new().unwrap();
+        let marker = directory.path().join("executed");
+        let executable = directory.path().join("runtime-fixture.sh");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf ran > \"{}\"\n", marker.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let logs = directory.path().join(RUNTIME_LOG_DIRECTORY);
+        fs::create_dir(&logs).unwrap();
+        let spec = RuntimeLaunchSpec::new(
+            "gateway-runtime",
+            executable,
+            "127.0.0.1:1",
+            Vec::new(),
+            Vec::new(),
+        );
+        let error = spawn_runtime_process(&logs, &spec, |_| {
+            assert!(!marker.exists());
+            Err(CliError::RuntimeState(
+                "injected journal persistence failure".to_owned(),
+            ))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail == "injected journal persistence failure"
+        ));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_generation_matches_argv0_and_mismatch_is_never_signalled() {
+        use std::os::unix::process::CommandExt as _;
+
+        let generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let mut command = ProcessCommand::new("/bin/sleep");
+        command
+            .arg0(&generation)
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let record = RuntimeProcessRecord {
+            pid: child.id(),
+            generation,
+            ready_address: "127.0.0.1:1".to_owned(),
+            log_file: "logs/test.log".to_owned(),
+        };
+        let mut observed = Ok(RuntimeProcessObservation::Stopped);
+        for _ in 0..50 {
+            observed = observe_runtime_process(&record);
+            if !matches!(&observed, Ok(RuntimeProcessObservation::Stopped)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut mismatched = record.clone();
+        mismatched.generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let mismatch_observation = observe_runtime_process(&mismatched);
+        let reconciled = stop_process(&mismatched);
+        let alive_after_reconciliation = child.try_wait().unwrap().is_none();
+        let stopped = stop_process(&record);
+        if stopped.is_err() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+
+        assert_eq!(observed.unwrap(), RuntimeProcessObservation::Owned);
+        assert_eq!(
+            mismatch_observation.unwrap(),
+            RuntimeProcessObservation::IdentityMismatch
+        );
+        reconciled.unwrap();
+        assert!(alive_after_reconciliation);
+        stopped.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_reconciles_owned_processes_without_signalling_mismatched_pid() {
+        use std::os::unix::process::CommandExt as _;
+
+        let directory = TempDir::new().unwrap();
+        let runtime = directory.path();
+        let owned_generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let mut owned_child = ProcessCommand::new("/bin/sleep")
+            .arg0(&owned_generation)
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let foreign_generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let mut foreign_child = ProcessCommand::new("/bin/sleep")
+            .arg0(&foreign_generation)
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut state = RuntimeProcessState {
+            schema_version: RUNTIME_PROCESS_SCHEMA_VERSION,
+            kind: RUNTIME_PROCESS_KIND.to_owned(),
+            tenant_id: "ten_test".to_owned(),
+            profile: "starter".to_owned(),
+            profile_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            release_identity:
+                "source:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+            compose_project: "insight-test".to_owned(),
+            source_fingerprint:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            lifecycle: RuntimeProcessLifecycle::Starting,
+            processes: BTreeMap::from([
+                (
+                    "owned".to_owned(),
+                    RuntimeProcessRecord {
+                        pid: owned_child.id(),
+                        generation: owned_generation,
+                        ready_address: "127.0.0.1:1".to_owned(),
+                        log_file: "logs/owned.log".to_owned(),
+                    },
+                ),
+                (
+                    "stale".to_owned(),
+                    RuntimeProcessRecord {
+                        pid: foreign_child.id(),
+                        generation: format!(
+                            "{RUNTIME_PROCESS_GENERATION_PREFIX}{}",
+                            Uuid::now_v7()
+                        ),
+                        ready_address: "127.0.0.1:2".to_owned(),
+                        log_file: "logs/stale.log".to_owned(),
+                    },
+                ),
+            ]),
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        let cause = abort_runtime_start(
+            runtime,
+            &mut state,
+            CliError::RuntimeUnavailable("injected".to_owned()),
+        );
+        assert!(matches!(cause, CliError::RuntimeUnavailable(detail) if detail == "injected"));
+        assert_eq!(state.lifecycle, RuntimeProcessLifecycle::Stopped);
+        assert!(state.processes.is_empty());
+        assert!(foreign_child.try_wait().unwrap().is_none());
+        for _ in 0..100 {
+            if owned_child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(owned_child.try_wait().unwrap().is_some());
+        let _ = foreign_child.kill();
+        let _ = foreign_child.wait();
     }
 
     #[test]
@@ -7551,13 +10957,19 @@ mod tests {
         let project =
             initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
         let kms = "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012";
-        let starter =
-            prepare_runtime_profile(directory.path(), kms, "sha256:test-profile-source").unwrap();
+        let starter = prepare_runtime_profile(
+            directory.path(),
+            kms,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
         let runtime = state_directory.join(RUNTIME_DIRECTORY);
-        let mut state = read_runtime_profile_state(&runtime).unwrap().unwrap();
+        let mut state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
         let model = DevProfile::parse(Some("model"), false, true).unwrap();
-        ensure_selected_feature_identity(&state_directory, model).unwrap();
+        ensure_selected_feature_identity(&state_directory, model, None).unwrap();
         append_selected_feature_configs(&state_directory, &project.identity, &mut state, model)
             .unwrap();
         for (role, digest) in &starter {
@@ -7575,7 +10987,7 @@ mod tests {
             .exists());
 
         let all = DevProfile::parse(Some("all"), false, true).unwrap();
-        ensure_selected_feature_identity(&state_directory, all).unwrap();
+        ensure_selected_feature_identity(&state_directory, all, None).unwrap();
         append_selected_feature_configs(&state_directory, &project.identity, &mut state, all)
             .unwrap();
         assert_eq!(state.config_digests.len(), 23);
@@ -7611,6 +11023,127 @@ mod tests {
         )
         .unwrap();
         assert!(orchestration.get("sandbox").is_none());
+    }
+
+    #[test]
+    fn additive_feature_config_recovers_only_an_exact_preexisting_file() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let mut state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let selected = DevProfile::parse(Some("model"), false, true).unwrap();
+        ensure_selected_feature_identity(&state_directory, selected, None).unwrap();
+        let artifact_catalog = local_artifact_provider_catalog(&state.kms_key_arn).unwrap();
+        let secret_catalog = local_secret_provider_catalog(
+            &state.kms_key_arn,
+            &state.secret_readiness_arn,
+            &state.secret_provider_id,
+        )
+        .unwrap();
+        let generated = selected_feature_configs(
+            &runtime,
+            &state.ports,
+            &project.identity,
+            &artifact_catalog,
+            &secret_catalog,
+            &state.capability_protocol_profile_revision_id,
+            selected,
+        )
+        .unwrap();
+        let (file, config) = generated.get("egress-broker").unwrap();
+        let config_path = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY).join(file);
+        write_new(&config_path, &serde_json::to_vec_pretty(config).unwrap()).unwrap();
+
+        read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        append_selected_feature_configs(&state_directory, &project.identity, &mut state, selected)
+            .unwrap();
+        assert!(state.config_digests.contains_key("egress-broker"));
+
+        state.config_digests.remove("egress-broker");
+        let mut tampered = config.clone();
+        tampered["tampered"] = serde_json::json!(true);
+        fs::write(&config_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let error = append_selected_feature_configs(
+            &state_directory,
+            &project.identity,
+            &mut state,
+            selected,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::RuntimeState(detail) if detail.contains("does not match the generated closure")
+        ));
+    }
+
+    #[test]
+    fn remote_capability_additive_recovery_reuses_persisted_protocol_revision() {
+        let directory = TempDir::new().unwrap();
+        let project =
+            initialize_project(directory.path(), Some("demo"), SystemTime::now()).unwrap();
+        prepare_runtime_profile(
+            directory.path(),
+            "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let state_directory = directory.path().join(PROJECT_DIRECTORY);
+        let runtime = state_directory.join(RUNTIME_DIRECTORY);
+        let mut state = read_runtime_profile_state(&runtime, &project.identity)
+            .unwrap()
+            .unwrap();
+        let selected = DevProfile::parse(Some("remote-capability"), false, true).unwrap();
+        ensure_selected_feature_identity(&state_directory, selected, None).unwrap();
+        let artifact_catalog = local_artifact_provider_catalog(&state.kms_key_arn).unwrap();
+        let secret_catalog = local_secret_provider_catalog(
+            &state.kms_key_arn,
+            &state.secret_readiness_arn,
+            &state.secret_provider_id,
+        )
+        .unwrap();
+        let first_generation = selected_feature_configs(
+            &runtime,
+            &state.ports,
+            &project.identity,
+            &artifact_catalog,
+            &secret_catalog,
+            &state.capability_protocol_profile_revision_id,
+            selected,
+        )
+        .unwrap();
+        let (file, config) = first_generation.get("capability-remote").unwrap();
+        let path = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY).join(file);
+        write_new(&path, &serde_json::to_vec_pretty(config).unwrap()).unwrap();
+
+        let retry_generation = selected_feature_configs(
+            &runtime,
+            &state.ports,
+            &project.identity,
+            &artifact_catalog,
+            &secret_catalog,
+            &state.capability_protocol_profile_revision_id,
+            selected,
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_digest(config).unwrap(),
+            canonical_digest(&retry_generation["capability-remote"].1).unwrap()
+        );
+        append_selected_feature_configs(&state_directory, &project.identity, &mut state, selected)
+            .unwrap();
+        assert!(state.config_digests.contains_key("capability-remote"));
     }
 
     #[test]

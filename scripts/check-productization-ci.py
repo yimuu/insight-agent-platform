@@ -40,14 +40,13 @@ for marker in (
     "needs.changes.outputs.runtime == 'true'",
     "needs.changes.outputs.cli == 'true'",
     "needs.changes.outputs.console == 'true'",
-    "needs.changes.outputs.mcp_interop == 'true'",
     "needs.changes.outputs.policy == 'true'",
     "corepack pnpm --dir web/console install --frozen-lockfile",
     "corepack pnpm --dir web/console browser:fixture:qualify",
     "corepack install --global pnpm@11.19.0",
-    "corepack install --global pnpm@11.9.0",
     "runs-on: ubuntu-24.04",
-    "node-version: \"24\"",
+    'node-version: "24.11.1"',
+    "version: v3.19.0",
     "workflow_dispatch:",
     "schedule:",
 ):
@@ -91,14 +90,12 @@ for marker in (
     "RUNTIME_SELECTED: ${{ needs.changes.outputs.runtime }}",
     "CLI_SELECTED: ${{ needs.changes.outputs.cli }}",
     "CONSOLE_SELECTED: ${{ needs.changes.outputs.console }}",
-    "MCP_SELECTED: ${{ needs.changes.outputs.mcp_interop }}",
     "POLICY_SELECTED: ${{ needs.changes.outputs.policy }}",
     "steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - name: Reject any selected lane failure",
     "python3 scripts/check-required-ci-results.py",
     '--runtime-selected "$RUNTIME_SELECTED"',
     '--cli-selected "$CLI_SELECTED"',
     '--console-selected "$CONSOLE_SELECTED"',
-    '--mcp-interop-selected "$MCP_SELECTED"',
     '--policy-selected "$POLICY_SELECTED"',
     '--changes-result "$CHANGES_RESULT"',
     '--quick-result "$QUICK_RESULT"',
@@ -106,7 +103,6 @@ for marker in (
     '--test-result "$TEST_RESULT"',
     '--cli-result "$CLI_RESULT"',
     '--console-result "$CONSOLE_RESULT"',
-    '--mcp-interop-result "$MCP_RESULT"',
     '--policy-result "$POLICY_RESULT"',
 ):
     if marker not in ci:
@@ -120,7 +116,7 @@ for forbidden_trigger in ("pull_request:", "schedule:", "tags:"):
         failures.append(f"candidate workflow contains automatic trigger {forbidden_trigger!r}")
 if "timeout-minutes: 10" not in candidate or candidate.count("timeout-minutes: 10") < 2:
     failures.append("candidate sign and verify steps must retain bounded ten-minute timeouts")
-if dockerfile.count("cargo build --locked --release") != 1:
+if dockerfile.count("cargo build --locked --release --workspace") != 1:
     failures.append("candidate Dockerfile must compile the production closure once")
 if "cargo build --locked --release --workspace" not in dockerfile:
     failures.append("candidate Dockerfile must use one workspace binary build graph")

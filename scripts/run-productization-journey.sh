@@ -330,7 +330,7 @@ if [[ -n "$first_run_marker" ]]; then
 fi
 
 env "${test_environment[@]}" \
-  cargo test --locked -p insight-agent-platform --test productization public_cli_deterministic_first_run -- --nocapture
+  cargo test --locked -p insight-platform-qualification-tests --test productization public_cli_deterministic_first_run -- --nocapture
 
 if [[ -n "$report_directory" ]]; then
   python3 scripts/check-productization-scenario-reports.py \

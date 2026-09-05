@@ -70,7 +70,8 @@ use insight_platform_orchestrator::{
 };
 use insight_platform_postgres::{
     model_turn_repository::{
-        ClaimedModelExecution, ControlledModelExecution, PreparedModelExecution,
+        ClaimedModelExecution, ControlledModelExecution, DriveExpiredModelJobs,
+        ExpiredModelRecoverySlot, PreparedModelExecution,
     },
     repository::{
         ClaimOrchestrationJobs, ContinueModelToolResultsToModelTurn,
@@ -3220,6 +3221,220 @@ async fn seed_ready_model_orchestration(
     (node_id, job_id)
 }
 
+async fn assert_exhausted_model_lease_converges(
+    pool: &PgPool,
+    repository: &PgRepository,
+    fixture: &Fixture,
+) {
+    let (_, mut owner_command) =
+        seed_running_model_orchestration(pool, repository, fixture, 0xc80).await;
+    owner_command.requested_attempt_limit = 1;
+    let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+    let deferred = match scheduler
+        .defer_orchestration_to_model_turn(owner_command)
+        .await
+        .unwrap()
+    {
+        CommandOutcome::Applied(record) => record,
+        CommandOutcome::Replayed(_) => panic!("fresh exhausted Model dispatch replayed"),
+    };
+    scheduler.commit().await.unwrap();
+
+    let worker_id = id(ResourceKind::WorkerProcessGeneration, 0xd00);
+    let lease_token = named_digest("exhausted-model-worker-lease");
+    let usage_reservation_id = id(ResourceKind::UsageReservation, 0xd01);
+    let mut claims = repository
+        .claim_model_jobs(ClaimModelJobs {
+            worker_process_generation_id: worker_id,
+            worker_manifest_digest: production_model_worker_manifest_digest(),
+            limit: 1,
+            lease_milliseconds: 30_000,
+            slots: vec![ModelClaimSlot {
+                lease_token_digest: lease_token,
+                usage_reservation_id: usage_reservation_id.clone(),
+                quota_entry_ids: (0xd02..=0xd05)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                event_id: id(ResourceKind::Event, 0xd06),
+                outbox_id: id(ResourceKind::OutboxEvent, 0xd07),
+                resume_mutations: None,
+                failure_mutations: None,
+                tool_continuation_mutations: None,
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    let claim = claims.pop().unwrap();
+    assert_eq!(claim.turn.model_turn_id, deferred.turn.model_turn_id);
+    assert_eq!(claim.job.attempt_no, 1);
+    assert_eq!(claim.job.attempt_limit, 1);
+    let model_job_id: ResourceId = claim.job.job_id.parse().unwrap();
+    let quota_ceiling = claim.turn.payload.admission.quota_ceiling;
+    let reports_cost = claim.turn.payload.admission.profile.usage.reports_cost;
+
+    sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET heartbeat_at = clock_timestamp() - interval '2 seconds',
+            lease_expires_at = clock_timestamp() - interval '1 second'
+        WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(model_job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let convergence = failure_mutations(0xd30);
+    let recovered = repository
+        .drive_expired_model_jobs(DriveExpiredModelJobs {
+            shard: SafetyScanShard::whole(),
+            after: None,
+            limit: 1,
+            // Exhaustion must not attempt to construct a retry timestamp.
+            retry_backoff_milliseconds: u64::MAX,
+            slots: vec![ExpiredModelRecoverySlot {
+                quota_entry_ids: (0xd20..=0xd23)
+                    .map(|suffix| id(ResourceKind::QuotaLedgerEntry, suffix))
+                    .collect(),
+                event_id: id(ResourceKind::Event, 0xd24),
+                outbox_id: id(ResourceKind::OutboxEvent, 0xd25),
+                failure_mutations: convergence.clone(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.records.len(), 1);
+    let terminal = &recovered.records[0];
+    assert_eq!(terminal.turn.state, ModelTurnState::Failed);
+    assert!(terminal.turn.terminal_at.is_some());
+    assert!(terminal.turn.retry_at.is_none());
+    assert_eq!(terminal.job.state, JobState::Failed.as_str());
+    assert!(terminal.job.terminal_at.is_some());
+    assert!(terminal.job.worker_id.is_none());
+    assert!(terminal.job.lease_token_digest.is_none());
+    assert!(terminal.job.lease_expires_at.is_none());
+    assert!(terminal.job.quota_reservation_id.is_none());
+    assert_eq!(terminal.turn.payload.attempts.len(), 1);
+    assert_eq!(
+        terminal.turn.payload.attempts[0].outcome,
+        insight_platform_models::ModelAttemptOutcomeKind::Failed
+    );
+    assert!(terminal.turn.payload.attempts[0].request_sent);
+    let failure = terminal.turn.payload.failure.as_ref().unwrap();
+    assert_eq!(
+        failure.class,
+        insight_platform_contracts::FailureClass::Platform
+    );
+    assert_eq!(
+        failure.retryability,
+        insight_platform_contracts::Retryability::Never
+    );
+
+    let settlements: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT account.metric, ledger.used_amount
+        FROM insight_platform.quota_ledger AS ledger
+        JOIN insight_platform.quota_accounts AS account
+          ON account.tenant_id = ledger.tenant_id
+         AND account.quota_account_id = ledger.quota_account_id
+        WHERE ledger.tenant_id = $1 AND ledger.correlation_id = $2
+          AND ledger.entry_kind = 'settle'
+        ORDER BY account.metric
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(usage_reservation_id.to_string())
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let settlements = settlements.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(settlements.len(), 4);
+    assert_eq!(
+        settlements[QuotaDimension::WorkClassConcurrentOperations.as_str()],
+        0
+    );
+    assert_eq!(settlements[QuotaDimension::ModelRequests.as_str()], 1);
+    assert_eq!(
+        settlements[QuotaDimension::ModelTokens.as_str()],
+        i64::try_from(quota_ceiling.tokens).unwrap()
+    );
+    assert_eq!(
+        settlements[QuotaDimension::ModelCostMicrounits.as_str()],
+        if reports_cost {
+            i64::try_from(quota_ceiling.cost_microunits).unwrap()
+        } else {
+            0
+        }
+    );
+    let reserved_model_quota: i64 = sqlx::query_scalar(
+        "SELECT sum(reserved_value)::bigint FROM insight_platform.quota_accounts WHERE tenant_id = $1 AND work_class = 'model'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(reserved_model_quota, 0);
+
+    let convergence_state: (String, String, i32, String, bool) = sqlx::query_as(
+        r#"
+        SELECT leaf.state, run.state, run.active_work_count, convergence.state,
+               convergence.payload->'convergence_failure' IS NOT NULL
+        FROM insight_platform.run_nodes AS leaf
+        JOIN insight_platform.runs AS run
+          ON run.tenant_id = leaf.tenant_id AND run.run_id = leaf.run_id
+        JOIN insight_platform.jobs AS convergence
+          ON convergence.tenant_id = leaf.tenant_id AND convergence.job_id = $3
+        WHERE leaf.tenant_id = $1 AND leaf.node_id = $2
+        "#,
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(deferred.node_id.clone())
+    .bind(convergence.convergence_job_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        convergence_state,
+        (
+            "ready".to_owned(),
+            "running".to_owned(),
+            0,
+            "ready".to_owned(),
+            true,
+        )
+    );
+    let recovery_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM insight_platform.events WHERE tenant_id = $1 AND aggregate_id = $2 AND event_type = 'model.lease_recovered'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(deferred.turn.model_turn_id.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(recovery_events, 1);
+
+    // Keep the remainder of this single-database fixture free of claimable convergence work.
+    sqlx::query(
+        "UPDATE insight_platform.jobs SET state = 'cancelled', terminal_at = clock_timestamp(), updated_at = clock_timestamp() WHERE tenant_id = $1 AND job_id = $2 AND state = 'ready'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(convergence.convergence_job_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.run_nodes SET state = 'cancelled', terminal_at = clock_timestamp(), updated_at = clock_timestamp() WHERE tenant_id = $1 AND node_id = $2 AND state = 'ready'",
+    )
+    .bind(fixture.tenant_id.to_string())
+    .bind(deferred.node_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn admit_prepare_and_claim(
     repository: &PgRepository,
     command: &CreateModelTurn,
@@ -5108,6 +5323,8 @@ async fn model_turn_fixture() {
     .execute(&pool)
     .await
     .unwrap();
+
+    assert_exhausted_model_lease_converges(&pool, &repository, &fixture).await;
 
     let (_, tool_owner_command) =
         seed_running_model_orchestration(&pool, &repository, &fixture, 0x900).await;

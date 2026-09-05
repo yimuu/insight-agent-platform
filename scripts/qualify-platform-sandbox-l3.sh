@@ -21,7 +21,7 @@ for name in "${required_environment[@]}"; do
   fi
 done
 
-for command_name in cargo curl kubectl; do
+for command_name in cargo curl kubectl python3; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf '%s is required\n' "$command_name" >&2
     exit 2
@@ -46,6 +46,9 @@ original_server_replicas="$(
 )"
 port_forward_pid=""
 port_forward_log="$(mktemp -t platform-opensandbox-l3-port-forward.XXXXXX)"
+abort_evidence_directory="$(mktemp -d -t platform-opensandbox-l3-abort.XXXXXX)"
+abort_marker="$abort_evidence_directory/marker.json"
+abort_phase_log="$abort_evidence_directory/cargo.log"
 
 cleanup() {
   if [[ -n "$port_forward_pid" ]]; then
@@ -56,7 +59,8 @@ cleanup() {
     --replicas="$original_dispatcher_replicas" >/dev/null 2>&1 || true
   kubectl scale deployment "$server_deployment" -n "$control_namespace" \
     --replicas="$original_server_replicas" >/dev/null 2>&1 || true
-  rm -f "$port_forward_log"
+  rm -f "$port_forward_log" "$abort_marker" "$abort_phase_log"
+  rmdir "$abort_evidence_directory" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -91,7 +95,7 @@ run_provider_phase() {
   local test_name="$2"
   PLATFORM_OPENSANDBOX_L3_PHASE="$phase" \
     PLATFORM_OPENSANDBOX_L3_WORKLOADS_NAMESPACE="$workloads_namespace" \
-    cargo test -p insight-platform-opensandbox-client --test kubernetes_l3 \
+    cargo test --locked -p insight-platform-opensandbox-client --test kubernetes_l3 \
       "$test_name" -- --exact --nocapture
 }
 
@@ -99,7 +103,7 @@ for deployment in "$dispatcher_deployment" "$server_deployment" "$controller_dep
   kubectl rollout status "deployment/$deployment" -n "$control_namespace" --timeout=120s
 done
 PLATFORM_DATABASE_URL="$PLATFORM_TEST_DATABASE_URL" \
-  cargo run -p insight-platform-postgres --bin platform-schema -- verify
+  cargo run --locked -p insight-platform-postgres --bin platform-schema -- verify
 
 # Keep point-read orphan cleanup from racing provider-only scenarios. Dispatcher is restored before
 # the orphan and kill/reclaim proofs.
@@ -134,30 +138,74 @@ run_provider_phase boot-rollover \
 # Start a real long-running Sandbox, persist cancel intent, and let the local Dispatcher process
 # exit. The business terminal must commit while Server is unavailable; only physical cleanup waits
 # for Server recovery.
-if PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent \
-  PLATFORM_OPENSANDBOX_L3_ABORT_AFTER_INTENT=1 \
-    cargo test -p insight-platform-postgres --test phase3_opensandbox \
-      opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit \
-      -- --exact --nocapture; then
-  printf 'cancel-intent Dispatcher fixture did not terminate abruptly\n' >&2
+set +e
+PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-intent \
+PLATFORM_OPENSANDBOX_L3_ABORT_AFTER_INTENT=1 \
+PLATFORM_OPENSANDBOX_L3_ABORT_MARKER="$abort_marker" \
+  cargo test --locked -p insight-platform-qualification-tests --test phase3_opensandbox \
+    opensandbox_kubernetes_l3_running_cancel_intent_survives_dispatcher_exit \
+    -- --exact --nocapture >"$abort_phase_log" 2>&1
+abort_status=$?
+set -e
+cat "$abort_phase_log"
+if [[ "$abort_status" -ne 101 ]]; then
+  printf 'cancel-intent Dispatcher fixture exited with %s instead of Cargo signal status 101\n' \
+    "$abort_status" >&2
   exit 1
 fi
+if [[ ! -f "$abort_marker" || -L "$abort_marker" ]]; then
+  printf 'cancel-intent Dispatcher fixture did not persist its run-scoped pre-abort marker\n' >&2
+  exit 1
+fi
+python3 - "$abort_marker" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+marker = json.loads(path.read_bytes())
+if set(marker) != {"schema_version", "kind", "phase", "job_id", "sandbox_id"}:
+    raise SystemExit("cancel-intent pre-abort marker is not closed")
+if marker != {
+    "schema_version": 1,
+    "kind": "insight.productization.opensandbox-abort-marker/v1",
+    "phase": "cancel-intent",
+    "job_id": marker.get("job_id"),
+    "sandbox_id": marker.get("sandbox_id"),
+}:
+    raise SystemExit("cancel-intent pre-abort marker has invalid fixed fields")
+if not isinstance(marker["job_id"], str) or not re.fullmatch(
+    r"job_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    marker["job_id"],
+):
+    raise SystemExit("cancel-intent pre-abort marker has an invalid Job identity")
+if not isinstance(marker["sandbox_id"], str) or not re.fullmatch(
+    r"[A-Za-z0-9_-]{1,128}", marker["sandbox_id"]
+):
+    raise SystemExit("cancel-intent pre-abort marker has an invalid OpenSandbox identity")
+PY
+if ! grep -Fq '(signal: 6, SIGABRT: process abort signal)' "$abort_phase_log"; then
+  printf 'cancel-intent Dispatcher fixture did not terminate with SIGABRT\n' >&2
+  exit 1
+fi
+printf 'verified cancel-intent pre-abort marker and SIGABRT\n'
 kubectl scale deployment "$server_deployment" -n "$control_namespace" --replicas=0
 kubectl wait --for=delete pod -n "$control_namespace" \
   -l app.kubernetes.io/component=server --timeout=60s
 PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-terminal \
-  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+  cargo test --locked -p insight-platform-qualification-tests --test phase3_opensandbox \
     opensandbox_kubernetes_l3_cancel_terminal_commits_while_server_is_unavailable \
     -- --exact --nocapture
 kubectl scale deployment "$server_deployment" -n "$control_namespace" --replicas=1
 kubectl rollout status "deployment/$server_deployment" -n "$control_namespace" --timeout=120s
 start_port_forward
 PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=cancel-cleanup \
-  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+  cargo test --locked -p insight-platform-qualification-tests --test phase3_opensandbox \
     opensandbox_kubernetes_l3_cancel_cleanup_resumes_after_server_recovery \
     -- --exact --nocapture
 PLATFORM_OPENSANDBOX_L3_CONTROL_PHASE=timeout \
-  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+  cargo test --locked -p insight-platform-qualification-tests --test phase3_opensandbox \
     opensandbox_kubernetes_l3_running_deadline_terminal_and_cleanup \
     -- --exact --nocapture
 
@@ -178,7 +226,7 @@ kubectl rollout status "deployment/$dispatcher_deployment" -n "$control_namespac
 run_provider_phase orphan-verify opensandbox_kubernetes_l3_orphan_candidate_was_deleted
 
 PLATFORM_OPENSANDBOX_L3_DISPATCHER=1 \
-  cargo test -p insight-platform-postgres --test phase3_opensandbox \
+  cargo test --locked -p insight-platform-qualification-tests --test phase3_opensandbox \
     opensandbox_kubernetes_l3_dispatcher_kill_reclaims_same_started_runner \
     -- --exact --nocapture
 

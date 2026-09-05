@@ -7,8 +7,8 @@ use insight_platform_contracts::{
     ExactVersionRef, ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds,
     InstalledModelAdapter, ModelCatalogEvidence, ModelIdentityStability, ModelLimits,
     ModelModalities, ModelToolContract, ModelUsageContract, ProviderDataHandlingContract,
-    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, SecretPurpose,
-    SecretResolutionPolicy, StructuredOutputContract, ValueRef,
+    ProviderModelIdentity, ProviderRequestLimits, ProviderTrainingPolicy, Retryability,
+    SecretPurpose, SecretResolutionPolicy, StructuredOutputContract, ValueRef,
 };
 use insight_platform_jobs::JobFence;
 use insight_platform_models::{
@@ -349,6 +349,31 @@ struct DispatchCountingAdapter {
     dispatch_count: Arc<AtomicUsize>,
 }
 
+struct PendingAdapter {
+    descriptor: InstalledModelAdapterDescriptor,
+}
+
+#[async_trait]
+impl ModelProviderAdapter for PendingAdapter {
+    fn descriptor(&self) -> InstalledModelAdapterDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn invoke(
+        &self,
+        _request: ModelAdapterExecutionRequest,
+    ) -> Result<NormalizedModelStream, ModelAdapterFailure> {
+        std::future::pending().await
+    }
+
+    async fn cancel(
+        &self,
+        _request: ModelAdapterCancelRequest,
+    ) -> Result<ModelAdapterCancelOutcome, ModelAdapterFailure> {
+        Ok(ModelAdapterCancelOutcome::Unsupported)
+    }
+}
+
 #[async_trait]
 impl ModelProviderAdapter for DispatchCountingAdapter {
     fn descriptor(&self) -> InstalledModelAdapterDescriptor {
@@ -577,6 +602,22 @@ fn adapter_failure_cannot_hide_dispatch_or_retry_state() {
     );
 }
 
+#[test]
+fn internally_generated_retry_failure_has_a_worker_handoff_window() {
+    let fixture = fixture("fixture.responses/v1", '9', 'a');
+    let generated_not_before = Utc::now();
+    let failure =
+        ModelAdapterFailure::retryable_after_dispatch("model_connect_timeout", &fixture.request);
+    let retry_at = failure
+        .retry_at
+        .expect("a timeout before the Run deadline remains retryable");
+
+    assert!(retry_at >= generated_not_before + ChronoDuration::milliseconds(250));
+    failure
+        .validate_for(&fixture.request, Utc::now())
+        .expect("the Host-to-Worker handoff must not expire its own retry instruction");
+}
+
 struct InlineMaterializer;
 
 #[async_trait]
@@ -641,6 +682,28 @@ impl ModelOutputMaterializer for RejectingMaterializer {
         _success: ModelAdapterSuccess,
     ) -> Result<ModelOutputValue, ModelAdapterFailure> {
         panic!("preflight-rejected execution reached output materialization")
+    }
+}
+
+struct StaticValidationFailureMaterializer {
+    failure: ModelAdapterFailure,
+}
+
+#[async_trait]
+impl ModelOutputMaterializer for StaticValidationFailureMaterializer {
+    fn validate_execution(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+    ) -> Result<(), ModelAdapterFailure> {
+        Err(self.failure.clone())
+    }
+
+    async fn materialize(
+        &self,
+        _execution: &ModelAdapterExecutionRequest,
+        _success: ModelAdapterSuccess,
+    ) -> Result<ModelOutputValue, ModelAdapterFailure> {
+        panic!("failed execution validation reached output materialization")
     }
 }
 
@@ -920,6 +983,148 @@ async fn dispatched_failure_is_conservatively_accounted_and_attempt_bounded() {
         );
         assert!(measurement.observation.possible_duplicate_charge);
     }
+}
+
+#[tokio::test]
+async fn expired_retry_instruction_on_final_attempt_is_rejected_as_stale() {
+    let mut fixture = fixture("fixture.responses/v1", '9', 'a');
+    fixture.request.attempt_limit = 1;
+    let evidence_digest = sha('8');
+    let failure = ModelAdapterFailure {
+        class: ModelAdapterFailureClass::RetryableAfterDispatch,
+        safe_code: "model_connect_timeout".to_owned(),
+        safe_message: "Model Provider completion could not be observed".to_owned(),
+        evidence_digest: evidence_digest.clone(),
+        request_sent: true,
+        retry_at: Some(Utc::now() - ChronoDuration::milliseconds(1)),
+    };
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let mut registry = InstalledModelAdapterRegistry::default();
+    registry
+        .install(Arc::new(DispatchCountingAdapter {
+            descriptor: fixture.descriptor,
+            dispatch_count: dispatch_count.clone(),
+        }))
+        .unwrap();
+    let authority = Arc::new(CapturingAuthority {
+        outcome: Mutex::new(None),
+        fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
+    });
+    let worker = ModelAdapterWorker::new(
+        Arc::new(ModelAdapterHost::new(
+            registry,
+            Arc::new(DropModelLiveDeltas),
+            limits(),
+        )),
+        StaticValidationFailureMaterializer { failure },
+        authority.clone(),
+    );
+
+    let result = worker.execute(worker_command(fixture.request)).await;
+
+    assert!(matches!(
+        result,
+        Err(ModelAdapterWorkerError::Contract(
+            ModelAdapterWorkerContractError::InvalidFailure
+        ))
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+    assert!(authority.outcome.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn final_attempt_connect_timeout_is_committed_as_permanent() {
+    let mut fixture = fixture("fixture.responses/v1", '9', 'a');
+    fixture.request.attempt_limit = 1;
+    fixture
+        .request
+        .provider
+        .request_limits
+        .connect_timeout_milliseconds = 1;
+    let mut registry = InstalledModelAdapterRegistry::default();
+    registry
+        .install(Arc::new(PendingAdapter {
+            descriptor: fixture.descriptor,
+        }))
+        .unwrap();
+    let authority = Arc::new(CapturingAuthority {
+        outcome: Mutex::new(None),
+        fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
+    });
+    let worker = ModelAdapterWorker::new(
+        Arc::new(ModelAdapterHost::new(
+            registry,
+            Arc::new(DropModelLiveDeltas),
+            limits(),
+        )),
+        InlineMaterializer,
+        authority.clone(),
+    );
+
+    worker
+        .execute(worker_command(fixture.request))
+        .await
+        .unwrap();
+
+    let outcome = authority.outcome.lock().unwrap();
+    let ModelDispatchOutcome::PermanentFailure {
+        failure,
+        measurement,
+    } = outcome.as_ref().unwrap()
+    else {
+        panic!("final-attempt connect timeout was not committed as permanent")
+    };
+    assert_eq!(failure.failure.retryability, Retryability::Never);
+    assert_eq!(failure.safe_code, "model_connect_timeout");
+    assert!(measurement.observation.request_sent);
+    assert!(measurement.observation.possible_duplicate_charge);
+}
+
+#[tokio::test]
+async fn final_attempt_still_rejects_a_retry_instruction_outside_the_deadline() {
+    let mut fixture = fixture("fixture.responses/v1", '9', 'a');
+    fixture.request.attempt_limit = 1;
+    let failure = ModelAdapterFailure {
+        class: ModelAdapterFailureClass::RetryableAfterDispatch,
+        safe_code: "model_connect_timeout".to_owned(),
+        safe_message: "Model Provider completion could not be observed".to_owned(),
+        evidence_digest: sha('8'),
+        request_sent: true,
+        retry_at: Some(fixture.request.request.deadline),
+    };
+    let mut registry = InstalledModelAdapterRegistry::default();
+    registry
+        .install(Arc::new(DispatchCountingAdapter {
+            descriptor: fixture.descriptor,
+            dispatch_count: Arc::new(AtomicUsize::new(0)),
+        }))
+        .unwrap();
+    let authority = Arc::new(CapturingAuthority {
+        outcome: Mutex::new(None),
+        fence: Mutex::new(None),
+        terminal_mutations: Mutex::new(None),
+    });
+    let worker = ModelAdapterWorker::new(
+        Arc::new(ModelAdapterHost::new(
+            registry,
+            Arc::new(DropModelLiveDeltas),
+            limits(),
+        )),
+        StaticValidationFailureMaterializer { failure },
+        authority.clone(),
+    );
+
+    let result = worker.execute(worker_command(fixture.request)).await;
+
+    assert!(matches!(
+        result,
+        Err(ModelAdapterWorkerError::Contract(
+            ModelAdapterWorkerContractError::InvalidFailure
+        ))
+    ));
+    assert!(authority.outcome.lock().unwrap().is_none());
 }
 
 struct FixtureWireConnector {

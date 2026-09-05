@@ -25,12 +25,13 @@ insight dev --path ./my-agent --features all
 ```
 
 feature 集合按 canonical 顺序冻结到 profile digest；未知、重复或移除既有 feature 都会在拉取 image 或启动服务前
-fail closed。`insight stop` 保留数据，`insight start` 重验并恢复同一 closure；`insight reset` 先显示精确删除范围，
+fail closed。同一 release/source 才能追加 feature；切换 exact release/source 必须先用原 feature 集合完成一次显式 `dev`，
+不能在同次操作中顺带扩展 feature。`insight stop` 保留数据，`insight start` 重验并恢复同一 closure；`insight reset` 先显示精确删除范围，
 只有再次提供 project name 才删除 project-local authority 和 volume。
 
 ## 安装、更新与诊断
 
-每个 release 提供四个平台 CLI archive、checksum、SBOM、provenance、签名以及 digest-pinned runtime、Sandbox guest
+每个 release 提供四个平台 CLI archive、checksum、SBOM、provenance、签名以及 digest-pinned runtime、Sandbox runner
 和 Console image。CLI 只接受与当前平台、版本、profile/schema 和自身 binary digest 完全匹配的签名 ReleaseBundle。
 
 ```bash
@@ -39,6 +40,9 @@ insight update check
 insight update apply --version 1.2.3
 insight doctor --json
 ```
+
+`update apply` 只原子安装已签名的 exact CLI，不会隐式改写现有 project runtime；随后先以原 feature 集合运行
+`insight stop && insight dev` 完成 release transition，再用另一次 `dev` 增加 feature。
 
 `doctor` 的预构建路径要求 Docker/Compose、可用端口、至少 4 CPU、8 GiB memory 与 8 GiB free disk；Rust 仅作为
 `--from-source` contributor 路径的可选检查，Node.js 只用于构建 Console 和远端框架 reference。
@@ -54,6 +58,8 @@ scripts/run-productization-journey.sh --console-browser
 ```
 
 `--from-source` 只构建所选 role closure。发行版或 image 验证失败时默认路径不会静默编译源码。
+仓库根是 virtual Cargo workspace；可执行实现只来自显式 `platform-*` role 与 `insight` CLI，跨平面
+journey 由 `insight-platform-qualification-tests` 持有，不存在根级 runtime facade。
 
 ## 产品文档
 

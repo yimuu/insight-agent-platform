@@ -225,8 +225,11 @@ impl ModelAdapterFailure {
 
     fn retryable_after_dispatch(code: &str, request: &ModelAdapterExecutionRequest) -> Self {
         let now = Utc::now();
-        let retry_at = now + chrono::Duration::milliseconds(1);
-        let can_retry = retry_at < request.request.deadline;
+        // Keep the bounded retry intent valid across the immediate Host-to-Worker validation;
+        // durable lease recovery handles a later lost commit.
+        let retry_at = now + chrono::Duration::milliseconds(250);
+        let can_retry =
+            request.attempt_no < request.attempt_limit && retry_at < request.request.deadline;
         Self {
             class: if can_retry {
                 ModelAdapterFailureClass::RetryableAfterDispatch
@@ -608,10 +611,20 @@ impl ModelAdapterHost {
 }
 
 fn checked_failure(
-    failure: ModelAdapterFailure,
+    mut failure: ModelAdapterFailure,
     request: &ModelAdapterExecutionRequest,
 ) -> Result<ModelAdapterExecutionOutcome, ModelAdapterHostError> {
     failure.validate_for(request, Utc::now())?;
+    if request.attempt_no >= request.attempt_limit
+        && matches!(
+            failure.class,
+            ModelAdapterFailureClass::RetryableBeforeDispatch
+                | ModelAdapterFailureClass::RetryableAfterDispatch
+        )
+    {
+        failure.class = ModelAdapterFailureClass::Permanent;
+        failure.retry_at = None;
+    }
     Ok(ModelAdapterExecutionOutcome::Failed(failure))
 }
 

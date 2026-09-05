@@ -726,7 +726,7 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
         let stored_entry = self
             .create_or_load(&secret_name, &version_id, proposed)
             .await?;
-        let secret_id = stored_secret_id(&stored_entry, &secret_name)?.to_owned();
+        let secret_id = stored_secret_id(&stored_entry)?.to_owned();
         if stored_entry.version_id != version_id {
             return Err(SecretProviderPrepareError::Rejected);
         }
@@ -812,8 +812,7 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
         let Some(stored) = self.load_prepared(&name, &version).await? else {
             return Ok(None);
         };
-        self.token_result(preparation, name, version, stored)
-            .map(Some)
+        self.token_result(preparation, version, stored).map(Some)
     }
 
     async fn prepare_or_load_mcp_oauth_token(
@@ -851,7 +850,7 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
             expires_at: verified.expires_at,
         });
         let stored = self.create_or_load(&name, &version, proposed).await?;
-        self.token_result(preparation, name, version, stored)
+        self.token_result(preparation, version, stored)
     }
 }
 
@@ -1037,11 +1036,10 @@ impl AwsSecretsManagerProvider {
     fn token_result(
         &self,
         preparation: &McpOAuthTokenPreparation,
-        name: String,
         version: String,
         stored: StoredPreparedSecret,
     ) -> Result<ProviderStoredMcpOAuthTokenSecret, SecretProviderPrepareError> {
-        let secret_id = stored_secret_id(&stored, &name)?.to_owned();
+        let secret_id = stored_secret_id(&stored)?.to_owned();
         if stored.version_id != version {
             return Err(SecretProviderPrepareError::Rejected);
         }
@@ -1332,10 +1330,7 @@ fn deterministic_version_id(
     Ok(Uuid::from_bytes(id).to_string())
 }
 
-fn stored_secret_id<'a>(
-    stored: &'a StoredPreparedSecret,
-    _fallback: &'a str,
-) -> Result<&'a str, SecretProviderPrepareError> {
+fn stored_secret_id(stored: &StoredPreparedSecret) -> Result<&str, SecretProviderPrepareError> {
     if stored.secret_id.is_empty() {
         Err(SecretProviderPrepareError::Rejected)
     } else if valid_secret_arn(&stored.secret_id) {

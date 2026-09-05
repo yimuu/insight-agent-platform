@@ -14,6 +14,15 @@ OptionParser.new do |parser|
   parser.on("--output PATH") { |value| options[:output] = value }
   parser.on("--git-commit SHA") { |value| options[:git_commit] = value }
   parser.on("--platform-image-digest DIGEST") { |value| options[:platform_image_digest] = value }
+  parser.on("--platform-image-repository REPOSITORY") do |value|
+    options[:platform_image_repository] = value
+  end
+  parser.on("--sandbox-runner-image-digest DIGEST") do |value|
+    options[:sandbox_runner_image_digest] = value
+  end
+  parser.on("--sandbox-runner-image-repository REPOSITORY") do |value|
+    options[:sandbox_runner_image_repository] = value
+  end
   parser.on("--postgres-cidr CIDR") { |value| options[:postgres_cidr] = value }
   parser.on("--nats-cidr CIDR") { |value| options[:nats_cidr] = value }
   parser.on("--localstack-pod-cidr CIDR") { |value| options[:localstack_pod_cidr] = value }
@@ -28,7 +37,8 @@ OptionParser.new do |parser|
 end.parse!
 
 required = %i[
-  seed_runtime output git_commit platform_image_digest postgres_cidr nats_cidr
+  seed_runtime output git_commit platform_image_digest platform_image_repository
+  sandbox_runner_image_digest sandbox_runner_image_repository postgres_cidr nats_cidr
   localstack_pod_cidr localstack_service_cidr kubernetes_api_service_cidr
   kubernetes_api_endpoint_cidr kubernetes_api_endpoint_port kms_key_arn readiness_secret_arn
 ]
@@ -38,6 +48,13 @@ abort "missing required options: #{missing.join(', ')}" unless missing.empty?
 DIGEST = /\Asha256:[0-9a-f]{64}\z/
 COMMIT = /\A[0-9a-f]{40}\z/
 abort "platform image digest is invalid" unless DIGEST.match?(options[:platform_image_digest])
+abort "Sandbox runner image digest is invalid" unless DIGEST.match?(options[:sandbox_runner_image_digest])
+abort "platform image repository is invalid" unless
+  %r{\A[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+\z}.match?(options[:platform_image_repository]) ||
+    %r{\A[a-z0-9._/-]+\z}.match?(options[:platform_image_repository])
+abort "Sandbox runner image repository is invalid" unless
+  %r{\A[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+\z}.match?(options[:sandbox_runner_image_repository]) ||
+    %r{\A[a-z0-9._/-]+\z}.match?(options[:sandbox_runner_image_repository])
 abort "git commit is invalid" unless COMMIT.match?(options[:git_commit])
 abort "Kubernetes API endpoint port is invalid" unless (1..65_535).cover?(options[:kubernetes_api_endpoint_port])
 
@@ -247,13 +264,16 @@ deployment_config_digest = digest(
   "schema_version" => 1,
   "profile" => "kind-local-mechanics",
   "git_commit" => options[:git_commit],
+  "platform_image_repository" => options[:platform_image_repository],
   "platform_image_digest" => options[:platform_image_digest],
+  "sandbox_runner_image_repository" => options[:sandbox_runner_image_repository],
+  "sandbox_runner_image_digest" => options[:sandbox_runner_image_digest],
   "configuration_digests" => digests
 )
 
 common = {
   "image" => {
-    "repository" => "insight-agent-platform",
+    "repository" => options[:platform_image_repository],
     "digest" => options[:platform_image_digest]
   },
   "candidate" => {"deploymentConfigDigest" => deployment_config_digest}
@@ -265,7 +285,16 @@ localstack_cidrs = [options[:localstack_pod_cidr], options[:localstack_service_c
 values = {
   "sandbox" => {
     "global" => {"deploymentConfigDigest" => deployment_config_digest},
-    "images" => {"platform" => {"digest" => options[:platform_image_digest]}},
+    "images" => {
+      "platform" => {
+        "repository" => options[:platform_image_repository],
+        "digest" => options[:platform_image_digest]
+      },
+      "sandboxRunner" => {
+        "repository" => options[:sandbox_runner_image_repository],
+        "digest" => options[:sandbox_runner_image_digest]
+      }
+    },
     "monitoring" => {"enabled" => false},
     "networkPolicy" => {
       "postgresCidrs" => postgres,
@@ -470,11 +499,14 @@ File.write(
 File.write(
   File.join(output, "environment.json"),
   JSON.pretty_generate(
-    "schema_version" => 1,
-    "kind" => "insight.platform/kind-local-mechanics/v1",
+    "schema_version" => 2,
+    "kind" => "insight.platform/kind-local-mechanics/v2",
     "production" => false,
     "git_commit" => options[:git_commit],
+    "platform_image_repository" => options[:platform_image_repository],
     "platform_image_digest" => options[:platform_image_digest],
+    "sandbox_runner_image_repository" => options[:sandbox_runner_image_repository],
+    "sandbox_runner_image_digest" => options[:sandbox_runner_image_digest],
     "deployment_config_digest" => deployment_config_digest,
     "generated_at" => Time.now.utc.iso8601(6)
   ) << "\n"

@@ -346,7 +346,7 @@ def validate_sandbox_security(
         "opensandbox-batchsandbox": [
             f"system:serviceaccount:{CONTROL_NAMESPACE}:opensandbox-server",
             f"system:serviceaccount:{CONTROL_NAMESPACE}:opensandbox-controller",
-            "armed-runner-v1",
+            "armed-runner-v2",
             "execd-installer",
         ],
         "opensandbox-pods": [
