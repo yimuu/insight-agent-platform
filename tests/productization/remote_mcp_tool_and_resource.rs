@@ -14,12 +14,21 @@ pub(super) struct McpEvidence {
     pub console_passed: bool,
     started_at: chrono::DateTime<Utc>,
     finished_at: chrono::DateTime<Utc>,
-    _remote_worker: Child,
+    restored_profile_worker: Option<FixtureChild>,
 }
 
 impl McpEvidence {
     pub(super) fn mark_console_passed(&mut self) {
         self.console_passed = true;
+        self.finished_at = Utc::now();
+    }
+
+    pub(super) fn terminate_restored_profile_worker(&mut self) {
+        self.restored_profile_worker
+            .take()
+            .expect("restored profile Capability worker is terminated exactly once")
+            .terminate()
+            .expect("restored profile Capability worker terminates before profile restart");
     }
 
     pub(super) fn report(&self, revision: &str) -> Value {
@@ -30,6 +39,10 @@ impl McpEvidence {
             "scenario_id": "remote-mcp-tool-and-resource",
             "contract_profile": "insight.platform/v1",
             "profile": "starter+mcp,remote-capability",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},
@@ -59,19 +72,145 @@ impl McpEvidence {
 }
 
 struct McpEnvironment {
-    broker: Child,
-    fixture: Child,
+    broker: FixtureChild,
+    fixture: FixtureChild,
     config_path: std::path::PathBuf,
+}
+
+struct InstalledMcpCodecWorker {
+    child: FixtureChild,
+    authority_config_path: std::path::PathBuf,
     original_config: Vec<u8>,
+}
+
+fn spawn_capability_remote_worker(
+    project: &Path,
+    config_path: &Path,
+    config: &Value,
+    config_digest: &str,
+    log_name: &str,
+) -> FixtureChild {
+    let runtime = project.join(".insight/runtime");
+    let tls = runtime.join("tls");
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.join("logs").join(log_name))
+        .expect("Capability worker log is writable");
+    let stderr = log
+        .try_clone()
+        .expect("Capability worker log can be cloned");
+    let mut child = FixtureChild::new(
+        Command::new(runtime_binary_path(
+            project,
+            "platform-capability-remote-worker",
+        ))
+        .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG", config_path)
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST",
+            config_digest,
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
+            DATABASE_URL,
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH",
+            tls.join("ca.pem"),
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
+            tls.join("capability-remote-client.pem"),
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
+            tls.join("capability-remote-client-key.pem"),
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
+            tls.join("ca.pem"),
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
+            tls.join("capability-remote-client.pem"),
+        )
+        .env(
+            "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
+            tls.join("capability-remote-client-key.pem"),
+        )
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("replacement Capability worker starts"),
+    );
+    let address = config["observability_listen_address"]
+        .as_str()
+        .expect("Capability worker observability address");
+    let deadline = Instant::now() + StdDuration::from_secs(30);
+    while TcpStream::connect(address).is_err() {
+        assert!(
+            child.child_mut().try_wait().unwrap().is_none(),
+            "replacement Capability worker exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "replacement Capability worker readiness"
+        );
+        thread::sleep(StdDuration::from_millis(50));
+    }
+    child
+}
+
+fn restore_profile_capability_worker(
+    project: &Path,
+    mut worker: InstalledMcpCodecWorker,
+) -> FixtureChild {
+    let config_path = worker.authority_config_path.clone();
+    let original_config = worker.original_config.clone();
+    worker
+        .child
+        .terminate()
+        .expect("MCP Capability worker terminates before profile worker restore");
+    let restored = fs::read(&config_path).expect("restored Capability config is readable");
+    assert_eq!(
+        restored, original_config,
+        "MCP fixture must preserve the exact profile-owned Capability config"
+    );
+    let profile_path = config_path
+        .parent()
+        .and_then(Path::parent)
+        .expect("Capability config is inside the runtime directory")
+        .join("profile.json");
+    let profile: Value = serde_json::from_slice(
+        &fs::read(profile_path).expect("runtime profile authority is readable"),
+    )
+    .expect("runtime profile authority is closed JSON");
+    let restored: Value =
+        serde_json::from_slice(&restored).expect("restored Capability config is closed JSON");
+    let config_digest = canonical_digest(&restored);
+    assert_eq!(
+        profile["config_digests"]["capability-remote"], config_digest,
+        "restored Capability config must match profile authority"
+    );
+    spawn_capability_remote_worker(
+        project,
+        &config_path,
+        &restored,
+        &config_digest,
+        "capability-remote-profile-restore.log",
+    )
+}
+
+impl Drop for InstalledMcpCodecWorker {
+    fn drop(&mut self) {
+        let _ = self.child.terminate();
+    }
 }
 
 impl Drop for McpEnvironment {
     fn drop(&mut self) {
-        let _ = self.broker.kill();
-        let _ = self.broker.wait();
-        let _ = self.fixture.kill();
-        let _ = self.fixture.wait();
-        fs::write(&self.config_path, &self.original_config).expect("Egress config restore");
+        let _ = self.broker.terminate();
+        let _ = self.fixture.terminate();
     }
 }
 
@@ -269,21 +408,19 @@ fn seed_authorization(
 }
 
 fn start_environment(
-    insight: &Path,
+    _insight: &Path,
     project: &Path,
+    fixture_directory: &Path,
     deployment: &Value,
     endpoint: &Value,
     policies: &std::collections::BTreeMap<&str, native_and_remote_capability::PolicyAuthority>,
 ) -> McpEnvironment {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap();
+    let workspace = workspace_root();
     let runtime = project.join(".insight/runtime");
     let tls = runtime.join("tls");
-    let config_path = runtime.join("config/egress-broker.json");
-    let original_config = fs::read(&config_path).unwrap();
+    let authority_config_path = runtime.join("config/egress-broker.json");
+    let config_path = fixture_directory.join("egress-broker-mcp.json");
+    let original_config = fs::read(&authority_config_path).unwrap();
     let mut config: Value = serde_json::from_slice(&original_config).unwrap();
     config["mcp_streamable_http_endpoints"] = json!([{
         "schema_version": 1,
@@ -309,29 +446,31 @@ fn start_environment(
         stop_role(project, "egress-broker");
     }
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
-    let mut fixture = Command::new(node)
-        .arg(workspace.join("examples/productization/remote-fixture.mjs"))
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_PORT",
-            endpoint["port"].as_u64().unwrap().to_string(),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
-            tls.join("egress-broker.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
-            tls.join("egress-broker-key.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
-            runtime.join("logs/remote-fixture-mcp.jsonl"),
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let ready = BufReader::new(fixture.stdout.take().unwrap())
+    let mut fixture = FixtureChild::new(
+        Command::new(node)
+            .arg(workspace.join("examples/productization/remote-fixture.mjs"))
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_PORT",
+                endpoint["port"].as_u64().unwrap().to_string(),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
+                tls.join("egress-broker.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
+                tls.join("egress-broker-key.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
+                runtime.join("logs/remote-fixture-mcp.jsonl"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let ready = BufReader::new(fixture.child_mut().stdout.take().unwrap())
         .lines()
         .next()
         .unwrap()
@@ -340,14 +479,17 @@ fn start_environment(
         serde_json::from_str::<Value>(&ready).unwrap()["status"],
         "ready"
     );
-    let mut broker =
-        native_and_remote_capability::spawn_egress(workspace, project, &config_path, &config);
-    native_and_remote_capability::wait_egress(&mut broker, &address);
+    let mut broker = FixtureChild::new(native_and_remote_capability::spawn_egress(
+        workspace,
+        project,
+        &config_path,
+        &config,
+    ));
+    native_and_remote_capability::wait_egress(broker.child_mut(), &address);
     McpEnvironment {
         broker,
         fixture,
         config_path,
-        original_config,
     }
 }
 
@@ -450,22 +592,19 @@ fn discovery_snapshot(insight: &Path, project: &Path, fixture: &Path) -> Value {
 }
 
 fn install_exact_mcp_codec(
-    insight: &Path,
+    _insight: &Path,
     project: &Path,
+    fixture_directory: &Path,
     backend_contract: &Value,
     schema_digest: &str,
     protocol: &Value,
     objects_digest: &Value,
-) -> (Value, Child) {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap();
+) -> (Value, InstalledMcpCodecWorker) {
     let runtime = project.join(".insight/runtime");
-    let tls = runtime.join("tls");
-    let config_path = runtime.join("config/capability-remote.json");
-    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    let authority_config_path = runtime.join("config/capability-remote.json");
+    let config_path = fixture_directory.join("capability-remote-mcp.json");
+    let original_config = fs::read(&authority_config_path).unwrap();
+    let mut config: Value = serde_json::from_slice(&original_config).unwrap();
     let existing = config["installed_mcp_codecs"][0].clone();
     let descriptor_digest = canonical_digest(&json!({
         "contract": backend_contract,
@@ -489,62 +628,19 @@ fn install_exact_mcp_codec(
     stop_role(project, "capability-remote");
     fs::write(&config_path, canonical_bytes(&config)).unwrap();
     let digest = canonical_digest(&config);
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(runtime.join("logs/capability-remote-mcp-restart.log"))
-        .unwrap();
-    let stderr = log.try_clone().unwrap();
-    let mut child =
-        Command::new(workspace.join("target/release/platform-capability-remote-worker"))
-            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG", &config_path)
-            .env("PLATFORM_CAPABILITY_REMOTE_WORKER_CONFIG_DIGEST", digest)
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_DATABASE_URL",
-                DATABASE_URL,
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH",
-                tls.join("ca.pem"),
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH",
-                tls.join("capability-remote-client.pem"),
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH",
-                tls.join("capability-remote-client-key.pem"),
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH",
-                tls.join("ca.pem"),
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH",
-                tls.join("capability-remote-client.pem"),
-            )
-            .env(
-                "PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH",
-                tls.join("capability-remote-client-key.pem"),
-            )
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .unwrap();
-    let address = config["observability_listen_address"].as_str().unwrap();
-    let deadline = Instant::now() + StdDuration::from_secs(30);
-    while TcpStream::connect(address).is_err() {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "replacement MCP Capability worker exited"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "replacement MCP Capability worker readiness"
-        );
-        thread::sleep(StdDuration::from_millis(50));
-    }
-    (config, child)
+    let child = spawn_capability_remote_worker(
+        project,
+        &config_path,
+        &config,
+        &digest,
+        "capability-remote-mcp-restart.log",
+    );
+    let worker = InstalledMcpCodecWorker {
+        child,
+        authority_config_path,
+        original_config,
+    };
+    (config, worker)
 }
 
 fn publish_agent(
@@ -581,13 +677,14 @@ fn publish_agent(
     );
     let manifest = json!({
         "schema_version": 1, "kind": "insight.platform.apply/v1", "resource_noun": "agents",
-        "create": {"display_name": "Remote MCP Tool agent", "document": {"resource_kind": "agent", "spec": {
+        "create": {"display_name": "Remote MCP Tool agent", "document": {"resource_kind": "agent", "spec": agent_resource_spec(
+            "remote-mcp-tool-agent", vec![], json!({
             "authoring_package": {"artifact": authoring_ref, "manifest_digest": authoring_ref["content_digest"]},
             "contract_digest": contract_digest, "dependency_versions": [],
             "policy_versions": policies.values().map(|policy| policy.revision.clone()).collect::<Vec<_>>(),
             "input_schema": schema, "output_schema": schema, "error_schema": native_and_remote_capability::value_schema("error"),
             "typed_plan_artifact_id": plan_upload["artifact_id"], "typed_plan_digest": plan_upload["content_digest"]
-        }}},
+        }))}},
         "publish": {"kind": "agent", "revision_no": 1, "interface_content_digest": contract_digest,
             "plan_content_digest": plan_upload["content_digest"], "artifact_id": plan_upload["artifact_id"]},
         "deployment": {"environment": "local", "closure": {"resource_kind": "agent", "bindings": {
@@ -672,7 +769,8 @@ pub(super) fn run(
         canonical_digest(&endpoint).as_str(),
         &provider_id,
     );
-    let mut environment = start_environment(insight, project, &deployment, &endpoint, &policies);
+    let mut environment =
+        start_environment(insight, project, fixture, &deployment, &endpoint, &policies);
     let _operation = discover(insight, project, &server, &authorization_id);
     let snapshot_record = discovery_snapshot(insight, project, fixture);
     let snapshot = &snapshot_record["snapshot"];
@@ -697,6 +795,7 @@ pub(super) fn run(
     let (remote_config, remote_worker) = install_exact_mcp_codec(
         insight,
         project,
+        fixture,
         &backend_contract,
         &remote_input_schema_digest,
         &snapshot["protocol_profile"],
@@ -789,30 +888,28 @@ pub(super) fn run(
         .lines()
         .filter(|line| line.contains("\"rpc_method\":\"tools/call\""))
         .count();
-    let _ = environment.broker.kill();
-    let _ = environment.broker.wait();
+    environment
+        .broker
+        .terminate()
+        .expect("replacement Egress terminates before the TLS rejection probe");
     let mut wrong_tls: Value =
         serde_json::from_slice(&fs::read(&environment.config_path).unwrap()).unwrap();
     wrong_tls["mcp_streamable_http_endpoints"][0]["trusted_root_pem"] = json!(fs::read_to_string(
         project.join(".insight/runtime/tls/security-authority.pem")
     )
     .unwrap());
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap();
+    let workspace = workspace_root();
     let address = wrong_tls["observability_listen_address"]
         .as_str()
         .unwrap()
         .to_owned();
-    environment.broker = native_and_remote_capability::spawn_egress(
+    environment.broker = FixtureChild::new(native_and_remote_capability::spawn_egress(
         workspace,
         project,
         &environment.config_path,
         &wrong_tls,
-    );
-    native_and_remote_capability::wait_egress(&mut environment.broker, &address);
+    ));
+    native_and_remote_capability::wait_egress(environment.broker.child_mut(), &address);
     let tls_id = native_and_remote_capability::create_run(
         insight,
         project,
@@ -833,11 +930,16 @@ pub(super) fn run(
         .count();
     assert_eq!(calls_after, calls_before);
 
+    let restored_profile_worker = restore_profile_capability_worker(project, remote_worker);
+    // The remote worker establishes its Egress channel before binding readiness, so preserve the
+    // live MCP Egress long enough to restore the profile-owned worker.  Drop the fixture Egress
+    // only after readiness; the following scenario replaces it at the same profile-owned address.
+    drop(environment);
     McpEvidence {
         run_id,
         console_passed: false,
         started_at,
         finished_at: Utc::now(),
-        _remote_worker: remote_worker,
+        restored_profile_worker: Some(restored_profile_worker),
     }
 }

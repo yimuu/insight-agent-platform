@@ -60,6 +60,10 @@ impl TimerSignalEvidence {
             "scenario_id": "timer-signal-restart-recovery",
             "contract_profile": "insight.platform/v1",
             "profile": "starter",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P2",
             "source_revision": revision,
             "environment": {
@@ -94,7 +98,7 @@ pub(super) fn run(
     fixture: &Path,
     schema_digest: &str,
     agent_manifest: &Value,
-    replacement: RestartedOrchestrationWorker,
+    mut replacement: RestartedOrchestrationWorker,
 ) -> (TimerSignalEvidence, RestartedOrchestrationWorker) {
     let started_at = Utc::now();
     let plan = json!({
@@ -132,6 +136,7 @@ pub(super) fn run(
     );
     let mut manifest = agent_manifest.clone();
     manifest["create"]["display_name"] = json!("Timer signal recovery agent");
+    manifest["create"]["document"]["spec"]["authoring_name"] = json!("timer-signal-recovery-agent");
     manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
         plan_upload["artifact_id"].clone();
     manifest["create"]["document"]["spec"]["typed_plan_digest"] =
@@ -209,7 +214,9 @@ pub(super) fn run(
         );
         thread::sleep(StdDuration::from_millis(50));
     }
-    drop(replacement);
+    replacement
+        .terminate()
+        .expect("the orchestration Worker is terminated before signal submission");
 
     let (client, base_url, token) = raw_runtime_client(project);
     let receipt = format!("productization-signal-{run_id}");

@@ -20,6 +20,7 @@ def expected_results(selections: Mapping[str, bool]) -> dict[str, str]:
         "cli": "success" if selections["cli"] and not runtime else "skipped",
         "console": "success" if selections["console"] else "skipped",
         "policy": "success" if selections["policy"] else "skipped",
+        "productization": "success",
     }
 
 
@@ -46,7 +47,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     for lane in ("runtime", "cli", "console", "policy"):
         parser.add_argument(f"--{lane}-selected", type=selection, required=True)
-    for lane in ("changes", "quick", "lint", "test", "cli", "console", "policy"):
+    for lane in (
+        "changes",
+        "quick",
+        "lint",
+        "test",
+        "cli",
+        "console",
+        "policy",
+        "productization",
+    ):
         parser.add_argument(f"--{lane}-result", choices=RESULTS, required=True)
     arguments = vars(parser.parse_args())
     selections = {
@@ -55,7 +65,16 @@ def main() -> None:
     }
     actual = {
         lane: arguments[f"{lane.replace('-', '_')}_result"]
-        for lane in ("changes", "quick", "lint", "test", "cli", "console", "policy")
+        for lane in (
+            "changes",
+            "quick",
+            "lint",
+            "test",
+            "cli",
+            "console",
+            "policy",
+            "productization",
+        )
     }
     failures = validate_results(selections, actual)
     if failures:

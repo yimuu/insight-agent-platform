@@ -110,6 +110,54 @@ function jsonLiteral(value) {
   return JSON.stringify(value).replaceAll('<', '\\u003c')
 }
 
+function exactPanelStatus(kicker, state) {
+  return `(() => {
+    const panel = [...document.querySelectorAll('article.panel')].find((candidate) =>
+      candidate.querySelector(':scope > .panel__heading .kicker')?.textContent.trim() === ${jsonLiteral(kicker)}
+    );
+    return panel?.querySelector(':scope > .panel__heading > .status')?.textContent.trim() === ${jsonLiteral(state)};
+  })()`
+}
+
+function exactPanelText(kicker, text) {
+  return `(() => {
+    const panel = [...document.querySelectorAll('article.panel')].find((candidate) =>
+      candidate.querySelector(':scope > .kicker, :scope > .panel__heading .kicker')?.textContent.trim() === ${jsonLiteral(kicker)}
+    );
+    return panel?.innerText.includes(${jsonLiteral(text)}) === true;
+  })()`
+}
+
+function submitSearchAndWaitForIdle(inputSelector) {
+  return `new Promise((resolveDone, rejectDone) => {
+    const input = document.querySelector(${jsonLiteral(inputSelector)});
+    const form = input?.closest('form');
+    const button = form?.querySelector('button');
+    if (!(form instanceof HTMLFormElement) || !(button instanceof HTMLButtonElement)) {
+      rejectDone(new Error('missing search form: ' + ${jsonLiteral(inputSelector)}));
+      return;
+    }
+    let sawBusy = button.disabled;
+    let timer;
+    const observer = new MutationObserver((records) => {
+      if (button.disabled || records.some((record) =>
+        record.attributeName === 'disabled' && record.oldValue === null
+      )) sawBusy = true;
+      if (sawBusy && !button.disabled) {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolveDone(true);
+      }
+    });
+    observer.observe(button, { attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
+    timer = setTimeout(() => {
+      observer.disconnect();
+      rejectDone(new Error('search form did not complete: ' + ${jsonLiteral(inputSelector)}));
+    }, 10_000);
+    form.requestSubmit();
+  })`
+}
+
 function setInput(selector, value) {
   return `(() => {
     const element = document.querySelector(${jsonLiteral(selector)});
@@ -138,6 +186,7 @@ async function main() {
   const emptyRunId = process.env.INSIGHT_CONSOLE_EMPTY_RUN_ID
   const expectSlowLoading = process.env.INSIGHT_CONSOLE_EXPECT_SLOW_LOADING === '1'
   const taskId = required('INSIGHT_CONSOLE_TASK_ID')
+  const taskSafePromptKey = required('INSIGHT_CONSOLE_TASK_SAFE_PROMPT_KEY')
   const deterministicRunId = process.env.INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID
   const timerSignalRunId = process.env.INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID
   const subagentRunId = process.env.INSIGHT_CONSOLE_SUBAGENT_RUN_ID
@@ -146,10 +195,11 @@ async function main() {
   const modelRunId = process.env.INSIGHT_CONSOLE_MODEL_RUN_ID
   const capabilityRunId = process.env.INSIGHT_CONSOLE_CAPABILITY_RUN_ID
   const mcpRunId = process.env.INSIGHT_CONSOLE_MCP_RUN_ID
-  const wasiFrameworkRunId = process.env.INSIGHT_CONSOLE_WASI_FRAMEWORK_RUN_ID
+  const sandboxRunId = process.env.INSIGHT_CONSOLE_SANDBOX_RUN_ID
   const responseBody = JSON.parse(required('INSIGHT_CONSOLE_TASK_RESPONSE'))
   const expectedResultText = process.env.INSIGHT_CONSOLE_EXPECTED_RESULT_TEXT ?? 'after task'
   const authoringJourney = process.env.INSIGHT_CONSOLE_AUTHORING_JOURNEY === '1'
+  const bundleRoot = process.env.INSIGHT_CONSOLE_BUNDLE_ROOT
   const browser = [
     process.env.INSIGHT_CONSOLE_BROWSER_BIN,
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -162,7 +212,7 @@ async function main() {
     .map((candidate) => resolve(candidate))
     .find((candidate) => existsSync(candidate))
   if (!browser) throw new Error('an executable Chromium or Chrome browser is required')
-  const consoleServer = await startGatewayConsoleServer({ gatewayOrigin })
+  const consoleServer = await startGatewayConsoleServer({ gatewayOrigin, bundleRoot })
   const browserProfile = mkdtempSync(join(tmpdir(), 'insight-console-browser-'))
   const debugPort = await unusedPort()
   const browserProcess = spawn(browser, [
@@ -246,7 +296,11 @@ async function main() {
         60_000,
       )
       await evaluate(client, clickText('Run'))
-      await waitFor(client, `document.body.innerText.includes('Run Hello Agent') && document.body.innerText.includes('Start Run')`, 'schema-driven Run input')
+      await waitFor(
+        client,
+        `document.body.innerText.includes('Run Hello Agent') && [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === 'Start Run' && !button.disabled)`,
+        'enabled schema-driven Run input',
+      )
       await evaluate(client, clickText('Start Run'))
       await waitFor(client, `document.body.innerText.includes('Completed')`, 'new Agent Run terminal state')
       await evaluate(client, `(() => { const buttons = [...document.querySelectorAll('button')].filter((button) => button.textContent.trim() === 'Refresh'); buttons.at(-1).click() })()`)
@@ -275,30 +329,30 @@ async function main() {
     if (deterministicRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', deterministicRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('hello')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'hello')}`,
         'exact deterministic Run authority and Inline result',
       )
     }
     if (timerSignalRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', timerSignalRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('resume after signal')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'resume after signal')}`,
         'exact Timer/Signal Run authority and Inline result',
       )
     }
     if (subagentRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', subagentRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('child.started') && document.body.innerText.includes('child.completed')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && document.body.innerText.includes('child.started') && document.body.innerText.includes('child.completed')`,
         'exact Subagent parent Run and durable child timeline',
       )
     }
@@ -306,68 +360,84 @@ async function main() {
       await evaluate(client, clickText('Settings'))
       await evaluate(client, clickText('Artifacts'))
       await evaluate(client, setInput('input[placeholder="art_…"]', artifactId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="art_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.includes(${jsonLiteral(artifactId)}) && document.body.innerText.toLowerCase().includes('ready') && document.body.innerText.includes('Controlled download')`,
+        `(() => {
+          const input = document.querySelector('input[placeholder="art_…"]')
+          const panel = input?.closest('.nested-panel')
+          const metrics = panel && [...panel.querySelectorAll('.metric')]
+          const action = panel && [...panel.querySelectorAll('button')]
+            .find((button) => button.textContent.trim() === 'Controlled download')
+          const exactMetric = (label, value) => metrics && metrics.some((metric) =>
+            metric.querySelector('dt')?.textContent.trim() === label
+              && metric.querySelector('dd')?.textContent.trim() === value)
+          return input instanceof HTMLInputElement
+            && input.value === ${jsonLiteral(artifactId)}
+            && panel instanceof HTMLElement
+            && exactMetric('Artifact ID', ${jsonLiteral(artifactId)})
+            && exactMetric('State', 'ready')
+            && action instanceof HTMLButtonElement
+            && !action.disabled
+        })()`,
         'exact Ready Artifact authority and controlled-download action',
       )
     }
     if (contextRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', contextRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('local deterministic context item') && document.body.innerText.includes('observation_only')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'local deterministic context item')} && ${exactPanelText('TYPED RESULT', 'observation_only')}`,
         'exact Context Run and citation projection',
       )
     }
     if (modelRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', modelRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('deterministic streamed model response')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'deterministic streamed model response')}`,
         'exact Model Run and structured Inline result',
       )
     }
     if (capabilityRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', capabilityRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('capability round trip')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'capability round trip')}`,
         'exact native-to-remote Capability Run and typed Inline result',
       )
     }
     if (mcpRunId) {
       await evaluate(client, clickText('Runs'))
       await evaluate(client, setInput('input[placeholder="run_…"]', mcpRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('mcp round trip')`,
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'mcp round trip')}`,
         'exact MCP Capability Run and typed Inline result',
       )
     }
-    if (wasiFrameworkRunId) {
+    if (sandboxRunId) {
       await evaluate(client, clickText('Runs'))
-      await evaluate(client, setInput('input[placeholder="run_…"]', wasiFrameworkRunId))
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
+      await evaluate(client, setInput('input[placeholder="run_…"]', sandboxRunId))
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
       await waitFor(
         client,
-        `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes('langgraph: bounded request')`,
-        'exact remote LangGraph Capability Run and bounded typed Inline result',
+        `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', 'langgraph: bounded request')}`,
+        'exact sandbox/framework Capability Run and bounded typed Inline result',
       )
     }
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
-    await evaluate(client, `document.querySelector('.search').requestSubmit()`)
-    await waitFor(client, `document.body.innerText.includes(${jsonLiteral(taskId)}) && document.body.innerText.toLowerCase().includes('waiting')`, 'waiting Run and linked Task')
+    await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
+    await waitFor(client, `${exactPanelStatus('RUN', 'waiting')} && document.body.innerText.includes(${jsonLiteral(taskId)})`, 'waiting Run and linked Task')
     const eventCanaryAbsent = await evaluate(client, `![
       'browser-token-must-not-render',
       'browser-prompt-must-not-render',
@@ -375,21 +445,27 @@ async function main() {
     ].some((canary) => document.documentElement.innerHTML.includes(canary))`)
     if (!eventCanaryAbsent) throw new Error('sensitive event canary reached the DOM')
     await evaluate(client, clickText('Open task'))
-    await evaluate(client, `document.querySelector('.search').requestSubmit()`)
-    await waitFor(client, `document.body.innerText.toLowerCase().includes('pending') && document.body.innerText.includes('interaction.confirm_release')`, 'pending Task authority')
+    await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="int_… or apv_…"]'))
+    await waitFor(client, `${exactPanelStatus('TASK', 'pending')} && ${exactPanelText('TASK', taskSafePromptKey)}`, 'pending Task authority')
     await evaluate(client, setInput('textarea', JSON.stringify(responseBody, null, 2)))
     await evaluate(client, clickText('Submit input'))
-    await waitFor(client, `document.body.innerText.toLowerCase().includes('responded') && document.body.innerText.includes('submit-input committed')`, 'Task mutation authority result')
+    await waitFor(client, `${exactPanelStatus('TASK', 'responded')} && document.body.innerText.includes('submit-input committed')`, 'Task mutation authority result')
 
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
     const terminalDeadline = Date.now() + 60_000
+    const terminalEvidence = `${exactPanelStatus('RUN', 'succeeded')} && ${exactPanelText('TYPED RESULT', expectedResultText)}`
+    let terminal = false
     while (Date.now() < terminalDeadline) {
-      await evaluate(client, `document.querySelector('.search').requestSubmit()`)
-      if (await evaluate(client, `document.body.innerText.toLowerCase().includes('succeeded')`)) break
+      await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
+      terminal = await evaluate(client, terminalEvidence)
+      if (terminal) break
       await delay(250)
     }
-    await waitFor(client, `document.body.innerText.toLowerCase().includes('succeeded') && document.body.innerText.includes(${jsonLiteral(expectedResultText)})`, 'terminal Run and safe result')
+    if (!terminal) {
+      const body = await evaluate(client, `document.body.innerText.slice(0, 4096)`)
+      throw new Error(`timed out waiting for terminal Run and safe result; visible page:\n${body}`)
+    }
     if (await evaluate(client, `document.documentElement.innerHTML.includes('browser-tool-output-must-not-render')`)) {
       throw new Error('sensitive result canary reached the DOM')
     }
@@ -426,8 +502,8 @@ async function main() {
     await waitFor(client, `document.body.innerText.includes('Gateway is ready.')`, 'Gateway readiness after reload')
     await evaluate(client, clickText('Runs'))
     await evaluate(client, setInput('input[placeholder="run_…"]', runId))
-    await evaluate(client, `document.querySelector('.search').requestSubmit()`)
-    await waitFor(client, `document.body.innerText.toLowerCase().includes('succeeded')`, 'authority Run re-read after reload')
+    await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="run_…"]'))
+    await waitFor(client, terminalEvidence, 'authority Run and safe result re-read after reload')
     if (consoleMessages.some((message) => message.includes(token))) throw new Error('access token appeared in browser console output')
     observer.close()
     process.stdout.write(`${JSON.stringify({
@@ -444,7 +520,7 @@ async function main() {
       model_run_id: modelRunId,
       capability_run_id: capabilityRunId,
       mcp_run_id: mcpRunId,
-      wasi_framework_run_id: wasiFrameworkRunId,
+      sandbox_run_id: sandboxRunId,
       checks: [
         'gateway_ready',
         ...(authoringJourney ? ['agent_authoring_north_star'] : []),
@@ -458,7 +534,7 @@ async function main() {
         ...(modelRunId ? ['model_run_read'] : []),
         ...(capabilityRunId ? ['capability_run_read'] : []),
         ...(mcpRunId ? ['mcp_run_read'] : []),
-        ...(wasiFrameworkRunId ? ['wasi_framework_run_read'] : []),
+        ...(sandboxRunId ? ['sandbox_run_read'] : []),
         'sse_task_discovery',
         'task_mutation',
         'terminal_run',

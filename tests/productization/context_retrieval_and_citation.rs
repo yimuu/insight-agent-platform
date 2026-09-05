@@ -16,6 +16,7 @@ pub(super) struct ContextRetrievalEvidence {
 impl ContextRetrievalEvidence {
     pub(super) fn mark_console_passed(&mut self) {
         self.console_passed = true;
+        self.finished_at = Utc::now();
     }
 
     pub(super) fn report(&self, revision: &str) -> Value {
@@ -39,6 +40,10 @@ impl ContextRetrievalEvidence {
             "scenario_id": "context-retrieval-and-citation",
             "contract_profile": "insight.platform/v1",
             "profile": "starter+context",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {
@@ -798,7 +803,7 @@ fn apply_context_agent(
             "display_name": format!("{name} Context Agent"),
             "document": {
                 "resource_kind": "agent",
-                "spec": {
+                "spec": agent_resource_spec(&format!("{name}-context-agent"), vec![], json!({
                     "authoring_package": {"artifact": authoring_ref, "manifest_digest": authoring_ref["content_digest"]},
                     "contract_digest": interface_contract_digest,
                     "dependency_versions": [],
@@ -814,7 +819,7 @@ fn apply_context_agent(
                     })),
                     "typed_plan_artifact_id": plan_upload["artifact_id"],
                     "typed_plan_digest": plan_upload["content_digest"],
-                },
+                })),
             },
         },
         "publish": {

@@ -20,6 +20,11 @@ pub(super) struct ArtifactLifecycleEvidence {
 }
 
 impl ArtifactLifecycleEvidence {
+    pub(super) fn mark_console_passed(&mut self) {
+        self.console_passed = true;
+        self.finished_at = Utc::now();
+    }
+
     pub(super) fn report(&self, revision: &str) -> Value {
         let check = |id: &str, status: &str, evidence: &str| json!({"id": id, "status": status, "evidence": evidence});
         let console = if self.console_passed {
@@ -45,7 +50,11 @@ impl ArtifactLifecycleEvidence {
             "report_kind": "insight.productization.scenario-report/v1",
             "scenario_id": "artifact-lifecycle-and-rejection",
             "contract_profile": "insight.platform/v1",
-            "profile": "starter+artifact",
+            "profile": "starter",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {
@@ -80,7 +89,6 @@ pub(super) fn run(
     fixture: &Path,
     ready_upload: &Value,
     ready_document: &Value,
-    console_passed: bool,
 ) -> ArtifactLifecycleEvidence {
     let started_at = Utc::now();
     let artifact_id = ready_upload["artifact_id"]
@@ -150,7 +158,7 @@ pub(super) fn run(
 
     ArtifactLifecycleEvidence {
         artifact_id: artifact_id.to_owned(),
-        console_passed,
+        console_passed: false,
         started_at,
         finished_at: Utc::now(),
     }

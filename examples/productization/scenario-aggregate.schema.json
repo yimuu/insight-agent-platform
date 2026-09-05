@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:insight:productization:scenario-aggregate:v1",
+  "title": "Insight Productization 10/10 Scenario Aggregate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "contract_profile",
+    "source_revision",
+    "qualification_run_id",
+    "actual_profile",
+    "profile_digest",
+    "scenario_manifest_digest",
+    "scenario_count",
+    "status",
+    "reports"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "report_kind": { "const": "insight.productization.scenario-aggregate/v1" },
+    "contract_profile": { "const": "insight.platform/v1" },
+    "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "qualification_run_id": {
+      "description": "The single raw OpenSandbox L3 qualification run identity shared by all ten reports.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "actual_profile": { "const": "all" },
+    "profile_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "scenario_manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "scenario_count": { "const": 10 },
+    "status": { "const": "passed" },
+    "reports": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "prefixItems": [
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "deterministic-first-run" }, "profile": { "const": "starter" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "exact-model-streaming-chat" }, "profile": { "const": "starter+model" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "native-and-remote-capability" }, "profile": { "const": "starter+remote-capability" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "remote-mcp-tool-and-resource" }, "profile": { "const": "starter+mcp,remote-capability" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "context-retrieval-and-citation" }, "profile": { "const": "starter+context" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "approval-task-resume" }, "profile": { "const": "starter" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "timer-signal-restart-recovery" }, "profile": { "const": "starter" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "subagent-quota-and-cancel" }, "profile": { "const": "starter" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "artifact-lifecycle-and-rejection" }, "profile": { "const": "starter" } } },
+        { "$ref": "#/$defs/report", "properties": { "scenario_id": { "const": "sandbox-and-remote-framework-capability" }, "profile": { "const": "starter+remote-capability,sandbox" } } }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "profile", "report_digest"],
+      "properties": {
+        "scenario_id": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "profile": { "type": "string", "minLength": 1, "maxLength": 96 },
+        "report_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

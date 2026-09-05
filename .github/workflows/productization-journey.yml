@@ -1,27 +1,43 @@
-name: Productization starter and feature journey
+name: Productization 10/10 journey
 
 on:
+  workflow_call:
+    inputs:
+      features:
+        description: Closed starter feature set to qualify
+        required: false
+        default: all
+        type: string
+      artifact_mode:
+        description: Qualify source artifacts or one signed release candidate
+        required: false
+        default: source
+        type: string
+      release_candidate_artifact:
+        description: Exact signed candidate artifact name (candidate mode only)
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: Exact vMAJOR.MINOR.PATCH candidate tag (candidate mode only)
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       features:
         description: Closed starter feature set to qualify
         required: true
-        default: starter
+        default: all
         type: choice
-        options:
-          - starter
-          - model
-          - remote-capability
-          - context
-          - mcp
-          - sandbox
-          - all
+        options: [starter, model, remote-capability, context, mcp, sandbox, all]
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
-  group: productization-journey-${{ github.ref }}-${{ inputs.features }}
+  group: productization-journey-${{ github.workflow }}-${{ github.ref }}-${{ inputs.features || 'all' }}-${{ inputs.artifact_mode || 'source' }}
   cancel-in-progress: true
 
 env:
@@ -29,48 +45,458 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_RELEASE_DEBUG: "0"
+  PRODUCTIZATION_FEATURES: ${{ inputs.features || 'all' }}
+  PRODUCTIZATION_ARTIFACT_MODE: ${{ inputs.artifact_mode || 'source' }}
 
 jobs:
-  fresh-starter-console:
-    name: Fresh starter + ${{ inputs.features }} CLI and real Console journey
+  exact-revision-journey:
+    name: Exact-revision ${{ inputs.features || 'all' }} public product journey
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - name: Record fresh-checkout journey start
         run: echo "PLATFORM_PRODUCTIZATION_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate closed artifact mode inputs
+        env:
+          RELEASE_CANDIDATE_ARTIFACT: ${{ inputs.release_candidate_artifact || '' }}
+          RELEASE_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+          case "$PRODUCTIZATION_ARTIFACT_MODE" in
+            source)
+              [[ -z "$RELEASE_CANDIDATE_ARTIFACT" && -z "$RELEASE_TAG" ]]
+              ;;
+            signed-release-candidate)
+              [[ "$PRODUCTIZATION_FEATURES" == "all" ]]
+              [[ "$RELEASE_CANDIDATE_ARTIFACT" == "signed-release-candidate-${GITHUB_SHA}" ]]
+              [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == "$RELEASE_TAG" ]]
+              ;;
+            *)
+              echo "artifact-mode must be source or signed-release-candidate" >&2
+              exit 2
+              ;;
+          esac
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.94.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          node-version: "24.11.1"
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        with:
+          go-version: "1.25.1"
+          cache: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        with:
+          version: v3.19.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
+        with:
+          name: ${{ inputs.release_candidate_artifact }}
+          path: ${{ runner.temp }}/signed-release-candidate
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' || env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          prefix-key: "v1-productization-starter"
-          shared-key: "productization-starter"
+          prefix-key: "v2-productization"
+          shared-key: "productization-${{ env.PRODUCTIZATION_FEATURES }}"
           cache-on-failure: "false"
-      - name: Enable exact Console package manager
+      - name: Enable exact Console and framework package manager
         run: |
           corepack enable
           corepack install --global pnpm@11.19.0
+      - name: Install exact Kind builder
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/productization-bin"
+          GOBIN="$RUNNER_TEMP/productization-bin" go install sigs.k8s.io/kind@v0.30.0
+          echo "$RUNNER_TEMP/productization-bin" >> "$GITHUB_PATH"
+      - name: Install exact candidate registry reader
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/productization-bin" \
+            go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+          go version -m "$RUNNER_TEMP/productization-bin/crane" | \
+            grep -F $'mod\tgithub.com/google/go-containerregistry\tv0.20.6\t'
+      - name: Verify and unpack the exact signed release candidate
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/signed-release-candidate"
+          closure="$RUNNER_TEMP/productization-release-candidate.json"
+          console_assets="$RUNNER_TEMP/productization-candidate-console"
+          python3 scripts/prepare-productization-release-candidate.py \
+            --assets "$assets" --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$RELEASE_TAG" --revision "$GITHUB_SHA" \
+            --platform linux/amd64 --console-output "$console_assets" --output "$closure"
+          cosign verify-blob --bundle "$assets/release-bundle.sigstore.json" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/product-release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$assets/release-bundle.json"
+
+          candidate_binary="$(jq -r '.cli.path' "$closure")"
+          chmod 0755 "$candidate_binary"
+          candidate_identity="$($candidate_binary version --json)"
+          jq -e --arg version "${RELEASE_TAG#v}" --arg revision "$GITHUB_SHA" \
+            '.version == $version and .git_commit == $revision and .target == "x86_64-unknown-linux-gnu"' \
+            <<<"$candidate_identity" >/dev/null
+
+          crane_bin="$RUNNER_TEMP/productization-bin/crane"
+          [[ -x "$crane_bin" ]]
+          for component in runtime sandbox_runner console; do
+            subject="$(jq -r ".images.${component}.subject" "$closure")"
+            index_digest="$(jq -r ".images.${component}.index_digest" "$closure")"
+            platform_digest="$(jq -r ".images.${component}.platform_digest" "$closure")"
+            tag_inspection="$RUNNER_TEMP/${component}-candidate-tag.txt"
+            docker buildx imagetools inspect "${subject}:build-${GITHUB_SHA}" >"$tag_inspection"
+            mapfile -t observed_indexes < <(
+              awk '$1 == "Digest:" { print $2 }' "$tag_inspection"
+            )
+            [[ "${#observed_indexes[@]}" -eq 1 ]]
+            [[ "${observed_indexes[0]}" == "$index_digest" ]]
+            raw_index="$RUNNER_TEMP/${component}-candidate-index.json"
+            "$crane_bin" manifest "${subject}@${index_digest}" >"$raw_index"
+            observed_raw_digest="sha256:$(shasum -a 256 "$raw_index" | awk '{print $1}')"
+            [[ "$observed_raw_digest" == "$index_digest" ]]
+            jq -e --arg expected "$platform_digest" '
+              type == "object" and
+              .schemaVersion == 2 and
+              (.mediaType == "application/vnd.oci.image.index.v1+json" or
+               .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and
+              (.manifests | type == "array") and
+              ([.manifests[] |
+                select(
+                  (.platform | type == "object") and
+                  .platform.os == "linux" and
+                  .platform.architecture == "amd64"
+                )
+              ] | length == 1 and .[0].digest == $expected)
+            ' "$raw_index" >/dev/null
+            cosign verify \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/product-release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${subject}@${index_digest}" >/dev/null
+            docker pull "${subject}@${platform_digest}"
+          done
+          runtime_subject="$(jq -r '.images.runtime.subject' "$closure")"
+          runtime_index="$(jq -r '.images.runtime.index_digest' "$closure")"
+          docker pull "${runtime_subject}@${runtime_index}"
+
+          console_subject="$(jq -r '.images.console.subject' "$closure")"
+          console_platform_digest="$(jq -r '.images.console.platform_digest' "$closure")"
+          console_container="productization-console-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_console_container() {
+            docker rm --force "$console_container" >/dev/null 2>&1 || true
+          }
+          trap cleanup_console_container EXIT INT TERM
+          docker create --name "$console_container" --entrypoint /console/index.html \
+            "${console_subject}@${console_platform_digest}" >/dev/null
+          mkdir "$RUNNER_TEMP/productization-console-image"
+          docker cp "$console_container:/console/." "$RUNNER_TEMP/productization-console-image"
+          docker rm "$console_container" >/dev/null
+          trap - EXIT INT TERM
+          python3 scripts/verify-productization-console-image.py \
+            --candidate-closure "$closure" --archive-directory "$console_assets" \
+            --image-directory "$RUNNER_TEMP/productization-console-image"
+
+          {
+            echo "PRODUCTIZATION_RELEASE_CANDIDATE=$assets"
+            echo "PRODUCTIZATION_RELEASE_CANDIDATE_CLOSURE=$closure"
+            echo "PRODUCTIZATION_RELEASE_CANDIDATE_CONSOLE=$console_assets"
+            echo "PRODUCTIZATION_RELEASE_CANDIDATE_BINARY=$candidate_binary"
+          } >> "$GITHUB_ENV"
+      - name: Build current-SHA Kind images and complete non-Sandbox seed
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'source' && (env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox') }}
+        run: |
+          set -euo pipefail
+          runtime_repository="docker.io/insight-qualification/platform-runtime"
+          runner_repository="docker.io/insight-qualification/platform-sandbox-runner"
+          package_repository="docker.io/insight-qualification/platform-sandbox-package"
+          runtime_archive="$RUNNER_TEMP/productization-runtime.oci.tar"
+          runner_archive="$RUNNER_TEMP/productization-sandbox-runner.oci.tar"
+          package_archive="$RUNNER_TEMP/productization-sandbox-package.oci.tar"
+          runtime_metadata="$RUNNER_TEMP/productization-runtime.metadata.json"
+          runner_metadata="$RUNNER_TEMP/productization-sandbox-runner.metadata.json"
+          package_metadata="$RUNNER_TEMP/productization-sandbox-package.metadata.json"
+          runtime_identity="$RUNNER_TEMP/productization-runtime.identity.json"
+          runner_identity="$RUNNER_TEMP/productization-sandbox-runner.identity.json"
+          package_identity="$RUNNER_TEMP/productization-sandbox-package.identity.json"
+          cargo build --locked -p insight-cli --bin insight
+          cargo build --locked --release -p insight-platform-postgres --bin platform-schema
+          for target in runtime sandbox-runner sandbox-l3-package; do
+            case "$target" in
+              runtime)
+                repository=$runtime_repository
+                archive=$runtime_archive
+                metadata=$runtime_metadata
+                ;;
+              sandbox-runner)
+                repository=$runner_repository
+                archive=$runner_archive
+                metadata=$runner_metadata
+                ;;
+              sandbox-l3-package)
+                repository=$package_repository
+                archive=$package_archive
+                metadata=$package_metadata
+                ;;
+            esac
+            docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+              --target "$target" --tag "${repository}:build-${GITHUB_SHA}" \
+              --output "type=oci,dest=$archive" --metadata-file "$metadata" .
+          done
+          for component in runtime runner package; do
+            case "$component" in
+              runtime)
+                archive=$runtime_archive
+                metadata=$runtime_metadata
+                identity=$runtime_identity
+                ;;
+              runner)
+                archive=$runner_archive
+                metadata=$runner_metadata
+                identity=$runner_identity
+                ;;
+              package)
+                archive=$package_archive
+                metadata=$package_metadata
+                identity=$package_identity
+                ;;
+            esac
+            metadata_digest="$(jq -r '."containerimage.digest"' "$metadata")"
+            [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            python3 scripts/inspect-platform-oci-image.py \
+              --oci-archive "$archive" --platform linux/amd64 \
+              --expected-manifest-digest "$metadata_digest" --output "$identity"
+          done
+          runtime_digest="$(jq -r '.manifest_digest' "$runtime_identity")"
+          runner_digest="$(jq -r '.manifest_digest' "$runner_identity")"
+          package_digest="$(jq -r '.manifest_digest' "$package_identity")"
+          python3 scripts/verify-platform-sandbox-package-image.py \
+            --runner-oci-archive "$runner_archive" \
+            --package-oci-archive "$package_archive" \
+            --runner-platform-manifest-digest "$runner_digest" \
+            --package-platform-manifest-digest "$package_digest"
+
+          seed="$RUNNER_TEMP/productization-kind-seed"
+          target/debug/insight init --path "$seed" --name productization-kind-seed
+          target/debug/insight dev --path "$seed" \
+            --features context,mcp,model,remote-capability --from-source
+          target/debug/insight stop --path "$seed"
+
+          {
+            echo "INSIGHT_KIND_CLUSTER_NAME=productization-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "INSIGHT_KIND_OUTPUT_DIR=$RUNNER_TEMP/productization-kind"
+            echo "INSIGHT_KIND_KUBECONFIG=$RUNNER_TEMP/productization-kind/kubeconfig"
+            echo "KUBECONFIG=$RUNNER_TEMP/productization-kind/kubeconfig"
+            echo "INSIGHT_KIND_SEED_PROJECT=$seed"
+            echo "INSIGHT_KIND_PLATFORM_IMAGE=$runtime_repository@$runtime_digest"
+            echo "INSIGHT_KIND_PLATFORM_REPOSITORY=$runtime_repository"
+            echo "INSIGHT_KIND_PLATFORM_DIGEST=$runtime_digest"
+            echo "INSIGHT_KIND_PLATFORM_OCI_ARCHIVE=$runtime_archive"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_IMAGE=$runner_repository@$runner_digest"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_REPOSITORY=$runner_repository"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_DIGEST=$runner_digest"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_OCI_ARCHIVE=$runner_archive"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_IMAGE=$package_repository@$package_digest"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_REPOSITORY=$package_repository"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST=$package_digest"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_OCI_ARCHIVE=$package_archive"
+            echo "INSIGHT_KIND_INSIGHT_BIN=$GITHUB_WORKSPACE/target/debug/insight"
+            echo "INSIGHT_KIND_SCHEMA_BIN=$GITHUB_WORKSPACE/target/release/platform-schema"
+            echo "PRODUCTIZATION_SANDBOX_PACKAGE_IMAGE=$package_repository@$package_digest"
+          } >> "$GITHUB_ENV"
+      - name: Prepare exact signed runtime and Sandbox runner for Kind
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' }}
+        run: |
+          set -euo pipefail
+          closure="$PRODUCTIZATION_RELEASE_CANDIDATE_CLOSURE"
+          runtime_subject="$(jq -r '.images.runtime.subject' "$closure")"
+          runtime_index="$(jq -r '.images.runtime.index_digest' "$closure")"
+          runtime_platform="$(jq -r '.images.runtime.platform_digest' "$closure")"
+          runner_subject="$(jq -r '.images.sandbox_runner.subject' "$closure")"
+          runner_index="$(jq -r '.images.sandbox_runner.index_digest' "$closure")"
+          runner_platform="$(jq -r '.images.sandbox_runner.platform_digest' "$closure")"
+          runtime_reference="${runtime_subject}@${runtime_platform}"
+          runner_reference="${runner_subject}@${runner_platform}"
+
+          runtime_layout="$RUNNER_TEMP/productization-runtime.oci"
+          runtime_archive="$RUNNER_TEMP/productization-runtime.oci.tar"
+          runner_layout="$RUNNER_TEMP/productization-sandbox-runner.oci"
+          runner_archive="$RUNNER_TEMP/productization-sandbox-runner.oci.tar"
+          [[ ! -e "$runtime_layout" && ! -e "$runtime_archive" && \
+             ! -e "$runner_layout" && ! -e "$runner_archive" ]]
+          "$RUNNER_TEMP/productization-bin/crane" pull \
+            --platform linux/amd64 --format=oci --annotate-ref \
+            "$runtime_reference" "$runtime_layout"
+          tar --create --file "$runtime_archive" --directory "$runtime_layout" \
+            oci-layout index.json blobs
+          "$RUNNER_TEMP/productization-bin/crane" pull \
+            --platform linux/amd64 --format=oci --annotate-ref \
+            "$runner_reference" "$runner_layout"
+          tar --create --file "$runner_archive" --directory "$runner_layout" \
+            oci-layout index.json blobs
+
+          package_repository="docker.io/insight-qualification/platform-sandbox-package"
+          package_image="$package_repository:build-${GITHUB_SHA}"
+          package_archive="$RUNNER_TEMP/productization-sandbox-package.oci.tar"
+          package_metadata="$RUNNER_TEMP/productization-sandbox-package.metadata.json"
+          package_identity="$RUNNER_TEMP/productization-sandbox-package.identity.json"
+          runtime_identity="$RUNNER_TEMP/productization-runtime.identity.json"
+          runner_identity="$RUNNER_TEMP/productization-sandbox-runner.identity.json"
+          docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+            --file tests/fixtures/Dockerfile.platform-sandbox-l3 \
+            --build-arg "RUNNER_IMAGE=$runner_reference" --tag "$package_image" \
+            --output "type=oci,dest=$package_archive" --metadata-file "$package_metadata" .
+          python3 scripts/inspect-platform-oci-image.py \
+            --oci-archive "$runtime_archive" --platform linux/amd64 \
+            --expected-manifest-digest "$runtime_platform" --output "$runtime_identity"
+          python3 scripts/inspect-platform-oci-image.py \
+            --oci-archive "$runner_archive" --platform linux/amd64 \
+            --expected-manifest-digest "$runner_platform" --output "$runner_identity"
+          package_metadata_digest="$(jq -r '."containerimage.digest"' "$package_metadata")"
+          [[ "$package_metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          python3 scripts/inspect-platform-oci-image.py \
+            --oci-archive "$package_archive" --platform linux/amd64 \
+            --expected-manifest-digest "$package_metadata_digest" --output "$package_identity"
+          package_digest="$(jq -r '.manifest_digest' "$package_identity")"
+          python3 scripts/verify-platform-sandbox-package-image.py \
+            --runner-oci-archive "$runner_archive" \
+            --package-oci-archive "$package_archive" \
+            --runner-platform-manifest-digest "$runner_platform" \
+            --package-platform-manifest-digest "$package_digest"
+
+          seed="$RUNNER_TEMP/productization-kind-seed"
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" init --path "$seed" --name productization-kind-seed
+          candidate_version="$(jq -r '.version' "$closure")"
+          release_cache="$seed/.insight/cache/releases/$candidate_version"
+          mkdir -p "$release_cache"
+          cp "$PRODUCTIZATION_RELEASE_CANDIDATE/release-bundle.json" "$release_cache/release-bundle.json"
+          cp "$PRODUCTIZATION_RELEASE_CANDIDATE/release-bundle.signature.json" "$release_cache/release-bundle.signature.json"
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" dev --path "$seed" \
+            --features context,mcp,model,remote-capability --offline
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" stop --path "$seed"
+          bundle_digest="$(jq -r '.release_bundle_digest' "$closure")"
+          schema_bin="$seed/.insight/runtime/releases/${bundle_digest#sha256:}/bin/platform-schema"
+          [[ -x "$schema_bin" ]]
+
+          {
+            echo "INSIGHT_KIND_CLUSTER_NAME=productization-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "INSIGHT_KIND_OUTPUT_DIR=$RUNNER_TEMP/productization-kind"
+            echo "INSIGHT_KIND_KUBECONFIG=$RUNNER_TEMP/productization-kind/kubeconfig"
+            echo "KUBECONFIG=$RUNNER_TEMP/productization-kind/kubeconfig"
+            echo "INSIGHT_KIND_SEED_PROJECT=$seed"
+            echo "INSIGHT_KIND_PLATFORM_IMAGE=$runtime_reference"
+            echo "INSIGHT_KIND_PLATFORM_REPOSITORY=$runtime_subject"
+            echo "INSIGHT_KIND_PLATFORM_DIGEST=$runtime_platform"
+            echo "INSIGHT_KIND_PLATFORM_INDEX_DIGEST=$runtime_index"
+            echo "INSIGHT_KIND_PLATFORM_OCI_ARCHIVE=$runtime_archive"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_IMAGE=$runner_reference"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_REPOSITORY=$runner_subject"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_DIGEST=$runner_platform"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_INDEX_DIGEST=$runner_index"
+            echo "INSIGHT_KIND_SANDBOX_RUNNER_OCI_ARCHIVE=$runner_archive"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_IMAGE=$package_repository@$package_digest"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_REPOSITORY=$package_repository"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST=$package_digest"
+            echo "INSIGHT_KIND_SANDBOX_PACKAGE_OCI_ARCHIVE=$package_archive"
+            echo "INSIGHT_KIND_INSIGHT_BIN=$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY"
+            echo "INSIGHT_KIND_SCHEMA_BIN=$schema_bin"
+            echo "PRODUCTIZATION_SANDBOX_PACKAGE_IMAGE=$package_repository@$package_digest"
+          } >> "$GITHUB_ENV"
+      - name: Bootstrap fresh current-SHA Kind and checked OpenSandbox chart
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        run: scripts/bootstrap-platform-kind-local.sh
+      - name: Run fail-closed real OpenSandbox L3 qualification
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        run: |
+          set -euo pipefail
+          postgres_log="$RUNNER_TEMP/productization-postgres-forward.log"
+          kubectl -n platform-deps port-forward service/postgres 15433:5432 >"$postgres_log" 2>&1 &
+          postgres_forward_pid=$!
+          cleanup_forward() {
+            kill "$postgres_forward_pid" >/dev/null 2>&1 || true
+            wait "$postgres_forward_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup_forward EXIT INT TERM
+          for _ in $(seq 1 120); do
+            grep -q 'Forwarding from' "$postgres_log" && break
+            if ! kill -0 "$postgres_forward_pid" >/dev/null 2>&1; then
+              cat "$postgres_log" >&2
+              exit 1
+            fi
+            sleep 0.25
+          done
+          grep -q 'Forwarding from' "$postgres_log"
+          export PLATFORM_TEST_DATABASE_URL=postgresql://insight:insight-local-only@127.0.0.1:15433/insight
+          export PLATFORM_OPENSANDBOX_L3_API_KEY
+          PLATFORM_OPENSANDBOX_L3_API_KEY="$(kubectl -n platform-sandbox get secret opensandbox-api-key -o jsonpath='{.data.api-key}' | base64 --decode)"
+          export PLATFORM_OPENSANDBOX_L3_IMAGE="$PRODUCTIZATION_SANDBOX_PACKAGE_IMAGE"
+          export PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST
+          PLATFORM_OPENSANDBOX_L3_RUNTIME_DIGEST="$(kubectl -n platform-sandbox get configmap sandbox-dispatcher-config -o jsonpath='{.metadata.annotations.insight\.platform/runtime-contract-digest}')"
+          export PLATFORM_OPENSANDBOX_L3_PROBE_ADDRESS=1.1.1.1
+          export PLATFORM_OPENSANDBOX_L3_PROBE_PORT=443
+          qualification_arguments=(
+            --environment "$INSIGHT_KIND_OUTPUT_DIR/environment.json"
+            --source-revision "$GITHUB_SHA"
+            --output "$RUNNER_TEMP/productization-opensandbox-evidence.json"
+          )
+          if [[ "$PRODUCTIZATION_ARTIFACT_MODE" == "signed-release-candidate" ]]; then
+            qualification_arguments+=(--release-candidate-closure "$PRODUCTIZATION_RELEASE_CANDIDATE_CLOSURE")
+          fi
+          scripts/run-productization-sandbox-qualification.sh "${qualification_arguments[@]}"
+          cp "$INSIGHT_KIND_OUTPUT_DIR/environment.json" \
+            "$RUNNER_TEMP/productization-sandbox-environment.json"
       - name: Run fresh public CLI and real Gateway Console journey
         run: |
+          set -euo pipefail
           arguments=(
-            --project "$RUNNER_TEMP/insight-productization-${{ inputs.features }}"
+            --project "$RUNNER_TEMP/insight-productization-${PRODUCTIZATION_FEATURES}"
             --console-browser
             --node-bin "$(command -v node)"
             --browser-bin "$(command -v google-chrome)"
             --report-directory "$RUNNER_TEMP/productization-reports"
           )
-          if [[ "${{ inputs.features }}" != "starter" ]]; then
-            arguments+=(--features "${{ inputs.features }}")
+          if [[ "$PRODUCTIZATION_FEATURES" != "starter" ]]; then
+            arguments+=(--features "$PRODUCTIZATION_FEATURES")
           fi
-          if [[ "${{ inputs.features }}" == "starter" ]]; then
+          if [[ "$PRODUCTIZATION_FEATURES" == "starter" ]]; then
+            arguments+=(--north-star-report "$RUNNER_TEMP/productization-north-star.json" \
+              --journey-started-epoch "$PLATFORM_PRODUCTIZATION_STARTED_EPOCH" --fresh-checkout)
+          fi
+          if [[ "$PRODUCTIZATION_FEATURES" == "all" || "$PRODUCTIZATION_FEATURES" == "sandbox" ]]; then
             arguments+=(
-              --north-star-report "$RUNNER_TEMP/productization-north-star.json"
-              --journey-started-epoch "$PLATFORM_PRODUCTIZATION_STARTED_EPOCH"
-              --fresh-checkout
+              --sandbox-evidence "$RUNNER_TEMP/productization-opensandbox-evidence.json"
+              --sandbox-environment "$INSIGHT_KIND_OUTPUT_DIR/environment.json"
+            )
+          fi
+          if [[ "$PRODUCTIZATION_FEATURES" == "all" ]]; then
+            arguments+=(--aggregate-report "$RUNNER_TEMP/productization-10-of-10.json")
+          fi
+          if [[ "$PRODUCTIZATION_ARTIFACT_MODE" == "signed-release-candidate" ]]; then
+            arguments+=(
+              --release-candidate "$PRODUCTIZATION_RELEASE_CANDIDATE"
+              --console-bundle "$PRODUCTIZATION_RELEASE_CANDIDATE_CONSOLE"
+              --insight-bin "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY"
             )
           fi
           scripts/run-productization-journey.sh "${arguments[@]}"
@@ -78,26 +504,51 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-${{ inputs.features }}-failure-diagnostics-${{ github.sha }}
+          name: productization-${{ env.PRODUCTIZATION_FEATURES }}-failure-diagnostics-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/logs/*.log
-            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/profile.json
-            ${{ runner.temp }}/insight-productization-${{ inputs.features }}/.insight/runtime/processes.json
+            ${{ runner.temp }}/insight-productization-${{ env.PRODUCTIZATION_FEATURES }}/.insight/runtime/logs/*.log
+            ${{ runner.temp }}/insight-productization-${{ env.PRODUCTIZATION_FEATURES }}/.insight/runtime/profile.json
+            ${{ runner.temp }}/productization-kind/environment.json
+            ${{ runner.temp }}/productization-opensandbox-evidence.json
           if-no-files-found: warn
           retention-days: 7
       - name: Preserve exact-revision scenario reports
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: productization-${{ inputs.features }}-scenario-reports-${{ github.sha }}
+          name: productization-${{ env.PRODUCTIZATION_FEATURES }}-scenario-reports-${{ github.sha }}
           path: ${{ runner.temp }}/productization-reports/*.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
+      - name: Preserve strict exact-revision 10/10 aggregate
+        if: ${{ always() && env.PRODUCTIZATION_FEATURES == 'all' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: productization-10-of-10-${{ github.sha }}
+          path: ${{ runner.temp }}/productization-10-of-10.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve bound Sandbox and bootstrap evidence
+        if: ${{ always() && (env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: productization-${{ env.PRODUCTIZATION_FEATURES }}-sandbox-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/productization-opensandbox-evidence.json
+            ${{ runner.temp }}/productization-sandbox-environment.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Preserve fresh-checkout north-star report
-        if: ${{ always() && inputs.features == 'starter' }}
+        if: ${{ always() && env.PRODUCTIZATION_FEATURES == 'starter' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: productization-starter-north-star-${{ github.sha }}
           path: ${{ runner.temp }}/productization-north-star.json
           if-no-files-found: error
           retention-days: 14
+      - name: Always remove the disposable Kind cluster
+        if: ${{ always() && (env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox') }}
+        run: |
+          if command -v kind >/dev/null 2>&1 && [[ -n "${INSIGHT_KIND_CLUSTER_NAME:-}" ]]; then
+            kind delete cluster --name "$INSIGHT_KIND_CLUSTER_NAME"
+          fi

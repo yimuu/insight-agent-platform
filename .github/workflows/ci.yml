@@ -75,9 +75,11 @@ jobs:
             scripts/tests/test_platform_observability_redaction.py \
             scripts/tests/test_required_ci_results.py \
             scripts/tests/test_productization_journey_runner.py \
+            scripts/tests/test_prepare_productization_release_candidate.py \
             scripts/tests/test_productization_http_lifecycle.py \
             scripts/tests/test_productization_north_star_report.py \
             scripts/tests/test_productization_scenario_reports.py \
+            scripts/tests/test_productization_sandbox_qualification.py \
             scripts/tests/test_inspect_platform_oci_image.py \
             scripts/tests/test_verify_platform_sandbox_package_image.py \
             scripts/tests/test_platform_kind_l4_opensandbox_probe.py \
@@ -321,10 +323,19 @@ jobs:
       - name: Check dependency policy
         run: cargo deny check
 
+  productization:
+    name: Required exact-revision productization 10/10
+    needs: quick
+    uses: ./.github/workflows/productization-journey.yml
+    with:
+      features: all
+    permissions:
+      contents: read
+
   required:
     name: Required CI summary
     if: always()
-    needs: [changes, quick, lint, test, cli, console, policy]
+    needs: [changes, quick, lint, test, cli, console, policy, productization]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -341,6 +352,7 @@ jobs:
           CLI_RESULT: ${{ needs.cli.result }}
           CONSOLE_RESULT: ${{ needs.console.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
+          PRODUCTIZATION_RESULT: ${{ needs.productization.result }}
         run: |
           python3 scripts/check-required-ci-results.py \
             --runtime-selected "$RUNTIME_SELECTED" \
@@ -353,4 +365,5 @@ jobs:
             --test-result "$TEST_RESULT" \
             --cli-result "$CLI_RESULT" \
             --console-result "$CONSOLE_RESULT" \
-            --policy-result "$POLICY_RESULT"
+            --policy-result "$POLICY_RESULT" \
+            --productization-result "$PRODUCTIZATION_RESULT"

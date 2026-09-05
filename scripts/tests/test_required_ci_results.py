@@ -71,6 +71,15 @@ class RequiredCiResultsTests(unittest.TestCase):
             ],
         )
 
+    def test_productization_is_always_required_and_cannot_skip(self) -> None:
+        actual = MODULE.expected_results(selections())
+        self.assertEqual(actual["productization"], "success")
+        actual["productization"] = "skipped"
+        self.assertEqual(
+            MODULE.validate_results(selections(), actual),
+            ["productization lane expected success but was 'skipped'"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

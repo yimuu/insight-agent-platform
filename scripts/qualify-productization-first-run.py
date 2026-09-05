@@ -174,10 +174,15 @@ def main() -> None:
             "schema_version": 1, "kind": "insight.platform.apply/v1", "resource_noun": "agents",
             "create": {"display_name": "Deterministic echo agent", "document": {
                 "resource_kind": "agent", "spec": {
+                    "authoring_name": "deterministic-echo-agent",
+                    "required_features": [],
+                    "input_classification": "internal",
+                    "default_deadline_seconds": 120,
                     "authoring_package": {"artifact": authoring,
                                           "manifest_digest": authoring_upload["content_digest"]},
                     "contract_digest": CONTRACT_DIGEST, "dependency_versions": [],
-                    "policy_versions": [policy_revision], "input_schema": closed_schema,
+                    "policy_versions": [policy_revision], "author_instructions": None,
+                    "input_schema": closed_schema,
                     "output_schema": closed_schema, "error_schema": closed_schema,
                     "typed_plan_artifact_id": plan_upload["artifact_id"],
                     "typed_plan_digest": plan_upload["content_digest"],

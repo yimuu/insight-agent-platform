@@ -62,6 +62,7 @@ async function runJourney(origin) {
       INSIGHT_CONSOLE_EMPTY_RUN_ID: emptyRunId,
       INSIGHT_CONSOLE_EXPECT_SLOW_LOADING: '1',
       INSIGHT_CONSOLE_TASK_ID: taskId,
+      INSIGHT_CONSOLE_TASK_SAFE_PROMPT_KEY: 'interaction.confirm_release',
       INSIGHT_CONSOLE_TASK_RESPONSE: JSON.stringify({
         classification: 'internal',
         schema_digest: `sha256:${'a'.repeat(64)}`,
@@ -89,8 +90,18 @@ function verifyRequestLog(output) {
     .filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line))
   const readiness = records.filter((record) => record.path === '/readyz')
-  const publicRequests = records.filter((record) => record.path.startsWith('/v1/'))
-  const mutation = publicRequests.find((record) => record.method === 'POST' && record.path === `/v1/tasks/${taskId}:submit-input`)
+  const publicRequests = records.filter((record) => typeof record.path === 'string' && record.path.startsWith('/v1/'))
+  const mutationIndex = publicRequests.findIndex((record) => record.method === 'POST' && record.path === `/v1/tasks/${taskId}:submit-input`)
+  const mutation = publicRequests[mutationIndex]
+  const runReadsAfterMutation = publicRequests.slice(mutationIndex + 1).filter((record) =>
+    record.method === 'GET' && record.path === `/v1/runs/${runId}`
+  )
+  const postTaskRunResponses = records.filter((record) =>
+    record.fixture_observation === 'post_task_run_response'
+  )
+  const overlappingRunReads = records.filter((record) =>
+    record.fixture_observation === 'overlapping_post_task_run_read'
+  )
   if (readiness.length < 2 || readiness.some((record) => record.authorization_present)) {
     throw new Error('readiness requests must remain unauthenticated before and after reload')
   }
@@ -100,8 +111,17 @@ function verifyRequestLog(output) {
   if (!mutation || mutation.if_match !== '"task-v1"' || !mutation.idempotency_key_present) {
     throw new Error('Task mutation did not preserve exact If-Match and Receipt headers')
   }
+  if (runReadsAfterMutation.length < 3) {
+    throw new Error('browser journey did not refresh the Run authority through running, succeeded, and reload re-read')
+  }
+  if (JSON.stringify(postTaskRunResponses.slice(0, 3).map((record) => record.state)) !== JSON.stringify(['running', 'succeeded', 'succeeded'])) {
+    throw new Error('browser journey did not observe ordered running, succeeded, then reload succeeded Run responses')
+  }
+  if (overlappingRunReads.length > 0) {
+    throw new Error('browser journey issued overlapping Run authority reads')
+  }
   if (output.includes(token)) throw new Error('fixture request log exposed the bearer token')
-  return records.length
+  return records.filter((record) => Number.isInteger(record.request_count)).length
 }
 
 async function main() {

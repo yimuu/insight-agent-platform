@@ -15,8 +15,8 @@ from pathlib import Path
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
-def command(arguments: list[str], *, stdin: bytes | None = None) -> bytes:
-    result = subprocess.run(arguments, input=stdin, capture_output=True, check=False)
+def command(arguments: list[str]) -> bytes:
+    result = subprocess.run(arguments, capture_output=True, check=False)
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()[:512]
         raise ValueError(f"release signing command failed: {detail}")
@@ -49,18 +49,21 @@ def main() -> None:
     if public_der != ED25519_SPKI_PREFIX + expected_public:
         raise ValueError("release private key does not match the compiled public trust root")
     with tempfile.TemporaryDirectory() as temporary:
+        bundle_path = Path(temporary) / "release-bundle.json"
         signature_path = Path(temporary) / "signature.bin"
         public_path = Path(temporary) / "public.pem"
-        signature_path.write_bytes(command([
-            "openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(args.private_key)
-        ], stdin=bundle))
+        bundle_path.write_bytes(bundle)
+        command([
+            "openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(args.private_key),
+            "-in", str(bundle_path), "-out", str(signature_path),
+        ])
         public_path.write_bytes(command([
             "openssl", "pkey", "-in", str(args.private_key), "-pubout"
         ]))
         command([
             "openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey",
-            str(public_path), "-sigfile", str(signature_path)
-        ], stdin=bundle)
+            str(public_path), "-sigfile", str(signature_path), "-in", str(bundle_path),
+        ])
         signature = signature_path.read_bytes()
     value = {
         "algorithm": "ed25519",

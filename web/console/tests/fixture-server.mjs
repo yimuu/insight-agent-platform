@@ -21,6 +21,8 @@ const policyDeploymentId = 'pdep_0198f1c3-8f49-7c3e-b1f3-773c28367ba4'
 let taskState = 'pending'
 let runState = 'waiting'
 let taskVersion = 1
+let runReadsAfterTaskResponse = 0
+let postTaskRunReadInFlight = false
 let authoredAgentReady = false
 let authoredDocument = null
 let authoredDisplayName = 'Hello Agent'
@@ -357,9 +359,32 @@ const server = createServer(async (request, response) => {
     return
   }
   if (request.method === 'GET' && [runId, emptyRunId].some((id) => url.pathname === `/v1/runs/${id}`)) {
-    if (slowResponseMilliseconds > 0) await delay(slowResponseMilliseconds)
     const selectedRunId = url.pathname.split('/').at(-1)
-    sendJson(response, 200, runView(selectedRunId), { etag: runView(selectedRunId).etag })
+    const postTaskRunRead = selectedRunId === runId && taskState === 'responded'
+    if (postTaskRunRead && postTaskRunReadInFlight) {
+      process.stdout.write(`${JSON.stringify({ fixture_observation: 'overlapping_post_task_run_read' })}\n`)
+      problem(response, 409, 'overlapping_run_read', 'Run authority reads must complete before the next refresh.')
+      return
+    }
+    if (postTaskRunRead) postTaskRunReadInFlight = true
+    try {
+      if (slowResponseMilliseconds > 0) await delay(slowResponseMilliseconds)
+      if (postTaskRunRead && runState === 'running') {
+        runReadsAfterTaskResponse += 1
+        if (runReadsAfterTaskResponse >= 2) runState = 'succeeded'
+      }
+      const view = runView(selectedRunId)
+      sendJson(response, 200, view, { etag: view.etag })
+      if (postTaskRunRead) {
+        process.stdout.write(`${JSON.stringify({
+          fixture_observation: 'post_task_run_response',
+          run_read_ordinal: runReadsAfterTaskResponse,
+          state: view.state,
+        })}\n`)
+      }
+    } finally {
+      if (postTaskRunRead) postTaskRunReadInFlight = false
+    }
     return
   }
   if (request.method === 'GET' && url.pathname === `/v1/runs/${emptyRunId}/events`) {
@@ -419,7 +444,8 @@ const server = createServer(async (request, response) => {
     JSON.parse(await readBody(request))
     taskState = 'responded'
     taskVersion = 2
-    runState = 'succeeded'
+    runState = 'running'
+    runReadsAfterTaskResponse = 0
     sendJson(response, 200, taskView(), { etag: taskView().etag })
     return
   }

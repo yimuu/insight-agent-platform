@@ -33,7 +33,10 @@ for marker in (
     "qualify-development-profile.sh", "development-profile-performance.json",
     "--release-assets", "signed-release-candidate-${{ github.sha }}",
     "--include-development-qualification", "Attest qualified ReleaseBundle",
-    "--stabilization-seconds 300",
+    "--include-productization-qualification",
+    "--productization-release-candidate-bundle",
+    "preliminary-release-bundle.json",
+    "--stabilization-seconds 300", 'node-version: "24.11.1"',
     "gh release create", "already exists and cannot be overwritten", "INSIGHT_RELEASE_PUBLIC_KEY_BASE64",
 ):
     if marker not in workflow:
@@ -44,6 +47,8 @@ for forbidden in (":latest", ":candidate-", "docker build ", "cargo build --rele
         failures.append(f"product release workflow contains forbidden marker {forbidden!r}")
 
 for action in re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE):
+    if action.startswith("./"):
+        continue
     revision = action.rsplit("@", 1)[-1]
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         failures.append(f"release action is not pinned to an immutable commit: {action}")
@@ -68,8 +73,13 @@ if "needs: [cli, images]" not in assemble_job:
     failures.append("signed release candidate must depend on CLI and image candidate builds")
 if "needs: assemble-release" not in qualification_job or "needs: publish" in qualification_job:
     failures.append("development profile qualification must consume the signed candidate before publish")
-if "needs: [assemble-release, development-profile-qualification]" not in publish_job:
-    failures.append("immutable publish must depend on signed candidate and successful qualification")
+if (
+    "needs: [assemble-release, development-profile-qualification, productization-10-of-10]"
+    not in publish_job
+):
+    failures.append(
+        "immutable publish must depend on the signed candidate and both successful qualifications"
+    )
 if "gh release create" in assemble_job or "gh release create" in qualification_job:
     failures.append("GitHub Release creation is forbidden before qualification")
 if publish_job.count("docker buildx imagetools create --tag") != 3:
@@ -78,6 +88,14 @@ if "cannot prove release image tag" not in publish_job or "manifest unknown|not 
     failures.append("release tag reservation must fail closed on ambiguous registry errors")
 if "Finalize and sign qualified ReleaseBundle" not in publish_job:
     failures.append("qualified evidence must be included in a newly signed final ReleaseBundle")
+for marker in (
+    "--sandbox-evidence",
+    "--sandbox-environment",
+    "--productization-release-candidate-bundle",
+    "preliminary-release-bundle.json",
+):
+    if marker not in publish_job:
+        failures.append(f"qualified publish does not bind required evidence input {marker!r}")
 if "gh release create" not in publish_job:
     failures.append("qualified publish job must create the immutable GitHub Release")
 

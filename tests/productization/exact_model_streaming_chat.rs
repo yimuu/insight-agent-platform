@@ -25,6 +25,7 @@ pub(super) struct ExactModelEvidence {
 impl ExactModelEvidence {
     pub(super) fn mark_console_passed(&mut self) {
         self.console_passed = true;
+        self.finished_at = Utc::now();
     }
 
     pub(super) fn report(&self, revision: &str) -> Value {
@@ -48,6 +49,10 @@ impl ExactModelEvidence {
             "scenario_id": "exact-model-streaming-chat",
             "contract_profile": "insight.platform/v1",
             "profile": "starter+model",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},
@@ -378,41 +383,33 @@ fn create_run(
 }
 
 struct RemoteModelEnvironment {
-    broker: Child,
-    fixture: Child,
-    config_path: std::path::PathBuf,
-    original_config: Vec<u8>,
+    broker: FixtureChild,
+    fixture: FixtureChild,
 }
 
 impl Drop for RemoteModelEnvironment {
     fn drop(&mut self) {
-        let _ = self.broker.kill();
-        let _ = self.broker.wait();
-        let _ = self.fixture.kill();
-        let _ = self.fixture.wait();
-        fs::write(&self.config_path, &self.original_config)
-            .expect("original Egress config is restored");
+        let _ = self.broker.terminate();
+        let _ = self.fixture.terminate();
     }
 }
 
 fn start_remote_model_environment(
-    insight: &Path,
+    _insight: &Path,
     project: &Path,
+    fixture_directory: &Path,
     provider_deployment: &Value,
     provider_revision: &Value,
     endpoint: &Value,
     endpoint_digest: &str,
     policies: &std::collections::BTreeMap<&str, PolicyAuthority>,
 ) -> RemoteModelEnvironment {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("workspace");
+    let workspace = workspace_root();
     let runtime = project.join(".insight/runtime");
     let tls = runtime.join("tls");
-    let config_path = runtime.join("config/egress-broker.json");
-    let original_config = fs::read(&config_path).expect("Egress config is readable");
+    let authority_config_path = runtime.join("config/egress-broker.json");
+    let config_path = fixture_directory.join("egress-broker-model.json");
+    let original_config = fs::read(&authority_config_path).expect("Egress config is readable");
     let mut config: Value =
         serde_json::from_slice(&original_config).expect("Egress config is closed JSON");
     config["model_endpoints"] = json!([{
@@ -444,26 +441,28 @@ fn start_remote_model_environment(
 
     let fixture_port = endpoint["port"].as_u64().expect("fixture port").to_string();
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
-    let mut fixture = Command::new(node)
-        .arg(workspace.join("examples/productization/remote-fixture.mjs"))
-        .env("INSIGHT_REMOTE_FIXTURE_PORT", &fixture_port)
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
-            tls.join("egress-broker.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
-            tls.join("egress-broker-key.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
-            runtime.join("logs/remote-fixture-model.jsonl"),
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("remote fixture starts");
-    let ready = BufReader::new(fixture.stdout.take().expect("fixture stdout"))
+    let mut fixture = FixtureChild::new(
+        Command::new(node)
+            .arg(workspace.join("examples/productization/remote-fixture.mjs"))
+            .env("INSIGHT_REMOTE_FIXTURE_PORT", &fixture_port)
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
+                tls.join("egress-broker.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
+                tls.join("egress-broker-key.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
+                runtime.join("logs/remote-fixture-model.jsonl"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("remote fixture starts"),
+    );
+    let ready = BufReader::new(fixture.child_mut().stdout.take().expect("fixture stdout"))
         .lines()
         .next()
         .expect("fixture readiness line")
@@ -479,40 +478,42 @@ fn start_remote_model_environment(
         .open(runtime.join("logs/egress-broker-model-restart.log"))
         .expect("Egress log");
     let stderr = log.try_clone().expect("Egress log clone");
-    let mut broker = Command::new(workspace.join("target/release/platform-egress-broker"))
-        .env("PLATFORM_EGRESS_BROKER_CONFIG", &config_path)
-        .env("PLATFORM_EGRESS_BROKER_CONFIG_DIGEST", &config_digest)
-        .env(
-            "PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH",
-            tls.join("ca.pem"),
-        )
-        .env(
-            "PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH",
-            tls.join("egress-broker-client.pem"),
-        )
-        .env(
-            "PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH",
-            tls.join("egress-broker-client-key.pem"),
-        )
-        .env("PLATFORM_EGRESS_BROKER_CLIENT_CA_PATH", tls.join("ca.pem"))
-        .env(
-            "PLATFORM_EGRESS_BROKER_CERT_PATH",
-            tls.join("egress-broker.pem"),
-        )
-        .env(
-            "PLATFORM_EGRESS_BROKER_KEY_PATH",
-            tls.join("egress-broker-key.pem"),
-        )
-        .env("AWS_ACCESS_KEY_ID", "test")
-        .env("AWS_SECRET_ACCESS_KEY", "test")
-        .env("AWS_EC2_METADATA_DISABLED", "true")
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .expect("replacement Egress Broker starts");
+    let mut broker = FixtureChild::new(
+        Command::new(runtime_binary_path(project, "platform-egress-broker"))
+            .env("PLATFORM_EGRESS_BROKER_CONFIG", &config_path)
+            .env("PLATFORM_EGRESS_BROKER_CONFIG_DIGEST", &config_digest)
+            .env(
+                "PLATFORM_EGRESS_BROKER_AUTHORITY_CA_PATH",
+                tls.join("ca.pem"),
+            )
+            .env(
+                "PLATFORM_EGRESS_BROKER_AUTHORITY_CERT_PATH",
+                tls.join("egress-broker-client.pem"),
+            )
+            .env(
+                "PLATFORM_EGRESS_BROKER_AUTHORITY_KEY_PATH",
+                tls.join("egress-broker-client-key.pem"),
+            )
+            .env("PLATFORM_EGRESS_BROKER_CLIENT_CA_PATH", tls.join("ca.pem"))
+            .env(
+                "PLATFORM_EGRESS_BROKER_CERT_PATH",
+                tls.join("egress-broker.pem"),
+            )
+            .env(
+                "PLATFORM_EGRESS_BROKER_KEY_PATH",
+                tls.join("egress-broker-key.pem"),
+            )
+            .env("AWS_ACCESS_KEY_ID", "test")
+            .env("AWS_SECRET_ACCESS_KEY", "test")
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("replacement Egress Broker starts"),
+    );
     let deadline = Instant::now() + StdDuration::from_secs(30);
     while TcpStream::connect(&ready_address).is_err() {
-        if let Some(status) = broker.try_wait().expect("Egress status") {
+        if let Some(status) = broker.child_mut().try_wait().expect("Egress status") {
             panic!("replacement Egress Broker exited before readiness: {status}");
         }
         assert!(
@@ -521,12 +522,7 @@ fn start_remote_model_environment(
         );
         thread::sleep(StdDuration::from_millis(50));
     }
-    RemoteModelEnvironment {
-        broker,
-        fixture,
-        config_path,
-        original_config,
-    }
+    RemoteModelEnvironment { broker, fixture }
 }
 
 pub(super) fn run(
@@ -723,6 +719,7 @@ pub(super) fn run(
     let remote = start_remote_model_environment(
         insight,
         project,
+        fixture,
         &provider_deployment,
         &provider_revision,
         &endpoint,
@@ -762,14 +759,15 @@ pub(super) fn run(
     );
     let agent_manifest = json!({
         "schema_version": 1, "kind": "insight.platform.apply/v1", "resource_noun": "agents",
-        "create": {"display_name": "Exact model streaming agent", "document": {"resource_kind": "agent", "spec": {
+        "create": {"display_name": "Exact model streaming agent", "document": {"resource_kind": "agent", "spec": agent_resource_spec(
+            "exact-model-streaming-agent", vec![AgentRequiredFeature::Model], json!({
             "authoring_package": {"artifact": authoring_ref, "manifest_digest": authoring_ref["content_digest"]},
             "contract_digest": contract_digest, "dependency_versions": [],
             "policy_versions": policies.values().map(|policy| policy.revision.clone()).collect::<Vec<_>>(),
             "input_schema": input_schema, "output_schema": output_schema,
             "error_schema": closed_schema(json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"message": bounded_string_schema()}, "required": ["message"], "additionalProperties": false})),
             "typed_plan_artifact_id": plan_upload["artifact_id"], "typed_plan_digest": plan_upload["content_digest"],
-        }}},
+        }))}},
         "publish": {"kind": "agent", "revision_no": 1, "interface_content_digest": contract_digest,
             "plan_content_digest": plan_upload["content_digest"], "artifact_id": plan_upload["artifact_id"]},
         "deployment": {"environment": "local", "closure": {"resource_kind": "agent", "bindings": {

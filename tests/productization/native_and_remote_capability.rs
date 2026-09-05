@@ -20,6 +20,7 @@ pub(super) struct CapabilityEvidence {
 impl CapabilityEvidence {
     pub(super) fn mark_console_passed(&mut self) {
         self.console_passed = true;
+        self.finished_at = Utc::now();
     }
 
     pub(super) fn report(&self, revision: &str) -> Value {
@@ -43,6 +44,10 @@ impl CapabilityEvidence {
             "scenario_id": "native-and-remote-capability",
             "contract_profile": "insight.platform/v1",
             "profile": "starter+remote-capability",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P3",
             "source_revision": revision,
             "environment": {"os": env::consts::OS, "architecture": env::consts::ARCH, "fresh_profile": true},
@@ -535,24 +540,21 @@ pub(super) fn provision_capability_quotas(deployments: &[(&Value, &str)]) {
 }
 
 struct RemoteCapabilityEnvironment {
-    broker: Child,
-    fixture: Child,
+    broker: FixtureChild,
+    fixture: FixtureChild,
     config_path: std::path::PathBuf,
     original_config: Vec<u8>,
 }
 
 impl Drop for RemoteCapabilityEnvironment {
     fn drop(&mut self) {
-        let _ = self.broker.kill();
-        let _ = self.broker.wait();
-        let _ = self.fixture.kill();
-        let _ = self.fixture.wait();
-        fs::write(&self.config_path, &self.original_config).expect("Egress config restore");
+        let _ = self.broker.terminate();
+        let _ = self.fixture.terminate();
     }
 }
 
 pub(super) fn spawn_egress(
-    workspace: &Path,
+    _workspace: &Path,
     project: &Path,
     config_path: &Path,
     config: &Value,
@@ -567,7 +569,7 @@ pub(super) fn spawn_egress(
         .open(runtime.join("logs/egress-broker-capability-restart.log"))
         .expect("Egress log");
     let stderr = log.try_clone().expect("Egress log clone");
-    Command::new(workspace.join("target/release/platform-egress-broker"))
+    Command::new(runtime_binary_path(project, "platform-egress-broker"))
         .env("PLATFORM_EGRESS_BROKER_CONFIG", config_path)
         .env("PLATFORM_EGRESS_BROKER_CONFIG_DIGEST", config_digest)
         .env(
@@ -612,22 +614,20 @@ pub(super) fn wait_egress(child: &mut Child, address: &str) {
 }
 
 fn start_remote_environment(
-    insight: &Path,
+    _insight: &Path,
     project: &Path,
+    fixture_directory: &Path,
     deployment: &Value,
     backend_contract_digest: &str,
     endpoint: &Value,
     policies: &std::collections::BTreeMap<&str, PolicyAuthority>,
 ) -> RemoteCapabilityEnvironment {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap();
+    let workspace = workspace_root();
     let runtime = project.join(".insight/runtime");
     let tls = runtime.join("tls");
-    let config_path = runtime.join("config/egress-broker.json");
-    let original_config = fs::read(&config_path).expect("Egress config read");
+    let authority_config_path = runtime.join("config/egress-broker.json");
+    let config_path = fixture_directory.join("egress-broker-capability.json");
+    let original_config = fs::read(&authority_config_path).expect("Egress config read");
     let mut config: Value = serde_json::from_slice(&original_config).expect("Egress config JSON");
     config["capability_http_endpoints"] = json!([{
         "schema_version": 1,
@@ -657,26 +657,28 @@ fn start_remote_environment(
     }
     let port = endpoint["port"].as_u64().unwrap().to_string();
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
-    let mut fixture = Command::new(node)
-        .arg(workspace.join("examples/productization/remote-fixture.mjs"))
-        .env("INSIGHT_REMOTE_FIXTURE_PORT", port)
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
-            tls.join("egress-broker.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
-            tls.join("egress-broker-key.pem"),
-        )
-        .env(
-            "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
-            runtime.join("logs/remote-fixture-capability.jsonl"),
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("remote Capability fixture starts");
-    let ready = BufReader::new(fixture.stdout.take().unwrap())
+    let mut fixture = FixtureChild::new(
+        Command::new(node)
+            .arg(workspace.join("examples/productization/remote-fixture.mjs"))
+            .env("INSIGHT_REMOTE_FIXTURE_PORT", port)
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_CERT_PATH",
+                tls.join("egress-broker.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_KEY_PATH",
+                tls.join("egress-broker-key.pem"),
+            )
+            .env(
+                "INSIGHT_REMOTE_FIXTURE_TRACE_PATH",
+                runtime.join("logs/remote-fixture-capability.jsonl"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("remote Capability fixture starts"),
+    );
+    let ready = BufReader::new(fixture.child_mut().stdout.take().unwrap())
         .lines()
         .next()
         .unwrap()
@@ -685,8 +687,8 @@ fn start_remote_environment(
         serde_json::from_str::<Value>(&ready).unwrap()["status"],
         "ready"
     );
-    let mut broker = spawn_egress(workspace, project, &config_path, &config);
-    wait_egress(&mut broker, &address);
+    let mut broker = FixtureChild::new(spawn_egress(workspace, project, &config_path, &config));
+    wait_egress(broker.child_mut(), &address);
     RemoteCapabilityEnvironment {
         broker,
         fixture,
@@ -898,6 +900,7 @@ pub(super) fn run(
     let mut remote = start_remote_environment(
         insight,
         project,
+        fixture,
         &remote_deployment,
         &http_contract_digest,
         &endpoint,
@@ -934,12 +937,13 @@ pub(super) fn run(
     );
     let agent_manifest = json!({
         "schema_version": 1, "kind": "insight.platform.apply/v1", "resource_noun": "agents",
-        "create": {"display_name": "Native and remote Capability agent", "document": {"resource_kind": "agent", "spec": {
+        "create": {"display_name": "Native and remote Capability agent", "document": {"resource_kind": "agent", "spec": agent_resource_spec(
+            "native-remote-capability-agent", vec![], json!({
             "authoring_package": {"artifact": authoring_ref, "manifest_digest": authoring_ref["content_digest"]},
             "contract_digest": contract_digest, "dependency_versions": [], "policy_versions": policies.values().map(|p| p.revision.clone()).collect::<Vec<_>>(),
             "input_schema": schema, "output_schema": schema, "error_schema": value_schema("error"),
             "typed_plan_artifact_id": plan_upload["artifact_id"], "typed_plan_digest": plan_upload["content_digest"]
-        }}},
+        }))}},
         "publish": {"kind": "agent", "revision_no": 1, "interface_content_digest": contract_digest, "plan_content_digest": plan_upload["content_digest"], "artifact_id": plan_upload["artifact_id"]},
         "deployment": {"environment": "local", "closure": {"resource_kind": "agent", "bindings": {
             "entry_node_id": "start", "entry_node_kind": "start",
@@ -1015,22 +1019,25 @@ pub(super) fn run(
         "succeeded"
     );
 
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .unwrap();
+    let workspace = workspace_root();
     let address: String = serde_json::from_slice::<Value>(&remote.original_config).unwrap()
         ["observability_listen_address"]
         .as_str()
         .unwrap()
         .to_owned();
-    let _ = remote.broker.kill();
-    let _ = remote.broker.wait();
+    remote
+        .broker
+        .terminate()
+        .expect("replacement Egress terminates before the rejection probe");
     let mut deny_config: Value = serde_json::from_slice(&remote.original_config).unwrap();
     deny_config["capability_http_endpoints"] = json!([]);
-    remote.broker = spawn_egress(workspace, project, &remote.config_path, &deny_config);
-    wait_egress(&mut remote.broker, &address);
+    remote.broker = FixtureChild::new(spawn_egress(
+        workspace,
+        project,
+        &remote.config_path,
+        &deny_config,
+    ));
+    wait_egress(remote.broker.child_mut(), &address);
     let rejected_id = create_run(
         insight,
         project,

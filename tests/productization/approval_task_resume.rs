@@ -1,5 +1,7 @@
 use super::*;
 
+const TASK_SAFE_PROMPT_KEY: &str = "provide_message";
+
 pub(super) struct ApprovalTaskEvidence {
     pub run_id: String,
     pub console_passed: bool,
@@ -34,6 +36,10 @@ impl ApprovalTaskEvidence {
             "scenario_id": "approval-task-resume",
             "contract_profile": "insight.platform/v1",
             "profile": "starter",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P2",
             "source_revision": revision,
             "environment": {
@@ -77,6 +83,7 @@ pub(super) fn run(
         Option<&str>,
         Option<&str>,
         Option<&str>,
+        Option<&str>,
     ),
 ) -> ApprovalTaskEvidence {
     let (
@@ -88,6 +95,7 @@ pub(super) fn run(
         model_run_id,
         capability_run_id,
         mcp_run_id,
+        sandbox_run_id,
     ) = console_authorities;
     let started_at = Utc::now();
     let human_task_plan = json!({
@@ -105,7 +113,7 @@ pub(super) fn run(
                     "eligible_principal_rule_digest": canonical_digest(&json!({
                         "rule": "local_developer",
                     })),
-                    "safe_prompt_key": "provide_message",
+                    "safe_prompt_key": TASK_SAFE_PROMPT_KEY,
                 },
                 "response": {
                     "source": "node_output",
@@ -137,6 +145,7 @@ pub(super) fn run(
     );
     let mut human_task_manifest = agent_manifest.clone();
     human_task_manifest["create"]["display_name"] = json!("Deterministic human task agent");
+    human_task_manifest["create"]["document"]["spec"]["authoring_name"] = json!("human-task-agent");
     human_task_manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
         human_task_plan_upload["artifact_id"].clone();
     human_task_manifest["create"]["document"]["spec"]["typed_plan_digest"] =
@@ -186,21 +195,27 @@ pub(super) fn run(
         .as_str()
         .expect("Human Task Run ID")
         .to_owned();
-    let mut watcher = Command::new(insight)
-        .args([
-            "run",
-            "watch",
-            &run_id,
-            "--timeout-seconds",
-            "120",
-            "--path",
-            project.to_str().unwrap(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Human Task Run watcher starts");
-    let stdout = watcher.stdout.take().expect("watcher stdout is piped");
+    let mut watcher = FixtureChild::new(
+        Command::new(insight)
+            .args([
+                "run",
+                "watch",
+                &run_id,
+                "--timeout-seconds",
+                "120",
+                "--path",
+                project.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Human Task Run watcher starts"),
+    );
+    let stdout = watcher
+        .child_mut()
+        .stdout
+        .take()
+        .expect("watcher stdout is piped");
     let mut lines = BufReader::new(stdout).lines();
     let mut watch_records = Vec::new();
     let task_id = loop {
@@ -323,6 +338,7 @@ pub(super) fn run(
                     model_run_id,
                     capability_run_id,
                     mcp_run_id,
+                    sandbox_run_id,
                 ),
             );
             true
@@ -353,6 +369,7 @@ fn run_real_gateway_console_journey(
         Option<&str>,
         Option<&str>,
         Option<&str>,
+        Option<&str>,
     ),
 ) {
     let (
@@ -364,6 +381,7 @@ fn run_real_gateway_console_journey(
         model_run_id,
         capability_run_id,
         mcp_run_id,
+        sandbox_run_id,
     ) = authorities;
     let request = json!({
         "agent_id": agent_id,
@@ -391,21 +409,24 @@ fn run_real_gateway_console_journey(
         .as_str()
         .expect("Console Human Task Run ID")
         .to_owned();
-    let mut watcher = Command::new(insight)
-        .args([
-            "run",
-            "watch",
-            &run_id,
-            "--timeout-seconds",
-            "120",
-            "--path",
-            project.to_str().unwrap(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Console Human Task Run watcher starts");
+    let mut watcher = FixtureChild::new(
+        Command::new(insight)
+            .args([
+                "run",
+                "watch",
+                &run_id,
+                "--timeout-seconds",
+                "120",
+                "--path",
+                project.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Console Human Task Run watcher starts"),
+    );
     let stdout = watcher
+        .child_mut()
         .stdout
         .take()
         .expect("Console watcher stdout is piped");
@@ -435,7 +456,10 @@ fn run_real_gateway_console_journey(
         "value": {"kind": "inline", "value": {"message": "after task"}},
     });
     let (_, gateway_origin, token) = raw_runtime_client(project);
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("qualification crate is inside the workspace");
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
     let output = Command::new(node)
         .arg(workspace.join("web/console/tests/real-gateway-journey.mjs"))
@@ -443,6 +467,7 @@ fn run_real_gateway_console_journey(
         .env("INSIGHT_CONSOLE_ACCESS_TOKEN", token)
         .env("INSIGHT_CONSOLE_RUN_ID", &run_id)
         .env("INSIGHT_CONSOLE_TASK_ID", &task_id)
+        .env("INSIGHT_CONSOLE_TASK_SAFE_PROMPT_KEY", TASK_SAFE_PROMPT_KEY)
         .env("INSIGHT_CONSOLE_DETERMINISTIC_RUN_ID", deterministic_run_id)
         .env("INSIGHT_CONSOLE_TIMER_SIGNAL_RUN_ID", timer_signal_run_id)
         .env("INSIGHT_CONSOLE_SUBAGENT_RUN_ID", subagent_run_id)
@@ -451,6 +476,7 @@ fn run_real_gateway_console_journey(
         .envs(model_run_id.map(|run_id| ("INSIGHT_CONSOLE_MODEL_RUN_ID", run_id)))
         .envs(capability_run_id.map(|run_id| ("INSIGHT_CONSOLE_CAPABILITY_RUN_ID", run_id)))
         .envs(mcp_run_id.map(|run_id| ("INSIGHT_CONSOLE_MCP_RUN_ID", run_id)))
+        .envs(sandbox_run_id.map(|run_id| ("INSIGHT_CONSOLE_SANDBOX_RUN_ID", run_id)))
         .env(
             "INSIGHT_CONSOLE_TASK_RESPONSE",
             serde_json::to_string(&response).expect("Console Task response is JSON"),
@@ -496,6 +522,12 @@ fn run_real_gateway_console_journey(
         assert!(browser_evidence["checks"]
             .as_array()
             .is_some_and(|checks| checks.iter().any(|check| check == "mcp_run_read")));
+    }
+    if let Some(sandbox_run_id) = sandbox_run_id {
+        assert_eq!(browser_evidence["sandbox_run_id"], sandbox_run_id);
+        assert!(browser_evidence["checks"]
+            .as_array()
+            .is_some_and(|checks| checks.iter().any(|check| check == "sandbox_run_read")));
     }
     for line in lines {
         watch_records.push(

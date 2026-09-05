@@ -37,6 +37,10 @@ impl SubagentEvidence {
             "scenario_id": "subagent-quota-and-cancel",
             "contract_profile": "insight.platform/v1",
             "profile": "starter",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P2",
             "source_revision": revision,
             "environment": {
@@ -352,6 +356,7 @@ fn apply_waiting_child(
     );
     let mut manifest = agent_manifest.clone();
     manifest["create"]["display_name"] = json!("Subagent cancellation child");
+    manifest["create"]["document"]["spec"]["authoring_name"] = json!("subagent-cancellation-child");
     manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
         upload["artifact_id"].clone();
     manifest["create"]["document"]["spec"]["typed_plan_digest"] = upload["content_digest"].clone();
@@ -445,6 +450,7 @@ fn apply_parent(
     );
     let mut manifest = agent_manifest.clone();
     manifest["create"]["display_name"] = json!(format!("Productization {name}"));
+    manifest["create"]["document"]["spec"]["authoring_name"] = json!(name);
     manifest["create"]["document"]["spec"]["typed_plan_artifact_id"] =
         upload["artifact_id"].clone();
     manifest["create"]["document"]["spec"]["typed_plan_digest"] = upload["content_digest"].clone();

@@ -1,9 +1,9 @@
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const bundleRoot = resolve(fileURLToPath(new URL('../dist', import.meta.url)))
+const defaultBundleRoot = resolve(fileURLToPath(new URL('../dist', import.meta.url)))
 const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost'])
 const maximumRequestBytes = 1024 * 1024
 const hopByHopHeaders = new Set([
@@ -25,15 +25,38 @@ function checkedUpstream(value) {
   return upstream
 }
 
-function staticPath(requestPath) {
+export function checkedBundleRoot(value) {
+  const requested = resolve(value)
+  const metadata = lstatSync(requested)
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error('Console bundle root must be a real directory, not a symbolic link')
+  }
+  const canonicalRoot = realpathSync(requested)
+  const pending = [canonicalRoot]
+  while (pending.length > 0) {
+    const directory = pending.pop()
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const child = lstatSync(path)
+      if (child.isSymbolicLink()) throw new Error('Console bundle must not contain symbolic links')
+      if (child.isDirectory()) pending.push(path)
+      else if (!child.isFile()) throw new Error('Console bundle must contain only directories and regular files')
+    }
+  }
+  const index = join(canonicalRoot, 'index.html')
+  if (!existsSync(index) || !lstatSync(index).isFile()) throw new Error('Console bundle must contain a regular index.html')
+  return canonicalRoot
+}
+
+function staticPath(bundleRoot, requestPath) {
   const relative = requestPath === '/' ? 'index.html' : requestPath.slice(1)
   const candidate = normalize(join(bundleRoot, relative))
   if (candidate.startsWith(`${bundleRoot}/`) && existsSync(candidate) && statSync(candidate).isFile()) return candidate
   return join(bundleRoot, 'index.html')
 }
 
-function serveStatic(method, requestPath, response) {
-  const path = staticPath(requestPath)
+function serveStatic(bundleRoot, method, requestPath, response) {
+  const path = staticPath(bundleRoot, requestPath)
   const mediaType = {
     '.css': 'text/css; charset=utf-8',
     '.html': 'text/html; charset=utf-8',
@@ -99,8 +122,8 @@ function proxy(request, response, upstream, requestUrl) {
   request.on('error', () => forwarded.destroy())
 }
 
-export async function startGatewayConsoleServer({ gatewayOrigin, port = 0 } = {}) {
-  if (!existsSync(join(bundleRoot, 'index.html'))) throw new Error('Build web/console before starting the Gateway Console server')
+export async function startGatewayConsoleServer({ gatewayOrigin, port = 0, bundleRoot: requestedBundleRoot } = {}) {
+  const bundleRoot = checkedBundleRoot(requestedBundleRoot ?? process.env.INSIGHT_CONSOLE_BUNDLE_ROOT ?? defaultBundleRoot)
   const upstream = checkedUpstream(gatewayOrigin ?? process.env.INSIGHT_CONSOLE_GATEWAY_ORIGIN ?? '')
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
@@ -113,7 +136,7 @@ export async function startGatewayConsoleServer({ gatewayOrigin, port = 0 } = {}
       response.end()
       return
     }
-    serveStatic(request.method, url.pathname, response)
+    serveStatic(bundleRoot, request.method, url.pathname, response)
   })
   await new Promise((resolveListen, rejectListen) => {
     server.once('error', rejectListen)

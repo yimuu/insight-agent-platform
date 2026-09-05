@@ -4,6 +4,10 @@
   "scenario_id": "deterministic-first-run",
   "contract_profile": "insight.platform/v1",
   "profile": "starter",
+  "qualification_run_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "actual_profile": "starter",
+  "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "evidence_inputs": {},
   "automation_layer": "P2",
   "source_revision": "0000000000000000000000000000000000000000",
   "environment": {

@@ -1,4 +1,7 @@
 use chrono::{Duration, SecondsFormat, Utc};
+use insight_platform_contracts::{
+    AgentRequiredFeature, AgentResourceSpec, DataClassification, ResourceDocument,
+};
 use reqwest::{blocking::Client, redirect::Policy, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -27,6 +30,8 @@ mod exact_model_streaming_chat;
 mod native_and_remote_capability;
 #[path = "remote_mcp_tool_and_resource.rs"]
 mod remote_mcp_tool_and_resource;
+#[path = "sandbox_and_remote_framework_capability.rs"]
+mod sandbox_and_remote_framework_capability;
 #[path = "subagent_quota_and_cancel.rs"]
 mod subagent_quota_and_cancel;
 #[path = "timer_signal_restart_recovery.rs"]
@@ -38,6 +43,9 @@ const REPORT_DIRECTORY_ENV: &str = "PLATFORM_PRODUCTIZATION_REPORT_DIRECTORY";
 const FRESH_PROFILE_ENV: &str = "PLATFORM_PRODUCTIZATION_FRESH_PROFILE";
 const FIRST_RUN_MARKER_ENV: &str = "PLATFORM_PRODUCTIZATION_FIRST_RUN_MARKER";
 const FEATURES_ENV: &str = "PLATFORM_PRODUCTIZATION_FEATURES";
+const QUALIFICATION_RUN_ID_ENV: &str = "PLATFORM_PRODUCTIZATION_QUALIFICATION_RUN_ID";
+const ACTUAL_PROFILE_ENV: &str = "PLATFORM_PRODUCTIZATION_ACTUAL_PROFILE";
+const PROFILE_DIGEST_ENV: &str = "PLATFORM_PRODUCTIZATION_PROFILE_DIGEST";
 const CONTRACT_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -46,14 +54,130 @@ fn feature_enabled(name: &str) -> bool {
     selected == "all" || selected.split(',').any(|feature| feature == name)
 }
 
-struct RestartedOrchestrationWorker(Child);
+fn exact_evidence_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
 
-impl Drop for RestartedOrchestrationWorker {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+fn qualification_run_id() -> String {
+    let value = env::var(QUALIFICATION_RUN_ID_ENV)
+        .unwrap_or_else(|_| panic!("{QUALIFICATION_RUN_ID_ENV} is required to write reports"));
+    assert!(
+        exact_evidence_digest(&value),
+        "qualification run ID is exact"
+    );
+    value
+}
+
+fn actual_productization_profile() -> String {
+    env::var(ACTUAL_PROFILE_ENV)
+        .unwrap_or_else(|_| panic!("{ACTUAL_PROFILE_ENV} is required to write reports"))
+}
+
+fn productization_profile_digest() -> String {
+    let value = env::var(PROFILE_DIGEST_ENV)
+        .unwrap_or_else(|_| panic!("{PROFILE_DIGEST_ENV} is required to write reports"));
+    assert!(
+        exact_evidence_digest(&value),
+        "runtime profile digest is exact"
+    );
+    value
+}
+
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("qualification crate is inside the workspace")
+}
+
+fn runtime_binary_path(project: &Path, binary: &str) -> std::path::PathBuf {
+    let runtime = project.join(".insight/runtime");
+    let profile: Value = serde_json::from_slice(
+        &fs::read(runtime.join("profile.json")).expect("runtime profile is readable"),
+    )
+    .expect("runtime profile is closed JSON");
+    let release_identity = profile["release_identity"]
+        .as_str()
+        .expect("runtime profile has an exact release identity");
+    let directory = if release_identity.starts_with("source:") {
+        workspace_root().join("target/release")
+    } else if release_identity.starts_with("release:") {
+        let digest = release_identity
+            .rsplit(':')
+            .next()
+            .expect("release identity has a bundle digest");
+        assert!(
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "release identity bundle digest is exact"
+        );
+        runtime.join("releases").join(digest).join("bin")
+    } else {
+        panic!("runtime profile release identity is not closed")
+    };
+    let path = directory.join(format!("{binary}{}", env::consts::EXE_SUFFIX));
+    assert!(
+        path.is_file(),
+        "required runtime binary is missing: {}",
+        path.display()
+    );
+    path
+}
+
+struct FixtureChild {
+    child: Option<Child>,
+}
+
+impl FixtureChild {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("fixture child is still owned by its guard")
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let result = self
+            .child
+            .as_mut()
+            .expect("fixture child is waited exactly once")
+            .wait();
+        if result.is_ok() {
+            self.child = None;
+        }
+        result
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(());
+        };
+        let _ = child.kill();
+        let result = child.wait().map(|_| ());
+        if result.is_ok() {
+            self.child = None;
+        }
+        result
     }
 }
+
+impl Drop for FixtureChild {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+type RestartedOrchestrationWorker = FixtureChild;
 
 fn process_is_running(pid: u64) -> bool {
     Command::new("kill")
@@ -185,11 +309,7 @@ fn prove_invalid_receipt_conflict(project: &Path, request: &Value) {
 }
 
 fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrchestrationWorker {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("insight binary is inside workspace target directory");
+    let _ = insight;
     let runtime = project.join(".insight/runtime");
     let profile: Value = serde_json::from_slice(
         &fs::read(runtime.join("profile.json")).expect("runtime profile is readable"),
@@ -209,7 +329,11 @@ fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrch
         .open(runtime.join("logs/orchestration-restart.log"))
         .expect("restart log is writable");
     let stderr = log.try_clone().expect("restart log can be cloned");
-    let mut child = Command::new(workspace.join("target/release/platform-orchestration-worker"))
+    let mut child = FixtureChild::new(
+        Command::new(runtime_binary_path(
+            project,
+            "platform-orchestration-worker",
+        ))
         .env(
             "PLATFORM_ORCHESTRATION_WORKER_CONFIG",
             runtime.join("config/orchestration.json"),
@@ -234,14 +358,19 @@ fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrch
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .expect("replacement orchestration worker starts");
+        .expect("replacement orchestration worker starts"),
+    );
     let address = format!("127.0.0.1:{port}");
     let deadline = Instant::now() + StdDuration::from_secs(30);
     loop {
         if TcpStream::connect(&address).is_ok() {
             break;
         }
-        if let Some(status) = child.try_wait().expect("replacement status is readable") {
+        if let Some(status) = child
+            .child_mut()
+            .try_wait()
+            .expect("replacement status is readable")
+        {
             panic!("replacement orchestration worker exited before readiness: {status}");
         }
         assert!(
@@ -250,7 +379,7 @@ fn restart_orchestration_worker(insight: &Path, project: &Path) -> RestartedOrch
         );
         thread::sleep(StdDuration::from_millis(50));
     }
-    RestartedOrchestrationWorker(child)
+    child
 }
 
 fn canonical_bytes(value: &Value) -> Vec<u8> {
@@ -346,13 +475,8 @@ fn run_failure(insight: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("insight failure is UTF-8")
 }
 
-fn run_http_resource_lifecycle(insight: &Path, project: &Path, manifest: &Path) -> Value {
-    let workspace = insight
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("insight binary is inside the workspace target directory");
-    let fixture = workspace.join("examples/productization/http-resource-lifecycle.sh");
+fn run_http_resource_lifecycle(_insight: &Path, project: &Path, manifest: &Path) -> Value {
+    let fixture = workspace_root().join("examples/productization/http-resource-lifecycle.sh");
     let output = Command::new(&fixture)
         .args([
             "--project",
@@ -441,6 +565,56 @@ fn exact_version(version: &Value) -> Value {
         "resource_kind": version["resource_kind"],
         "semantic_digest": version["content_digest"],
     })
+}
+
+fn agent_resource_spec(
+    authoring_name: &str,
+    required_features: Vec<AgentRequiredFeature>,
+    value: Value,
+) -> Value {
+    let mut fields = value
+        .as_object()
+        .cloned()
+        .expect("Agent fixture spec fields are an object");
+    let mut take = |name: &str| {
+        fields
+            .remove(name)
+            .unwrap_or_else(|| panic!("Agent fixture spec omitted {name}"))
+    };
+    let spec = AgentResourceSpec {
+        authoring_name: authoring_name.to_owned(),
+        required_features,
+        input_classification: DataClassification::Internal,
+        default_deadline_seconds: 120,
+        authoring_package: serde_json::from_value(take("authoring_package"))
+            .expect("Agent authoring package follows the owning contract"),
+        contract_digest: serde_json::from_value(take("contract_digest"))
+            .expect("Agent contract digest follows the owning contract"),
+        dependency_versions: serde_json::from_value(take("dependency_versions"))
+            .expect("Agent dependency versions follow the owning contract"),
+        policy_versions: serde_json::from_value(take("policy_versions"))
+            .expect("Agent policy versions follow the owning contract"),
+        author_instructions: None,
+        input_schema: serde_json::from_value(take("input_schema"))
+            .expect("Agent input schema follows the owning contract"),
+        output_schema: serde_json::from_value(take("output_schema"))
+            .expect("Agent output schema follows the owning contract"),
+        error_schema: serde_json::from_value(take("error_schema"))
+            .expect("Agent error schema follows the owning contract"),
+        typed_plan_artifact_id: serde_json::from_value(take("typed_plan_artifact_id"))
+            .expect("Agent Typed Plan Artifact ID follows the owning contract"),
+        typed_plan_digest: serde_json::from_value(take("typed_plan_digest"))
+            .expect("Agent Typed Plan digest follows the owning contract"),
+    };
+    assert!(
+        fields.is_empty(),
+        "Agent fixture spec contains fields outside the owning typed builder: {:?}",
+        fields.keys().collect::<Vec<_>>()
+    );
+    ResourceDocument::Agent(spec.clone())
+        .validate()
+        .expect("Agent fixture spec satisfies the owning contract");
+    serde_json::to_value(spec).expect("Agent fixture spec serializes")
 }
 
 #[test]
@@ -727,7 +901,7 @@ fn public_cli_deterministic_first_run() {
             "display_name": "Deterministic echo agent",
             "document": {
                 "resource_kind": "agent",
-                "spec": {
+                "spec": agent_resource_spec("deterministic-echo-agent", vec![], json!({
                     "authoring_package": {
                         "artifact": authoring_ref,
                         "manifest_digest": authoring_upload["content_digest"],
@@ -740,7 +914,7 @@ fn public_cli_deterministic_first_run() {
                     "error_schema": closed_schema,
                     "typed_plan_artifact_id": plan_upload["artifact_id"],
                     "typed_plan_digest": plan_upload["content_digest"],
-                },
+                })),
             },
         },
         "publish": {
@@ -935,6 +1109,19 @@ fn public_cli_deterministic_first_run() {
                 &qualification_ref,
             )
         });
+    assert!(
+        !feature_enabled("sandbox") || feature_enabled("remote-capability"),
+        "the sandbox golden scenario requires the remote-capability feature"
+    );
+    let mut sandbox_evidence = feature_enabled("sandbox").then(|| {
+        sandbox_and_remote_framework_capability::run(
+            insight,
+            project,
+            fixture.path(),
+            &authoring_ref,
+            &qualification_ref,
+        )
+    });
     let mut model_evidence = feature_enabled("model").then(|| {
         exact_model_streaming_chat::run(
             insight,
@@ -944,7 +1131,7 @@ fn public_cli_deterministic_first_run() {
             &qualification_ref,
         )
     });
-    let (mut timer_signal_evidence, replacement) = timer_signal_restart_recovery::run(
+    let (mut timer_signal_evidence, mut replacement) = timer_signal_restart_recovery::run(
         insight,
         project,
         fixture.path(),
@@ -970,6 +1157,13 @@ fn public_cli_deterministic_first_run() {
             &qualification_ref,
         )
     });
+    let mut artifact_evidence = artifact_lifecycle_and_rejection::run(
+        insight,
+        project,
+        fixture.path(),
+        &plan_upload,
+        &plan,
+    );
     let approval_evidence = approval_task_resume::run(
         insight,
         project,
@@ -993,19 +1187,13 @@ fn public_cli_deterministic_first_run() {
             mcp_evidence
                 .as_ref()
                 .map(|evidence| evidence.run_id.as_str()),
+            sandbox_evidence
+                .as_ref()
+                .map(|evidence| evidence.run_id.as_str()),
         ),
     );
-    let artifact_evidence = feature_enabled("artifact").then(|| {
-        artifact_lifecycle_and_rejection::run(
-            insight,
-            project,
-            fixture.path(),
-            &plan_upload,
-            &plan,
-            approval_evidence.console_passed,
-        )
-    });
     if approval_evidence.console_passed {
+        artifact_evidence.mark_console_passed();
         timer_signal_evidence.mark_console_passed();
         subagent_evidence.mark_console_passed();
         if let Some(context_evidence) = &mut context_evidence {
@@ -1020,8 +1208,15 @@ fn public_cli_deterministic_first_run() {
         if let Some(mcp_evidence) = &mut mcp_evidence {
             mcp_evidence.mark_console_passed();
         }
+        if let Some(sandbox_evidence) = &mut sandbox_evidence {
+            sandbox_evidence.mark_console_passed();
+        }
     }
     let human_task_run_id = approval_evidence.run_id.as_str();
+
+    if let Some(mcp_evidence) = &mut mcp_evidence {
+        mcp_evidence.terminate_restored_profile_worker();
+    }
 
     // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business
     // state is neither treated as a bootstrap conflict nor used as a reason to skip verification.
@@ -1032,7 +1227,9 @@ fn public_cli_deterministic_first_run() {
     let build_state_modified_before = fs::metadata(&build_state_path)
         .and_then(|metadata| metadata.modified())
         .expect("build state modification time is readable");
-    drop(replacement);
+    replacement
+        .terminate()
+        .expect("the replacement orchestration Worker terminates before profile restart");
     stop_role(project, "gateway-runtime");
     let unavailable = run_failure(
         insight,
@@ -1053,6 +1250,7 @@ fn public_cli_deterministic_first_run() {
         "Gateway unavailability must not require a Rust backtrace: {unavailable}"
     );
     let stopped = Command::new(insight)
+        .current_dir(workspace_root())
         .args(["stop", "--path", project.to_str().unwrap()])
         .output()
         .expect("insight stop starts");
@@ -1062,7 +1260,18 @@ fn public_cli_deterministic_first_run() {
         String::from_utf8_lossy(&stopped.stdout),
         String::from_utf8_lossy(&stopped.stderr)
     );
+    assert_eq!(
+        String::from_utf8(stopped.stdout).expect("insight stop output is UTF-8"),
+        "stopped local Platform roles; PostgreSQL, NATS and LocalStack dependencies remain ready for durable restart\n"
+    );
+    for address in ["127.0.0.1:5432", "127.0.0.1:4222", "127.0.0.1:4566"] {
+        assert!(
+            TcpStream::connect(address).is_ok(),
+            "dependency {address} must remain ready after insight stop"
+        );
+    }
     let restarted = Command::new(insight)
+        .current_dir(workspace_root())
         .args(["start", "--path", project.to_str().unwrap()])
         .output()
         .expect("insight dev restart starts");
@@ -1100,6 +1309,30 @@ fn public_cli_deterministic_first_run() {
         ],
     );
     assert_eq!(persisted["state"], "succeeded");
+    let restarted_downloaded_plan_path = fixture.path().join("downloaded-plan-after-restart.json");
+    let restarted_download = run_json(
+        insight,
+        &[
+            "artifact",
+            "read",
+            plan_artifact_id,
+            "--output",
+            restarted_downloaded_plan_path.to_str().unwrap(),
+            "--path",
+            project.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(restarted_download["artifact_id"], plan_artifact_id);
+    assert_eq!(
+        restarted_download["content_digest"],
+        canonical_digest(&plan)
+    );
+    assert_eq!(
+        fs::read(&restarted_downloaded_plan_path)
+            .expect("restarted Artifact download is readable"),
+        canonical_bytes(&plan),
+        "restart must preserve the exact object and KMS authority needed to decrypt existing content"
+    );
 
     if let Ok(report_directory) = env::var(REPORT_DIRECTORY_ENV) {
         assert_eq!(
@@ -1107,14 +1340,9 @@ fn public_cli_deterministic_first_run() {
             Ok("true"),
             "writing qualification evidence requires an explicitly fresh profile"
         );
-        let workspace = insight
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("insight binary is inside workspace target directory");
         let dirty = Command::new("git")
             .args(["status", "--porcelain"])
-            .current_dir(workspace)
+            .current_dir(workspace_root())
             .output()
             .expect("Git working tree status is readable");
         assert!(dirty.status.success(), "Git status succeeds");
@@ -1124,7 +1352,7 @@ fn public_cli_deterministic_first_run() {
         );
         let revision = Command::new("git")
             .args(["rev-parse", "HEAD"])
-            .current_dir(workspace)
+            .current_dir(workspace_root())
             .output()
             .expect("Git revision is readable");
         assert!(revision.status.success(), "Git revision lookup succeeds");
@@ -1158,6 +1386,10 @@ fn public_cli_deterministic_first_run() {
             "scenario_id": "deterministic-first-run",
             "contract_profile": "insight.platform/v1",
             "profile": "starter",
+            "qualification_run_id": qualification_run_id(),
+            "actual_profile": actual_productization_profile(),
+            "profile_digest": productization_profile_digest(),
+            "evidence_inputs": {},
             "automation_layer": "P2",
             "source_revision": revision.clone(),
             "environment": {
@@ -1208,14 +1440,12 @@ fn public_cli_deterministic_first_run() {
                 .expect("Subagent scenario report is canonicalizable"),
         )
         .expect("Subagent scenario report is writable");
-        if let Some(artifact_evidence) = artifact_evidence {
-            fs::write(
-                report_directory.join("artifact-lifecycle-and-rejection.json"),
-                serde_jcs::to_vec(&artifact_evidence.report(&revision))
-                    .expect("Artifact scenario report is canonicalizable"),
-            )
-            .expect("Artifact scenario report is writable");
-        }
+        fs::write(
+            report_directory.join("artifact-lifecycle-and-rejection.json"),
+            serde_jcs::to_vec(&artifact_evidence.report(&revision))
+                .expect("Artifact scenario report is canonicalizable"),
+        )
+        .expect("Artifact scenario report is writable");
         if let Some(context_evidence) = context_evidence {
             fs::write(
                 report_directory.join("context-retrieval-and-citation.json"),
@@ -1247,6 +1477,14 @@ fn public_cli_deterministic_first_run() {
                     .expect("MCP scenario report is canonicalizable"),
             )
             .expect("MCP scenario report is writable");
+        }
+        if let Some(sandbox_evidence) = sandbox_evidence {
+            fs::write(
+                report_directory.join("sandbox-and-remote-framework-capability.json"),
+                serde_jcs::to_vec(&sandbox_evidence.report(&revision))
+                    .expect("Sandbox/framework scenario report is canonicalizable"),
+            )
+            .expect("Sandbox/framework scenario report is writable");
         }
     }
 }
