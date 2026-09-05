@@ -103,22 +103,26 @@ for marker in (
     "cargo run --locked -p insight-platform-contracts --bin check-platform-contracts",
     "cargo run --locked -p insight-platform-contracts --bin platform-qualification",
     "cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract",
-    "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+    "cargo clippy --locked --workspace --all-targets --all-features --no-deps -- -D warnings",
     "cargo test --locked --workspace --all-targets --all-features",
     "cargo test --locked --workspace --doc --all-features",
 ):
     if marker not in rust_verification:
         failures.append(f"single-target Rust verification misses {marker!r}")
 test_command = "cargo test --locked --workspace --all-targets --all-features"
-clippy_command = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
+clippy_command = (
+    "cargo clippy --locked --workspace --all-targets --all-features --no-deps -- -D warnings"
+)
 if (
     test_command in rust_verification
     and clippy_command in rust_verification
     and rust_verification.index(test_command) > rust_verification.index(clippy_command)
 ):
-    failures.append("workspace Clippy must reuse the already compiled test graph")
+    failures.append("workspace-only Clippy must follow tests and reuse their dependency artifacts")
 if "cargo check --locked" in ci:
     failures.append("ordinary CI retains a redundant cargo check before Clippy and tests")
+if "cargo clippy --locked -p insight-cli --all-targets --no-deps -- -D warnings" not in cli_checks:
+    failures.append("CLI Clippy still re-lints dependencies")
 if (
     "cargo test --locked -p insight-platform-qualification-tests --test productization --no-run"
     not in cli_checks
