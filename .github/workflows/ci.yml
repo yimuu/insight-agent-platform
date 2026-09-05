@@ -331,6 +331,7 @@ jobs:
       features: all
     permissions:
       contents: read
+      packages: read
 
   required:
     name: Required CI summary

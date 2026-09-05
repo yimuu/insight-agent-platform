@@ -365,11 +365,18 @@ for marker in (
     if marker not in product_release:
         failures.append(f"product release misses required 10/10 evidence marker {marker!r}")
 
+ci_productization = ci.split("\n  productization:", 1)[-1].split("\n  required:", 1)[0]
 for marker in (
-    "productization:",
     "needs: quick",
     "uses: ./.github/workflows/productization-journey.yml",
     "features: all",
+    "permissions:\n      contents: read\n      packages: read",
+):
+    if marker not in ci_productization:
+        failures.append(f"ordinary CI productization caller misses {marker!r}")
+
+for marker in (
+    "productization:",
     "needs: [changes, quick, lint, test, cli, console, policy, productization]",
     "PRODUCTIZATION_RESULT: ${{ needs.productization.result }}",
     '--productization-result "$PRODUCTIZATION_RESULT"',

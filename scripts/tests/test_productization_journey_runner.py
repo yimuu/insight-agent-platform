@@ -161,7 +161,17 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
         self.assertIn('kind delete cluster --name "$INSIGHT_KIND_CLUSTER_NAME"', workflow)
         self.assertIn("workflow_call:", workflow.split("permissions:", 1)[0])
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("uses: ./.github/workflows/productization-journey.yml", ci)
+        productization_call = ci.split("\n  productization:", 1)[-1].split(
+            "\n  required:", 1
+        )[0]
+        self.assertIn(
+            "uses: ./.github/workflows/productization-journey.yml",
+            productization_call,
+        )
+        self.assertIn(
+            "permissions:\n      contents: read\n      packages: read",
+            productization_call,
+        )
         self.assertIn("needs: [changes, quick, lint, test, cli, console, policy, productization]", ci)
 
     def test_candidate_mode_is_prebuilt_only_and_fail_closed(self) -> None:
