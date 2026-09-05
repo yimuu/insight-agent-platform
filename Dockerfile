@@ -85,7 +85,7 @@ RUN apt-get update \
 RUN runner_target="$(rustc -vV | sed -n 's/^host: //p' | sed 's/-gnu$/-musl/')" \
     && rustup target add "$runner_target" \
     && CC=musl-gcc CXX=musl-gcc AR=ar \
-       RUSTFLAGS='-C linker=musl-gcc -C target-feature=+crt-static' \
+       RUSTFLAGS='-C target-feature=+crt-static' \
        cargo build --locked --release --target "$runner_target" \
          -p insight-platform-sandbox-runner --bin platform-sandbox-runner \
     && cp "target/$runner_target/release/platform-sandbox-runner" \
