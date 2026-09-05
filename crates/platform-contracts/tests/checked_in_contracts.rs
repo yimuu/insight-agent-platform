@@ -1,10 +1,13 @@
 use insight_platform_contracts::{
     canonical_digest, checked_in_hard_limit_profile,
     machine::{check_contract_tree, repository_root_from_manifest},
-    parse_strict_json, CandidateManifest, CapacityProfile, JsonLimits, NewCandidateManifest,
+    parse_strict_json, ArtifactRef, CandidateManifest, CapacityProfile, DataClassification,
+    DeploymentClosure, ExactVersionRef, JsonLimits, NewCandidateManifest,
     QualificationArtifactLink, QualificationEvidenceManifest, QualificationGateEvidence,
-    QualificationOutcome, QualificationProfile, Sha256Digest, WorkClass, WorkerManifest,
-    QUALIFICATION_EVIDENCE_VERSION, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+    QualificationOutcome, QualificationProfile, ResourceId, SandboxNetworkMode,
+    SandboxProfileDeploymentClosure, SandboxProvisioningLimitsV1, SandboxResourceLimitsV1,
+    Sha256Digest, WorkClass, WorkerManifest, QUALIFICATION_EVIDENCE_VERSION,
+    SANDBOX_CONTRACT_SCHEMA_VERSION, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use std::fs;
@@ -160,6 +163,113 @@ fn capacity_profile_schema_matches_the_closed_rust_contract() {
             .field,
         "work_class_capacity"
     );
+}
+
+#[test]
+fn sandbox_deployment_closure_schema_matches_the_owning_rust_type() {
+    let root = repository_root_from_manifest();
+    let schema: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join("contracts/platform-v1/schemas/deployment-closure.schema.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let closure = DeploymentClosure::SandboxProfile(SandboxProfileDeploymentClosure {
+        schema_version: SANDBOX_CONTRACT_SCHEMA_VERSION,
+        profile_revision: ExactVersionRef::new(
+            "sxrev_0198f1c3-8f49-7c3e-b1f3-773c28367b84"
+                .parse::<ResourceId>()
+                .unwrap(),
+            sha('a'),
+        )
+        .unwrap(),
+        runtime_revision: ExactVersionRef::new(
+            "srrev_0198f1c3-8f49-7c3e-b1f3-773c28367b85"
+                .parse::<ResourceId>()
+                .unwrap(),
+            sha('b'),
+        )
+        .unwrap(),
+        provider_binding_digest: sha('c'),
+        network_mode: SandboxNetworkMode::Disabled,
+        limits: SandboxResourceLimitsV1 {
+            maximum_input_bytes: 1_048_576,
+            maximum_output_bytes: 1_048_576,
+            cpu_millicores: 1_000,
+            memory_mebibytes: 512,
+            pids: 64,
+            ephemeral_storage_bytes: 1_048_576,
+            wall_milliseconds: 60_000,
+            cleanup_milliseconds: 30_000,
+        },
+        provisioning_limits: SandboxProvisioningLimitsV1 {
+            maximum_candidates: 4,
+            candidate_page_items: 16,
+            candidate_quiescence_milliseconds: 500,
+            provisioning_timeout_milliseconds: 30_000,
+            orphan_page_items: 100,
+            runner_header_bytes: 65_536,
+            diagnostic_bytes: 65_536,
+        },
+        secret_injection_disabled: true,
+        qualification_evidence: ArtifactRef::new(
+            "art_0198f1c3-8f49-7c3e-b1f3-773c28367b86"
+                .parse::<ResourceId>()
+                .unwrap(),
+            sha('d'),
+            4_096,
+            "application/json",
+            DataClassification::Internal,
+            Some("sandbox-qualification.json".to_owned()),
+        )
+        .unwrap(),
+    });
+    closure.validate().unwrap();
+
+    let value = serde_json::to_value(&closure).unwrap();
+    let closure_schema =
+        &schema["$defs"]["SandboxProfileDeploymentClosure"]["properties"]["bindings"];
+    assert_same_object_fields(
+        &closure_schema["properties"],
+        &closure_schema["required"],
+        &value["bindings"],
+    );
+    assert_same_object_fields(
+        &schema["$defs"]["SandboxResourceLimitsV1"]["properties"],
+        &schema["$defs"]["SandboxResourceLimitsV1"]["required"],
+        &value["bindings"]["limits"],
+    );
+    assert_same_object_fields(
+        &schema["$defs"]["SandboxProvisioningLimitsV1"]["properties"],
+        &schema["$defs"]["SandboxProvisioningLimitsV1"]["required"],
+        &value["bindings"]["provisioning_limits"],
+    );
+}
+
+fn assert_same_object_fields(
+    schema_properties: &serde_json::Value,
+    schema_required: &serde_json::Value,
+    serialized: &serde_json::Value,
+) {
+    let schema_fields = schema_properties
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let required_fields = schema_required
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field.as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let serialized_fields = serialized
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(schema_fields, serialized_fields);
+    assert_eq!(required_fields, serialized_fields);
 }
 
 #[test]

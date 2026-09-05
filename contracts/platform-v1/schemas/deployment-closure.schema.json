@@ -1092,27 +1092,48 @@
         "bindings": {
           "additionalProperties": false,
           "properties": {
-            "policy_bindings": {
-              "items": {
-                "$ref": "#/$defs/ExactPolicyBinding"
-              },
-              "maxItems": 512,
-              "type": "array"
+            "limits": {
+              "$ref": "#/$defs/SandboxResourceLimitsV1"
+            },
+            "network_mode": {
+              "enum": [
+                "disabled",
+                "direct"
+              ],
+              "type": "string"
             },
             "profile_revision": {
               "$ref": "#/$defs/ExactVersionRef"
+            },
+            "provider_binding_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "provisioning_limits": {
+              "$ref": "#/$defs/SandboxProvisioningLimitsV1"
             },
             "qualification_evidence": {
               "$ref": "nominal/artifact-ref.schema.json"
             },
             "runtime_revision": {
               "$ref": "#/$defs/ExactVersionRef"
+            },
+            "schema_version": {
+              "const": 1,
+              "type": "integer"
+            },
+            "secret_injection_disabled": {
+              "const": true
             }
           },
           "required": [
+            "schema_version",
             "profile_revision",
             "runtime_revision",
-            "policy_bindings",
+            "provider_binding_digest",
+            "network_mode",
+            "limits",
+            "provisioning_limits",
+            "secret_injection_disabled",
             "qualification_evidence"
           ],
           "type": "object"
@@ -1124,6 +1145,112 @@
       "required": [
         "resource_kind",
         "bindings"
+      ],
+      "type": "object"
+    },
+    "SandboxProvisioningLimitsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_page_items": {
+          "maximum": 16,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "candidate_quiescence_milliseconds": {
+          "maximum": 5000,
+          "minimum": 100,
+          "type": "integer"
+        },
+        "diagnostic_bytes": {
+          "maximum": 65536,
+          "minimum": 1024,
+          "type": "integer"
+        },
+        "maximum_candidates": {
+          "maximum": 4,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "orphan_page_items": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provisioning_timeout_milliseconds": {
+          "maximum": 120000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "runner_header_bytes": {
+          "maximum": 65536,
+          "minimum": 1024,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_candidates",
+        "candidate_page_items",
+        "candidate_quiescence_milliseconds",
+        "provisioning_timeout_milliseconds",
+        "orphan_page_items",
+        "runner_header_bytes",
+        "diagnostic_bytes"
+      ],
+      "type": "object"
+    },
+    "SandboxResourceLimitsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_milliseconds": {
+          "maximum": 300000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cpu_millicores": {
+          "maximum": 8000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ephemeral_storage_bytes": {
+          "maximum": 4294967296,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_input_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_output_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memory_mebibytes": {
+          "maximum": 16384,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pids": {
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "wall_milliseconds": {
+          "maximum": 3600000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_input_bytes",
+        "maximum_output_bytes",
+        "cpu_millicores",
+        "memory_mebibytes",
+        "pids",
+        "ephemeral_storage_bytes",
+        "wall_milliseconds",
+        "cleanup_milliseconds"
       ],
       "type": "object"
     },

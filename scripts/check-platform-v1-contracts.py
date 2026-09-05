@@ -1281,7 +1281,9 @@ def check_machine_registry_contracts(errors):
             "policy_revision", "applicability_digest", "qualification_evidence"
         }),
         ("SandboxProfileDeploymentClosure", "sandbox_profile", {
-            "profile_revision", "runtime_revision", "policy_bindings", "qualification_evidence"
+            "schema_version", "profile_revision", "runtime_revision", "provider_binding_digest",
+            "network_mode", "limits", "provisioning_limits", "secret_injection_disabled",
+            "qualification_evidence"
         }),
     ]
     defs = deployment_schema.get("$defs", {})
@@ -1304,6 +1306,22 @@ def check_machine_registry_contracts(errors):
             errors.append(f"{name}.bindings differs from its Rust owner fields")
         if set(bindings.get("properties", {})) != binding_fields:
             errors.append(f"{name}.bindings exposes unknown or missing fields")
+    sandbox_bindings = (
+        defs.get("SandboxProfileDeploymentClosure", {})
+        .get("properties", {})
+        .get("bindings", {})
+        .get("properties", {})
+    )
+    if sandbox_bindings.get("schema_version", {}).get("const") != 1:
+        errors.append("SandboxProfileDeploymentClosure does not freeze schema version 1")
+    if sandbox_bindings.get("network_mode", {}).get("enum") != ["disabled", "direct"]:
+        errors.append("SandboxProfileDeploymentClosure network modes differ from the Rust owner")
+    if sandbox_bindings.get("secret_injection_disabled", {}).get("const") is not True:
+        errors.append("SandboxProfileDeploymentClosure does not forbid secret injection")
+    if sandbox_bindings.get("limits", {}).get("$ref") != "#/$defs/SandboxResourceLimitsV1":
+        errors.append("SandboxProfileDeploymentClosure does not bind closed resource limits")
+    if sandbox_bindings.get("provisioning_limits", {}).get("$ref") != "#/$defs/SandboxProvisioningLimitsV1":
+        errors.append("SandboxProfileDeploymentClosure does not bind closed provisioning limits")
     policy_binding = defs.get("ExactPolicyBinding", {})
     if policy_binding.get("additionalProperties") is not False or set(
         policy_binding.get("required", [])

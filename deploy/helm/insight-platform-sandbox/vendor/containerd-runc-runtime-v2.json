@@ -1,0 +1,123 @@
+{
+  "schema_version": 2,
+  "provider": "kubernetes",
+  "container_runtime": "containerd",
+  "oci_runtime": "runc",
+  "runtime_class": null,
+  "host_runtime_socket_mounts": false,
+  "sandbox_service_account_token": false,
+  "container_security_context": {
+    "run_as_user": 65532,
+    "run_as_group": 65532,
+    "supplemental_groups_policy": "Strict",
+    "read_only_root_filesystem": true,
+    "allow_privilege_escalation": true,
+    "capabilities_drop": ["ALL"],
+    "capabilities_add": ["KILL", "SETGID", "SETUID"],
+    "capability_bounding_mask": "0x00000000000000e0",
+    "seccomp_mode": 2
+  },
+  "process_topology": {
+    "pid_1": {
+      "component": "opensandbox-execd",
+      "release": "v1.1.0",
+      "source_commit": "48b0215f1bd097b31d0f022a44640e00c11ac49d",
+      "image_index_digest": "sha256:6cf7dba2f21f0b536e100563d841ac58a9f31c2b0a081b7ac76796a24d6f47e2",
+      "uid": 65532,
+      "gid": 65532,
+      "permitted_capabilities": "0x0000000000000000",
+      "effective_capabilities": "0x0000000000000000",
+      "inheritable_capabilities": "0x0000000000000000",
+      "ambient_capabilities": "0x0000000000000000",
+      "capability_bounding_mask": "0x00000000000000e0",
+      "securebits": "0x00000000",
+      "no_new_privileges": false,
+      "hardening_floor": "disabled",
+      "init_mode": true,
+      "api_port": 44772,
+      "api_access_token": {
+        "environment_name": "EXECD_ACCESS_TOKEN",
+        "encoding": "lowercase_hex",
+        "entropy_bits": 256,
+        "generation": "per_candidate_csprng",
+        "unauthenticated_requests": "reject"
+      }
+    },
+    "runner_launcher": {
+      "path": "/usr/local/bin/platform-sandbox-runner",
+      "parent_pid": 1,
+      "uid": 65532,
+      "gid": 65532,
+      "supplemental_groups": [],
+      "file_capabilities": ["KILL", "SETGID", "SETUID"],
+      "file_capability_flags": "ep",
+      "initial_permitted_capabilities": "0x00000000000000e0",
+      "initial_effective_capabilities": "0x00000000000000e0",
+      "initial_inheritable_capabilities": "0x0000000000000000",
+      "initial_ambient_capabilities": "0x0000000000000000",
+      "capability_bounding_mask": "0x00000000000000e0",
+      "securebits": "0x00000000",
+      "initial_no_new_privileges": false,
+      "seccomp_mode": 2,
+      "environment_allowlist": [
+        "INSIGHT_SANDBOX_RUNNER_CONFIG",
+        "INSIGHT_SANDBOX_RUNNER_CONFIG_DIGEST",
+        "OPENSANDBOX_ID"
+      ],
+      "exec_target": "/usr/local/libexec/platform-sandbox-runner-core",
+      "handoff_no_new_privileges": true
+    },
+    "runner_core": {
+      "path": "/usr/local/libexec/platform-sandbox-runner-core",
+      "uid": 65532,
+      "gid": 65532,
+      "supplemental_groups": [],
+      "permitted_capabilities": "0x00000000000000e0",
+      "effective_capabilities": "0x00000000000000e0",
+      "inheritable_capabilities": "0x0000000000000000",
+      "ambient_capabilities": "0x0000000000000000",
+      "capability_bounding_mask": "0x00000000000000e0",
+      "securebits": "0x00000000",
+      "no_new_privileges": true,
+      "seccomp_mode": 2,
+      "dumpable": false,
+      "listen_port": 18080
+    },
+    "package": {
+      "uid": 65533,
+      "gid": 65533,
+      "supplemental_groups": [],
+      "permitted_capabilities": "0x0000000000000000",
+      "effective_capabilities": "0x0000000000000000",
+      "inheritable_capabilities": "0x0000000000000000",
+      "ambient_capabilities": "0x0000000000000000",
+      "capability_bounding_mask": "0x00000000000000e0",
+      "securebits": "0x00000000",
+      "no_new_privileges": true,
+      "seccomp_mode": 2,
+      "runner_signal_syscalls": "deny"
+    }
+  },
+  "privileged_files": [
+    {
+      "path": "/usr/local/bin/platform-sandbox-runner",
+      "capabilities": "cap_kill,cap_setgid,cap_setuid=ep"
+    }
+  ],
+  "package_image_composition": {
+    "runner_layers": "strict_prefix",
+    "added_path_prefixes": ["/opt/insight/package"],
+    "runtime_config_changes": false,
+    "whiteouts": false,
+    "device_nodes": false,
+    "setuid_or_setgid_files": false,
+    "additional_file_capabilities": false
+  },
+  "required_network_policy_semantics": [
+    "default-deny",
+    "namespace-selector",
+    "pod-selector",
+    "ip-block-except"
+  ],
+  "qualification_level": "l3"
+}

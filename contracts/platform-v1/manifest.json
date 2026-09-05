@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:b3c898c8a39c428754bcd03e879b4392ed414120bed75d68521582f8cbefcccb",
+  "contract_digest": "sha256:9975676dc5cb124d374677857b8167dcf370bea90f736bf97b2bae831b8172d1",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -63,10 +63,10 @@
       "sha256": "47baa322cbd057e1cb1dcedb51925522f8bdd332f5a2c4c5e8ee1e31035ab1d7"
     },
     {
-      "bytes": 33314,
+      "bytes": 36614,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/deployment-closure.schema.json",
-      "sha256": "2500b02c1756ec83b2f4b1b58916f55e531340d2c5566e79a53a985bcef0a125"
+      "sha256": "b57f6fadcc5436c1ae09c65ccc3ea941e4eb7df9a9659edba27326d363394d39"
     },
     {
       "bytes": 1524,

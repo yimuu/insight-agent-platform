@@ -3045,6 +3045,58 @@ fn mcp_transport_binding_schema() -> Value {
     }))]})
 }
 
+fn sandbox_resource_limits_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "maximum_input_bytes",
+            "maximum_output_bytes",
+            "cpu_millicores",
+            "memory_mebibytes",
+            "pids",
+            "ephemeral_storage_bytes",
+            "wall_milliseconds",
+            "cleanup_milliseconds"
+        ],
+        "properties": {
+            "maximum_input_bytes": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SANDBOX_INPUT_BYTES},
+            "maximum_output_bytes": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SANDBOX_OUTPUT_BYTES},
+            "cpu_millicores": {"type": "integer", "minimum": 1, "maximum": 8_000},
+            "memory_mebibytes": {"type": "integer", "minimum": 1, "maximum": 16_384},
+            "pids": {"type": "integer", "minimum": 1, "maximum": 4_096},
+            "ephemeral_storage_bytes": {"type": "integer", "minimum": 1, "maximum": 4_294_967_296_u64},
+            "wall_milliseconds": {"type": "integer", "minimum": 1, "maximum": 3_600_000},
+            "cleanup_milliseconds": {"type": "integer", "minimum": 1, "maximum": 300_000}
+        }
+    })
+}
+
+fn sandbox_provisioning_limits_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "maximum_candidates",
+            "candidate_page_items",
+            "candidate_quiescence_milliseconds",
+            "provisioning_timeout_milliseconds",
+            "orphan_page_items",
+            "runner_header_bytes",
+            "diagnostic_bytes"
+        ],
+        "properties": {
+            "maximum_candidates": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SANDBOX_CANDIDATES},
+            "candidate_page_items": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SANDBOX_CANDIDATE_PAGE_ITEMS},
+            "candidate_quiescence_milliseconds": {"type": "integer", "minimum": 100, "maximum": 5_000},
+            "provisioning_timeout_milliseconds": {"type": "integer", "minimum": 1_000, "maximum": 120_000},
+            "orphan_page_items": {"type": "integer", "minimum": 1, "maximum": crate::MAX_SANDBOX_ORPHAN_PAGE_ITEMS},
+            "runner_header_bytes": {"type": "integer", "minimum": 1_024, "maximum": crate::MAX_SANDBOX_RUNNER_HEADER_BYTES},
+            "diagnostic_bytes": {"type": "integer", "minimum": 1_024, "maximum": crate::MAX_SANDBOX_DIAGNOSTIC_BYTES}
+        }
+    })
+}
+
 fn deployment_closure_schema() -> Value {
     let exact_version_ref = json!({
         "type": "object",
@@ -3091,6 +3143,8 @@ fn deployment_closure_schema() -> Value {
     let capability_backend = capability_backend_binding_schema();
     let context_backend = context_backend_binding_schema();
     let mcp_transport = mcp_transport_binding_schema();
+    let sandbox_resource_limits = sandbox_resource_limits_schema();
+    let sandbox_provisioning_limits = sandbox_provisioning_limits_schema();
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "urn:insight:platform:v1:deployment-closure",
@@ -3115,6 +3169,8 @@ fn deployment_closure_schema() -> Value {
             "CapabilityBackendBinding": capability_backend,
             "ContextBackendBinding": context_backend,
             "McpTransportBinding": mcp_transport,
+            "SandboxResourceLimitsV1": sandbox_resource_limits,
+            "SandboxProvisioningLimitsV1": sandbox_provisioning_limits,
             "AgentDeploymentClosure": deployment_variant_schema("agent", json!({
                 "interface": {"$ref": "#/$defs/ExactVersionRef"},
                 "plan": {"$ref": "#/$defs/ExactVersionRef"},
@@ -3233,15 +3289,26 @@ fn deployment_closure_schema() -> Value {
                     "bindings": {
                         "type": "object",
                         "additionalProperties": false,
-                        "required": ["profile_revision", "runtime_revision", "policy_bindings", "qualification_evidence"],
+                        "required": [
+                            "schema_version",
+                            "profile_revision",
+                            "runtime_revision",
+                            "provider_binding_digest",
+                            "network_mode",
+                            "limits",
+                            "provisioning_limits",
+                            "secret_injection_disabled",
+                            "qualification_evidence"
+                        ],
                         "properties": {
+                            "schema_version": {"type": "integer", "const": crate::SANDBOX_CONTRACT_SCHEMA_VERSION},
                             "profile_revision": {"$ref": "#/$defs/ExactVersionRef"},
                             "runtime_revision": {"$ref": "#/$defs/ExactVersionRef"},
-                            "policy_bindings": {
-                                "type": "array",
-                                "maxItems": 512,
-                                "items": {"$ref": "#/$defs/ExactPolicyBinding"}
-                            },
+                            "provider_binding_digest": {"$ref": "nominal/digest.schema.json"},
+                            "network_mode": {"type": "string", "enum": ["disabled", "direct"]},
+                            "limits": {"$ref": "#/$defs/SandboxResourceLimitsV1"},
+                            "provisioning_limits": {"$ref": "#/$defs/SandboxProvisioningLimitsV1"},
+                            "secret_injection_disabled": {"const": true},
                             "qualification_evidence": {"$ref": "nominal/artifact-ref.schema.json"}
                         }
                     }
