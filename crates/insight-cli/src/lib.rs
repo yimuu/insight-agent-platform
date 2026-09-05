@@ -106,6 +106,10 @@ const RUNTIME_PROCESS_STATE_FILE: &str = "processes.json";
 const RUNTIME_PROCESS_SCHEMA_VERSION: u32 = 3;
 const RUNTIME_PROCESS_KIND: &str = "insight.dev.process-state/v3";
 const RUNTIME_PROCESS_GENERATION_PREFIX: &str = "insight-platform-process-v3-";
+#[cfg(target_os = "linux")]
+const RUNTIME_PROCESS_ARGV0_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(target_os = "linux")]
+const RUNTIME_PROCESS_ARGV0_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const RUNTIME_LIFECYCLE_LOCK_FILE: &str = "lifecycle.lock";
 const RUNTIME_COMPOSE_FILE: &str = "compose.yaml";
 const RUNTIME_LOG_DIRECTORY: &str = "logs";
@@ -5812,21 +5816,7 @@ fn process_argv0(pid: u32) -> Result<Option<String>, CliError> {
     #[cfg(target_os = "linux")]
     {
         let path = PathBuf::from(format!("/proc/{pid}/cmdline"));
-        return match fs::read(&path) {
-            Ok(bytes) => {
-                let argv0 = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
-                let argv0 = std::str::from_utf8(argv0).map_err(|_| {
-                    CliError::RuntimeUnavailable(format!(
-                        "inspect process {pid} generation: argv0 is not UTF-8"
-                    ))
-                })?;
-                Ok(Some(argv0.to_owned()))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(CliError::RuntimeUnavailable(format!(
-                "inspect process {pid} generation: {error}"
-            ))),
-        };
+        read_linux_process_argv0(pid, || fs::read(&path))
     }
     #[cfg(target_os = "macos")]
     {
@@ -5862,6 +5852,40 @@ fn process_argv0(pid: u32) -> Result<Option<String>, CliError> {
         Err(CliError::RuntimeUnavailable(
             "local process identity inspection is supported on macOS and Linux".to_owned(),
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_process_argv0(
+    pid: u32,
+    mut read_cmdline: impl FnMut() -> std::io::Result<Vec<u8>>,
+) -> Result<Option<String>, CliError> {
+    let settle_deadline = Instant::now() + RUNTIME_PROCESS_ARGV0_SETTLE_TIMEOUT;
+    loop {
+        match read_cmdline() {
+            Ok(bytes) => {
+                let argv0 = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+                // Linux can expose an empty /proc/<pid>/cmdline during exec after spawn has
+                // returned. Retry only that transient shape; a stable empty or different
+                // argv0 remains an identity mismatch and is never signalled as owned.
+                if argv0.is_empty() && Instant::now() < settle_deadline {
+                    std::thread::sleep(RUNTIME_PROCESS_ARGV0_POLL_INTERVAL);
+                    continue;
+                }
+                let argv0 = std::str::from_utf8(argv0).map_err(|_| {
+                    CliError::RuntimeUnavailable(format!(
+                        "inspect process {pid} generation: argv0 is not UTF-8"
+                    ))
+                })?;
+                break Ok(Some(argv0.to_owned()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break Ok(None),
+            Err(error) => {
+                break Err(CliError::RuntimeUnavailable(format!(
+                    "inspect process {pid} generation: {error}"
+                )))
+            }
+        }
     }
 }
 
@@ -10786,6 +10810,31 @@ mod tests {
             CliError::RuntimeState(detail) if detail == "injected journal persistence failure"
         ));
         assert!(!marker.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_argv0_retries_only_an_empty_exec_window() {
+        let expected = "insight-platform-process-v3-test";
+        let mut reads = std::collections::VecDeque::from([
+            Vec::new(),
+            format!("{expected}\0argument").into_bytes(),
+        ]);
+        let observed = read_linux_process_argv0(7, || {
+            Ok(reads.pop_front().expect("bounded retry reads cmdline"))
+        })
+        .unwrap();
+        assert_eq!(observed.as_deref(), Some(expected));
+        assert!(reads.is_empty());
+
+        let mut mismatch_reads = 0;
+        let observed = read_linux_process_argv0(7, || {
+            mismatch_reads += 1;
+            Ok(b"foreign-process\0".to_vec())
+        })
+        .unwrap();
+        assert_eq!(observed.as_deref(), Some("foreign-process"));
+        assert_eq!(mismatch_reads, 1);
     }
 
     #[cfg(unix)]
