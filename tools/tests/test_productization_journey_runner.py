@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +16,89 @@ BOOTSTRAP = ROOT / "tools/qualification/bootstrap-platform-kind-local.sh"
 
 
 class ProductizationJourneyRunnerTests(unittest.TestCase):
+    def test_consumed_seed_step_uses_owned_cleanup_and_preserves_failure_fallback(self) -> None:
+        steps = json.loads(subprocess.check_output(['ruby', '-ryaml', '-rjson', '-e',
+            'puts JSON.generate(YAML.load_file(ARGV[0])["jobs"]["exact-revision-journey"]["steps"])', str(WORKFLOW)]))
+        by_name = {step['name']: step for step in steps if 'name' in step}
+        names = [step.get('name') for step in steps]
+        order = ['Bootstrap fresh current-SHA Kind and checked OpenSandbox chart',
+                 'Run fail-closed real OpenSandbox L3 qualification',
+                 'Release consumed seed before the fresh public journey',
+                 'Run fresh public CLI and real Gateway Console journey',
+                 'Always clean the exact seed project and volumes',
+                 'Preserve bounded runtime diagnostics', 'Always remove the disposable Kind cluster']
+        self.assertEqual([names.index(name) for name in order], sorted(names.index(name) for name in order))
+        release = by_name[order[2]]
+        fallback = by_name[order[4]]
+        self.assertEqual(release['if'], "${{ env.PRODUCTIZATION_SEED_IDENTITY != '' }}")
+        self.assertNotIn('continue-on-error', release)
+        for forbidden in ('always()', '|| true', '--keep-failed-resources'):
+            self.assertNotIn(forbidden, release['run'])
+        self.assertIn('always()', fallback['if'])
+        for failure in ('none', 'stop', 'reset', 'identity', 'name'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory).resolve()
+                project = root / 'productization-kind-seed'
+                runtime = project / '.insight/runtime'
+                (runtime / 'logs').mkdir(parents=True)
+                (runtime / 'logs/seed.log').write_text('bounded shutdown diagnostics\n')
+                (runtime / 'compose.yaml').write_text('services: {}\n')
+                (runtime / 'processes.json').write_text('{}')
+                manifest = project / '.insight/project.json'
+                manifest.write_text(json.dumps({'project_name': 'productization-kind-seed'}))
+                owned = project.stat()
+                identity = f'{owned.st_dev}:{owned.st_ino}'
+                calls = root / 'calls.jsonl'
+                fake_cli = root / 'insight'
+                fake_cli.write_text(f'#!{sys.executable}\n' +
+                    'import json,os,sys\n' +
+                    'with open(os.environ["SEED_TEST_CALLS"],"a") as log: log.write(json.dumps(sys.argv[1:])+"\\n")\n' +
+                    'sys.exit(1 if os.environ["SEED_TEST_FAILURE"] == sys.argv[1] else 0)\n')
+                fake_cli.chmod(0o700)
+                env_file = root / 'github-env'
+                env_file.write_text('EXISTING=retained\n')
+                sibling = root / 'unrelated-project'
+                sibling.mkdir()
+                (sibling / 'keep').write_text('unrelated')
+                kind_output = root / 'productization-kind'
+                kind_output.mkdir()
+                (kind_output / 'environment.json').write_text('independent Kind evidence')
+                env = dict(os.environ, RUNNER_TEMP=str(root), GITHUB_ENV=str(env_file),
+                    PRODUCTIZATION_SEED_IDENTITY=identity, PRODUCTIZATION_SEED_BINARY=str(fake_cli),
+                    SEED_TEST_CALLS=str(calls), SEED_TEST_FAILURE=failure)
+                if failure == 'identity':
+                    project.rename(root / 'original-seed')
+                    project.mkdir()
+                elif failure == 'name':
+                    manifest.write_text(json.dumps({'project_name': 'someone-else'}))
+                result = subprocess.run(['bash', '-e', '-c', release['run']], cwd=ROOT,
+                    env=env, capture_output=True, text=True)
+                observed = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+                expected = [] if failure in ('identity', 'name') else [['stop', '--path', str(project)]]
+                if failure in ('none', 'reset'):
+                    expected.append(['reset', '--path', str(project), '--confirm', 'productization-kind-seed'])
+                self.assertEqual(observed, expected)
+                if failure == 'none':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertFalse(project.exists())
+                    self.assertEqual(env_file.read_text(), 'EXISTING=retained\nPRODUCTIZATION_SEED_IDENTITY=\n')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(project.exists())
+                    self.assertEqual(env_file.read_text(), 'EXISTING=retained\n')
+                    if failure in ('stop', 'reset'):
+                        env['SEED_TEST_FAILURE'] = 'none'
+                        retried = subprocess.run(['bash', '-e', '-c', fallback['run']], cwd=ROOT,
+                            env=env, capture_output=True, text=True)
+                        self.assertEqual(retried.returncode, 0, retried.stderr)
+                        self.assertFalse(project.exists())
+                        self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()][-2:],
+                            [['stop', '--path', str(project)], ['reset', '--path', str(project), '--confirm', 'productization-kind-seed']])
+                        for name in ('productization-seed-consumed-logs', 'productization-seed-logs'):
+                            self.assertEqual((root / name / 'seed.log').read_text(), 'bounded shutdown diagnostics\n')
+                self.assertEqual((sibling / 'keep').read_text(), 'unrelated')
+                self.assertEqual((kind_output / 'environment.json').read_text(), 'independent Kind evidence')
+
     def test_kind_image_store_preflight_rejects_classic_and_broken_daemons(self) -> None:
         preflight = ROOT / "tools/qualification/check-kind-image-store.sh"
         cases = [
