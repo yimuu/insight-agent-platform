@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 
@@ -14,6 +15,38 @@ BOOTSTRAP = ROOT / "tools/qualification/bootstrap-platform-kind-local.sh"
 
 
 class ProductizationJourneyRunnerTests(unittest.TestCase):
+    def test_kind_image_store_preflight_rejects_classic_and_broken_daemons(self) -> None:
+        preflight = ROOT / "tools/qualification/check-kind-image-store.sh"
+        cases = [
+            ('[["driver-type","io.containerd.snapshotter.v1"]]', 0, 0),
+            ('[["Backing Filesystem","extfs"]]', 0, 1),
+            ('[]', 0, 1),
+            ('not-json', 0, 1),
+            ('[["driver-type","io.containerd.snapshotter.v1"]]', 1, 1),
+        ]
+        for value, docker_status, expected in cases:
+            with self.subTest(value=value, docker_status=docker_status), tempfile.TemporaryDirectory() as directory:
+                docker = pathlib.Path(directory) / "docker"
+                docker.write_text('#!/bin/sh\nprintf "%s\\n" "$STORE_STATUS"\nexit "$DOCKER_STATUS"\n')
+                docker.chmod(0o700)
+                env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
+                           STORE_STATUS=value, DOCKER_STATUS=str(docker_status))
+                result = subprocess.run(["bash", str(preflight)], env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected:
+                    self.assertIn("containerd image store", result.stderr)
+
+    def test_oci_store_is_ready_before_builds_and_bootstrap_mutations(self) -> None:
+        workflow = WORKFLOW.read_text()
+        setup = workflow.split("- name: Enable the OCI image store", 1)[1].split("- name: Require the OCI image store", 1)[0]
+        self.assertIn("docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4", setup)
+        self.assertIn("version: v28.0.4", setup)
+        self.assertIn('{"features":{"containerd-snapshotter":true}}', setup)
+        self.assertNotIn("tcp-port:", setup)
+        self.assertLess(workflow.index("check-kind-image-store.sh"), workflow.index("docker/setup-buildx-action@"))
+        bootstrap = BOOTSTRAP.read_text()
+        self.assertLess(bootstrap.index("check-kind-image-store.sh"), bootstrap.index('mkdir -p "$output"'))
+
     def run_runner(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(RUNNER), *arguments],

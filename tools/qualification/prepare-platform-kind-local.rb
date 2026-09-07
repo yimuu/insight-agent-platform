@@ -315,6 +315,41 @@ sandbox_manifest = {
 File.unlink(sandbox_catalog_input)
 digests["sandbox-worker-manifest.json"] = digest(sandbox_manifest)
 
+resource_bytes = File.binread(File.expand_path('../../deploy/kind/workload-resources.json', __dir__), 4097)
+abort 'Kind resource profile exceeds byte limit' if resource_bytes.bytesize > 4096
+# Validate duplicate keys before Ruby materializes objects. JSON gem versions differ
+# in whether object_class sees every pair or an already deduplicated mapping.
+strict_json = <<~'PYTHON'
+  import json, sys
+  def unique(pairs):
+      result = {}
+      for key, value in pairs:
+          if key in result:
+              raise ValueError('duplicate Kind resource profile field')
+          result[key] = value
+      return result
+  def constant(value):
+      raise ValueError('invalid Kind resource profile constant')
+  try:
+      value = json.loads(sys.stdin.buffer.read().decode('utf-8'), object_pairs_hook=unique, parse_constant=constant)
+      print(json.dumps(value, allow_nan=False))
+  except (ValueError, RecursionError):
+      sys.exit('invalid or duplicate Kind resource profile')
+PYTHON
+resource_json, resource_error, resource_status = Open3.capture3('python3', '-c', strict_json, stdin_data: resource_bytes)
+abort resource_error unless resource_status.success?
+resource_profile = JSON.parse(resource_json, create_additions: false)
+abort 'invalid Kind resource profile' unless resource_profile.is_a?(Hash)
+resource_keys = %w[schema_version rust_service_cpu_request_millicores maximum_steady_platform_cpu_millicores]
+abort 'invalid Kind resource profile' unless resource_profile.keys.sort == resource_keys.sort &&
+  resource_profile['schema_version'].is_a?(Integer) &&
+  resource_profile['schema_version'] == 1 &&
+  resource_profile['rust_service_cpu_request_millicores'].is_a?(Integer) &&
+  (1..250).cover?(resource_profile['rust_service_cpu_request_millicores']) &&
+  resource_profile['maximum_steady_platform_cpu_millicores'].is_a?(Integer) &&
+  (1..4000).cover?(resource_profile['maximum_steady_platform_cpu_millicores'])
+local_cpu_resources = {'requests' => {'cpu' => "#{resource_profile.fetch('rust_service_cpu_request_millicores')}m"}}
+
 deployment_config_digest = digest(
   "schema_version" => 1,
   "profile" => "kind-local-mechanics",
@@ -323,7 +358,8 @@ deployment_config_digest = digest(
   "platform_image_digest" => options[:platform_image_digest],
   "sandbox_runner_image_repository" => options[:sandbox_runner_image_repository],
   "sandbox_runner_image_digest" => options[:sandbox_runner_image_digest],
-  "configuration_digests" => digests
+  "configuration_digests" => digests,
+  "resource_profile" => resource_profile
 )
 
 common = {
@@ -331,7 +367,8 @@ common = {
     "repository" => options[:platform_image_repository],
     "digest" => options[:platform_image_digest]
   },
-  "candidate" => {"deploymentConfigDigest" => deployment_config_digest}
+  "candidate" => {"deploymentConfigDigest" => deployment_config_digest},
+  "resources" => local_cpu_resources
 }
 two_replicas = {"minReplicas" => 2, "maxReplicas" => 2}
 postgres = [options[:postgres_cidr]]
@@ -363,9 +400,9 @@ values = {
   "artifact" => common.merge(
     "autoscaling" => two_replicas,
     "roles" => {
-      "gateway" => {"config" => {"digest" => digests.fetch("artifact-gateway.json")}},
-      "data-worker" => {"config" => {"digest" => digests.fetch("artifact-data-worker.json")}},
-      "maintenance" => {"config" => {"digest" => digests.fetch("artifact-maintenance.json")}}
+      "gateway" => {"resources" => local_cpu_resources, "config" => {"digest" => digests.fetch("artifact-gateway.json")}},
+      "data-worker" => {"resources" => local_cpu_resources, "config" => {"digest" => digests.fetch("artifact-data-worker.json")}},
+      "maintenance" => {"resources" => local_cpu_resources, "config" => {"digest" => digests.fetch("artifact-maintenance.json")}}
     },
     "networkPolicy" => {
       "postgresCidrs" => postgres,
@@ -400,12 +437,14 @@ values = {
     "config" => {"digest" => digests.fetch("context-worker.json")},
     "networkPolicy" => {"postgresCidrs" => postgres},
     "datasetPool" => {
+      "resources" => local_cpu_resources,
       "enabled" => true,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("context-dataset-worker.json")},
       "artifactDataWorker" => {"namespace" => "platform-artifacts", "port" => 9443}
     },
     "subscriptionPool" => {
+      "resources" => local_cpu_resources,
       "enabled" => true,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("subscription-context-worker.json")}
@@ -419,11 +458,13 @@ values = {
     },
     "roles" => {
       "management-api" => {
+        "resources" => local_cpu_resources,
         "replicas" => 2,
         "autoscaling" => two_replicas,
         "config" => {"digest" => digests.fetch("management-gateway.json")}
       },
       "runtime-api" => {
+        "resources" => local_cpu_resources,
         "replicas" => 2,
         "autoscaling" => two_replicas,
         "config" => {"digest" => digests.fetch("runtime-gateway.json")}
@@ -434,11 +475,13 @@ values = {
     "autoscaling" => two_replicas,
     "config" => {"digest" => digests.fetch("mcp-host.json")},
     "resourcePool" => {
+      "resources" => local_cpu_resources,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("mcp-resource-host.json")},
       "postgresCidrs" => postgres
     },
     "discoveryPool" => {
+      "resources" => local_cpu_resources,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("mcp-discovery-worker.json")},
       "postgresCidrs" => postgres,
@@ -446,6 +489,7 @@ values = {
       "artifactPort" => 9443
     },
     "subscriptionPool" => {
+      "resources" => local_cpu_resources,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("mcp-subscription-worker.json")},
       "postgresCidrs" => postgres
@@ -490,10 +534,12 @@ values = {
   ),
   "security" => common.merge(
     "egress" => {
+      "resources" => local_cpu_resources,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("egress-broker.json")}
     },
     "securityAuthority" => {
+      "resources" => local_cpu_resources,
       "autoscaling" => two_replicas,
       "config" => {"digest" => digests.fetch("security-authority.json")}
     },

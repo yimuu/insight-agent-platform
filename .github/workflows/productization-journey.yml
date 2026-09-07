@@ -103,6 +103,16 @@ jobs:
         with:
           name: ${{ inputs.release_candidate_artifact }}
           path: ${{ runner.temp }}/signed-release-candidate
+      - name: Enable the OCI image store before creating fixture resources
+        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' || env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        with:
+          version: v28.0.4
+          daemon-config: |
+            {"features":{"containerd-snapshotter":true}}
+      - name: Require the OCI image store before building
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' || env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        run: bash tools/qualification/check-kind-image-store.sh
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'signed-release-candidate' || env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -518,6 +528,15 @@ jobs:
             )
           fi
           tools/qualification/run-productization-journey.sh "${arguments[@]}"
+      - name: Capture bounded Kind scheduling diagnostics
+        if: ${{ always() && env.INSIGHT_KIND_CLUSTER_NAME != '' }}
+        run: |
+          if [[ -f "$INSIGHT_KIND_KUBECONFIG" ]]; then
+            python3 tools/qualification/collect-kind-diagnostics.py \
+              --kubeconfig "$INSIGHT_KIND_KUBECONFIG" \
+              --context "kind-$INSIGHT_KIND_CLUSTER_NAME" \
+              --output "$RUNNER_TEMP/productization-kind-diagnostics.json"
+          fi
       - name: Always clean the exact seed project and volumes
         if: ${{ always() && env.PRODUCTIZATION_SEED_IDENTITY != '' }}
         run: |
@@ -535,6 +554,7 @@ jobs:
           path: |
             ${{ runner.temp }}/productization-runtime-logs/*.log
             ${{ runner.temp }}/productization-seed-logs/*.log
+            ${{ runner.temp }}/productization-kind-diagnostics.json
             ${{ runner.temp }}/productization-kind/environment.json
             ${{ runner.temp }}/productization-opensandbox-evidence.json
           if-no-files-found: warn
