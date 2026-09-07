@@ -965,7 +965,7 @@ async fn exercise_cancel_timeout_and_quota(pool: PgPool) {
     let timeout_fixture = seed_fixture_with(
         pool,
         FixtureOptions {
-            deadline_after: Duration::milliseconds(100),
+            deadline_after: Duration::microseconds(1),
             ..FixtureOptions::default()
         },
     )
@@ -2035,6 +2035,8 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
         .fetch_one(&pool)
         .await
         .unwrap();
+    // The fixture represents one already accepted operation. All durable owners use
+    // this admission instant, even when constructing the fixture outlasts its deadline.
     let deadline = now + options.deadline_after;
     let deployment_id = id(ResourceKind::CapabilityDeployment);
     let interface_exact =
@@ -2066,8 +2068,9 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
             tenant_id, run_id, root_run_id, agent_deployment_id, principal_id, trace_id,
             state, bindings_schema_version, bindings, bindings_digest,
             current_schema_version, current_payload, current_payload_digest, deadline,
-            execution_requirement_version, execution_requirement, execution_requirement_digest
-        ) VALUES ($1, $2, $2, $3, $4, $5, 'running', $6, $7, $8, $6, $7, $8, $9, $10, $11, $12)
+            execution_requirement_version, execution_requirement, execution_requirement_digest,
+            created_at, updated_at
+        ) VALUES ($1, $2, $2, $3, $4, $5, 'running', $6, $7, $8, $6, $7, $8, $9, $10, $11, $12, $13, $13)
         "#,
     )
     .bind(tenant_id.to_string())
@@ -2082,6 +2085,7 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
     .bind(i32::try_from(insight_platform_contracts::EXECUTION_REQUIREMENT_VERSION).unwrap())
     .bind(serde_json::to_value(&execution_requirement).unwrap())
     .bind(execution_requirement_digest.to_string())
+    .bind(now)
     .execute(&pool)
     .await
     .unwrap();
@@ -2089,8 +2093,8 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
         r#"
         INSERT INTO insight_platform.run_nodes (
             tenant_id, node_id, run_id, record_kind, scope_id, logical_key,
-            node_kind, state, payload_schema_version, payload, payload_digest, deadline
-        ) VALUES ($1, $2, $3, 'scope_instance', $2, 'root-scope', 'scope', 'open', $4, $5, $6, $7)
+            node_kind, state, payload_schema_version, payload, payload_digest, deadline, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'scope_instance', $2, 'root-scope', 'scope', 'open', $4, $5, $6, $7, $8, $8)
         "#,
     )
     .bind(tenant_id.to_string())
@@ -2100,6 +2104,7 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
     .bind(&empty.value)
     .bind(&empty.digest)
     .bind(deadline)
+    .bind(now)
     .execute(&pool)
     .await
     .unwrap();
@@ -2108,9 +2113,9 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
         INSERT INTO insight_platform.run_nodes (
             tenant_id, node_id, run_id, record_kind, scope_id, plan_node_key,
             activation_ordinal, logical_key, node_kind, state,
-            payload_schema_version, payload, payload_digest, deadline
+            payload_schema_version, payload, payload_digest, deadline, created_at, updated_at
         ) VALUES ($1, $2, $3, 'node_execution', $4, 'sandbox', 1,
-                  'sandbox-node', 'capability_call', 'waiting', $5, $6, $7, $8)
+                  'sandbox-node', 'capability_call', 'waiting', $5, $6, $7, $8, $9, $9)
         "#,
     )
     .bind(tenant_id.to_string())
@@ -2121,6 +2126,7 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
     .bind(&empty.value)
     .bind(&empty.digest)
     .bind(deadline)
+    .bind(now)
     .execute(&pool)
     .await
     .unwrap();
@@ -2268,10 +2274,10 @@ async fn seed_fixture_with(pool: PgPool, options: FixtureOptions) -> Fixture {
             lease_epoch, scheduled_at, deadline, priority, request_digest,
             quota_reservation_id, payload_schema_version, payload, payload_digest,
             scheduler_partition_id, execution_requirement_version,
-            execution_requirement, execution_requirement_digest
+            execution_requirement, execution_requirement_digest, created_at, updated_at
         ) VALUES ($1, $2, 'sandbox_capability_execution', 'sandbox', 'job', $2, $3,
                   $4, $5, $6, 'ready', 1, 0, 1, 0, $7, $8, 0, $9, $10, $11, $12, $13,
-                  (SELECT scheduler_partition_id FROM insight_platform.tenants WHERE tenant_id=$1), $14, $15, $16)
+                  (SELECT scheduler_partition_id FROM insight_platform.tenants WHERE tenant_id=$1), $14, $15, $16, $7, $7)
         "#,
     )
     .bind(tenant_id.to_string())
