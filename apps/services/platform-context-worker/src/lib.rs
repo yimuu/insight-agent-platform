@@ -26,7 +26,7 @@ use insight_platform_contracts::{
     ContextCitationStrength, DataClassification, ExternalLeafFailureMutationIds,
     ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
     HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError, ResourceKind, Retryability,
-    Sha256Digest, TraceFlags, ValueRef, WorkClass,
+    Sha256Digest, TraceFlags, UtcTimestamp, ValueRef, WorkClass,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_postgres::{
@@ -1273,7 +1273,7 @@ fn build_output(
             },
             strength: ContextCitationStrength::ObservationOnly,
             content_digest,
-            observed_at,
+            observed_at: UtcTimestamp::from_datetime(observed_at),
             display_label: adapter.display_label.clone(),
         },
         authorization_evidence_digest: authorization.clone(),
@@ -1301,7 +1301,7 @@ fn build_output(
             rejected_count: 0,
             truncated: false,
         },
-        observed_at,
+        observed_at: UtcTimestamp::from_datetime(observed_at),
         total_bytes,
         canonical_digest: new_digest()?,
     };
@@ -1405,7 +1405,7 @@ fn build_remote_output(
                 },
                 strength: ContextCitationStrength::ObservationOnly,
                 content_digest,
-                observed_at: response.observed_at,
+                observed_at: UtcTimestamp::from_datetime(response.observed_at),
                 display_label: remote.display_label,
             },
             authorization_evidence_digest: remote.authorization_evidence_digest,
@@ -1430,7 +1430,7 @@ fn build_remote_output(
             rejected_count: 0,
             truncated: false,
         },
-        observed_at: response.observed_at,
+        observed_at: UtcTimestamp::from_datetime(response.observed_at),
         total_bytes,
         canonical_digest: new_digest()?,
     };

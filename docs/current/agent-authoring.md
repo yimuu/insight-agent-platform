@@ -14,6 +14,9 @@ Console 不提供丢弃未完成恢复记录后隐式重发的入口。
 
 CLI 和 Console 在查询任何作者依赖前，先把同一组有界源文件交给共享 Rust 源预检，校验清单、schema 和本地可判定的 Plan 结构。预检只返回编辑诊断，不构成编译或发布证据；当前权限、exact 部署、功能闭包和 policy 仍在解析后由完整编译及 Registry 终裁。解析期间文件变化不会混入已捕获的这次编译。
 
+Context 观察结果与引用的时间使用既有 `UtcTimestamp` 格式，在计算内容摘要前统一为 UTC 六位微秒。
+系统或提供方的纳秒精度不会改变输出 Schema；读取拒绝非规范时间，摘要核验仍覆盖实际输出字节。
+
 ## 完整计划与依赖
 
 `full_plan` 引用唯一 [RuntimePlan](../../crates/definitions/platform-plan/src/lib.rs) 的完整源。内部标量、数组和对象端口使用冻结的 ClosedValueSchema；公开输入输出及人工响应使用对象 schema。模型、Capability、Context、Skill、Child Agent、控制流和等待沿用各自 typed 节点及领域合同。完整节点源可在 CLI 导入，也可在 Console 的完整源与节点编辑器中编辑；布局不进入 Plan 的语义身份。

@@ -73,8 +73,8 @@ use insight_platform_contracts::{
     PublishedVersionPayload, QuotaDimension, ReadOperation, RegistryResourceKind, ResourceDocument,
     ResourceId, ResourceKind, Retryability, RunBindingsSnapshot, SafeJobResult,
     SandboxArtifactIoPolicyDocument, SchedulerPriority, SchedulingPolicyDocument, Sha256Digest,
-    TenantConfig, TenantPrincipalPayload, ValidationSummary, ValueRef, WorkClass, WorkerManifest,
-    WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
+    TenantConfig, TenantPrincipalPayload, UtcTimestamp, ValidationSummary, ValueRef, WorkClass,
+    WorkerManifest, WORKER_MANIFEST_VERSION, WORKER_PROTOCOL_VERSION,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -2826,7 +2826,7 @@ fn output(
             },
             strength: ContextCitationStrength::ObservationOnly,
             content_digest,
-            observed_at,
+            observed_at: UtcTimestamp::from_datetime(observed_at),
             display_label: "authorized row".to_owned(),
         },
         authorization_evidence_digest: named_digest("authorization-evidence"),
@@ -2859,7 +2859,7 @@ fn output(
             rejected_count: 0,
             truncated: false,
         },
-        observed_at,
+        observed_at: UtcTimestamp::from_datetime(observed_at),
         total_bytes,
         canonical_digest: named_digest("placeholder"),
     };

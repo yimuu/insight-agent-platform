@@ -7,7 +7,7 @@ use insight_platform_contracts::{
     ContextDeploymentClosure, ContextImplementationResourceSpec, ContextInterfaceResourceSpec,
     ContextLocatorKind, DataClassification, ExactDatasetGenerationRef, ExactDeploymentRef,
     ExactVersionRef, HardLimitProfile, JsonLimits, PrincipalSnapshot, ResourceId, ResourceKind,
-    Sha256Digest, ValueRef,
+    Sha256Digest, UtcTimestamp, ValueRef,
 };
 use insight_platform_invocations::ExactInvocationValueRef;
 use insight_platform_jobs::{JobFence, WakeContract};
@@ -768,7 +768,7 @@ pub struct ContextCitation {
     pub locator: CitationLocator,
     pub strength: insight_platform_contracts::ContextCitationStrength,
     pub content_digest: Sha256Digest,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub display_label: String,
 }
 
@@ -879,7 +879,7 @@ pub struct ContextObservation {
     pub items: Vec<ContextItem>,
     pub next_cursor_digest: Option<Sha256Digest>,
     pub evidence: ContextRetrievalEvidence,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub total_bytes: u64,
     pub canonical_digest: Sha256Digest,
 }

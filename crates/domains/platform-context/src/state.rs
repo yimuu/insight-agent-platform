@@ -1365,7 +1365,7 @@ mod tests {
         ContextConsistencyMode, ContextDataPolicyContract, ContextImplementationContract,
         ContextInterfaceLimits, ContextLocatorKind, ContextPaginationContract,
         ContextRankingContract, DataClassification, DataRegion, ExactDeploymentRef,
-        ExactPolicyBinding, FrozenSlotBinding, PermissionSet, PrincipalKind,
+        ExactPolicyBinding, FrozenSlotBinding, PermissionSet, PrincipalKind, UtcTimestamp,
     };
     use insight_platform_invocations::InvocationValueStorage;
     use insight_platform_jobs::{JobFence, WakeKind};
@@ -1718,7 +1718,7 @@ mod tests {
                 },
                 strength: ContextCitationStrength::ObservationOnly,
                 content_digest,
-                observed_at,
+                observed_at: UtcTimestamp::from_datetime(observed_at),
                 display_label: "authorized row".to_owned(),
             },
             authorization_evidence_digest: named_digest("authorization-evidence"),
@@ -1751,7 +1751,7 @@ mod tests {
                 rejected_count: 0,
                 truncated: false,
             },
-            observed_at,
+            observed_at: UtcTimestamp::from_datetime(observed_at),
             total_bytes,
             canonical_digest: named_digest("placeholder"),
         };
@@ -1971,6 +1971,90 @@ mod tests {
         assert!(decision.consumed_query);
         assert_eq!(decision.settled_result_bytes, 0);
         assert!(!decision.job_payload.query_consumed);
+    }
+
+    #[test]
+    fn observation_timestamps_have_canonical_precision_before_hashing() {
+        let fixture = fixture();
+        let query = decide_context_query_admission(&fixture.command, fixture.facts, fixture.limits)
+            .unwrap();
+        for (input, expected) in [
+            ("2026-09-07T10:00:00Z", "2026-09-07T10:00:00.000000Z"),
+            ("2026-09-07T10:00:00.123Z", "2026-09-07T10:00:00.123000Z"),
+            ("2026-09-07T10:00:00.123456Z", "2026-09-07T10:00:00.123456Z"),
+            (
+                "2026-09-07T10:00:00.123456789Z",
+                "2026-09-07T10:00:00.123456Z",
+            ),
+        ] {
+            let output = observation_output(&query, input.parse().unwrap());
+            let value = serde_json::to_value(&output.observation).unwrap();
+            for pointer in ["/observed_at", "/items/0/citation/observed_at"] {
+                assert_eq!(
+                    value.pointer(pointer).unwrap(),
+                    expected,
+                    "{input} at {pointer}"
+                );
+                value
+                    .pointer(pointer)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .parse::<insight_platform_contracts::UtcTimestamp>()
+                    .unwrap();
+            }
+            let decoded: ContextObservation = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded, output.observation);
+            decoded
+                .validate_for(
+                    &query.context_query_id,
+                    &query.payload.admission,
+                    fixture.limits,
+                )
+                .unwrap();
+            assert_eq!(
+                digest_without_field(&decoded, "canonical_digest").unwrap(),
+                decoded.canonical_digest
+            );
+            let mut unsigned = value.clone();
+            unsigned.as_object_mut().unwrap().remove("canonical_digest");
+            assert_eq!(output.value, ValueRef::Inline { value: unsigned });
+            let mut tampered = value;
+            tampered["observed_at"] = json!("2026-09-07T10:00:01.000000Z");
+            let tampered: ContextObservation = serde_json::from_value(tampered).unwrap();
+            assert!(tampered
+                .validate_for(
+                    &query.context_query_id,
+                    &query.payload.admission,
+                    fixture.limits
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn observation_timestamps_reject_noncanonical_input_at_both_boundaries() {
+        let fixture = fixture();
+        let query = decide_context_query_admission(&fixture.command, fixture.facts, fixture.limits)
+            .unwrap();
+        let output = observation_output(&query, "2026-09-07T10:00:00.123456Z".parse().unwrap());
+        for pointer in ["/observed_at", "/items/0/citation/observed_at"] {
+            for invalid in [
+                json!("2026-09-07T10:00:00Z"),
+                json!("2026-09-07T10:00:00.123Z"),
+                json!("2026-09-07T10:00:00.123456789Z"),
+                json!("2026-09-07T10:00:00.123456+00:00"),
+                json!("2026-02-30T10:00:00.123456Z"),
+                json!(123),
+            ] {
+                let mut value = serde_json::to_value(&output.observation).unwrap();
+                *value.pointer_mut(pointer).unwrap() = invalid.clone();
+                assert!(
+                    serde_json::from_value::<ContextObservation>(value).is_err(),
+                    "accepted {invalid} at {pointer}"
+                );
+            }
+        }
     }
 
     #[test]
