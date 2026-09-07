@@ -44,7 +44,7 @@ class KindConfigurationTests(unittest.TestCase):
                         'artifact-data-worker': 'artifact-data'}
         for config_path in configs.glob('*.json'):
             name = config_path.stem.removeprefix('platform-')
-            if name == 'sandbox-dispatcher':
+            if name in ('sandbox-dispatcher', 'artifact-maintenance'):
                 continue
             config = json.loads(config_path.read_text())
             # This fixture exercises real generation and owning catalog validation, not process startup.
@@ -53,7 +53,7 @@ class KindConfigurationTests(unittest.TestCase):
             config['live_delta'] = {'servers': ['tls://localhost:4222']}
             (source / (source_names.get(name, name) + '.json')).write_text(json.dumps(config))
         catalog = {'kms_key_bindings': [{'key_id': 'seed-key'}], 's3_storage_bindings': [{}]}
-        for name in ('artifact-gateway', 'artifact-data', 'artifact-maintenance'):
+        for name in ('artifact-gateway', 'artifact-data'):
             target = source / (name + '.json')
             config = json.loads(target.read_text()) if target.exists() else {}
             config['artifact_provider_catalog'] = copy.deepcopy(catalog)
@@ -293,6 +293,35 @@ class KindConfigurationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(error, result.stderr)
 
+    def test_maintenance_is_composed_without_a_cli_seed_and_binds_actual_image_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            self.assertFalse((runtime / 'config/artifact-maintenance.json').exists())
+            source_files = {path.name: path.read_bytes() for path in (runtime / 'config').iterdir()}
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(source_files, {path.name: path.read_bytes() for path in (runtime / 'config').iterdir()})
+            path = output / 'configs/artifact-maintenance.json'
+            config = json.loads(path.read_bytes())
+            gateway = json.loads((output / 'configs/artifact-gateway.json').read_bytes())
+            self.assertEqual(config['artifact_provider_catalog'], gateway['artifact_provider_catalog'])
+            manifest = config['worker']['worker_manifest']
+            projection = copy.deepcopy(config)
+            del projection['worker']['worker_manifest']
+            identity = {'schema_version': 1, 'profile': 'kind-local-artifact-maintenance', 'configuration': projection}
+            self.assertEqual(manifest['adapter_runtime_digest'], 'sha256:' + hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+            catalog = json.loads(subprocess.check_output([str(self.tool), 'print-worker-execution-capabilities',
+                'platform-artifact-maintenance', str(path)], cwd=ROOT))
+            self.assertEqual(manifest['execution_capabilities'], catalog)
+            binary = binaries / 'platform-artifact-maintenance'
+            self.assertEqual(manifest['worker_build_digest'], 'sha256:' + hashlib.sha256(binary.read_bytes()).hexdigest())
+            binary.write_bytes(binary.read_bytes() + b'changed after deployment evidence')
+            rejected = subprocess.run([str(self.tool), 'validate-worker-deployment', str(output / 'worker-manifests'),
+                str(output / 'worker-configs'), str(binaries), 'sha256:' + 'a' * 64], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+
     def test_missing_binary_or_old_manifest_fails_closed(self):
         for mutation in ('missing', 'old'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
@@ -301,9 +330,9 @@ class KindConfigurationTests(unittest.TestCase):
                 if mutation == 'missing':
                     (binaries / 'platform-history-maintenance').unlink()
                 else:
-                    path = runtime / 'config/artifact-maintenance.json'
+                    path = runtime / 'config/orchestration.json'
                     config = json.loads(path.read_text())
-                    config['worker']['worker_manifest']['manifest_version'] = 1
+                    config['worker_manifest']['manifest_version'] = 1
                     path.write_text(json.dumps(config))
                 result, _ = self.generate(directory, runtime, binaries)
                 self.assertNotEqual(result.returncode, 0)

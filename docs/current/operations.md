@@ -192,6 +192,9 @@ python3 tools/release/platform-recovery.py verify --set verified-recovery-set \
 
 `tools/qualification/bootstrap-platform-kind-local.sh` 创建新的隔离 Kind 环境。输入包括 exact OCI archives、CLI seed 配置以及预构建的 `platform-schema`、`platform-database-role`、`platform-jetstream-provision` 和 `platform-qualification`。生成器读取已验证镜像内的实际 worker bytes，通过 owning catalog 验证本地配置；Sandbox chart 必须收到完整 WorkerManifest，不能依赖默认身份。Management 与 Runtime 共用 Gateway 的 Artifact mTLS Secret，Registry 使用独立受限客户端 Secret。
 
+Artifact maintenance 由 Kind 单独组合配置，复用该环境的 Artifact provider catalog；CLI seed 不包含这个未选择的本地角色。
+生成阶段验证其 owning 执行能力与实际 binary 身份，完整字段、限额和 provider readiness 继续由服务启动检查；仅通过 manifest 校验不能声明角色已可运行。
+
 Kind 验证要求 Docker 启用 containerd image store，并支持按平台保存镜像（API 1.48 或以上）。CI 在构建前配置、检查该存储模式；本地 bootstrap 在创建资源前检查。镜像仍按原始 OCI manifest 与 config 摘要核验，再从停止的容器读取字节。
 
 [开发资源输入](../../deploy/kind/workload-resources.json)单独降低 Rust 服务的 CPU 预留，并进入本地部署身份。内存、limits、双副本与安全配置仍来自各 owning chart。完整渲染检查开发调度预算，实际运行是否存在 CPU 饱和、内存压力或恢复问题仍以动态验收为准。
