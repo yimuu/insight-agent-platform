@@ -14,6 +14,11 @@ import test_platform_candidate_pipeline as candidate_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 PREPARE = ROOT / 'tools/qualification/prepare-platform-kind-local.rb'
+KMS_KEY_ARN = 'arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789abc'
+
+
+def canonical_digest(value):
+    return 'sha256:' + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def yaml_documents(text):
@@ -30,6 +35,9 @@ class KindConfigurationTests(unittest.TestCase):
         cls.role_tool = Path(metadata['target_directory']) / 'debug/platform-database-role'
         cls.owner = candidate_fixture.CandidatePipelineTests()
         cls.tool = candidate_fixture.CandidatePipelineTests.tool
+        subprocess.run(['cargo', 'build', '--locked', '--quiet', '-p', 'insight-platform-artifact-service',
+                        '--bin', 'platform-artifact-maintenance'], cwd=ROOT, check=True)
+        cls.maintenance_tool = Path(metadata['target_directory']) / 'debug/platform-artifact-maintenance'
 
     def seed(self, directory):
         runtime = directory / 'runtime'
@@ -52,7 +60,15 @@ class KindConfigurationTests(unittest.TestCase):
                 config[key] = {'endpoint': 'https://localhost:9443/'}
             config['live_delta'] = {'servers': ['tls://localhost:4222']}
             (source / (source_names.get(name, name) + '.json')).write_text(json.dumps(config))
-        catalog = {'kms_key_bindings': [{'key_id': 'seed-key'}], 's3_storage_bindings': [{}]}
+        kms = {'schema_version': 1, 'endpoint': 'https://kms.platform.example', 'region': 'us-east-1',
+               'key_id': KMS_KEY_ARN, 'connect_timeout_milliseconds': 1000, 'operation_timeout_milliseconds': 5000}
+        kms['kms_binding_digest'] = canonical_digest(dict(kms, provider='aws_kms'))
+        storage = {'schema_version': 1, 'endpoint': 'https://s3.platform.example', 'region': 'us-east-1',
+                   'bucket': 'platform-artifacts', 'force_path_style': True, 'kms_binding_digest': kms['kms_binding_digest'],
+                   'connect_timeout_milliseconds': 1000, 'operation_timeout_milliseconds': 5000, 'maximum_object_bytes': 16 * 1024 * 1024}
+        storage['storage_binding_digest'] = canonical_digest(dict(storage, backend='s3'))
+        catalog = {'schema_version': 1, 'write_storage_binding_digest': storage['storage_binding_digest'],
+                   'kms_key_bindings': [kms], 's3_storage_bindings': [storage]}
         for name in ('artifact-gateway', 'artifact-data'):
             target = source / (name + '.json')
             config = json.loads(target.read_text()) if target.exists() else {}
@@ -82,7 +98,7 @@ class KindConfigurationTests(unittest.TestCase):
                    '--postgres-cidr', '10.0.0.1/32', '--nats-cidr', '10.0.0.2/32', '--localstack-pod-cidr', '10.0.0.3/32',
                    '--localstack-service-cidr', '10.0.0.4/32', '--kubernetes-api-service-cidr', '10.0.0.5/32',
                    '--kubernetes-api-endpoint-cidr', '10.0.0.6/32', '--kubernetes-api-endpoint-port', '6443',
-                   '--kms-key-arn', 'arn:aws:kms:us-east-1:000000000000:key/kind-test',
+                   '--kms-key-arn', KMS_KEY_ARN,
                    '--readiness-secret-arn', 'arn:aws:secretsmanager:us-east-1:000000000000:secret:kind-test']
         return subprocess.run(command, cwd=ROOT, text=True, capture_output=True), output
 
@@ -337,6 +353,41 @@ class KindConfigurationTests(unittest.TestCase):
                 result, _ = self.generate(directory, runtime, binaries)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertRegex(result.stderr, 'actual image executable missing|current owning worker manifest')
+
+    def test_generated_maintenance_configuration_passes_the_actual_service_decoder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = output / 'configs/artifact-maintenance.json'
+            original = json.loads(path.read_bytes())
+
+            def decode(config):
+                path.write_text(json.dumps(config))
+                # Invalid URL syntax stops immediately after the actual owning load/validate
+                # path, before any database, AWS, listener, or worker startup side effect.
+                return subprocess.run([str(self.maintenance_tool)], env={
+                    'PLATFORM_ARTIFACT_MAINTENANCE_CONFIG': str(path),
+                    'PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST': canonical_digest(config),
+                    'PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL': 'postgresql://[',
+                }, capture_output=True, text=True, timeout=5)
+
+            accepted = decode(original)
+            self.assertEqual(accepted.returncode, 1)
+            self.assertEqual(accepted.stderr.strip(), 'platform-artifact-maintenance failed: database unavailable')
+            for mutation in ('claim-limit', 'provider-shape', 'unknown-field'):
+                with self.subTest(mutation=mutation):
+                    changed = copy.deepcopy(original)
+                    if mutation == 'claim-limit':
+                        changed['worker']['claim_batch'] = 0
+                    elif mutation == 'provider-shape':
+                        changed['artifact_provider_catalog']['kms_key_bindings'][0]['key_id'] = 'invalid-key'
+                    else:
+                        changed['unexpected'] = True
+                    rejected = decode(changed)
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertEqual(rejected.stderr.strip(), 'platform-artifact-maintenance failed: invalid configuration')
 
     def test_declared_unknown_capability_is_not_accepted_as_installed(self):
         with tempfile.TemporaryDirectory() as temporary:
