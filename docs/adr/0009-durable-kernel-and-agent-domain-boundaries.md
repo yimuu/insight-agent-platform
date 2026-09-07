@@ -156,6 +156,10 @@ Kind 独立部署的 Artifact maintenance 不属于 CLI 开发角色集合。Kin
 执行能力来自拥有域，build identity 来自镜像内实际 executable；物理配置身份排除 manifest 后计算，完整配置仍纳入部署摘要。
 不要求 CLI 生成未选择角色的文件，也不为 Kind 增加隐式本地进程。完整配置合法性由维护服务的 owning decoder 与实际启动验证。
 
+联合评审接受：从 CLI seed 切换到镜像 executable 时，Kind 先核验 Model adapter 和 Dataset source 对 seed WorkerManifest
+的引用闭包，再将引用绑定到镜像内实际程序的 manifest。Dataset source 的 binding 摘要随物理引用重算；内容索引、
+adapter 合同与执行语义身份保持原值。未知来源、旧引用不一致或重复 binding 必须拒绝，不能通过重绑定修补非法 seed。
+
 Kind 的 Outbox 与 History 使用独立 PostgreSQL 凭证，并调用同一 closed-purpose provisioning 工具的固定 loopback Kind profile。JetStream 使用独立 provisioning 身份、持久卷和 owning certificate ACL；publisher 不取得流管理权限。Management 与 Runtime 复用既有 Gateway Artifact 身份，Registry 使用独立已受限的 Artifact 读取身份。
 
 补充联合评审：CLI seed 的 server certificate 仅覆盖 localhost。Kind 为 Artifact、Egress、Security Authority 与 MCP 服务使用同一 seed CA 签发 exact service DNS 的 server certificate，并在 Secret 中引用；原 client URI identity 与 closed peer authorization 保持。禁止通过关闭 hostname、CA 或 mTLS 校验来跨越这两种部署地址。

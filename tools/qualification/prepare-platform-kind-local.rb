@@ -125,7 +125,15 @@ write_config = lambda do |name, value|
   if worker
     manifest = worker.fetch("manifest_pointer").delete_prefix("/").split("/").reduce(value) { |node, key| node.fetch(key) }
     abort "seed must contain a current owning worker manifest: #{name}" unless manifest.fetch("manifest_version") == 2
+    if name == "model-worker.json"
+      previous_digest = digest(manifest)
+      abort "Model adapters must reference the seed worker manifest" unless
+        value.fetch("installed_adapters").all? { |adapter| adapter.fetch("worker_manifest_digest") == previous_digest }
+    end
     manifest["worker_build_digest"] = executable_digest(options[:worker_binaries], worker.fetch("binary"))
+    if name == "model-worker.json"
+      value.fetch("installed_adapters").each { |adapter| adapter["worker_manifest_digest"] = digest(manifest) }
+    end
     File.write(File.join(worker_manifests, "#{worker.fetch('binary')}.json"), canonical_json(manifest))
     File.write(File.join(worker_configs, "#{worker.fetch('binary')}.json"), canonical_json(value))
   elsif name == "history-maintenance.json"
@@ -272,7 +280,30 @@ mcp_cleanup["observability_listen_address"] = "0.0.0.0:9090"
 mcp_cleanup["egress_endpoint"] = egress_endpoint
 write_config.call("mcp-cleanup-worker.json", mcp_cleanup)
 
+context_native = load_config(source, "context-native.json")
+seed_context_binding = {
+  "schema_version" => 1,
+  "required_worker_manifest_digest" => digest(context_native.fetch("worker_manifest")),
+  "adapter_contract_digest" => context_native.fetch("native_catalog").fetch("adapter_contract_digest"),
+  "installed_adapter_digest" => context_native.fetch("native_catalog").fetch("installed_adapter_digest")
+}
+seed_context_binding["canonical_digest"] = digest(seed_context_binding)
+context_native["observability_listen_address"] = "0.0.0.0:9090"
+write_config.call("context-worker.json", context_native)
+kind_context_binding = seed_context_binding.reject { |key, _| key == "canonical_digest" }
+kind_context_binding["required_worker_manifest_digest"] = digest(context_native.fetch("worker_manifest"))
+kind_context_binding["canonical_digest"] = digest(kind_context_binding)
+
 context_dataset = load_config(source, "context-dataset-worker.json")
+dataset_sources = context_dataset.fetch("sources")
+abort "Dataset sources must have distinct seed binding identities" unless
+  dataset_sources.map { |entry| entry.fetch("binding").fetch("canonical_digest") }.uniq.length == dataset_sources.length
+dataset_sources.each do |entry|
+  binding = entry.fetch("binding")
+  abort "Dataset source must reference the exact seed Native catalog binding" unless
+    binding.fetch("schema_version").is_a?(Integer) && binding == seed_context_binding
+  entry["binding"] = kind_context_binding.dup
+end
 context_dataset["observability_listen_address"] = "0.0.0.0:9290"
 context_dataset.fetch("artifact_data_worker")["endpoint"] = artifact_data_endpoint
 write_config.call("context-dataset-worker.json", context_dataset)
@@ -289,10 +320,6 @@ callback["egress_endpoint"] = egress_endpoint
 callback.fetch("oauth_state")["key_directory"] = "/etc/insight/oauth-state-keys"
 callback.fetch("oauth_state").fetch("keys").fetch(0)["key_material_path"] = "/etc/insight/oauth-state-keys/current"
 write_config.call("callback-api.json", callback)
-
-context_native = load_config(source, "context-native.json")
-context_native["observability_listen_address"] = "0.0.0.0:9090"
-write_config.call("context-worker.json", context_native)
 
 capability_native = load_config(source, "capability-native.json")
 capability_native["observability_listen_address"] = "0.0.0.0:9090"
