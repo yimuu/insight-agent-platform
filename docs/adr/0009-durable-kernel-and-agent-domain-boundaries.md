@@ -115,6 +115,22 @@ Run 根持有有界 history holds。签名维护策略、数据库时间、当�
 管理恢复 API 和 CLI 只组合现有 hold 与 cleanup 命令，返回有界安全投影。CLI 的私有意图记录用于重试定位，不能替代当前授权、
 服务端 Receipt 或实际恢复结果；业务数据库不接受任意 purge SQL 或部署回滚命令。
 
+## 公开文档检索示例边界
+
+文档检索示例作为独立、无状态的 HTTPS provider，复用现有 Remote Context HTTP wire 与结果映射。
+它只检索随示例冻结的公开源文件，在启动时核对唯一 corpus manifest 身份和实际文件字节；请求不能指定 URL、文件路径或新的源。
+检索只使用有界原文段落、确定性词项排名和单页结果。示例限制由其实现常量拥有，超出限制或不支持的过滤、投影、分页明确拒绝。
+
+原文 URI、版本、摘要和行范围属于 provider 返回的来源元数据。Egress 与 Context 仍独立拥有请求、授权、观察时间和引用映射；
+示例的 URI 与内容核对不能把 RemoteOpaque / ObservationOnly 提升为平台证明过的更强引用。
+该服务不持有租户、Job、业务期限、模型凭证或数据库状态，不新增持久表、队列、事件或事务边界。
+连接在 TLS 握手前受固定并发限制，每个已接收请求受包含握手、读取和写入的绝对期限限制；无应用等待队列，不承诺自动重试。
+
+联合评审要求：原始文件与行范围、中文检索、严格输入、容量和真实 HTTPS 负例应有独立测试；
+现有 Rust request encoder 和 response normalizer 必须接受示例实际生成的 wire。测试与本地 HTTPS 运行不构成公网部署或完整 Agent 资格。
+真实 Agent 仍需当前授权的 exact Context/Model deployment、受信任的公开 HTTPS 目标、真实 SecretBinding 和人工确认；
+不得放开生产 Egress 的目的地址限制、复用匿名测试凭证或把模型回答自动当作审批。
+
 ## 建库、发布与证据
 
 本地开发依赖的 Compose 命名空间使用已验证 Tenant ID 的完整 UUID。UUIDv7 的时间前缀不能用作项目身份；

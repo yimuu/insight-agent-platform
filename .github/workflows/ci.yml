@@ -77,6 +77,7 @@ jobs:
             tools/tests/test_rust_integration_lanes.py \
             tools/tests/test_productization_journey_runner.py \
             tools/tests/test_fixture_project.py \
+            tools/tests/test_document_review.py \
             tools/tests/test_kind_diagnostics.py \
             tools/tests/test_prepare_productization_release_candidate.py \
             tools/tests/test_productization_http_lifecycle.py \
