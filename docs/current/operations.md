@@ -39,6 +39,9 @@ Console 直接使用 Artifact 授予的短时 HTTPS URL 上传对象。本地 bu
 预签名 URL 和 Artifact 的当前授权、期限、摘要与长度验收继续生效。生产 bucket 应由部署者配置 exact HTTPS Console origin。
 实际浏览器的预检、上传和拒绝场景是该路径的验证要求，普通 HTTP 客户端成功不能替代浏览器证据。
 
+Artifact Gateway 在签发上传目标前将准入时间规范为共同的微秒精度，使 JSON 授权与 PostgreSQL 任务
+保持同一截止。授权不晚于任务、到期拒绝和原 Receipt 重放规则仍严格执行；重试不会刷新已提交的上传窗口。
+
 默认发行路径从签名 ReleaseBundle 解析 exact runtime image tag@index digest，并把所选 binary closure 提取到
 `.insight/runtime/releases/<bundle-digest>/bin`。缓存不完整、image/profile/schema drift 或签名失败均 fail closed；不会回退
 到 Cargo。`--offline` 需要 bundle、signature、image 与 binary cache 全部已存在。
