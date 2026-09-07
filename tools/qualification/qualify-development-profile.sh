@@ -61,16 +61,19 @@ fi
 project="$(mktemp -d /tmp/insight-dev-qualification.XXXXXX)"
 project_name="performance"
 bundle_temp=""
+project="$(cd "$project" && pwd -P)"
+project_identity="$(python3 "$workspace/tools/qualification/fixture_project.py" identity --project "$project")"
 cleanup() {
-  set +e
-  if [[ -d "$project/.insight" ]]; then
-    "$insight_bin" stop --path "$project" >/dev/null 2>&1
-    "$insight_bin" reset --path "$project" --confirm "$project_name" >/dev/null 2>&1
-  fi
+  local status=$?
+  trap - EXIT INT TERM
   [[ -z "$bundle_temp" ]] || rm -f "$bundle_temp"
-  rmdir "$project" >/dev/null 2>&1
+  python3 "$workspace/tools/qualification/fixture_project.py" cleanup \
+    --project "$project" --identity "$project_identity" --insight-bin "$insight_bin" \
+    --project-name "$project_name" --status "$status" --logs-directory "${output}.logs"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 version_json="$($insight_bin version --json)"
 read -r version revision target < <(python3 - "$version_json" <<'PY'
@@ -92,7 +95,7 @@ else
   bundle="$bundle_temp"
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$bundle_url" --output "$bundle"
 fi
-mapfile -t images < <(python3 - "$bundle" "$workspace/release/development-profile-v1.json" "$version" "$revision" <<'PY'
+mapfile -t images < <(python3 - "$bundle" "$workspace/deploy/release/development-profile-v1.json" "$version" "$revision" <<'PY'
 import json, pathlib, sys
 bundle = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
 registry = json.loads(pathlib.Path(sys.argv[2]).read_bytes())

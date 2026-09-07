@@ -1,3 +1,6 @@
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+use fixture_directory::FixtureDirectory;
 #[path = "support/adapter_claims.rs"]
 mod adapter_claims;
 use adapter_claims::AdapterClaimRounds;
@@ -4331,7 +4334,8 @@ async fn run_model_worker_process_recovery(
         CommandOutcome::Replayed(_) => panic!("fresh Model process prepare replayed"),
     }
 
-    let prefix = format!("/tmp/platform-model-worker-process-{}", std::process::id());
+    let _files = FixtureDirectory::new("platform-model-worker-process");
+    let prefix = _files.path().join("worker").display().to_string();
     let ca_path = PathBuf::from(format!("{prefix}-egress-ca.pem"));
     let cert_path = PathBuf::from(format!("{prefix}-egress-client.pem"));
     let key_path = PathBuf::from(format!("{prefix}-egress-client-key.pem"));
@@ -4632,10 +4636,8 @@ fn production_workers_complete_model_tool_result_return_chain() {
         install_production_typed_plan_object(&pool, &fixture, &production_artifact).await;
         let artifact_address = reserve_loopback_address();
         let artifact_observability_address = reserve_loopback_address();
-        let prefix = PathBuf::from(format!(
-            "/tmp/platform-model-tool-orchestration-{}",
-            std::process::id()
-        ));
+        let _files = FixtureDirectory::new("platform-model-tool-orchestration");
+        let prefix = _files.path().join("worker");
         let ca_path = PathBuf::from(format!("{}-ca.pem", prefix.display()));
         let cert_path = PathBuf::from(format!("{}-scheduler.pem", prefix.display()));
         let key_path = PathBuf::from(format!("{}-scheduler-key.pem", prefix.display()));

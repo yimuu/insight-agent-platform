@@ -7,7 +7,8 @@ report_directory=""
 features=""
 profile_label="starter"
 insight_bin="${PLATFORM_INSIGHT_BIN:-}"
-keep_dependencies=false
+keep_failed_resources=false
+logs_directory=""
 console_browser=false
 node_bin="${PLATFORM_PRODUCTIZATION_NODE_BIN:-}"
 browser_bin="${INSIGHT_CONSOLE_BROWSER_BIN:-}"
@@ -33,7 +34,8 @@ Options:
   --report-directory <path>    Write and validate exact-revision scenario evidence.
   --features <list|all>        Add a canonical feature closure to starter (default: none).
   --insight-bin <path>         Use an existing insight binary (default: Cargo target_directory/release/insight).
-  --keep-dependencies          Leave the exact Docker Compose dependencies running.
+  --keep-failed-resources      Retain this invocation only on failure for debugging.
+  --logs-directory <new-path>  Export bounded runtime logs before automatic cleanup.
   --console-browser           Run the static Console against the fresh real Gateway in headless Chromium.
   --node-bin <path>           Node.js executable for the remote-framework fixture and --console-browser (default: current or login-shell PATH).
   --browser-bin <path>        Chromium/Chrome executable for --console-browser.
@@ -72,8 +74,13 @@ while (($# > 0)); do
       insight_bin_explicit=true
       shift 2
       ;;
-    --keep-dependencies)
-      keep_dependencies=true
+    --logs-directory)
+      (($# >= 2)) || { echo "--logs-directory requires a value" >&2; exit 2; }
+      logs_directory=$2
+      shift 2
+      ;;
+    --keep-failed-resources)
+      keep_failed_resources=true
       shift
       ;;
     --console-browser)
@@ -306,10 +313,30 @@ if [[ -n "$orphaned_processes" ]]; then
 fi
 
 if [[ -z "$project" ]]; then
-  # Keep the retained journey path short and easy to inspect on macOS and Linux.
+  # Keep the ephemeral journey path within Unix socket limits on macOS and Linux.
   project="$(mktemp -d "/tmp/insight-productization.XXXXXX")"
+else
+  mkdir -m 700 "$project"
 fi
-project="$(cd "$(dirname "$project")" && pwd)/$(basename "$project")"
+project="$(cd "$(dirname "$project")" && pwd -P)/$(basename "$project")"
+project_identity="$(python3 "$workspace/tools/qualification/fixture_project.py" identity --project "$project")"
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  local arguments=(cleanup --project "$project" --identity "$project_identity"
+    --insight-bin "$insight_bin" --project-name "productization-${profile_label%%+*}" --status "$status")
+  if [[ "$keep_failed_resources" == true ]]; then arguments+=(--keep-failed); fi
+  if [[ -n "$logs_directory" ]]; then arguments+=(--logs-directory "$logs_directory"); fi
+  if python3 "$workspace/tools/qualification/fixture_project.py" "${arguments[@]}"; then
+    exit "$status"
+  else
+    exit "$?"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ -n "$report_directory" ]]; then
   mkdir -p "$(dirname "$report_directory")"
   mkdir "$report_directory"
@@ -323,6 +350,14 @@ if [[ -n "$aggregate_report" ]]; then
   mkdir -p "$(dirname "$aggregate_report")"
   aggregate_report="$(cd "$(dirname "$aggregate_report")" && pwd)/$(basename "$aggregate_report")"
 fi
+python3 - "$project" "$report_directory" "$north_star_report" "$aggregate_report" "$logs_directory" <<'PY_OUTPUTS'
+from pathlib import Path
+import sys
+project = Path(sys.argv[1]).resolve()
+for raw in sys.argv[2:]:
+    if raw and Path(raw).resolve().is_relative_to(project):
+        raise SystemExit("evidence paths must be outside the disposable project")
+PY_OUTPUTS
 first_run_marker=""
 if [[ -n "$north_star_report" ]]; then
   mkdir -p "$(dirname "$north_star_report")"
@@ -331,50 +366,6 @@ if [[ -n "$north_star_report" ]]; then
   rm -f "$first_run_marker"
 fi
 
-compose_project=""
-cleanup() {
-  set +e
-  if [[ -x "$insight_bin" && -d "$project/.insight" ]]; then
-    "$insight_bin" stop --path "$project"
-  fi
-  if [[ "$keep_dependencies" == false && -f "$project/.insight/project.json" ]]; then
-    if compose_project="$(python3 - \
-      "$project/.insight/project.json" \
-      "$project/.insight/runtime/processes.json" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-identity = json.loads(pathlib.Path(sys.argv[1]).read_text())
-processes = pathlib.Path(sys.argv[2])
-if processes.is_file():
-    project = json.loads(processes.read_text()).get("compose_project", "")
-else:
-    tenant_id = identity.get("identity", {}).get("tenant_id", "")
-    match = re.fullmatch(
-        r"ten_([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        tenant_id,
-    )
-    project = f"insight-{match.group(1)}" if match else ""
-if not re.fullmatch(r"insight-[0-9a-f]{8}", project):
-    raise SystemExit("refusing to clean an unexpected Compose project")
-print(project)
-PY
-)"; then
-      INSIGHT_DEV_NATS_CONFIG_PATH="$project/.insight/runtime/nats.conf" \
-      INSIGHT_DEV_NATS_CA_PATH="$project/.insight/runtime/tls/ca.pem" \
-      INSIGHT_DEV_NATS_SERVER_CERT_PATH="$project/.insight/runtime/tls/nats-server.pem" \
-      INSIGHT_DEV_NATS_SERVER_KEY_PATH="$project/.insight/runtime/tls/nats-server-key.pem" \
-        docker compose \
-        --project-name "$compose_project" \
-        --file "$workspace/deploy/dev/compose.yaml" \
-        down
-    fi
-  fi
-  echo "fresh project retained at $project"
-}
-trap cleanup EXIT
 
 cd "$workspace"
 if [[ -z "$release_candidate" ]]; then

@@ -41,6 +41,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 insight-platform-mcp-transport.workspace = true
 insight-platform-mcp-runtime.workspace = true
 insight-platform-model-adapters.workspace = true

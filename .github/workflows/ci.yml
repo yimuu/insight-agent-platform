@@ -76,6 +76,7 @@ jobs:
             tools/tests/test_required_ci_results.py \
             tools/tests/test_rust_integration_lanes.py \
             tools/tests/test_productization_journey_runner.py \
+            tools/tests/test_fixture_project.py \
             tools/tests/test_prepare_productization_release_candidate.py \
             tools/tests/test_productization_http_lifecycle.py \
             tools/tests/test_productization_north_star_report.py \
@@ -408,6 +409,8 @@ jobs:
       - name: Test CLI and compile Productization journeys
         run: |
           cargo test --locked -p insight-cli
+          cargo build --locked -p insight-cli --bin insight
+          python3 tools/qualification/qualify-fixture-cleanup.py --insight-bin target/debug/insight
           cargo test --locked -p insight-platform-qualification-tests --test productization --no-run
 
   console:

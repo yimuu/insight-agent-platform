@@ -4772,13 +4772,9 @@ fn workspace_root(root: &Path) -> Result<PathBuf, CliError> {
 }
 
 fn compose_project_name(tenant_id: &str) -> Result<String, CliError> {
-    let suffix = tenant_id
-        .rsplit('_')
-        .next()
-        .filter(|value| value.len() >= 8)
-        .map(|value| &value[..8])
-        .ok_or_else(|| CliError::RuntimeState("local tenant identity is malformed".to_owned()))?;
-    Ok(format!("insight-{suffix}"))
+    let tenant = ResourceId::parse_expected(tenant_id, ResourceKind::Tenant)
+        .map_err(|_| CliError::RuntimeState("local tenant identity is malformed".to_owned()))?;
+    Ok(format!("insight-{}", tenant.uuid().simple()))
 }
 
 fn compose_up(workspace: &Path, project: &str, runtime: &Path) -> Result<(), CliError> {
@@ -10470,6 +10466,24 @@ mod tests {
     }
 
     #[test]
+    fn compose_namespace_preserves_the_complete_tenant_identity() {
+        let first = "ten_019a7c80-0000-7000-8000-000000000001";
+        let second = "ten_019a7c80-0000-7000-8000-000000000002";
+        let first_name = compose_project_name(first).unwrap();
+        assert_eq!(first_name, "insight-019a7c80000070008000000000000001");
+        assert_eq!(compose_project_name(first).unwrap(), first_name);
+        assert_ne!(compose_project_name(second).unwrap(), first_name);
+        for invalid in [
+            "ten_019a7c80",
+            "agt_019a7c80-0000-7000-8000-000000000001",
+            "ten_019a7c80-0000-4000-8000-000000000001",
+            "ten_019A7C80-0000-7000-8000-000000000001",
+        ] {
+            assert!(compose_project_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn reset_is_a_two_step_project_scoped_destructive_operation() {
         let directory = TempDir::new().unwrap();
         initialize_project(directory.path(), Some("demo"), UNIX_EPOCH).unwrap();
@@ -11017,6 +11031,8 @@ mod tests {
         wrong_schema["schema_version"] = serde_json::json!(1);
         let mut wrong_kind = current.clone();
         wrong_kind["kind"] = serde_json::json!("insight.dev.process-state/v1");
+        let mut truncated_namespace = current.clone();
+        truncated_namespace["compose_project"] = serde_json::json!(&compose_project[..16]);
         let mut wrong_tenant = current.clone();
         wrong_tenant["tenant_id"] = serde_json::json!("ten_wrong");
         let mut wrong_profile = current.clone();
@@ -11081,6 +11097,11 @@ mod tests {
                 "unsupported runtime process schema_version",
             ),
             ("wrong kind", wrong_kind, "unsupported runtime process kind"),
+            (
+                "truncated namespace",
+                truncated_namespace,
+                "does not match the current tenant/profile/release/source binding",
+            ),
             (
                 "wrong tenant",
                 wrong_tenant,

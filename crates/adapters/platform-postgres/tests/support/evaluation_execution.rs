@@ -1,4 +1,6 @@
 //! Actual generated evaluation Plan execution through the existing coordinator.
+#[path = "fixture_directory.rs"]
+mod fixture_directory;
 use super::*;
 use insight_platform_agent_compiler::{evaluation::*, *};
 use insight_platform_contracts::{ClosedJsonValue, ClosedValueSchema};
@@ -691,7 +693,8 @@ fn generated_evaluation_survives_process_restart_and_preserves_cancel_and_budget
         let parent=install_agent(&repo,*compilation,&mut plans).await;
         let input=json!({"samples":{"one":{"input":sample}}});
         let first=admit_evaluation(&repo,&base,&parent,input.clone()).await;
-        let plans_file=std::env::temp_dir().join(format!("insight-evaluation-plans-{}.json",uuid::Uuid::now_v7()));std::fs::write(&plans_file,serde_json::to_vec(&plans).unwrap()).unwrap();
+        let _files = fixture_directory::FixtureDirectory::new("evaluation");
+        let plans_file = _files.path().join("plans.json");std::fs::write(&plans_file,serde_json::to_vec(&plans).unwrap()).unwrap();
         let mut worker=spawn_worker(&url,&plans_file);wait_for(&repo,&first,&mut worker,false).await;
         let completed_controllers: Vec<i32> = sqlx::query_scalar("SELECT attempt_no FROM insight_platform.jobs WHERE tenant_id=$1 AND run_id=$2 AND state='succeeded'").bind(TENANT_ID).bind(first.to_string()).fetch_all(repo.pool()).await.unwrap();
         assert!(!completed_controllers.is_empty(), "the parent has claimed its first controller");

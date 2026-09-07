@@ -303,6 +303,12 @@ jobs:
             --package-platform-manifest-digest "$package_digest"
 
           seed="$RUNNER_TEMP/productization-kind-seed"
+          mkdir -m 700 "$seed"
+          seed_identity="$(python3 tools/qualification/fixture_project.py identity --project "$seed")"
+          {
+            echo "PRODUCTIZATION_SEED_IDENTITY=$seed_identity"
+            echo "PRODUCTIZATION_SEED_BINARY=target/debug/insight"
+          } >> "$GITHUB_ENV"
           target/debug/insight init --path "$seed" --name productization-kind-seed
           target/debug/insight dev --path "$seed" \
             --features context,mcp,model,remote-capability --from-source
@@ -391,6 +397,12 @@ jobs:
             --package-platform-manifest-digest "$package_digest"
 
           seed="$RUNNER_TEMP/productization-kind-seed"
+          mkdir -m 700 "$seed"
+          seed_identity="$(python3 tools/qualification/fixture_project.py identity --project "$seed")"
+          {
+            echo "PRODUCTIZATION_SEED_IDENTITY=$seed_identity"
+            echo "PRODUCTIZATION_SEED_BINARY=$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY"
+          } >> "$GITHUB_ENV"
           "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" init --path "$seed" --name productization-kind-seed
           candidate_version="$(jq -r '.version' "$closure")"
           release_cache="$seed/.insight/cache/releases/$candidate_version"
@@ -480,6 +492,7 @@ jobs:
             --node-bin "$(command -v node)"
             --browser-bin "$(command -v google-chrome)"
             --report-directory "$RUNNER_TEMP/productization-reports"
+            --logs-directory "$RUNNER_TEMP/productization-runtime-logs"
           )
           if [[ "$PRODUCTIZATION_FEATURES" != "starter" ]]; then
             arguments+=(--features "$PRODUCTIZATION_FEATURES")
@@ -505,14 +518,23 @@ jobs:
             )
           fi
           tools/qualification/run-productization-journey.sh "${arguments[@]}"
-      - name: Preserve bounded runtime diagnostics on failure
-        if: ${{ failure() }}
+      - name: Always clean the exact seed project and volumes
+        if: ${{ always() && env.PRODUCTIZATION_SEED_IDENTITY != '' }}
+        run: |
+          python3 tools/qualification/fixture_project.py cleanup \
+            --project "$RUNNER_TEMP/productization-kind-seed" \
+            --identity "$PRODUCTIZATION_SEED_IDENTITY" \
+            --insight-bin "$PRODUCTIZATION_SEED_BINARY" \
+            --project-name productization-kind-seed \
+            --logs-directory "$RUNNER_TEMP/productization-seed-logs"
+      - name: Preserve bounded runtime diagnostics
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: productization-${{ env.PRODUCTIZATION_FEATURES }}-failure-diagnostics-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/insight-productization-${{ env.PRODUCTIZATION_FEATURES }}/.insight/runtime/logs/*.log
-            ${{ runner.temp }}/insight-productization-${{ env.PRODUCTIZATION_FEATURES }}/.insight/runtime/profile.json
+            ${{ runner.temp }}/productization-runtime-logs/*.log
+            ${{ runner.temp }}/productization-seed-logs/*.log
             ${{ runner.temp }}/productization-kind/environment.json
             ${{ runner.temp }}/productization-opensandbox-evidence.json
           if-no-files-found: warn

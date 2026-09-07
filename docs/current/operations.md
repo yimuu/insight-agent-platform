@@ -49,6 +49,12 @@ image digest、containerd节点、Direct/Disabled NetworkPolicy和不存在publi
 content bytes/time、稳定 5 分钟后的 RSS/CPU、project/volume disk 与 source compilation count。预算为 cold ≤300 秒、warm
 ≤60 秒、RSS ≤6 GiB、CPU ≤10% 单核等效、disk ≤8 GiB、source compilation=0；只有真实测量通过才能标 Passed。
 
+Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用容器或 volume 名称；固定宿主端口仍限制完整 profile 的并行启动。
+验证脚本创建的临时项目属于单次运行，结束时使用 CLI 的 `stop/reset` 清理进程、Compose 容器与 volume，
+随后删除该次项目目录。`run-productization-journey.sh --logs-directory <new-path>` 在删除前导出有界日志；CI 自动上传日志及独立的验证报告。
+只有显式传入 `--keep-failed-resources` 才保留失败旅程，成功运行始终清理。PostgreSQL 物理测试使用独立临时目录与进程守卫；
+排查断言失败时可设置 `INSIGHT_TEST_KEEP_FAILED_RESOURCES=1` 保留该测试目录。清理失败会使验证失败，保留所属目录供重试。
+
 ## 发行与生产
 
 受保护 tag workflow 构建四个平台 CLI archive、runtime/fixed Sandbox runner/Console与official OpenSandbox image闭包、checksum、SPDX SBOM、

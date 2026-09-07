@@ -29,7 +29,7 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
         self.assertIn("fresh selected-profile", result.stdout)
         self.assertIn("--report-directory", result.stdout)
         self.assertIn("--features <list|all>", result.stdout)
-        self.assertIn("--keep-dependencies", result.stdout)
+        self.assertIn("--keep-failed-resources", result.stdout)
         self.assertIn("--north-star-report", result.stdout)
         self.assertIn("--sandbox-evidence", result.stdout)
         self.assertIn("--aggregate-report", result.stdout)
@@ -64,12 +64,12 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
         )
         self.assertNotIn('${TMPDIR:-/tmp}/insight-productization', source)
 
-    def test_cleanup_can_derive_compose_project_before_process_state_exists(self) -> None:
+    def test_cleanup_uses_owned_directory_lifecycle(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
-        self.assertIn('"$project/.insight/project.json"', source)
-        self.assertIn('if processes.is_file():', source)
-        self.assertIn('tenant_id = identity.get("identity", {}).get("tenant_id", "")', source)
-        self.assertIn('project = f"insight-{match.group(1)}" if match else ""', source)
+        self.assertIn('fixture_project.py" identity --project "$project"', source)
+        self.assertIn('--identity "$project_identity"', source)
+        self.assertIn("trap 'exit 143' TERM", source)
+        self.assertIn('--logs-directory "$RUNNER_TEMP/productization-runtime-logs"', WORKFLOW.read_text())
 
     def test_unknown_option_fails_before_build_or_mutation(self) -> None:
         result = self.run_runner("--unknown")

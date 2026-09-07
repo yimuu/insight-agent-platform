@@ -1,3 +1,6 @@
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+use fixture_directory::FixtureDirectory;
 #[path = "support/mcp_subscription_isolation.rs"]
 mod mcp_subscription_isolation;
 use async_trait::async_trait;
@@ -2895,6 +2898,7 @@ impl ProductionArtifactProcessFixture {
 }
 
 struct ProcessFixtureFiles {
+    _directory: FixtureDirectory,
     prefix: String,
     ca: PathBuf,
     artifact_server_cert: PathBuf,
@@ -2915,12 +2919,11 @@ struct ProcessFixtureFiles {
 
 impl ProcessFixtureFiles {
     fn new(tls: &ProcessTlsFixture) -> Self {
-        let prefix = format!(
-            "/private/tmp/platform-subscription-process-l3-{}",
-            std::process::id()
-        );
+        let _files = FixtureDirectory::new("platform-subscription-process-l3");
+        let prefix = _files.path().join("worker").display().to_string();
         let path = |suffix: &str| PathBuf::from(format!("{prefix}-{suffix}"));
         let files = Self {
+            _directory: _files,
             prefix: prefix.clone(),
             ca: path("ca.pem"),
             artifact_server_cert: path("artifact-server.pem"),
