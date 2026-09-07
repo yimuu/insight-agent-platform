@@ -317,25 +317,29 @@ digests["sandbox-worker-manifest.json"] = digest(sandbox_manifest)
 
 resource_bytes = File.binread(File.expand_path('../../deploy/kind/workload-resources.json', __dir__), 4097)
 abort 'Kind resource profile exceeds byte limit' if resource_bytes.bytesize > 4096
-# A plain object is intentional: JSON versions may insert directly into Hash subclasses,
-# bypassing an overridden []= and silently accepting duplicate fields.
-unique_fields = Class.new do
-  def initialize
-    @fields = {}
-  end
-
-  def []=(key, value)
-    abort 'duplicate Kind resource profile field' if @fields.key?(key)
-    @fields[key] = value
-  end
-
-  def to_h
-    @fields
-  end
-end
-resource_document = JSON.parse(resource_bytes, object_class: unique_fields, create_additions: false)
-abort 'invalid Kind resource profile' unless resource_document.is_a?(unique_fields)
-resource_profile = resource_document.to_h
+# Validate duplicate keys before Ruby materializes objects. JSON gem versions differ
+# in whether object_class sees every pair or an already deduplicated mapping.
+strict_json = <<~'PYTHON'
+  import json, sys
+  def unique(pairs):
+      result = {}
+      for key, value in pairs:
+          if key in result:
+              raise ValueError('duplicate Kind resource profile field')
+          result[key] = value
+      return result
+  def constant(value):
+      raise ValueError('invalid Kind resource profile constant')
+  try:
+      value = json.loads(sys.stdin.buffer.read().decode('utf-8'), object_pairs_hook=unique, parse_constant=constant)
+      print(json.dumps(value, allow_nan=False))
+  except (ValueError, RecursionError):
+      sys.exit('invalid or duplicate Kind resource profile')
+PYTHON
+resource_json, resource_error, resource_status = Open3.capture3('python3', '-c', strict_json, stdin_data: resource_bytes)
+abort resource_error unless resource_status.success?
+resource_profile = JSON.parse(resource_json, create_additions: false)
+abort 'invalid Kind resource profile' unless resource_profile.is_a?(Hash)
 resource_keys = %w[schema_version rust_service_cpu_request_millicores maximum_steady_platform_cpu_millicores]
 abort 'invalid Kind resource profile' unless resource_profile.keys.sort == resource_keys.sort &&
   resource_profile['schema_version'].is_a?(Integer) &&

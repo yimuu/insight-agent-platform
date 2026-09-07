@@ -267,9 +267,15 @@ class KindConfigurationTests(unittest.TestCase):
         profile = (ROOT / 'deploy/kind/workload-resources.json').read_text()
         cases = [
             (profile.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1'), 'duplicate'),
+            (profile.replace('"schema_version": 1', r'"schema_version": 1, "schema\u005fversion": 1'), 'duplicate'),
             (profile + ' ' * 4096, 'byte limit'),
             (profile.replace('"schema_version": 1', '"schema_version": 1.0'), 'invalid'),
             (profile.replace('"schema_version": 1', '"unexpected": true, "schema_version": 1'), 'invalid'),
+            (profile.replace('"schema_version": 1', '"schema_version": NaN'), 'invalid'),
+            (profile.replace('"schema_version": 1', '"schema_version": Infinity'), 'invalid'),
+            (profile.replace('"schema_version": 1', '"schema_version": 1e999'), 'invalid'),
+            ('[]', 'invalid'),
+            (profile.encode('utf-16'), 'invalid'),
         ]
         for source, error in cases:
             with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
@@ -281,7 +287,7 @@ class KindConfigurationTests(unittest.TestCase):
                 prepare.write_bytes(PREPARE.read_bytes())
                 resource = isolated / 'deploy/kind/workload-resources.json'
                 resource.parent.mkdir(parents=True)
-                resource.write_text(source)
+                resource.write_bytes(source if isinstance(source, bytes) else source.encode('utf-8'))
                 (isolated / 'deploy/helm').symlink_to(ROOT / 'deploy/helm', target_is_directory=True)
                 result, _ = self.generate(directory, runtime, binaries, prepare)
                 self.assertNotEqual(result.returncode, 0)
