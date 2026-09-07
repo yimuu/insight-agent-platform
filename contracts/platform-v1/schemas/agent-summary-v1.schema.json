@@ -3,6 +3,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "active_deployment": {
+      "oneOf": [
+        {
+          "$ref": "deployment-closure.schema.json#/$defs/ExactDeploymentRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "agent_id": {
       "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
       "type": "string"
@@ -64,7 +74,11 @@
     "required_features": {
       "items": {
         "enum": [
-          "model"
+          "model",
+          "context",
+          "remote-capability",
+          "mcp",
+          "sandbox"
         ],
         "type": "string"
       },
@@ -94,6 +108,7 @@
     "name",
     "display_name",
     "agent_id",
+    "active_deployment",
     "state",
     "environment",
     "updated_at",

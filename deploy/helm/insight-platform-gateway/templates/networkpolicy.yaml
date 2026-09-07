@@ -39,13 +39,11 @@ spec:
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{protocol: TCP, port: 5432}]
-    {{- if eq $role "runtime-api" }}
     - to:
         - namespaceSelector:
             matchLabels: {{ toYaml $root.Values.artifactGateway.namespaceSelector | nindent 14 }}
           podSelector:
             matchLabels: {{ toYaml $root.Values.artifactGateway.podSelector | nindent 14 }}
       ports: [{protocol: TCP, port: 8080}]
-    {{- end }}
 {{ end }}
 {{- end }}

@@ -1,0 +1,67 @@
+{
+  "$id": "urn:insight:platform:v1:worker-executable-evidence",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "runtime_image_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "workers": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "binary": {
+            "enum": [
+              "platform-mcp-cleanup-worker",
+              "platform-orchestration-worker",
+              "platform-registry-validation-worker",
+              "platform-model-worker",
+              "platform-capability-native-worker",
+              "platform-capability-remote-worker",
+              "platform-context-worker",
+              "platform-remote-context-worker",
+              "platform-subscription-context-worker",
+              "platform-context-dataset-worker",
+              "platform-sandbox-dispatcher",
+              "platform-artifact-data-worker",
+              "platform-artifact-maintenance",
+              "platform-mcp-discovery-worker",
+              "platform-mcp-subscription-worker"
+            ],
+            "type": "string"
+          },
+          "process_config_digest": {
+            "$ref": "nominal/digest.schema.json"
+          },
+          "worker_build_digest": {
+            "$ref": "nominal/digest.schema.json"
+          },
+          "worker_manifest_digest": {
+            "$ref": "nominal/digest.schema.json"
+          }
+        },
+        "required": [
+          "binary",
+          "worker_manifest_digest",
+          "worker_build_digest",
+          "process_config_digest"
+        ],
+        "type": "object"
+      },
+      "maxItems": 15,
+      "minItems": 15,
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "runtime_image_digest",
+    "workers"
+  ],
+  "title": "WorkerExecutableEvidenceV1",
+  "type": "object"
+}

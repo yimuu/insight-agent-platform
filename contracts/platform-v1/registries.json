@@ -61,7 +61,11 @@
     "blocked"
   ],
   "agent_required_features": [
-    "model"
+    "model",
+    "context",
+    "remote-capability",
+    "mcp",
+    "sandbox"
   ],
   "artifact_grant_operations": [
     "read_whole",
@@ -405,6 +409,10 @@
     {
       "owner_kind": "job",
       "work_class": "recovery"
+    },
+    {
+      "owner_kind": "interaction",
+      "work_class": "recovery"
     }
   ],
   "interaction_kinds": [
@@ -532,6 +540,11 @@
       "job_kind": "recovery",
       "owner_kind": "job",
       "work_class": "recovery"
+    },
+    {
+      "job_kind": "mcp_oauth_pkce_cleanup",
+      "owner_kind": "interaction",
+      "work_class": "recovery"
     }
   ],
   "job_kinds": [
@@ -541,6 +554,7 @@
     "capability_invocation",
     "mcp_discovery",
     "mcp_subscription",
+    "mcp_oauth_pkce_cleanup",
     "context_query_native",
     "context_query_remote",
     "context_dataset_build",
@@ -611,6 +625,8 @@
   "permissions": [
     "installation.manage",
     "installation.support",
+    "history.hold.manage",
+    "mcp.cleanup.recover",
     "tenant.read",
     "tenant.manage",
     "tenant.emergency_stop",

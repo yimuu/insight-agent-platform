@@ -121,14 +121,17 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_json",
+ "serde_nanos",
  "serde_repr",
  "thiserror",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tokio-websockets",
  "tracing",
+ "tryhard",
  "url",
 ]
 
@@ -1061,6 +1064,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "digest"
@@ -1813,8 +1819,16 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "insight-platform-agent-compiler",
  "insight-platform-api",
+ "insight-platform-artifacts",
+ "insight-platform-context",
  "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-mcp-host",
+ "insight-platform-plan",
+ "insight-platform-registry",
+ "insight-platform-tasks",
  "jsonwebtoken",
  "libc",
  "rcgen",
@@ -1828,8 +1842,28 @@ dependencies = [
  "tempfile",
  "uuid",
  "x509-parser",
+ "yaml_serde",
+]
+
+[[package]]
+name = "insight-platform-agent-compiler"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
+ "insight-platform-plan",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "yaml-rust2",
  "yaml_serde",
+]
+
+[[package]]
+name = "insight-platform-agent-compiler-wasm"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-agent-compiler",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1844,6 +1878,10 @@ dependencies = [
  "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-mcp-host",
+ "insight-platform-mcp-runtime",
+ "insight-platform-orchestrator",
+ "insight-platform-plan",
+ "insight-platform-registry",
  "insight-platform-tasks",
  "jsonwebtoken",
  "ring",
@@ -1888,6 +1926,7 @@ dependencies = [
  "futures",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-execution-context",
  "insight-platform-jobs",
  "insight-platform-rpc-trace",
  "prost",
@@ -1923,7 +1962,9 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-jobs",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
+ "insight-platform-worker",
  "rcgen",
  "ring",
  "rustls",
@@ -1964,7 +2005,10 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-mcp-host",
+ "insight-platform-mcp-runtime",
+ "insight-platform-mcp-transport",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
  "serde",
  "serde_json",
@@ -2007,11 +2051,14 @@ dependencies = [
  "insight-platform-capability-adapters",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
+ "insight-platform-execution-context",
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-mcp-rpc",
  "insight-platform-observability",
+ "insight-platform-observability-http",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-rpc-trace",
  "insight-platform-worker",
@@ -2053,9 +2100,12 @@ dependencies = [
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
+ "insight-platform-execution-context",
  "insight-platform-jobs",
  "insight-platform-mcp-rpc",
  "insight-platform-observability",
+ "insight-platform-observability-http",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-rpc-trace",
  "insight-platform-worker",
@@ -2065,8 +2115,32 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "insight-platform-contract-tooling"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "insight-platform-agent-compiler",
+ "insight-platform-artifacts",
+ "insight-platform-context",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-mcp-host",
+ "insight-platform-orchestrator",
+ "insight-platform-plan",
+ "insight-platform-registry",
+ "insight-platform-sandbox",
+ "insight-platform-worker",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
 ]
 
 [[package]]
@@ -2081,6 +2155,17 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "insight-platform-deployment-contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "insight-platform-contracts",
+ "insight-platform-orchestrator",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2128,6 +2213,7 @@ dependencies = [
  "insight-platform-egress-rpc",
  "insight-platform-model-adapters",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-secret-broker",
  "insight-platform-security-rpc",
  "serde",
@@ -2149,6 +2235,7 @@ dependencies = [
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-egress",
+ "insight-platform-execution-context",
  "insight-platform-mcp-host",
  "insight-platform-model-adapters",
  "insight-platform-rpc-trace",
@@ -2170,6 +2257,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-execution-context"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "insight-platform-gateway"
 version = "0.1.0"
 dependencies = [
@@ -2178,14 +2274,18 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "insight-platform-agent-compiler",
  "insight-platform-api",
+ "insight-platform-artifacts",
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-orchestrator",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-registry",
  "insight-platform-tasks",
@@ -2206,9 +2306,11 @@ dependencies = [
 name = "insight-platform-invocations"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "insight-platform-contracts",
  "insight-platform-jobs",
+ "insight-platform-tasks",
  "serde",
  "serde_json",
 ]
@@ -2223,6 +2325,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-maintenance-worker"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-observability",
+ "insight-platform-observability-http",
+ "insight-platform-orchestrator",
+ "insight-platform-postgres",
+ "insight-platform-worker",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-mcp-cleanup-worker"
 version = "0.1.0"
 dependencies = [
@@ -2230,8 +2352,11 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
  "insight-platform-mcp-host",
+ "insight-platform-mcp-runtime",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
+ "insight-platform-worker",
  "serde",
  "serde_json",
  "sqlx",
@@ -2249,19 +2374,15 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
- "futures",
  "insight-platform-artifacts",
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-jobs",
- "insight-platform-rpc-trace",
- "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tokio",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -2272,6 +2393,7 @@ dependencies = [
  "chrono",
  "insight-platform-context",
  "insight-platform-contracts",
+ "insight-platform-execution-context",
  "insight-platform-mcp-host",
  "insight-platform-rpc-trace",
  "prost",
@@ -2291,6 +2413,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-mcp-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "insight-platform-artifacts",
+ "insight-platform-context",
+ "insight-platform-contracts",
+ "insight-platform-execution-context",
+ "insight-platform-jobs",
+ "insight-platform-mcp-host",
+ "insight-platform-mcp-transport",
+ "insight-platform-worker",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-mcp-service"
 version = "0.1.0"
 dependencies = [
@@ -2303,13 +2447,18 @@ dependencies = [
  "insight-platform-capability-adapters",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
+ "insight-platform-execution-context",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-mcp-rpc",
+ "insight-platform-mcp-runtime",
+ "insight-platform-mcp-transport",
  "insight-platform-model-adapters",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
  "insight-platform-rpc-trace",
+ "insight-platform-worker",
  "rcgen",
  "serde",
  "serde_json",
@@ -2317,8 +2466,28 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "insight-platform-mcp-transport"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "insight-platform-artifacts",
+ "insight-platform-context",
+ "insight-platform-contracts",
+ "insight-platform-jobs",
+ "insight-platform-mcp-host",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
 ]
 
 [[package]]
@@ -2347,10 +2516,13 @@ dependencies = [
  "futures",
  "insight-platform-contracts",
  "insight-platform-egress-rpc",
+ "insight-platform-execution-context",
  "insight-platform-jobs",
  "insight-platform-model-adapters",
  "insight-platform-models",
  "insight-platform-observability",
+ "insight-platform-observability-http",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-rpc-trace",
  "insight-platform-worker",
@@ -2362,6 +2534,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -2383,9 +2556,13 @@ dependencies = [
 [[package]]
 name = "insight-platform-observability"
 version = "0.1.0"
+
+[[package]]
+name = "insight-platform-observability-http"
+version = "0.1.0"
 dependencies = [
  "axum",
- "insight-platform-worker",
+ "insight-platform-observability",
  "tokio",
  "tokio-util",
  "tower",
@@ -2401,6 +2578,7 @@ dependencies = [
  "chrono",
  "futures",
  "insight-platform-contracts",
+ "insight-platform-opensandbox-executor",
  "insight-platform-sandbox",
  "reqwest",
  "ring",
@@ -2412,6 +2590,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-opensandbox-executor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "insight-platform-contracts",
+ "insight-platform-jobs",
+ "insight-platform-sandbox",
+ "ring",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "insight-platform-orchestration-worker"
 version = "0.1.0"
 dependencies = [
@@ -2419,8 +2612,11 @@ dependencies = [
  "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-orchestrator",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-runtime",
  "insight-platform-worker",
@@ -2439,8 +2635,44 @@ name = "insight-platform-orchestrator"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "insight-platform-context",
  "insight-platform-contracts",
+ "insight-platform-invocations",
  "insight-platform-jobs",
+ "insight-platform-models",
+ "insight-platform-plan",
+ "insight-platform-sandbox",
+ "insight-platform-scheduler",
+ "insight-platform-tasks",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "insight-platform-outbox-worker"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "async-trait",
+ "axum",
+ "chrono",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-observability",
+ "insight-platform-observability-http",
+ "insight-platform-postgres",
+ "insight-platform-worker",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "insight-platform-plan"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
  "serde",
  "serde_json",
 ]
@@ -2453,6 +2685,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "insight-platform-agent-compiler",
  "insight-platform-artifact-broker",
  "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
@@ -2464,14 +2697,19 @@ dependencies = [
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
+ "insight-platform-mcp-runtime",
+ "insight-platform-mcp-transport",
  "insight-platform-model-adapters",
  "insight-platform-models",
  "insight-platform-orchestrator",
+ "insight-platform-plan",
  "insight-platform-registry",
+ "insight-platform-runtime",
  "insight-platform-sandbox",
  "insight-platform-scheduler",
  "insight-platform-security",
  "insight-platform-tasks",
+ "insight-platform-worker",
  "rcgen",
  "ring",
  "rustls",
@@ -2485,6 +2723,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tracing",
  "uuid",
 ]
 
@@ -2494,6 +2733,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "insight-platform-agent-compiler",
+ "insight-platform-api",
  "insight-platform-artifact-broker",
  "insight-platform-artifacts",
  "insight-platform-contracts",
@@ -2501,8 +2742,13 @@ dependencies = [
  "insight-platform-jobs",
  "insight-platform-mcp-host",
  "insight-platform-opensandbox-client",
+ "insight-platform-opensandbox-executor",
+ "insight-platform-orchestrator",
+ "insight-platform-plan",
  "insight-platform-postgres",
+ "insight-platform-registry",
  "insight-platform-sandbox",
+ "insight-platform-security",
  "reqwest",
  "serde",
  "serde_jcs",
@@ -2519,7 +2765,9 @@ name = "insight-platform-registry"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "insight-platform-agent-compiler",
  "insight-platform-contracts",
+ "insight-platform-plan",
  "serde",
  "serde_json",
 ]
@@ -2530,10 +2778,16 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "insight-platform-agent-compiler",
+ "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
+ "insight-platform-registry",
  "insight-platform-worker",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
@@ -2547,6 +2801,7 @@ name = "insight-platform-rpc-trace"
 version = "0.1.0"
 dependencies = [
  "insight-platform-contracts",
+ "insight-platform-execution-context",
  "tokio",
  "tonic",
  "tracing",
@@ -2560,15 +2815,14 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "insight-platform-artifact-rpc",
  "insight-platform-artifacts",
  "insight-platform-contracts",
+ "insight-platform-execution-context",
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-models",
  "insight-platform-orchestrator",
- "insight-platform-postgres",
- "insight-platform-rpc-trace",
+ "insight-platform-plan",
  "insight-platform-sandbox",
  "insight-platform-security",
  "insight-platform-tasks",
@@ -2576,7 +2830,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlx",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2589,18 +2842,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "futures",
  "insight-platform-contracts",
- "insight-platform-invocations",
  "insight-platform-jobs",
- "insight-platform-mcp-host",
  "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tokio",
- "tokio-util",
- "url",
  "uuid",
 ]
 
@@ -2610,8 +2857,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "insight-platform-contracts",
+ "insight-platform-jobs",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-opensandbox-client",
+ "insight-platform-opensandbox-executor",
+ "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-sandbox",
  "insight-platform-worker",
@@ -2691,6 +2942,7 @@ dependencies = [
  "axum",
  "insight-platform-contracts",
  "insight-platform-observability",
+ "insight-platform-observability-http",
  "insight-platform-postgres",
  "insight-platform-security",
  "insight-platform-security-rpc",
@@ -2710,6 +2962,7 @@ dependencies = [
  "base64",
  "chrono",
  "insight-platform-contracts",
+ "insight-platform-execution-context",
  "insight-platform-rpc-trace",
  "insight-platform-security",
  "prost",
@@ -2728,20 +2981,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "insight-platform-storage-tooling"
+version = "0.1.0"
+dependencies = [
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-postgres",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "insight-platform-tasks"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "insight-platform-contracts",
  "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
 name = "insight-platform-worker"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "insight-platform-contracts",
+ "insight-platform-observability",
+ "sha2 0.11.0",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4011,6 +4283,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_nanos"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a93142f0367a4cc53ae0fead1bcda39e85beccfad3dcd717656cacab94b12985"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4797,6 +5078,16 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tryhard"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fe58ebd5edd976e0fe0f8a14d2a04b7c81ef153ea9a54eebc42e67c2c23b4e5"
+dependencies = [
+ "pin-project-lite",
+ "tokio",
+]
 
 [[package]]
 name = "typenum"

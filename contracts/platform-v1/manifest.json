@@ -1,24 +1,24 @@
 {
-  "contract_digest": "sha256:9975676dc5cb124d374677857b8167dcf370bea90f736bf97b2bae831b8172d1",
+  "contract_digest": "sha256:b776815943933e4fa25cae059ea3d125afb2c0d7629c9870cd255b501867c430",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
-      "bytes": 96382,
+      "bytes": 131935,
       "media_type": "application/yaml",
       "path": "contracts/platform-v1/openapi.yaml",
-      "sha256": "059ecf36de23b12e9696b966d14512c10556873800099bf758c90cd8c2e477ce"
+      "sha256": "1487598c92593e89aa2cc7edb7a566f9654f82332eb96b888153a2542abeecfd"
     },
     {
-      "bytes": 33533,
+      "bytes": 33885,
       "media_type": "application/json",
       "path": "contracts/platform-v1/registries.json",
-      "sha256": "755e7e6eeaf78fb171bed0cad0fa24b46125e4b84c48135dd441af5b21548abe"
+      "sha256": "c0f0fd9151819d55b1276d9433e03d3e16867876f11bffeb7514f13fd04b3595"
     },
     {
-      "bytes": 1949,
+      "bytes": 2067,
       "media_type": "application/json",
       "path": "contracts/platform-v1/errors.json",
-      "sha256": "e57965ffe2ac2b5163fe6d962835bdd1b8de6477a1ac0e3a162b2e9c37e73f74"
+      "sha256": "9b4deebdb2bd79026451edd4a2b4d11b9ef0a2294ef214b5574b1c38acad1f55"
     },
     {
       "bytes": 8575,
@@ -45,16 +45,16 @@
       "sha256": "9b9a7fa8041f48c4adb1e8bb971beaf28a48665b44a66923ff45cf350c478fe7"
     },
     {
-      "bytes": 26660,
+      "bytes": 27050,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/states.json",
-      "sha256": "069535f1da90826bb370a4d7407183357e45557013b7edf191a453e16a3f8321"
+      "sha256": "8c178a498d1135df151a8faf25efb8b5a9ec25986ffd824156e47cea45860958"
     },
     {
       "bytes": 4511,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal-types.json",
-      "sha256": "4a587f48d2356f925aaf98f3a5c3ad06f9fb09cfcf754d9d70e8f87b49c9937a"
+      "sha256": "a2fa842e8085b666997a1017bcd2cb2ca6b3e203d8aa34dfa20dfb0155fd4182"
     },
     {
       "bytes": 24280,
@@ -69,22 +69,52 @@
       "sha256": "b57f6fadcc5436c1ae09c65ccc3ea941e4eb7df9a9659edba27326d363394d39"
     },
     {
-      "bytes": 1524,
+      "bytes": 4435,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/worker-manifest.schema.json",
-      "sha256": "07851119c32bc17ffcce1f2c28d0e833e2689697992623fff03ac2fc36f5ca7d"
+      "sha256": "fed5f593d4edd3a58ba327c5cc1792ce744f5f632ad564b2f88331c4c427196f"
     },
     {
-      "bytes": 2925,
+      "bytes": 1963,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/worker-executable-evidence-v1.schema.json",
+      "sha256": "d6e28a279609e4d3992a24da2020aa4caf63aece9ed37c8a401ee45926440d51"
+    },
+    {
+      "bytes": 1107,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/schema-executable-evidence-v1.schema.json",
+      "sha256": "a7fecafda05ca6781f1643d751f2377a29b1dae86a7b31ca34860fd901061b1d"
+    },
+    {
+      "bytes": 2541,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/history-maintenance-config-v1.schema.json",
+      "sha256": "73786ca74d1b40a0d8d57223a2d84ce2e36b5daf2d8c0143d8de924202b90feb"
+    },
+    {
+      "bytes": 907,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/history-maintenance-executable-evidence-v1.schema.json",
+      "sha256": "b1c312b24b84568feee0b7b1372dc66c306f72b204b46ea2a9229ad4a2b6de0c"
+    },
+    {
+      "bytes": 1722,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/committed-event-notice-v1.schema.json",
+      "sha256": "63542252a60965ce8641b59e305b4a8ca64af0d4c9da3a9cd4a13f98c4666de4"
+    },
+    {
+      "bytes": 2985,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/candidate-manifest.schema.json",
-      "sha256": "d8ffa6794454d800fe98e916be55a5fc96e85262c8347114399830d8c179e3a6"
+      "sha256": "5d16e7d07a415b86283e605c00424f224b435afd737078987c4921beba811036"
     },
     {
-      "bytes": 9033,
+      "bytes": 9153,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/capacity-profile.schema.json",
-      "sha256": "3c62ad9c2bc1d948cd1d3cc147630bd517042fa9eba62fc4856350720029f360"
+      "sha256": "54c77078b9bab3b31d6891b1efb3e6cf462b1816072dd0c4b50c8afbe4111752"
     },
     {
       "bytes": 2580,
@@ -117,10 +147,10 @@
       "sha256": "a43cee5a2db18f9ce23ce8c5880d8b3a982c7ad81a907f3aadc14d3730330007"
     },
     {
-      "bytes": 3641,
+      "bytes": 3767,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal/api-problem.schema.json",
-      "sha256": "c2c920bd635b8d7343ceda3fabe826a7dff05a4700ade0cf0a88aed91266b80b"
+      "sha256": "931995111af7fb874411c11db5843efc9b9d37767d42535e89cf6b0a5a9fe450"
     },
     {
       "bytes": 1477,
@@ -159,10 +189,52 @@
       "sha256": "6a4e5c7bf1e7dfe40e3e464376ecffaba5fffda94ce5577b68bff844c19fd92c"
     },
     {
-      "bytes": 2093,
+      "bytes": 3080,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/agent-source-map-v1.schema.json",
+      "sha256": "3fcb3aaa22264dfb0df69be60c9eefda6e2974e7535644541c685fe956d6c683"
+    },
+    {
+      "bytes": 951,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/agent-source-inspection-request-v1.schema.json",
+      "sha256": "b7aa77b702750b5b89b31e69cdff8311cd214c405f4683e41a0e35d3311a9847"
+    },
+    {
+      "bytes": 4273,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/agent-source-inspection-response-v1.schema.json",
+      "sha256": "4474e06e9752e2519b567d0f667a4e55bd2359a124e326827e6a92d67b5f4ad3"
+    },
+    {
+      "bytes": 20499,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/agent-node-editor.v1.json",
+      "sha256": "0990c2c277f22f9de6b9b9086bb97306fd21b7f7a26b67ea0c8ca5024dcb65fd"
+    },
+    {
+      "bytes": 15379,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/evaluation-manifest-v1.schema.json",
+      "sha256": "751356c3cb72315d8269b974f0bc366dab4cf038460733b8c2fe7f0137afcbca"
+    },
+    {
+      "bytes": 16185,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/evaluation-report-v1.schema.json",
+      "sha256": "534e57afcf462b28c97e881cdbd861737d678386df2f88d6e772881c05aa46ed"
+    },
+    {
+      "bytes": 16902,
+      "media_type": "application/json",
+      "path": "contracts/platform-v1/schemas/evaluation-plan-request-v1.schema.json",
+      "sha256": "9930c84c848d8dd909908bd62ded2ab2b50e81225e9184bf524a8600769d13c4"
+    },
+    {
+      "bytes": 2410,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/agent-summary-v1.schema.json",
-      "sha256": "ebc888d823cb0d50168de849ef42e3e6e5dba4dce5255d4d2e2fdcd2fad2a809"
+      "sha256": "e6a599da11802ac7f1bb3d43bbbde1a11c0fae80551684e640fbb44c5879553d"
     },
     {
       "bytes": 1613,
@@ -219,16 +291,16 @@
       "sha256": "6f00cde55462b0d8789f1dce2865a1770f0f5a2e4c25b1ad47d4eaea6253600d"
     },
     {
-      "bytes": 12520,
+      "bytes": 13049,
       "media_type": "application/json",
       "path": "contracts/platform-v1/limits/hard-limit-profile.schema.json",
-      "sha256": "a4dabf1ceb196638d49543ffbc61836b01222f8c9a319f0c5142772a1a55b37f"
+      "sha256": "aa6fac91928dc9c3b37b720e338b575b62dcfa3a485f045f06cf2ec7f2175ff7"
     },
     {
-      "bytes": 12028,
+      "bytes": 15899,
       "media_type": "application/json",
       "path": "contracts/platform-v1/limits/q1-50.json",
-      "sha256": "c27b42c11615ffba4ec5e7cb095bd680271f522794010070f66ec0295d97654e"
+      "sha256": "31a39c856777f9f84958ddc201bdb876cb7c351c26effb41231a8de8f4dc2589"
     },
     {
       "bytes": 1430,
@@ -243,15 +315,21 @@
       "sha256": "0061d95f572a203d9d118d77c800c01a04ee8e3a6c34bb594d8deb9dfbdcdb7c"
     },
     {
-      "bytes": 296,
+      "bytes": 668,
       "media_type": "application/json",
       "path": "contracts/platform-v1/examples/q1-orchestration-worker-manifest.json",
-      "sha256": "684f98453e69a396782c402f16f4189d6e646fead202156d24a95cbba258b357"
+      "sha256": "655daa182b954690c10c912a70d0af0560b5ee35876b2906c11a44b3d8f44a23"
+    },
+    {
+      "bytes": 49,
+      "media_type": "application/octet-stream",
+      "path": "contracts/platform-v1/examples/q1-orchestration-worker-executable.txt",
+      "sha256": "9e1b62d552fb56c18357af074a413dc5890695328d145332d2e6be1e49c1810b"
     },
     {
       "bytes": 673,
       "media_type": "text/x-protobuf",
-      "path": "proto/insight/platform/v1/foundation.proto",
+      "path": "contracts/proto/insight/platform/v1/foundation.proto",
       "sha256": "1ede8d6ee1ee45ab513aa55d9f6472e3c64079e9698df78bab7968349d04662a"
     }
   ],

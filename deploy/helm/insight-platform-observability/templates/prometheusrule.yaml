@@ -231,12 +231,12 @@ spec:
             summary: Expired Outbox claims remain unrecovered
             description: Expired Outbox claim leases have exceeded the bounded recovery-lag threshold.
             runbook_url: {{ printf "%s#insightplatformexpiredoutboxclaimlaghigh" .Values.alerts.runbookBaseUrl | quote }}
-        - alert: InsightPlatformOutboxDeadEventsPresent
-          expr: max by (component_role) (insight_platform_outbox_events{component_role="scheduler-recovery",queue="dead"}) > 0
-          for: {{ .Values.alerts.outboxDeadFor }}
+        - alert: InsightPlatformOutboxIncompatibleEventsPresent
+          expr: max by (component_role) (insight_platform_outbox_events{component_role="scheduler-recovery",queue="incompatible"}) > 0
+          for: {{ .Values.alerts.outboxIncompatibleFor }}
           labels: {severity: critical, owner: platform-runtime}
           annotations:
-            summary: Durable Outbox contains dead events
-            description: At least one Outbox event reached a closed dead state and requires operator reconciliation.
-            runbook_url: {{ printf "%s#insightplatformoutboxdeadeventspresent" .Values.alerts.runbookBaseUrl | quote }}
+            summary: Durable Outbox contains incompatible events
+            description: At least one retained Outbox obligation has incompatible metadata or a transport contract mismatch.
+            runbook_url: {{ printf "%s#insightplatformoutboxincompatibleeventspresent" .Values.alerts.runbookBaseUrl | quote }}
 {{- end }}

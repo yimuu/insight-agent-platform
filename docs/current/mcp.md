@@ -4,7 +4,7 @@
 managed stdio 与 persistent sandbox session 不在当前范围。Remote MCP/HTTP 调用必须通过 exact Egress catalog、TLS、
 Secret binding、timeout 与 byte limit；未安装 endpoint 在 I/O 前 fail closed。
 
-[`examples/productization/langgraph-reference`](../../examples/productization/langgraph-reference/) 是固定
+[`examples/productization/langgraph-reference`](../../examples/productization/langgraph-reference) 是固定
 `@langchain/langgraph` 1.4.13 的独立 typed HTTP reference。它不读取 Platform DB，也不被链接进 Gateway、Scheduler 或
 Worker。Python SDK 与 Agno adapter 已取消。
 

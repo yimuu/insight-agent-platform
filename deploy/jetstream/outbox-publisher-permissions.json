@@ -1,0 +1,6 @@
+{
+  "publish": {
+    "allow": ["insight.platform.v1.committed", "$JS.API.STREAM.INFO.INSIGHT_COMMITTED_V1"]
+  },
+  "subscribe": {"allow": ["_INBOX.insight.outbox.>"]}
+}

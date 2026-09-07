@@ -1,0 +1,116 @@
+{
+  "$id": "urn:insight:platform:v1:agent-source-map-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "compiler_semantic_identity": {
+      "const": "sha256:b9af0db422de065196c852ddb4045ca8041e25202886d3dc92cdcd157611137e"
+    },
+    "entries": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "additionalProperties": false,
+            "properties": {
+              "column": {
+                "maximum": 1048576,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "file": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "line": {
+                "maximum": 1048576,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "source_pointer": {
+                "maxLength": 1024,
+                "pattern": "^(?:/(?:[^~]|~[01])*)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "file",
+              "source_pointer",
+              "line",
+              "column"
+            ],
+            "type": "object"
+          },
+          "target": {
+            "additionalProperties": false,
+            "properties": {
+              "ir_pointer": {
+                "maxLength": 1024,
+                "pattern": "^(?:/(?:[^~]|~[01])*)?$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "node",
+                  "port",
+                  "expression"
+                ]
+              },
+              "node_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "node_id",
+              "ir_pointer"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "target",
+          "source"
+        ],
+        "type": "object"
+      },
+      "maxItems": 32768,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "source_files_digest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "maxLength": 71,
+      "minLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Digest",
+      "type": "string",
+      "x-platform-max-bytes": 71
+    },
+    "typed_plan_digest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "maxLength": 71,
+      "minLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Digest",
+      "type": "string",
+      "x-platform-max-bytes": 71
+    }
+  },
+  "required": [
+    "schema_version",
+    "compiler_semantic_identity",
+    "source_files_digest",
+    "typed_plan_digest",
+    "entries"
+  ],
+  "type": "object",
+  "x-insight-max-canonical-bytes": 4194304
+}

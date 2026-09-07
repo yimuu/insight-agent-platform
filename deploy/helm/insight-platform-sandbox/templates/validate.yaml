@@ -65,3 +65,14 @@
 {{- if ne (int .Values.sandbox.packageRunAsGroup) 65533 -}}
   {{- fail "the untrusted Package GID is a closed value distinct from the runner" -}}
 {{- end -}}
+
+{{- $worker := required "dispatcher.workerManifest is required" .Values.dispatcher.workerManifest -}}
+{{- if or (ne (int $worker.manifest_version) 2) (ne $worker.worker_role "sandbox-dispatcher") (ne $worker.work_class "sandbox") (not (regexMatch $digestPattern $worker.worker_build_digest)) -}}
+  {{- fail "Dispatcher requires the current closed WorkerManifest with an actual executable digest" -}}
+{{- end -}}
+{{- if ne $worker.adapter_runtime_digest (include "insight-platform-sandbox.runtimeContractDigest" .) -}}
+  {{- fail "Dispatcher manifest must reference this exact Sandbox runtime contract" -}}
+{{- end -}}
+{{- if or (empty $worker.execution_capabilities.capabilities) (ne (int $worker.max_concurrency) (int .Values.dispatcher.worker.maximumConcurrency)) (ne (int $worker.critical_control_reserved_slots) (int .Values.dispatcher.worker.criticalControlReservedSlots)) -}}
+  {{- fail "Dispatcher manifest must declare its installed capabilities and configured capacity" -}}
+{{- end -}}

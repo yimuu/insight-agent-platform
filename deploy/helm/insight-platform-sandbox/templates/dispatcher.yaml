@@ -1,14 +1,7 @@
 {{- $runtimeJson := include "insight-platform-sandbox.runtimeContract" . -}}
 {{- $runtime := $runtimeJson | fromJson -}}
 {{- $runtimeDigest := include "insight-platform-sandbox.runtimeContractDigest" . -}}
-{{- $worker := dict
-  "manifest_version" 1
-  "worker_role" "sandbox-dispatcher"
-  "work_class" "sandbox"
-  "adapter_runtime_digest" $runtimeDigest
-  "protocol_version" 1
-  "max_concurrency" (int .Values.dispatcher.worker.maximumConcurrency)
-  "critical_control_reserved_slots" (int .Values.dispatcher.worker.criticalControlReservedSlots) -}}
+{{- $worker := required "dispatcher.workerManifest must bind the actual installed executable and owning capability catalog" .Values.dispatcher.workerManifest -}}
 {{- $opensandbox := dict
   "lifecycle_base_url" (printf "http://opensandbox-server.%s.svc.cluster.local:%v/v1/" .Values.namespaces.control .Values.server.port)
   "request_timeout_milliseconds" (int .Values.dispatcher.opensandbox.requestTimeoutMilliseconds)

@@ -30,5 +30,5 @@ alerts:
   maximumExpiredLeaseLagSeconds: 60
   maximumDueOutboxLagSeconds: 60
   maximumExpiredOutboxClaimLagSeconds: 60
-  outboxDeadFor: 5m
+  outboxIncompatibleFor: 5m
   runbookBaseUrl: https://runbooks.insight.platform/platform-v2-observability

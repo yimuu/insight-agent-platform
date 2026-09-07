@@ -1,0 +1,4887 @@
+use crate::{
+    invocation_repository::{
+        load_capability_continuation_input, load_capability_execution_contract,
+        load_capability_execution_input, load_capability_invocation,
+        load_capability_node_for_update, load_exact_capability_interface_spec,
+        validate_capability_value_against_schema, PgInvocationTransaction,
+    },
+    opensandbox_repository::update_job as update_opensandbox_job,
+    repository::{
+        append_command_event, append_scheduler_event, claim_command_receipt, database_timestamp,
+        decode_versioned_payload, job_from_row, job_projection, load_deployment, load_resource,
+        load_run_for_update, load_task_for_update, require_ready_run_artifact,
+        require_tenant_permission, safety_scan_cursor_from_row, safety_scan_page, task_projection,
+        terminalize_command_receipt, PgRepository, RepositoryError,
+    },
+};
+use chrono::{DateTime, Duration, Utc};
+use insight_platform_artifacts::ArtifactReferenceSnapshot;
+use insight_platform_contracts::TypedPayload;
+use insight_platform_invocations::execution_port::CancelCapabilityAdapterJob;
+use insight_platform_invocations::execution_port::CapabilityAdapterContinuation;
+use insight_platform_invocations::execution_port::CapabilityAdapterRequest;
+use insight_platform_invocations::execution_port::CapabilityExecutionAuthority;
+use insight_platform_invocations::execution_port::ExecuteCapabilityAdapterJob;
+use insight_platform_jobs::store::validate_safety_scan_request;
+use insight_platform_jobs::store::JobRecord;
+use insight_platform_jobs::store::SafetyScanCursor;
+use insight_platform_jobs::store::SafetyScanPage;
+use insight_platform_jobs::store::SafetyScanShard;
+use insight_platform_tasks::store::TaskRecord;
+
+use insight_platform_contracts::{
+    canonical_digest, ArtifactPurpose, ArtifactReferenceKind, CapabilityBackendKind,
+    CapabilityProgressDurability, CommandOutcome, EntityLifecycle, Failure, FailureClass,
+    FailureCode, FailureSource, InvocationState, JobState, Permission, PlatformFailureCode,
+    QuotaDimension, ResourceId, ResourceKind, Retryability, RunState, Sha256Digest, ValueRef,
+    WorkClass, MAX_CAPABILITY_TIMEOUT_MILLISECONDS,
+};
+use insight_platform_invocations::{
+    decide_cancellation_outcome, decide_capability_wake, decide_control,
+    decide_detached_input_response, decide_detached_job_control, decide_dispatch_outcome,
+    decide_expired_dispatch, decide_input_response, decide_prepare_dispatch, decide_progress,
+    decide_reconciliation_resolution, decide_start_dispatch, CapabilityCancellationObservation,
+    CapabilityControlKind, CapabilityDetachedPending, CapabilityJobPayload, CapabilitySignalAudit,
+    CapabilityWakeDisposition, CapabilityWorkerAudit, ClaimCapabilityJobs,
+    CommitCapabilityCancellationOutcome, CommitCapabilityOutcome, ControlCapabilityInvocation,
+    DetachedSandboxSourceKind, DispatchOutcome, ExpiredCapabilityLeaseObservation,
+    PrepareCapabilityDispatch, ReconciliationResolution, RecordCapabilityProgress,
+    ResolveCapabilityInput, ResolveCapabilityReconciliation, WakeCapabilityInvocation,
+    CAPABILITY_QUOTA_LINES,
+};
+use insight_platform_jobs::{decide_owner_cancelling, JobFence, LeasePolicy};
+use insight_platform_sandbox::contracts::{SandboxControlKindV1, SandboxDispatcherJobPayloadV1};
+use insight_platform_tasks::{
+    decide_resolution as decide_task_resolution, ResolveTask, TaskDefinition, TaskPayload,
+    TaskState,
+};
+use sqlx::{Acquire, Postgres, Row, Transaction};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedCapabilityExecution {
+    pub invocation: insight_platform_invocations::CapabilityInvocationRecord,
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimedCapabilityExecution {
+    pub invocation: insight_platform_invocations::CapabilityInvocationRecord,
+    pub job: JobRecord,
+    pub execution_contract: insight_platform_invocations::CapabilityExecutionContract,
+    pub input: insight_platform_invocations::CapabilityExecutionInput,
+    pub continuation_input: Option<insight_platform_invocations::CapabilityExecutionInput>,
+    pub fence: JobFence,
+    /// Ledger identities consumed by the claim transaction to record the quota reservation.
+    /// Terminal settlement must use a distinct caller-generated pair.
+    pub quota_reservation_entry_ids: Vec<ResourceId>,
+    pub resume_mutations: Option<insight_platform_contracts::ExternalLeafResumeMutationIds>,
+    pub failure_mutations: Option<insight_platform_contracts::ExternalLeafFailureMutationIds>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExpiredCapabilityRecoverySlot {
+    pub quota_entry_ids: Vec<ResourceId>,
+    pub event_id: ResourceId,
+    pub outbox_id: ResourceId,
+    pub failure_mutations: insight_platform_contracts::ExternalLeafFailureMutationIds,
+}
+
+impl ExpiredCapabilityRecoverySlot {
+    fn validate(&self) -> Result<(), RepositoryError> {
+        if self.quota_entry_ids.len() != CAPABILITY_QUOTA_LINES
+            || self
+                .quota_entry_ids
+                .iter()
+                .any(|id| id.kind() != ResourceKind::QuotaLedgerEntry)
+            || self.quota_entry_ids[0] == self.quota_entry_ids[1]
+            || self.event_id.kind() != ResourceKind::Event
+            || self.outbox_id.kind() != ResourceKind::OutboxEvent
+            || self.failure_mutations.validate().is_err()
+        {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery identity is invalid".to_owned(),
+            ));
+        }
+        let mut unique = self
+            .quota_entry_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        if !unique.insert(self.event_id.to_string()) || !unique.insert(self.outbox_id.to_string()) {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery identities must be unique".to_owned(),
+            ));
+        }
+        for id in [
+            &self.failure_mutations.convergence_job_id,
+            &self.failure_mutations.run_event_id,
+            &self.failure_mutations.run_outbox_id,
+            &self.failure_mutations.leaf_node_event_id,
+            &self.failure_mutations.leaf_node_outbox_id,
+            &self.failure_mutations.convergence_job_event_id,
+            &self.failure_mutations.convergence_job_outbox_id,
+        ] {
+            if !unique.insert(id.to_string()) {
+                return Err(RepositoryError::InvalidInput(
+                    "expired Capability recovery identities must be unique".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DriveExpiredCapabilityJobs {
+    pub work_class: WorkClass,
+    pub shard: SafetyScanShard,
+    pub after: Option<SafetyScanCursor>,
+    pub limit: u16,
+    pub slots: Vec<ExpiredCapabilityRecoverySlot>,
+}
+
+impl DriveExpiredCapabilityJobs {
+    fn validate(&self, maximum_batch: u16, maximum_shards: u16) -> Result<(), RepositoryError> {
+        if !matches!(
+            self.work_class,
+            WorkClass::CapabilityNative | WorkClass::CapabilityRemote
+        ) {
+            return Err(RepositoryError::InvalidInput(
+                "expired Capability recovery work class is invalid".to_owned(),
+            ));
+        }
+        validate_safety_scan_request(
+            self.shard,
+            self.after.as_ref(),
+            ResourceKind::Job,
+            self.limit,
+            self.slots.len(),
+            maximum_batch,
+            maximum_shards,
+        )?;
+        let mut unique = BTreeSet::new();
+        for slot in &self.slots {
+            slot.validate()?;
+            for id in slot.quota_entry_ids.iter().chain([
+                &slot.event_id,
+                &slot.outbox_id,
+                &slot.failure_mutations.convergence_job_id,
+                &slot.failure_mutations.run_event_id,
+                &slot.failure_mutations.run_outbox_id,
+                &slot.failure_mutations.leaf_node_event_id,
+                &slot.failure_mutations.leaf_node_outbox_id,
+                &slot.failure_mutations.convergence_job_event_id,
+                &slot.failure_mutations.convergence_job_outbox_id,
+            ]) {
+                if !unique.insert(id.to_string()) {
+                    return Err(RepositoryError::InvalidInput(
+                        "expired Capability recovery identities must be globally unique".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredCapabilityExecution {
+    pub invocation: insight_platform_invocations::CapabilityInvocationRecord,
+    pub job: JobRecord,
+}
+
+impl ClaimedCapabilityExecution {
+    /// Builds the credential-free exact request consumed by a process-installed Capability
+    /// adapter. The claim transaction has already loaded and validated the immutable Deployment
+    /// closure and input; this method rechecks their binding to the Running Job fence before any
+    /// external dispatch.
+    pub fn adapter_execution(
+        &self,
+        worker_manifest_digest: Sha256Digest,
+    ) -> Result<CapabilityAdapterRequest, RepositoryError> {
+        self.invocation
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        self.execution_contract
+            .validate_for(&self.invocation.payload.admission)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        self.input
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if self
+            .continuation_input
+            .as_ref()
+            .is_some_and(|input| input.validate().is_err())
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Capability continuation input is invalid".to_owned(),
+            ));
+        }
+        let projection = job_projection(&self.job)?;
+        let payload: CapabilityJobPayload =
+            decode_versioned_payload(&self.job.payload, "Capability Job")?;
+        payload
+            .validate_for(&self.invocation, &projection)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        if projection.state != JobState::Running
+            || self.invocation.payload.current_job_id.as_ref() != Some(&projection.job_id)
+            || projection.version != self.fence.expected_version
+            || projection.lease_generation != self.fence.lease_generation
+            || projection.attempt_count == 0
+            || projection.lease.as_ref().is_none_or(|lease| {
+                lease.worker_process_generation_id != self.fence.worker_process_generation_id
+                    || lease.lease_generation != self.fence.lease_generation
+                    || lease.token_digest != self.fence.token_digest
+            })
+        {
+            return Err(RepositoryError::Conflict(
+                "claimed Capability execution fence",
+            ));
+        }
+        let admission = &self.invocation.payload.admission;
+        let execution = CapabilityAdapterRequest {
+            tenant_id: self.invocation.tenant_id.clone(),
+            invocation_id: self.invocation.invocation_id.clone(),
+            job_id: projection.job_id,
+            worker_process_generation_id: self.fence.worker_process_generation_id.clone(),
+            worker_manifest_digest,
+            lease_generation: projection.lease_generation,
+            physical_attempt: projection.attempt_count,
+            attempt_limit: projection.attempt_limit,
+            admission_digest: admission.canonical_digest.clone(),
+            output_schema_digest: admission.output_schema_digest.clone(),
+            idempotency_key_digest: admission.idempotency_key_digest.clone(),
+            effect: admission.effect,
+            idempotency: admission.idempotency,
+            deadline: self.invocation.deadline,
+            execution: self.execution_contract.clone(),
+            input: self.input.clone(),
+            continuation: payload.encrypted_remote_state.clone().map(|state| {
+                CapabilityAdapterContinuation {
+                    encrypted_remote_state: state,
+                    external_identity_digest: payload.external_identity_digest.clone(),
+                    resume_input: self.continuation_input.clone(),
+                    resume_input_action: payload.resume_input_action,
+                    poll_count: payload.poll_count,
+                }
+            }),
+            mcp_runtime: admission.mcp_runtime.clone(),
+        };
+        execution
+            .validate_shape()
+            .map_err(|_| RepositoryError::Conflict("Capability adapter execution contract"))?;
+        Ok(execution)
+    }
+
+    pub fn adapter_job(
+        &self,
+        worker_manifest_digest: Sha256Digest,
+        audit: CapabilityWorkerAudit,
+        quota_settlement_entry_ids: Vec<ResourceId>,
+        retry_at: Option<DateTime<Utc>>,
+    ) -> Result<ExecuteCapabilityAdapterJob, RepositoryError> {
+        let reservation_ids = self
+            .quota_reservation_entry_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if quota_settlement_entry_ids
+            .iter()
+            .any(|identity| reservation_ids.contains(identity))
+        {
+            return Err(RepositoryError::InvalidInput(
+                "Capability quota settlement identities reuse reservation identities".to_owned(),
+            ));
+        }
+        let command = ExecuteCapabilityAdapterJob {
+            execution: self.adapter_execution(worker_manifest_digest)?,
+            audit,
+            expected_invocation_version: self.invocation.version,
+            fence: self.fence.clone(),
+            quota_entry_ids: quota_settlement_entry_ids,
+            retry_at,
+            resume_mutations: self.resume_mutations.clone(),
+            failure_mutations: self.failure_mutations.clone(),
+        };
+        command
+            .validate_at(Utc::now())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        Ok(command)
+    }
+}
+
+#[async_trait::async_trait]
+impl CapabilityExecutionAuthority for PgRepository {
+    type Error = RepositoryError;
+    type Record = PreparedCapabilityExecution;
+
+    async fn commit_capability_outcome(
+        &self,
+        command: CommitCapabilityOutcome,
+    ) -> Result<CommandOutcome<Self::Record>, Self::Error> {
+        let mut transaction = self.begin_invocation_transaction().await?;
+        let result =
+            PgInvocationTransaction::commit_capability_outcome(&mut transaction, command).await?;
+        insight_platform_invocations::InvocationTransaction::commit(transaction).await?;
+        Ok(result)
+    }
+
+    async fn commit_capability_cancellation_outcome(
+        &self,
+        command: CommitCapabilityCancellationOutcome,
+    ) -> Result<CommandOutcome<Self::Record>, Self::Error> {
+        let mut transaction = self.begin_invocation_transaction().await?;
+        let result = PgInvocationTransaction::commit_capability_cancellation_outcome(
+            &mut transaction,
+            command,
+        )
+        .await?;
+        insight_platform_invocations::InvocationTransaction::commit(transaction).await?;
+        Ok(result)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlledCapabilityExecution {
+    pub invocation: insight_platform_invocations::CapabilityInvocationRecord,
+    pub job: Option<JobRecord>,
+}
+
+impl ControlledCapabilityExecution {
+    /// Rebinds a durable `Cancelling` winner to the still-live physical execution that was
+    /// returned by the original claim. Only the optimistic Job version is rotated: worker,
+    /// lease generation, lease token, physical attempt and immutable execution closure must all
+    /// remain exact, so a replacement generation is rejected before adapter I/O.
+    pub fn cancel_adapter_job(
+        &self,
+        claimed: &ClaimedCapabilityExecution,
+        worker_manifest_digest: Sha256Digest,
+        audit: CapabilityWorkerAudit,
+        quota_settlement_entry_ids: Vec<ResourceId>,
+        cancel_deadline: DateTime<Utc>,
+    ) -> Result<CancelCapabilityAdapterJob, RepositoryError> {
+        self.invocation
+            .validate()
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let current_job = self
+            .job
+            .as_ref()
+            .ok_or(RepositoryError::Conflict("Capability cancellation Job"))?;
+        let current = job_projection(current_job)?;
+        let payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        payload
+            .validate_for(&self.invocation, &current)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let execution = claimed.adapter_execution(worker_manifest_digest)?;
+        let lease = current
+            .lease
+            .as_ref()
+            .ok_or(RepositoryError::Conflict("Capability cancellation lease"))?;
+        if self.invocation.state != InvocationState::Cancelling
+            || current.state != JobState::Cancelling
+            || self.invocation.tenant_id != claimed.invocation.tenant_id
+            || self.invocation.invocation_id != claimed.invocation.invocation_id
+            || self.invocation.run_id != claimed.invocation.run_id
+            || self.invocation.node_execution_id != claimed.invocation.node_execution_id
+            || self.invocation.payload.admission != claimed.invocation.payload.admission
+            || self.invocation.payload.current_job_id.as_ref() != Some(&current.job_id)
+            || current.job_id != execution.job_id
+            || current.version <= claimed.fence.expected_version
+            || current.attempt_count != execution.physical_attempt
+            || current.attempt_limit != execution.attempt_limit
+            || current.lease_generation != execution.lease_generation
+            || lease.worker_process_generation_id != claimed.fence.worker_process_generation_id
+            || lease.lease_generation != claimed.fence.lease_generation
+            || lease.token_digest != claimed.fence.token_digest
+        {
+            return Err(RepositoryError::Conflict(
+                "Capability cancellation physical execution",
+            ));
+        }
+        reject_quota_identity_reuse(
+            &claimed.quota_reservation_entry_ids,
+            &quota_settlement_entry_ids,
+        )?;
+        let command = CancelCapabilityAdapterJob {
+            execution,
+            audit,
+            expected_invocation_version: self.invocation.version,
+            fence: JobFence {
+                expected_version: current.version,
+                worker_process_generation_id: lease.worker_process_generation_id.clone(),
+                lease_generation: lease.lease_generation,
+                token_digest: lease.token_digest.clone(),
+            },
+            quota_entry_ids: quota_settlement_entry_ids,
+            cancel_deadline,
+        };
+        command
+            .validate_at(Utc::now())
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+        Ok(command)
+    }
+}
+
+fn reject_quota_identity_reuse(
+    reservation_entry_ids: &[ResourceId],
+    settlement_entry_ids: &[ResourceId],
+) -> Result<(), RepositoryError> {
+    let reservation_ids = reservation_entry_ids.iter().collect::<BTreeSet<_>>();
+    if settlement_entry_ids
+        .iter()
+        .any(|identity| reservation_ids.contains(identity))
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Capability quota settlement identities reuse reservation identities".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CapabilityClaimCandidate<'a> {
+    job: JobRecord,
+    deployment_id: ResourceId,
+    slot: &'a insight_platform_invocations::CapabilityClaimSlot,
+}
+
+#[derive(Debug, Clone)]
+struct CapabilityQuotaAccount {
+    tenant_id: String,
+    quota_account_id: String,
+    scope_kind: String,
+    scope_id: String,
+    work_class: String,
+    metric: String,
+    limit_value: i64,
+    reserved_value: i64,
+    used_value: i64,
+    version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityOwnerJobKind {
+    Capability,
+    DetachedSandbox(DetachedSandboxSourceKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityOwnerJobLock {
+    None,
+    Update,
+}
+
+fn classify_capability_owner_job(
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    job: &JobRecord,
+) -> Result<CapabilityOwnerJobKind, RepositoryError> {
+    let invocation_id = invocation.invocation_id.to_string();
+    if job.tenant_id != invocation.tenant_id.to_string()
+        || job.invocation_id.as_deref() != Some(invocation_id.as_str())
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Capability owner Job points at a different Invocation".to_owned(),
+        ));
+    }
+    match job
+        .work_class
+        .parse::<WorkClass>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?
+    {
+        WorkClass::CapabilityNative | WorkClass::CapabilityRemote => {
+            if job.owner_kind != ResourceKind::CapabilityInvocation.descriptor().name
+                || job.owner_id != invocation_id
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability Job owner binding is invalid".to_owned(),
+                ));
+            }
+            let projection = job_projection(job)?;
+            let payload: CapabilityJobPayload =
+                decode_versioned_payload(&job.payload, "Capability Job")?;
+            payload
+                .validate_for(invocation, &projection)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            Ok(CapabilityOwnerJobKind::Capability)
+        }
+        WorkClass::Sandbox => {
+            let projection = job_projection(job)?;
+            let payload: SandboxDispatcherJobPayloadV1 =
+                decode_versioned_payload(&job.payload, "OpenSandbox Job")?;
+            payload
+                .validate_for(&projection)
+                .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+            if job.owner_kind != ResourceKind::Job.descriptor().name
+                || job.owner_id != payload.plan.job_id.to_string()
+                || payload.plan.invocation_id != invocation.invocation_id
+                || payload.plan.job_id != projection.job_id
+                || invocation.payload.admission.backend_kind != CapabilityBackendKind::Sandbox
+                || invocation.payload.admission.mcp_runtime.is_some()
+            {
+                return Err(RepositoryError::CorruptRow(
+                    "detached Sandbox Job owner binding is invalid".to_owned(),
+                ));
+            }
+            Ok(CapabilityOwnerJobKind::DetachedSandbox(
+                DetachedSandboxSourceKind::SandboxCapability,
+            ))
+        }
+        _ => Err(RepositoryError::CorruptRow(
+            "Invocation current Job is not a Capability execution owner".to_owned(),
+        )),
+    }
+}
+
+async fn load_capability_owner_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    job_id: &ResourceId,
+    lock: CapabilityOwnerJobLock,
+) -> Result<(JobRecord, CapabilityOwnerJobKind), RepositoryError> {
+    let query = match lock {
+        CapabilityOwnerJobLock::None => {
+            "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2"
+        }
+        CapabilityOwnerJobLock::Update => {
+            "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR UPDATE"
+        }
+    };
+    let row = sqlx::query(query)
+        .bind(invocation.tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Capability owner Job"))?;
+    let job = job_from_row(row)?;
+    let kind = classify_capability_owner_job(invocation, &job)?;
+    Ok((job, kind))
+}
+
+pub(crate) async fn prepare_capability_dispatch_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: PrepareCapabilityDispatch,
+    database_now: DateTime<Utc>,
+) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+    let principal =
+        require_tenant_permission(transaction, &command.audit, Permission::CapabilityInvoke)
+            .await?;
+    if claim_command_receipt(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.invocation_id.to_string(),
+        "capability.dispatch.prepare",
+    )
+    .await?
+    {
+        let invocation = load_capability_invocation(
+            transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        load_capability_execution_contract(
+            transaction,
+            &command.audit.tenant_id,
+            &invocation.payload.admission,
+        )
+        .await?;
+        let job_id = invocation
+            .payload
+            .current_job_id
+            .as_ref()
+            .ok_or(RepositoryError::Conflict("Capability dispatch replay"))?;
+        if job_id != &command.job_id {
+            return Err(RepositoryError::Conflict("Capability dispatch replay"));
+        }
+        let job = load_capability_job(transaction, &command.audit.tenant_id, job_id, false).await?;
+        return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+            invocation,
+            job,
+        }));
+    }
+    let current = load_capability_invocation(
+        transaction,
+        &command.audit.tenant_id,
+        &command.invocation_id,
+        true,
+    )
+    .await?;
+    if principal != current.payload.admission.principal {
+        return Err(RepositoryError::Conflict(
+            "Capability dispatch principal snapshot",
+        ));
+    }
+    // Re-resolve the exact immutable execution closure before creating a Capability-owned
+    // Job. Managed stdio MCP is rejected by this route check and must instead be admitted by
+    // SandboxGatewayAuthority as the sole physical Sandbox Job.
+    load_capability_execution_contract(
+        transaction,
+        &command.audit.tenant_id,
+        &current.payload.admission,
+    )
+    .await?;
+    let prepared = decide_prepare_dispatch(&current, &command, database_now)?;
+    insert_capability_job(transaction, &prepared).await?;
+    update_capability_invocation(transaction, &current, &prepared.invocation).await?;
+    append_command_event(
+        transaction,
+        &command.audit,
+        "capability_invocation",
+        &command.invocation_id.to_string(),
+        as_i64(prepared.invocation.version, "Invocation version")?,
+        "capability.dispatch_prepared",
+        &TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "admission_digest": prepared.invocation.payload.admission.canonical_digest,
+                "job_id": prepared.job.job_id,
+                "work_class": prepared.job.work_class,
+            }),
+        )?,
+    )
+    .await?;
+    terminalize_command_receipt(
+        transaction,
+        &command.audit,
+        &command.invocation_id.to_string(),
+        "prepared",
+    )
+    .await?;
+    let invocation = load_capability_invocation(
+        transaction,
+        &command.audit.tenant_id,
+        &command.invocation_id,
+        false,
+    )
+    .await?;
+    let job = load_capability_job(
+        transaction,
+        &command.audit.tenant_id,
+        &command.job_id,
+        false,
+    )
+    .await?;
+    Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+        invocation,
+        job,
+    }))
+}
+
+impl PgInvocationTransaction {
+    pub async fn prepare_capability_dispatch(
+        &mut self,
+        command: PrepareCapabilityDispatch,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let outcome =
+            prepare_capability_dispatch_in_transaction(&mut transaction, command, database_now)
+                .await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    pub async fn commit_capability_outcome(
+        &mut self,
+        mut command: CommitCapabilityOutcome,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        if let DispatchOutcome::InputRequired(request) = &mut command.outcome {
+            request.deadline = database_timestamp(request.deadline);
+        }
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "expected_invocation_version": command.expected_invocation_version,
+                "fence": {
+                    "expected_version": command.fence.expected_version,
+                    "lease_generation": command.fence.lease_generation,
+                    "token_digest": command.fence.token_digest,
+                    "worker_process_generation_id": command.fence.worker_process_generation_id,
+                },
+                "invocation_id": command.invocation_id,
+                "job_id": command.job_id,
+                "outcome": command.outcome,
+                "quota_entry_ids": command.quota_entry_ids,
+            }),
+        )?;
+        if claim_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            "capability.outcome.commit",
+            &receipt_payload,
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = load_capability_job(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.job_id,
+                false,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+
+        let observed_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            false,
+        )
+        .await?;
+        let observed_projection = job_projection(&observed_job)?;
+        if observed_job.quota_reservation_id.is_none()
+            || observed_projection.version != command.fence.expected_version
+            || observed_projection.lease.as_ref().is_none_or(|lease| {
+                lease.worker_process_generation_id != command.fence.worker_process_generation_id
+                    || lease.lease_generation != command.fence.lease_generation
+                    || lease.token_digest != command.fence.token_digest
+                    || lease.expires_at <= database_now
+            })
+        {
+            return Err(RepositoryError::StaleFence);
+        }
+        let quota_accounts = lock_capability_quota_bundle(&mut transaction, &observed_job).await?;
+        let observed_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        load_run_for_update(
+            &mut transaction,
+            &observed_invocation.tenant_id,
+            &observed_invocation.run_id,
+        )
+        .await?;
+        load_capability_node_for_update(
+            &mut transaction,
+            &observed_invocation.tenant_id,
+            &observed_invocation.node_execution_id,
+        )
+        .await?;
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if current_invocation.version != command.expected_invocation_version
+            || current_invocation.payload.current_job_id.as_ref() != Some(&command.job_id)
+            || current_invocation.run_id != observed_invocation.run_id
+            || current_invocation.node_execution_id != observed_invocation.node_execution_id
+        {
+            return Err(RepositoryError::Conflict("CapabilityInvocation outcome"));
+        }
+        let current_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            true,
+        )
+        .await?;
+        if current_job.version != observed_job.version
+            || current_job.payload.digest != observed_job.payload.digest
+            || current_job.quota_reservation_id != observed_job.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("Capability outcome Job"));
+        }
+        let current_projection = job_projection(&current_job)?;
+        let current_payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        let mut trusted_outcome = command.outcome.clone();
+        if let DispatchOutcome::Completed(output) = &mut trusted_outcome {
+            let interface = load_exact_capability_interface_spec(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &current_invocation.payload.admission,
+            )
+            .await?;
+            if !interface.data_policy.permits_output(
+                current_invocation.payload.admission.input.classification,
+                output.classification,
+            ) {
+                return Err(RepositoryError::InvalidInput(
+                    "Capability output violates the frozen data-flow policy".to_owned(),
+                ));
+            }
+            validate_capability_value_against_schema(
+                &interface.output_schema,
+                &output.value,
+                interface.execution_limits.maximum_output_bytes,
+            )?;
+            output.validation_evidence_digest =
+                insight_platform_contracts::canonical_digest(&serde_json::json!({
+                    "classification": output.classification,
+                    "interface_revision": current_invocation.payload.admission.interface,
+                    "invocation_id": current_invocation.invocation_id,
+                    "job_id": current_job.job_id,
+                    "output_content_digest": output.content_digest,
+                    "output_schema_digest": output.schema_digest,
+                    "schema_version": 1,
+                    "tenant_id": current_invocation.tenant_id,
+                }))
+                .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+                .parse()
+                .map_err(|failure| {
+                    RepositoryError::InvalidInput(format!(
+                        "Capability validation evidence digest is invalid: {failure}"
+                    ))
+                })?;
+        }
+        let decision = decide_dispatch_outcome(
+            &current_invocation,
+            &current_projection,
+            &current_payload,
+            &command.fence,
+            &trusted_outcome,
+            database_now,
+            self.limits,
+        )?;
+        settle_capability_quota(
+            &mut transaction,
+            &current_job,
+            &quota_accounts,
+            &command.quota_entry_ids,
+            &command.audit.request_digest,
+        )
+        .await?;
+
+        if let Some(output) = &decision.output {
+            insert_capability_value_and_reference(
+                &mut transaction,
+                &decision.invocation,
+                output,
+                database_now,
+            )
+            .await?;
+        }
+        if let Some(request) = &decision.input_request {
+            insert_capability_input_task(
+                &mut transaction,
+                &decision.invocation,
+                &decision.job,
+                request,
+                database_now,
+            )
+            .await?;
+        }
+        update_capability_job(
+            &mut transaction,
+            &current_job,
+            &decision.job,
+            &decision.job_payload,
+            database_now,
+        )
+        .await?;
+        update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
+            .await?;
+
+        let owner_node_waiting: bool = sqlx::query_scalar(
+            r#"
+            SELECT state = 'waiting'
+            FROM insight_platform.run_nodes
+            WHERE tenant_id = $1 AND node_id = $2 AND run_id = $3
+              AND record_kind = 'node_execution'
+            "#,
+        )
+        .bind(current_invocation.tenant_id.to_string())
+        .bind(current_invocation.node_execution_id.to_string())
+        .bind(current_invocation.run_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let plan_leaf_waiting = owner_node_waiting
+            && matches!(
+                current_invocation.payload.admission.origin_key,
+                insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+            );
+        let model_tool_waiting = owner_node_waiting
+            && matches!(
+                current_invocation.payload.admission.origin_key,
+                insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+            );
+        if plan_leaf_waiting {
+            if matches!(trusted_outcome, DispatchOutcome::Completed(_)) {
+                let mutations =
+                    command
+                        .resume_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Capability Plan leaf completion has no continuation identities"
+                                .to_owned(),
+                        ))?;
+                let exact_output =
+                    decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Capability success has no exact output".to_owned(),
+                        )
+                    })?;
+                crate::repository::settle_capability_leaf_success_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &exact_output.output,
+                    mutations,
+                    self.scope_environment_limits,
+                    database_now,
+                )
+                .await?;
+            } else if let DispatchOutcome::PermanentFailure(failure) = &trusted_outcome {
+                let mutations =
+                    command
+                        .failure_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Capability Plan leaf failure has no convergence identities".to_owned(),
+                        ))?;
+                crate::repository::settle_capability_leaf_failure_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &failure.failure,
+                    mutations,
+                    true,
+                    database_now,
+                )
+                .await?;
+            } else {
+                if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
+                    return Err(RepositoryError::InvalidInput(
+                        "nonterminal Capability outcome has terminal identities".to_owned(),
+                    ));
+                }
+                release_capability_plan_leaf_permit(
+                    &mut transaction,
+                    &decision.invocation,
+                    database_now,
+                )
+                .await?;
+            }
+        } else if model_tool_waiting {
+            if matches!(trusted_outcome, DispatchOutcome::Completed(_)) {
+                let mutations =
+                    command
+                        .resume_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Model tool completion has no settlement identities".to_owned(),
+                        ))?;
+                let exact_output =
+                    decision.invocation.payload.result.as_ref().ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "Model tool success has no exact output".to_owned(),
+                        )
+                    })?;
+                crate::repository::settle_model_tool_success_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &exact_output.output,
+                    mutations,
+                    database_now,
+                )
+                .await?;
+            } else if let DispatchOutcome::PermanentFailure(failure) = &trusted_outcome {
+                let mutations =
+                    command
+                        .failure_mutations
+                        .as_ref()
+                        .ok_or(RepositoryError::InvalidInput(
+                            "Model tool failure has no convergence identities".to_owned(),
+                        ))?;
+                crate::repository::settle_model_tool_failure_in_transaction(
+                    &mut transaction,
+                    &decision.invocation,
+                    &command.job_id,
+                    &failure.failure,
+                    mutations,
+                    true,
+                    database_now,
+                )
+                .await?;
+            } else {
+                if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
+                    return Err(RepositoryError::InvalidInput(
+                        "nonterminal Model tool outcome has terminal identities".to_owned(),
+                    ));
+                }
+                release_capability_plan_leaf_permit(
+                    &mut transaction,
+                    &decision.invocation,
+                    database_now,
+                )
+                .await?;
+            }
+        } else if command.resume_mutations.is_some() || command.failure_mutations.is_some() {
+            return Err(RepositoryError::InvalidInput(
+                "non-Plan Capability outcome has continuation identities".to_owned(),
+            ));
+        }
+
+        let (event_type, disposition) = match &trusted_outcome {
+            DispatchOutcome::Completed(_) => ("capability.completed", "completed"),
+            DispatchOutcome::Deferred(_) => ("capability.waiting", "deferred"),
+            DispatchOutcome::InputRequired(_) => ("capability.input_required", "input_required"),
+            DispatchOutcome::RetryableFailure { .. } => ("capability.waiting", "retry_scheduled"),
+            DispatchOutcome::PermanentFailure(_) => ("capability.failed", "failed"),
+            DispatchOutcome::Uncertain(_) => (
+                "capability.reconciliation_required",
+                "reconciliation_required",
+            ),
+        };
+        append_scheduler_event(
+            &mut transaction,
+            &current_job.tenant_id,
+            &command.audit.event_id,
+            &command.audit.outbox_id,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            Some(&current_invocation.run_id.to_string()),
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "job_id": decision.job.job_id,
+                    "job_state": decision.job.state,
+                    "lease_generation": decision.job.lease_generation,
+                    "state": decision.invocation.state,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            disposition,
+            &command.invocation_id,
+        )
+        .await?;
+        let invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        let job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            false,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+            invocation,
+            job,
+        }))
+    }
+
+    pub async fn commit_capability_cancellation_outcome(
+        &mut self,
+        command: CommitCapabilityCancellationOutcome,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let fence = command.fence.as_ref().map(|fence| {
+            serde_json::json!({
+                "expected_version": fence.expected_version,
+                "lease_generation": fence.lease_generation,
+                "token_digest": fence.token_digest,
+                "worker_process_generation_id": fence.worker_process_generation_id,
+            })
+        });
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "expected_invocation_version": command.expected_invocation_version,
+                "fence": fence,
+                "invocation_id": command.invocation_id,
+                "job_id": command.job_id,
+                "cancellation_observation_digest": command.cancellation_observation_digest,
+                "external_identity_digest": command.external_identity_digest,
+                "no_effect_proof_digest": command.no_effect_proof_digest,
+                "cleanup_deadline": command.cleanup_deadline,
+                "quota_entry_ids": command.quota_entry_ids,
+            }),
+        )?;
+        if claim_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            "capability.cancellation.commit",
+            &receipt_payload,
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = load_capability_job(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.job_id,
+                false,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+        let observed_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            false,
+        )
+        .await?;
+        let quota_accounts = match observed_job.quota_reservation_id.as_ref() {
+            Some(_) => Some(lock_capability_quota_bundle(&mut transaction, &observed_job).await?),
+            None => None,
+        };
+        let observed_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        load_run_for_update(
+            &mut transaction,
+            &observed_invocation.tenant_id,
+            &observed_invocation.run_id,
+        )
+        .await?;
+        let controlled_node = load_capability_node_for_update(
+            &mut transaction,
+            &observed_invocation.tenant_id,
+            &observed_invocation.node_execution_id,
+        )
+        .await?;
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if current_invocation.version != command.expected_invocation_version
+            || current_invocation.payload.current_job_id.as_ref() != Some(&command.job_id)
+        {
+            return Err(RepositoryError::Conflict("Capability cancellation owner"));
+        }
+        let current_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            true,
+        )
+        .await?;
+        if current_job.version != observed_job.version
+            || current_job.payload.digest != observed_job.payload.digest
+            || current_job.quota_reservation_id != observed_job.quota_reservation_id
+        {
+            return Err(RepositoryError::Conflict("Capability cancellation Job"));
+        }
+        let current_projection = job_projection(&current_job)?;
+        let current_payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        if command.fence.is_none()
+            && current_projection
+                .lease
+                .as_ref()
+                .is_some_and(|lease| lease.expires_at > database_now)
+        {
+            return Err(RepositoryError::StaleFence);
+        }
+        if let Some(cleanup_deadline) = command.cleanup_deadline {
+            let maximum_milliseconds = i64::try_from(MAX_CAPABILITY_TIMEOUT_MILLISECONDS)
+                .map_err(|_| RepositoryError::CorruptRow("Capability cleanup limit".to_owned()))?;
+            let maximum_cleanup_deadline = current_projection
+                .deadline
+                .checked_add_signed(chrono::Duration::milliseconds(maximum_milliseconds))
+                .ok_or_else(|| {
+                    RepositoryError::CorruptRow("Capability cleanup deadline overflowed".to_owned())
+                })?;
+            if cleanup_deadline > maximum_cleanup_deadline {
+                return Err(RepositoryError::InvalidInput(
+                    "Capability cleanup deadline exceeds the platform hard limit".to_owned(),
+                ));
+            }
+        }
+        let decision = decide_cancellation_outcome(
+            &current_invocation,
+            &current_projection,
+            &current_payload,
+            command.fence.as_ref(),
+            &CapabilityCancellationObservation {
+                cancellation_observation_digest: command.cancellation_observation_digest.clone(),
+                external_identity_digest: command.external_identity_digest.clone(),
+                no_effect_proof_digest: command.no_effect_proof_digest.clone(),
+                cleanup_deadline: command.cleanup_deadline,
+            },
+            database_now,
+        )?;
+        match quota_accounts.as_deref() {
+            Some(accounts) => {
+                settle_capability_quota(
+                    &mut transaction,
+                    &current_job,
+                    accounts,
+                    &command.quota_entry_ids,
+                    &command.audit.request_digest,
+                )
+                .await?;
+            }
+            None if !command.quota_entry_ids.is_empty() => {
+                return Err(RepositoryError::InvalidInput(
+                    "Capability cancellation supplied unused quota identities".to_owned(),
+                ));
+            }
+            None => {}
+        }
+        if quota_accounts.is_some()
+            && controlled_node.state == insight_platform_contracts::NodeExecutionState::Waiting
+        {
+            release_capability_plan_leaf_permit(
+                &mut transaction,
+                &current_invocation,
+                database_now,
+            )
+            .await?;
+        }
+        let next_job = decision.job.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow("Capability cancellation lost its Job".to_owned())
+        })?;
+        let next_payload = decision.job_payload.as_ref().ok_or_else(|| {
+            RepositoryError::CorruptRow("Capability cancellation lost its Job payload".to_owned())
+        })?;
+        let job = update_capability_job(
+            &mut transaction,
+            &current_job,
+            next_job,
+            next_payload,
+            database_now,
+        )
+        .await?;
+        update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
+            .await?;
+        let (event_type, disposition) = match decision.invocation.state {
+            insight_platform_contracts::InvocationState::Cancelled => {
+                ("capability.cancelled", "cancelled")
+            }
+            insight_platform_contracts::InvocationState::ReconciliationRequired => (
+                "capability.reconciliation_required",
+                "reconciliation_required",
+            ),
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability cancellation produced an invalid state".to_owned(),
+                ))
+            }
+        };
+        append_scheduler_event(
+            &mut transaction,
+            &current_job.tenant_id,
+            &command.audit.event_id,
+            &command.audit.outbox_id,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            current_job.run_id.as_deref(),
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "job_id": command.job_id,
+                    "cancellation_observation_digest": command.cancellation_observation_digest,
+                    "state": decision.invocation.state,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            disposition,
+            &command.invocation_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+            invocation: decision.invocation,
+            job,
+        }))
+    }
+
+    pub async fn wake_capability_invocation(
+        &mut self,
+        command: WakeCapabilityInvocation,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let operation = format!("capability.wake.{}", command.source.as_str());
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "callback_binding_digest": command.callback_binding_digest,
+                "expected_generation": command.expected_generation,
+                "invocation_id": command.invocation_id,
+                "job_id": command.job_id,
+                "source": command.source,
+            }),
+        )?;
+        if claim_capability_signal_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            &operation,
+            &receipt_payload,
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = load_capability_job(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.job_id,
+                false,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        let current_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            true,
+        )
+        .await?;
+        if current_invocation.payload.current_job_id.as_ref() != Some(&command.job_id) {
+            return Err(RepositoryError::Conflict("Capability wake Job binding"));
+        }
+        let current_projection = job_projection(&current_job)?;
+        let current_payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        let decision = decide_capability_wake(
+            &current_invocation,
+            &current_projection,
+            &current_payload,
+            command.expected_generation,
+            command.source,
+            command.callback_binding_digest.as_ref(),
+            database_now,
+        )?;
+        let (invocation, job, disposition) = match decision {
+            CapabilityWakeDisposition::Rejected => {
+                terminalize_capability_signal_receipt(
+                    &mut transaction,
+                    &command.audit,
+                    &command.job_id,
+                    "rejected_stale",
+                    &command.invocation_id,
+                )
+                .await?;
+                (current_invocation, current_job, "rejected_stale")
+            }
+            CapabilityWakeDisposition::Applied(applied) => {
+                let insight_platform_invocations::AppliedCapabilityWake {
+                    invocation,
+                    job,
+                    job_payload,
+                } = *applied;
+                let persisted_job = update_capability_job(
+                    &mut transaction,
+                    &current_job,
+                    &job,
+                    &job_payload,
+                    database_now,
+                )
+                .await?;
+                update_capability_invocation(&mut transaction, &current_invocation, &invocation)
+                    .await?;
+                append_scheduler_event(
+                    &mut transaction,
+                    &current_job.tenant_id,
+                    &command.audit.event_id,
+                    &command.audit.outbox_id,
+                    "capability_invocation",
+                    &command.invocation_id.to_string(),
+                    as_i64(invocation.version, "Invocation version")?,
+                    Some(&invocation.run_id.to_string()),
+                    "capability.woken",
+                    &TypedPayload::new(
+                        1,
+                        &serde_json::json!({
+                            "job_id": job.job_id,
+                            "source": command.source,
+                            "wake_generation": command.expected_generation,
+                        }),
+                    )?,
+                )
+                .await?;
+                terminalize_capability_signal_receipt(
+                    &mut transaction,
+                    &command.audit,
+                    &command.job_id,
+                    "applied",
+                    &command.invocation_id,
+                )
+                .await?;
+                (invocation, persisted_job, "applied")
+            }
+        };
+        debug_assert!(matches!(disposition, "applied" | "rejected_stale"));
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+            invocation,
+            job,
+        }))
+    }
+
+    pub async fn resolve_capability_input(
+        &mut self,
+        command: ResolveCapabilityInput,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let resolver = require_tenant_permission(
+            &mut transaction,
+            &command.audit,
+            Permission::InteractionRespond,
+        )
+        .await?;
+        let observed_task = crate::repository::load_task_by_text(
+            &mut transaction,
+            &command.audit.tenant_id.to_string(),
+            &command.input_task_id.to_string(),
+        )
+        .await?;
+        if !insight_platform_tasks::is_eligible_responder(
+            &task_projection(&observed_task)?,
+            &resolver,
+        )? {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            "capability.input.resolve",
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = load_capability_owner_job(
+                &mut transaction,
+                &invocation,
+                &command.job_id,
+                CapabilityOwnerJobLock::None,
+            )
+            .await?
+            .0;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if current_invocation.version != command.expected_invocation_version
+            || current_invocation.payload.current_job_id.as_ref() != Some(&command.job_id)
+            || current_invocation.payload.input_task_id.as_ref() != Some(&command.input_task_id)
+        {
+            return Err(RepositoryError::Conflict("Capability input owner"));
+        }
+        let (current_job, current_job_kind) = load_capability_owner_job(
+            &mut transaction,
+            &current_invocation,
+            &command.job_id,
+            CapabilityOwnerJobLock::Update,
+        )
+        .await?;
+        if u64::try_from(current_job.version).ok() != Some(command.expected_job_version) {
+            return Err(RepositoryError::Conflict("Capability input Job"));
+        }
+        let current_task = load_task_for_update(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.input_task_id,
+        )
+        .await?;
+        let projection = task_projection(&current_task)?;
+        if !insight_platform_tasks::is_eligible_responder(&projection, &resolver)? {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        match (
+            &command.response,
+            &command.validated_input,
+            &projection.payload.definition,
+        ) {
+            (
+                Some(response),
+                Some(evidence),
+                TaskDefinition::CapabilityInput {
+                    response_schema, ..
+                },
+            ) => {
+                if !insight_platform_contracts::permits_content_disclosure(
+                    &resolver,
+                    insight_platform_contracts::ExecutionAuthorizationPurpose::ContentDisclosure,
+                ) {
+                    return Err(RepositoryError::PermissionDenied);
+                }
+                if response.schema_digest != response_schema.canonical_digest
+                    || !evidence.matches_response(
+                        &response_schema.canonical_digest,
+                        &response.content_digest,
+                        &response.value,
+                    )
+                    || (response_schema.profile
+                        == insight_platform_contracts::MCP_FORM_SCHEMA_PROFILE_ID
+                        && !matches!(&response.value, ValueRef::Inline { .. }))
+                {
+                    return Err(RepositoryError::InvalidInput("invalid_task_input".into()));
+                }
+            }
+            (None, None, _) => {}
+            _ => return Err(RepositoryError::InvalidInput("invalid_task_input".into())),
+        }
+        let current_job_projection = job_projection(&current_job)?;
+        let current_job_payload = match current_job_kind {
+            CapabilityOwnerJobKind::Capability => {
+                let payload: CapabilityJobPayload =
+                    decode_versioned_payload(&current_job.payload, "Capability Job")?;
+                require_exact_capability_input_task(
+                    &current_invocation,
+                    &current_job_projection,
+                    &payload,
+                    &current_task,
+                    &command,
+                )?;
+                Some(payload)
+            }
+            CapabilityOwnerJobKind::DetachedSandbox(DetachedSandboxSourceKind::ManagedMcp) => {
+                require_exact_detached_capability_input_task(
+                    &current_invocation,
+                    &current_job_projection,
+                    &current_task,
+                    &command,
+                )?;
+                None
+            }
+            CapabilityOwnerJobKind::DetachedSandbox(
+                DetachedSandboxSourceKind::SandboxCapability,
+            ) => {
+                return Err(RepositoryError::Conflict(
+                    "Sandbox Capability does not own MCP input continuation",
+                ));
+            }
+        };
+        let task_target = match command.action {
+            insight_platform_invocations::CapabilityInputAction::Accept => TaskState::Responded,
+            insight_platform_invocations::CapabilityInputAction::Decline => TaskState::Declined,
+            insight_platform_invocations::CapabilityInputAction::Cancel => TaskState::Cancelled,
+        };
+        let task_decision = decide_task_resolution(
+            &task_projection(&current_task)?,
+            ResolveTask {
+                expected_generation: command.expected_task_generation,
+                expected_version: command.expected_task_version,
+                target: task_target,
+                principal: (task_target != TaskState::Cancelled).then_some(resolver),
+                response_value_id: command
+                    .response
+                    .as_ref()
+                    .map(|response| response.value_id.clone()),
+                response_schema_digest: command
+                    .response
+                    .as_ref()
+                    .map(|response| response.schema_digest.clone()),
+            },
+            database_now,
+        )?;
+        let (next_invocation, capability_job_decision) = match current_job_payload.as_ref() {
+            Some(payload) => {
+                let decision = decide_input_response(
+                    &current_invocation,
+                    &current_job_projection,
+                    payload,
+                    insight_platform_invocations::CapabilityInputResolution {
+                        expected_generation: command.expected_wake_generation,
+                        action: command.action,
+                        response: command.response.as_ref(),
+                        database_now,
+                    },
+                    self.limits,
+                )?;
+                (decision.invocation.clone(), Some(decision))
+            }
+            None => (
+                decide_detached_input_response(
+                    &current_invocation,
+                    &current_job_projection,
+                    command.expected_wake_generation,
+                    command.action,
+                    command.response.as_ref(),
+                    database_now,
+                    self.limits,
+                )?,
+                None,
+            ),
+        };
+        if let Some(response) = command.response.as_ref() {
+            insert_capability_input_response_value(
+                &mut transaction,
+                &current_invocation,
+                response,
+                database_now,
+            )
+            .await?;
+        }
+        update_capability_task(
+            &mut transaction,
+            &current_task,
+            &task_decision,
+            database_now,
+        )
+        .await?;
+        let job = match capability_job_decision.as_ref() {
+            Some(decision) => {
+                update_capability_job(
+                    &mut transaction,
+                    &current_job,
+                    &decision.job,
+                    &decision.job_payload,
+                    database_now,
+                )
+                .await?
+            }
+            None => current_job.clone(),
+        };
+        update_capability_invocation(&mut transaction, &current_invocation, &next_invocation)
+            .await?;
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            as_i64(next_invocation.version, "Invocation version")?,
+            match command.action {
+                insight_platform_invocations::CapabilityInputAction::Accept => {
+                    "interaction.responded"
+                }
+                insight_platform_invocations::CapabilityInputAction::Decline => {
+                    "interaction.declined"
+                }
+                insight_platform_invocations::CapabilityInputAction::Cancel => {
+                    "interaction.cancelled"
+                }
+            },
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "input_task_id": command.input_task_id,
+                    "job_id": command.job_id,
+                    "action": command.action,
+                    "response_value_id": command.response.as_ref().map(|response| &response.value_id),
+                    "wake_generation": command.expected_wake_generation,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.invocation_id.to_string(),
+            match command.action {
+                insight_platform_invocations::CapabilityInputAction::Accept => "responded",
+                insight_platform_invocations::CapabilityInputAction::Decline => "declined",
+                insight_platform_invocations::CapabilityInputAction::Cancel => "cancelled",
+            },
+        )
+        .await?;
+        let invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+            invocation,
+            job,
+        }))
+    }
+
+    pub async fn record_capability_progress(
+        &mut self,
+        command: RecordCapabilityProgress,
+    ) -> Result<CommandOutcome<JobRecord>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let receipt_payload = TypedPayload::new(
+            1,
+            &serde_json::json!({
+                "expected_invocation_version": command.expected_invocation_version,
+                "fence": {
+                    "expected_version": command.fence.expected_version,
+                    "lease_generation": command.fence.lease_generation,
+                    "token_digest": command.fence.token_digest,
+                    "worker_process_generation_id": command.fence.worker_process_generation_id,
+                },
+                "invocation_id": command.invocation_id,
+                "job_id": command.job_id,
+                "progress": command.progress,
+            }),
+        )?;
+        if claim_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            "capability.progress.record",
+            &receipt_payload,
+        )
+        .await?
+        {
+            let job = load_capability_job(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.job_id,
+                false,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(job));
+        }
+        let invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if invocation.version != command.expected_invocation_version
+            || invocation.payload.current_job_id.as_ref() != Some(&command.job_id)
+        {
+            return Err(RepositoryError::Conflict("Capability progress owner"));
+        }
+        let current_job = load_capability_job(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.job_id,
+            true,
+        )
+        .await?;
+        let current_projection = job_projection(&current_job)?;
+        let current_payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        let decision = decide_progress(
+            &invocation,
+            &current_projection,
+            &current_payload,
+            &command.fence,
+            &command.progress,
+            database_now,
+            self.limits,
+        )?;
+        let job = update_capability_job(
+            &mut transaction,
+            &current_job,
+            &decision.job,
+            &decision.job_payload,
+            database_now,
+        )
+        .await?;
+        let disposition = match decision.durability {
+            CapabilityProgressDurability::CoarseDurable => {
+                append_scheduler_event(
+                    &mut transaction,
+                    &current_job.tenant_id,
+                    &command.audit.event_id,
+                    &command.audit.outbox_id,
+                    "job",
+                    &current_job.job_id,
+                    job.version,
+                    current_job.run_id.as_deref(),
+                    "capability.progress",
+                    &TypedPayload::new(
+                        1,
+                        &serde_json::json!({
+                            "invocation_id": command.invocation_id,
+                            "payload_digest": command.progress.payload_digest,
+                            "sequence": command.progress.sequence,
+                            "stage_key": command.progress.stage_key,
+                        }),
+                    )?,
+                )
+                .await?;
+                "coarse_durable"
+            }
+            CapabilityProgressDurability::LiveOnly => "live_only",
+            CapabilityProgressDurability::None => {
+                return Err(RepositoryError::CorruptRow(
+                    "accepted Capability progress has no durability".to_owned(),
+                ))
+            }
+        };
+        terminalize_capability_worker_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.job_id,
+            disposition,
+            &command.job_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(job))
+    }
+
+    pub async fn control_capability_invocation(
+        &mut self,
+        command: ControlCapabilityInvocation,
+    ) -> Result<CommandOutcome<ControlledCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        let operation = match command.kind {
+            CapabilityControlKind::Cancel => "capability.cancel",
+            CapabilityControlKind::Timeout => "capability.timeout",
+        };
+        require_tenant_permission(&mut transaction, &command.audit, Permission::RuntimeControl)
+            .await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            operation,
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job = match invocation.payload.current_job_id.as_ref() {
+                Some(job_id) => Some(
+                    load_capability_owner_job(
+                        &mut transaction,
+                        &invocation,
+                        job_id,
+                        CapabilityOwnerJobLock::None,
+                    )
+                    .await?
+                    .0,
+                ),
+                None => None,
+            };
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(ControlledCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+        let observed_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            false,
+        )
+        .await?;
+        let (observed_job, observed_job_kind) =
+            match observed_invocation.payload.current_job_id.as_ref() {
+                Some(job_id) => {
+                    let (job, kind) = load_capability_owner_job(
+                        &mut transaction,
+                        &observed_invocation,
+                        job_id,
+                        CapabilityOwnerJobLock::None,
+                    )
+                    .await?;
+                    (Some(job), Some(kind))
+                }
+                None => (None, None),
+            };
+        let quota_accounts = match observed_job.as_ref() {
+            Some(job)
+                if observed_job_kind == Some(CapabilityOwnerJobKind::Capability)
+                    && job.quota_reservation_id.is_some() =>
+            {
+                Some(lock_capability_quota_bundle(&mut transaction, job).await?)
+            }
+            _ => None,
+        };
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if current_invocation.version != command.expected_invocation_version
+            || current_invocation.version != observed_invocation.version
+            || current_invocation.payload != observed_invocation.payload
+        {
+            return Err(RepositoryError::Conflict("Capability control version"));
+        }
+        if let Some(CapabilityOwnerJobKind::DetachedSandbox(source_kind)) = observed_job_kind {
+            let job_id = current_invocation
+                .payload
+                .current_job_id
+                .as_ref()
+                .ok_or(RepositoryError::Conflict("Sandbox Capability control Job"))?;
+            let (sandbox_job, current_kind) = load_capability_owner_job(
+                &mut transaction,
+                &current_invocation,
+                job_id,
+                CapabilityOwnerJobLock::Update,
+            )
+            .await?;
+            if current_kind != CapabilityOwnerJobKind::DetachedSandbox(source_kind)
+                || observed_job.as_ref().is_none_or(|observed| {
+                    observed.version != sandbox_job.version
+                        || observed.payload.digest != sandbox_job.payload.digest
+                        || observed.quota_reservation_id != sandbox_job.quota_reservation_id
+                })
+            {
+                return Err(RepositoryError::Conflict("Sandbox Capability control Job"));
+            }
+            if !command.quota_entry_ids.is_empty() {
+                return Err(RepositoryError::InvalidInput(
+                    "Sandbox control quota remains owned by Sandbox authority".to_owned(),
+                ));
+            }
+            let projection = job_projection(&sandbox_job)?;
+            let invocation = decide_detached_job_control(
+                &current_invocation,
+                source_kind,
+                &projection,
+                command.kind,
+                database_now,
+            )?;
+            let payload: SandboxDispatcherJobPayloadV1 =
+                decode_versioned_payload(&sandbox_job.payload, "OpenSandbox Job")?;
+            let control_kind = match command.kind {
+                CapabilityControlKind::Cancel => SandboxControlKindV1::Cancel,
+                CapabilityControlKind::Timeout => SandboxControlKindV1::Timeout,
+            };
+            let payload =
+                payload.request_control(control_kind, database_now, invocation.version)?;
+            let cancelling_job = decide_owner_cancelling(&projection)
+                .map_err(|_| RepositoryError::Conflict("Sandbox control Job"))?;
+            let sandbox_job = update_opensandbox_job(
+                &mut transaction,
+                &sandbox_job,
+                &cancelling_job,
+                &payload,
+                database_now,
+                sandbox_job.result_digest.as_deref(),
+                sandbox_job.quota_reservation_id.as_deref(),
+            )
+            .await?;
+            update_capability_invocation(&mut transaction, &current_invocation, &invocation)
+                .await?;
+            let event_type = match command.kind {
+                CapabilityControlKind::Cancel => "capability.cancelling",
+                CapabilityControlKind::Timeout => "capability.cancelling",
+            };
+            append_command_event(
+                &mut transaction,
+                &command.audit,
+                "capability_invocation",
+                &command.invocation_id.to_string(),
+                as_i64(invocation.version, "Invocation version")?,
+                event_type,
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "control_kind": command.kind,
+                        "job_id": job_id,
+                        "state": invocation.state,
+                        "control_intent_digest": payload.control.as_deref().map(|intent| &intent.intent_digest),
+                        "task_id": null,
+                    }),
+                )?,
+            )
+            .await?;
+            terminalize_command_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.invocation_id.to_string(),
+                "cancelling",
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Applied(ControlledCapabilityExecution {
+                invocation,
+                job: Some(sandbox_job),
+            }));
+        }
+        let current_job = match current_invocation.payload.current_job_id.as_ref() {
+            Some(job_id) => {
+                let (job, kind) = load_capability_owner_job(
+                    &mut transaction,
+                    &current_invocation,
+                    job_id,
+                    CapabilityOwnerJobLock::Update,
+                )
+                .await?;
+                if kind != CapabilityOwnerJobKind::Capability {
+                    return Err(RepositoryError::Conflict("Capability control Job kind"));
+                }
+                Some(job)
+            }
+            None => None,
+        };
+        if let (Some(observed), Some(current)) = (&observed_job, &current_job) {
+            if current.version != observed.version
+                || current.payload.digest != observed.payload.digest
+                || current.quota_reservation_id != observed.quota_reservation_id
+            {
+                return Err(RepositoryError::Conflict("Capability control Job"));
+            }
+        }
+        let current_projection = current_job.as_ref().map(job_projection).transpose()?;
+        let current_payload = current_job
+            .as_ref()
+            .map(|job| {
+                decode_versioned_payload::<CapabilityJobPayload>(&job.payload, "Capability Job")
+            })
+            .transpose()?;
+        let task_id = current_invocation
+            .payload
+            .input_task_id
+            .as_ref()
+            .or(current_invocation.payload.approval_task_id.as_ref())
+            .cloned();
+        let current_task = match task_id.as_ref() {
+            Some(task_id) => Some(
+                load_task_for_update(&mut transaction, &command.audit.tenant_id, task_id).await?,
+            ),
+            None => None,
+        };
+        let decision = decide_control(
+            &current_invocation,
+            current_projection.as_ref(),
+            current_payload.as_ref(),
+            command.kind,
+            database_now,
+        )?;
+        let releases_quota = decision.job.as_ref().is_some_and(|job| job.lease.is_none())
+            && quota_accounts.is_some();
+        if releases_quota {
+            settle_capability_quota(
+                &mut transaction,
+                observed_job.as_ref().ok_or_else(|| {
+                    RepositoryError::CorruptRow("Capability quota owner Job disappeared".to_owned())
+                })?,
+                quota_accounts.as_deref().unwrap_or_default(),
+                &command.quota_entry_ids,
+                &command.audit.request_digest,
+            )
+            .await?;
+        } else if !command.quota_entry_ids.is_empty() {
+            return Err(RepositoryError::InvalidInput(
+                "Capability control supplied unused quota settlement identities".to_owned(),
+            ));
+        }
+        if let Some(task) = &current_task {
+            cancel_capability_task(&mut transaction, task, database_now).await?;
+        }
+        let job = match (
+            current_job.as_ref(),
+            decision.job.as_ref(),
+            decision.job_payload.as_ref(),
+        ) {
+            (Some(current), Some(next), Some(payload)) => Some(
+                update_capability_job(&mut transaction, current, next, payload, database_now)
+                    .await?,
+            ),
+            (None, None, None) => None,
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability control decision lost its Job pair".to_owned(),
+                ))
+            }
+        };
+        update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
+            .await?;
+        let (event_type, disposition) = match decision.invocation.state {
+            insight_platform_contracts::InvocationState::Cancelling => {
+                ("capability.cancelling", "cancelling")
+            }
+            insight_platform_contracts::InvocationState::Cancelled => {
+                ("capability.cancelled", "cancelled")
+            }
+            insight_platform_contracts::InvocationState::TimedOut => {
+                ("capability.timed_out", "timed_out")
+            }
+            insight_platform_contracts::InvocationState::ReconciliationRequired => (
+                "capability.reconciliation_required",
+                "reconciliation_required",
+            ),
+            _ => {
+                return Err(RepositoryError::CorruptRow(
+                    "Capability control produced an invalid state".to_owned(),
+                ))
+            }
+        };
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "control_kind": command.kind,
+                    "job_id": decision.invocation.payload.current_job_id,
+                    "state": decision.invocation.state,
+                    "task_id": task_id,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.invocation_id.to_string(),
+            disposition,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(ControlledCapabilityExecution {
+            invocation: decision.invocation,
+            job,
+        }))
+    }
+
+    pub async fn resolve_capability_reconciliation(
+        &mut self,
+        command: ResolveCapabilityReconciliation,
+    ) -> Result<CommandOutcome<PreparedCapabilityExecution>, RepositoryError> {
+        command.validate_at(Utc::now())?;
+        let mut transaction = self.transaction.begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        command.validate_at(database_now)?;
+        require_tenant_permission(&mut transaction, &command.audit, Permission::RuntimeControl)
+            .await?;
+        if claim_command_receipt(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            "capability.reconciliation.resolve",
+        )
+        .await?
+        {
+            let invocation = load_capability_invocation(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.invocation_id,
+                false,
+            )
+            .await?;
+            let job_id = invocation.payload.current_job_id.as_ref().ok_or_else(|| {
+                RepositoryError::CorruptRow("reconciled Invocation has no Job".to_owned())
+            })?;
+            let job =
+                load_capability_job(&mut transaction, &command.audit.tenant_id, job_id, false)
+                    .await?;
+            transaction.commit().await?;
+            return Ok(CommandOutcome::Replayed(PreparedCapabilityExecution {
+                invocation,
+                job,
+            }));
+        }
+        let current_invocation = load_capability_invocation(
+            &mut transaction,
+            &command.audit.tenant_id,
+            &command.invocation_id,
+            true,
+        )
+        .await?;
+        if current_invocation.version != command.expected_invocation_version {
+            return Err(RepositoryError::Conflict(
+                "Capability reconciliation version",
+            ));
+        }
+        let job_id = current_invocation
+            .payload
+            .current_job_id
+            .as_ref()
+            .ok_or_else(|| {
+                RepositoryError::CorruptRow("Capability reconciliation owner has no Job".to_owned())
+            })?;
+        let current_job =
+            load_capability_job(&mut transaction, &command.audit.tenant_id, job_id, true).await?;
+        if u64::try_from(current_job.version).ok() != Some(command.expected_job_version) {
+            return Err(RepositoryError::Conflict("Capability reconciliation Job"));
+        }
+        let current_projection = job_projection(&current_job)?;
+        let current_payload: CapabilityJobPayload =
+            decode_versioned_payload(&current_job.payload, "Capability Job")?;
+        let decision = decide_reconciliation_resolution(
+            &current_invocation,
+            &current_projection,
+            &current_payload,
+            &command.resolution,
+            database_now,
+            self.limits,
+        )?;
+        if let Some(output) = &decision.output {
+            insert_capability_value_and_reference(
+                &mut transaction,
+                &decision.invocation,
+                output,
+                database_now,
+            )
+            .await?;
+        }
+        let job = update_capability_job(
+            &mut transaction,
+            &current_job,
+            &decision.job,
+            &decision.job_payload,
+            database_now,
+        )
+        .await?;
+        update_capability_invocation(&mut transaction, &current_invocation, &decision.invocation)
+            .await?;
+        let (event_type, disposition) = match &command.resolution {
+            ReconciliationResolution::Succeeded(_) => ("capability.completed", "succeeded"),
+            ReconciliationResolution::Failed(_) => ("capability.failed", "failed"),
+            ReconciliationResolution::Cancelled => ("capability.cancelled", "cancelled"),
+        };
+        append_command_event(
+            &mut transaction,
+            &command.audit,
+            "capability_invocation",
+            &command.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            event_type,
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "job_id": decision.job.job_id,
+                    "state": decision.invocation.state,
+                }),
+            )?,
+        )
+        .await?;
+        terminalize_command_receipt(
+            &mut transaction,
+            &command.audit,
+            &command.invocation_id.to_string(),
+            disposition,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(CommandOutcome::Applied(PreparedCapabilityExecution {
+            invocation: decision.invocation,
+            job,
+        }))
+    }
+}
+
+impl PgRepository {
+    pub async fn drive_expired_capability_jobs(
+        &self,
+        command: DriveExpiredCapabilityJobs,
+    ) -> Result<SafetyScanPage<RecoveredCapabilityExecution>, RepositoryError> {
+        command.validate(self.recovery_batch_limit(), self.recovery_shard_limit())?;
+        let scan_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(self.pool())
+            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT job.*, COALESCE(job.lease_expires_at,job.updated_at) AS scan_sort_at
+            FROM insight_platform.jobs AS job
+            JOIN insight_platform.invocations AS invocation
+              ON invocation.tenant_id = job.tenant_id
+             AND invocation.invocation_id = job.invocation_id
+            WHERE job.work_class = $1 AND job.owner_kind = 'capability_invocation'
+              AND job.terminal_at IS NULL AND invocation.terminal_at IS NULL
+              AND ((job.state='running' AND invocation.state='in_flight' AND job.lease_expires_at <= $2)
+                OR (job.state='cancelling' AND invocation.state='cancelling' AND (job.lease_expires_at IS NULL OR job.lease_expires_at <= $2)))
+              AND mod(('x' || right(job.job_id, 8))::bit(32)::bigint, $5) = $4
+              AND (
+                  $6::timestamptz IS NULL OR
+                  (COALESCE(job.lease_expires_at,job.updated_at), job.tenant_id, job.job_id) >
+                      ($6::timestamptz, $7::text, $8::text)
+              )
+            ORDER BY COALESCE(job.lease_expires_at,job.updated_at), job.tenant_id, job.job_id
+            LIMIT $3
+            "#,
+        )
+        .bind(command.work_class.as_str())
+        .bind(scan_now)
+        .bind(i64::from(command.limit))
+        .bind(i64::from(command.shard.index))
+        .bind(i64::from(command.shard.count))
+        .bind(command.after.as_ref().map(|cursor| cursor.sort_at))
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.tenant_id.to_string()),
+        )
+        .bind(
+            command
+                .after
+                .as_ref()
+                .map(|cursor| cursor.item_id.to_string()),
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let scanned_count = rows.len();
+        let last_cursor = rows
+            .last()
+            .map(|row| safety_scan_cursor_from_row(row, "job_id", ResourceKind::Job))
+            .transpose()?;
+        let mut recovered = Vec::with_capacity(rows.len());
+        let mut diagnostics = Vec::new();
+        for (row, slot) in rows.into_iter().zip(&command.slots) {
+            let Some(observed) = crate::recovery_isolation::collect(
+                crate::repository::persisted_job_from_row(row),
+                &mut diagnostics,
+            )?
+            else {
+                continue;
+            };
+            match self
+                .recover_expired_capability_job(&observed, slot, scan_now)
+                .await
+            {
+                Ok(Some(record)) => recovered.push(record),
+                Ok(None)
+                | Err(RepositoryError::Conflict(_))
+                | Err(RepositoryError::StaleFence)
+                | Err(RepositoryError::LeaseExpired) => {}
+                Err(RepositoryError::InvalidPersistedObject(diagnostic)) => {
+                    diagnostics.push(diagnostic);
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+        Ok(
+            safety_scan_page(recovered, scanned_count, command.limit, last_cursor)
+                .with_diagnostics(diagnostics),
+        )
+    }
+
+    async fn recover_expired_capability_job(
+        &self,
+        observed: &JobRecord,
+        slot: &ExpiredCapabilityRecoverySlot,
+        scan_now: DateTime<Utc>,
+    ) -> Result<Option<RecoveredCapabilityExecution>, RepositoryError> {
+        crate::recovery_isolation::job(
+            decode_versioned_payload::<CapabilityJobPayload>(&observed.payload, "Capability Job"),
+            observed,
+            insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+        )?;
+        let mut transaction = self.pool().begin().await?;
+        // Quota is the first mutable authority in the global owner lock order.
+        let quota_accounts = if observed.quota_reservation_id.is_some() {
+            Some(lock_capability_quota_bundle(&mut transaction, observed).await?)
+        } else {
+            None
+        };
+        let tenant_id = parse_required_id(
+            Some(&observed.tenant_id),
+            ResourceKind::Tenant,
+            "expired Capability tenant",
+        )?;
+        let run_id = parse_required_id(
+            observed.run_id.as_deref(),
+            ResourceKind::Run,
+            "expired Capability Run",
+        )?;
+        let node_id = parse_required_id(
+            observed.node_id.as_deref(),
+            ResourceKind::NodeExecution,
+            "expired Capability Node",
+        )?;
+        let invocation_id = parse_required_id(
+            observed.invocation_id.as_deref(),
+            ResourceKind::CapabilityInvocation,
+            "expired Capability Invocation",
+        )?;
+        let job_id = parse_required_id(
+            Some(&observed.job_id),
+            ResourceKind::Job,
+            "expired Capability Job",
+        )?;
+        let run = load_run_for_update(&mut transaction, &tenant_id, &run_id).await?;
+        let node = load_capability_node_for_update(&mut transaction, &tenant_id, &node_id).await?;
+        let invocation =
+            load_capability_invocation(&mut transaction, &tenant_id, &invocation_id, true).await?;
+        let current = load_capability_job(&mut transaction, &tenant_id, &job_id, true).await?;
+        let database_now = database_now(&mut transaction).await?;
+        if database_now < scan_now
+            || current.version != observed.version
+            || current.lease_epoch != observed.lease_epoch
+            || current.lease_token_digest != observed.lease_token_digest
+            || current.lease_expires_at != observed.lease_expires_at
+            || current.payload.digest != observed.payload.digest
+            || current.quota_reservation_id != observed.quota_reservation_id
+            || current
+                .lease_expires_at
+                .is_some_and(|expires| expires > database_now)
+            || !((current.state == JobState::Running.as_str()
+                && invocation.state == InvocationState::InFlight)
+                || (current.state == JobState::Cancelling.as_str()
+                    && invocation.state == InvocationState::Cancelling))
+            || invocation.run_id != run_id
+            || invocation.node_execution_id != node_id
+            || run.terminal_at.is_some()
+            || node.run_id != run.run_id
+            || !matches!(
+                node.state,
+                insight_platform_contracts::NodeExecutionState::Running
+                    | insight_platform_contracts::NodeExecutionState::Waiting
+            )
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let projection = crate::recovery_isolation::job(
+            job_projection(&current),
+            &current,
+            insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+        )?;
+        let payload: CapabilityJobPayload = crate::recovery_isolation::job(
+            decode_versioned_payload(&current.payload, "Capability Job"),
+            &current,
+            insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+        )?;
+        crate::recovery_isolation::job(
+            payload
+                .validate_for(&invocation, &projection)
+                .map_err(RepositoryError::from),
+            &current,
+            insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+        )?;
+        let retry_backoff_milliseconds = i64::try_from(
+            invocation.payload.admission.retry_backoff_milliseconds,
+        )
+        .map_err(|_| RepositoryError::CorruptRow("retry backoff exceeds bigint".to_owned()))?;
+        let retry_at = database_now
+            .checked_add_signed(Duration::milliseconds(retry_backoff_milliseconds))
+            .filter(|retry_at| *retry_at < invocation.deadline);
+        let observation_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "invocation_id": invocation.invocation_id,
+            "job_id": projection.job_id,
+            "lease_generation": projection.lease_generation,
+            "observed_job_version": projection.version,
+            "reason": if current.state == "cancelling" {"cancellation_lease_expired_without_ack"} else {"worker_lease_expired"},
+            "schema_version": 1,
+        }))
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+        .parse()
+        .map_err(|failure: insight_platform_contracts::NominalTypeError| {
+            RepositoryError::InvalidInput(failure.to_string())
+        })?;
+        let decision = if current.state == "cancelling" {
+            let controlled = decide_cancellation_outcome(
+                &invocation,
+                &projection,
+                &payload,
+                None,
+                &CapabilityCancellationObservation {
+                    cancellation_observation_digest: observation_digest.clone(),
+                    external_identity_digest: payload.external_identity_digest.clone(),
+                    no_effect_proof_digest: None,
+                    cleanup_deadline: None,
+                },
+                database_now,
+            )?;
+            insight_platform_invocations::RecoveredCapabilityDispatch {
+                invocation: controlled.invocation,
+                job: controlled
+                    .job
+                    .ok_or_else(|| RepositoryError::CorruptRow("expired cancelling Job".into()))?,
+                job_payload: controlled.job_payload.ok_or_else(|| {
+                    RepositoryError::CorruptRow("expired cancelling payload".into())
+                })?,
+            }
+        } else {
+            decide_expired_dispatch(
+                &invocation,
+                &projection,
+                &payload,
+                database_now,
+                ExpiredCapabilityLeaseObservation {
+                    observed_job_version: u64::try_from(current.version).map_err(|_| {
+                        RepositoryError::CorruptRow("negative Job version".to_owned())
+                    })?,
+                    observed_lease_generation: u64::try_from(current.lease_epoch).map_err(
+                        |_| RepositoryError::CorruptRow("negative Job lease generation".to_owned()),
+                    )?,
+                    retry_at,
+                    observation_digest: observation_digest.clone(),
+                },
+            )?
+        };
+        crate::recovery_isolation::produced(
+            async {
+                if let Some(accounts) = &quota_accounts {
+                    settle_capability_quota(
+                        &mut transaction,
+                        &current,
+                        accounts,
+                        &slot.quota_entry_ids,
+                        &invocation.payload.admission.canonical_digest,
+                    )
+                    .await?;
+                }
+                let job = update_capability_job(
+                    &mut transaction,
+                    &current,
+                    &decision.job,
+                    &decision.job_payload,
+                    database_now,
+                )
+                .await?;
+                update_capability_invocation(&mut transaction, &invocation, &decision.invocation)
+                    .await?;
+                let external_leaf = node.state
+                    == insight_platform_contracts::NodeExecutionState::Waiting
+                    && matches!(
+                        invocation.payload.admission.origin_key,
+                        insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+                            | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+                    );
+                if external_leaf && quota_accounts.is_some() {
+                    if decision.invocation.state == InvocationState::TimedOut {
+                        let failure = Failure {
+                            code: FailureCode::Platform {
+                                code: PlatformFailureCode::DeadlineExceeded,
+                            },
+                            class: FailureClass::Deadline,
+                            retryability: Retryability::Never,
+                            safe_message: Some("Capability execution deadline exceeded".to_owned()),
+                            details_ref: None,
+                            source: FailureSource::Capability,
+                        };
+                        match invocation.payload.admission.origin_key {
+                            insight_platform_invocations::InvocationOrigin::PlanNode { .. } => {
+                                crate::repository::settle_capability_leaf_failure_in_transaction(
+                                    &mut transaction,
+                                    &decision.invocation,
+                                    &job_id,
+                                    &failure,
+                                    &slot.failure_mutations,
+                                    true,
+                                    database_now,
+                                )
+                                .await?;
+                            }
+                            insight_platform_invocations::InvocationOrigin::ModelToolCall {
+                                ..
+                            } => {
+                                crate::repository::settle_model_tool_failure_in_transaction(
+                                    &mut transaction,
+                                    &decision.invocation,
+                                    &job_id,
+                                    &failure,
+                                    &slot.failure_mutations,
+                                    true,
+                                    database_now,
+                                )
+                                .await?;
+                            }
+                        }
+                    } else {
+                        release_capability_plan_leaf_permit(
+                            &mut transaction,
+                            &decision.invocation,
+                            database_now,
+                        )
+                        .await?;
+                    }
+                }
+                let disposition = match decision.invocation.state {
+                    InvocationState::Cancelled => "cancelled",
+                    InvocationState::RetryScheduled => "retry_scheduled",
+                    InvocationState::ReconciliationRequired => "reconciliation_required",
+                    InvocationState::TimedOut => "timed_out",
+                    _ => {
+                        return Err(RepositoryError::CorruptRow(
+                            "expired Capability recovery selected an unsupported state".to_owned(),
+                        ))
+                    }
+                };
+                append_scheduler_event(
+            &mut transaction,
+            &current.tenant_id,
+            &slot.event_id,
+            &slot.outbox_id,
+            "capability_invocation",
+            &invocation.invocation_id.to_string(),
+            as_i64(decision.invocation.version, "Invocation version")?,
+            Some(&invocation.run_id.to_string()),
+            "capability.lease_expired",
+            &TypedPayload::new(
+                1,
+                &serde_json::json!({
+                    "disposition": disposition,
+                    "job_id": job.job_id,
+                    "lease_generation": current.lease_epoch,
+                    "observation_digest": observation_digest,
+                    "settled_quota_account_ids": quota_accounts.as_deref().unwrap_or_default()
+                        .iter()
+                        .map(|account| account.quota_account_id.clone())
+                        .collect::<Vec<_>>(),
+                }),
+            )?,
+        )
+        .await?;
+                transaction.commit().await?;
+                Ok(Some(RecoveredCapabilityExecution {
+                    invocation: decision.invocation,
+                    job,
+                }))
+            }
+            .await,
+        )
+    }
+
+    pub async fn claim_capability_jobs(
+        &self,
+        command: ClaimCapabilityJobs,
+    ) -> Result<Vec<ClaimedCapabilityExecution>, RepositoryError> {
+        command.validate()?;
+        if command.lease_milliseconds > self.invocation_limits().maximum_lease_milliseconds() {
+            return Err(RepositoryError::InvalidInput(
+                "Capability Job lease exceeds the frozen hard maximum".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool().begin().await?;
+        let database_now = database_now(&mut transaction).await?;
+        let Some(admission) = crate::claim_admission::PreparedClaimAdmission::prepare(
+            &mut transaction,
+            command.work_class,
+            crate::repository::DEFAULT_SCHEDULER_LIMITS,
+        )
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(Vec::new());
+        };
+        admission.observe_diagnostics();
+        let mut diagnostics = Vec::new();
+        let rows = sqlx::query(
+            r#"
+            SELECT ranked.*
+            FROM (
+                SELECT candidate.*,
+                       row_number() OVER (
+                           PARTITION BY candidate.tenant_id, candidate.node_id
+                           ORDER BY candidate.priority DESC,
+                                    COALESCE(candidate.retry_at, candidate.scheduled_at),
+                                    candidate.job_id
+                       ) AS node_rank
+                FROM insight_platform.jobs AS candidate
+                JOIN insight_platform.run_nodes AS owner_node
+                  ON owner_node.tenant_id = candidate.tenant_id
+                 AND owner_node.node_id = candidate.node_id
+                WHERE candidate.work_class = $1 AND candidate.job_id=ANY($3)
+                  AND EXISTS(SELECT 1 FROM jsonb_array_elements($4::jsonb) capability
+                    WHERE capability->>'family'='program'
+                      AND capability->>'program_semantic_identity'=candidate.execution_semantic_identity
+                      AND (capability->>'ir_abi_version')::integer=candidate.execution_ir_abi_version)
+                  AND candidate.state IN ('ready', 'retry_scheduled')
+                  AND candidate.terminal_at IS NULL AND candidate.worker_id IS NULL
+                  AND candidate.scheduled_at <= $2
+                  AND (candidate.retry_at IS NULL OR candidate.retry_at <= $2)
+                  AND candidate.deadline > $2
+                  AND (
+                      owner_node.node_kind <> 'model_loop'
+                      OR candidate.owner_id = (
+                          SELECT call.value ->> 'invocation_id'
+                          FROM jsonb_array_elements(owner_node.payload -> 'calls')
+                               WITH ORDINALITY AS call(value, ordinal)
+                          WHERE NOT (call.value ? 'result')
+                          ORDER BY call.ordinal
+                          LIMIT 1
+                      )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM insight_platform.jobs AS active
+                      WHERE active.tenant_id = candidate.tenant_id
+                        AND active.node_id = candidate.node_id
+                        AND active.work_class IN ('capability_native', 'capability_remote')
+                        AND active.state IN ('leased', 'running', 'cancelling')
+                        AND active.terminal_at IS NULL
+                  )
+            ) AS ranked
+            WHERE ranked.node_rank = 1
+            ORDER BY ranked.priority DESC,
+                     COALESCE(ranked.retry_at, ranked.scheduled_at), ranked.job_id
+            "#,
+        )
+        .bind(command.work_class.as_str())
+        .bind(database_now)
+        .bind(admission.candidate_ids())
+        .bind(serde_json::to_value(&command.worker_manifest.execution_capabilities.capabilities)
+            .map_err(|error|RepositoryError::InvalidInput(error.to_string()))?)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let result = async {
+                let job = crate::repository::persisted_job_from_row(row)?;
+                crate::recovery_isolation::job(
+                    (|| {
+                        parse_required_id(job.run_id.as_deref(), ResourceKind::Run, "claim Run")?;
+                        parse_required_id(
+                            job.node_id.as_deref(),
+                            ResourceKind::NodeExecution,
+                            "claim Node",
+                        )?;
+                        Ok(())
+                    })(),
+                    &job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let candidate = crate::recovery_isolation::job(
+                    capability_claim_candidate(job.clone(), &command.slots[0]),
+                    &job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let tenant = parse_required_id(
+                    Some(&candidate.job.tenant_id),
+                    ResourceKind::Tenant,
+                    "Capability tenant",
+                )?;
+                let owner = parse_required_id(
+                    Some(&candidate.job.owner_id),
+                    ResourceKind::CapabilityInvocation,
+                    "Capability owner",
+                )?;
+                let invocation =
+                    load_capability_invocation(&mut transaction, &tenant, &owner, false).await?;
+                let projection = crate::recovery_isolation::job(
+                    job_projection(&candidate.job),
+                    &candidate.job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let payload: CapabilityJobPayload = crate::recovery_isolation::job(
+                    decode_versioned_payload(&candidate.job.payload, "Capability Job"),
+                    &candidate.job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+                )?;
+                crate::recovery_isolation::job(
+                    payload
+                        .validate_for(&invocation, &projection)
+                        .map_err(RepositoryError::from),
+                    &candidate.job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let leaf = invocation
+                    .payload
+                    .admission
+                    .adapter_execution_requirement
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RepositoryError::CorruptRow(
+                            "non-Sandbox Capability missing adapter requirement".into(),
+                        )
+                    })?;
+                if command
+                    .worker_manifest
+                    .execution_capabilities
+                    .supports(&candidate.job.execution_requirement)
+                    && command
+                        .worker_manifest
+                        .execution_capabilities
+                        .supports(leaf)
+                {
+                    Ok(Some(candidate))
+                } else {
+                    Ok(None)
+                }
+            }
+            .await;
+            if let Some(candidate) =
+                crate::recovery_isolation::collect(result, &mut diagnostics)?.flatten()
+            {
+                candidates.push(candidate);
+            }
+        }
+        let mut quota_accounts =
+            lock_capability_quota_accounts(&mut transaction, &candidates, command.work_class)
+                .await?;
+        let available = quota_accounts
+            .values()
+            .map(|account| {
+                Ok((
+                    account
+                        .quota_account_id
+                        .parse::<ResourceId>()
+                        .map_err(|error| RepositoryError::CorruptRow(error.to_string()))?,
+                    account
+                        .limit_value
+                        .saturating_sub(account.reserved_value)
+                        .saturating_sub(account.used_value)
+                        .max(0) as u64,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, RepositoryError>>()?;
+        let mut eligible = BTreeMap::new();
+        for candidate in &candidates {
+            let costs = quota_accounts
+                .values()
+                .filter(|account| {
+                    capability_quota_account_matches(
+                        account,
+                        &candidate.job,
+                        &candidate.deployment_id,
+                    )
+                })
+                .map(|account| {
+                    Ok(insight_platform_scheduler::partitioned::QuotaCost {
+                        account_id: account
+                            .quota_account_id
+                            .parse::<ResourceId>()
+                            .map_err(|error| RepositoryError::CorruptRow(error.to_string()))?,
+                        amount: 1,
+                    })
+                })
+                .collect::<Result<Vec<_>, RepositoryError>>()?;
+            if costs.len() == CAPABILITY_QUOTA_LINES {
+                eligible.insert(
+                    candidate.job.job_id.clone(),
+                    crate::claim_admission::EligibleClaim {
+                        lane: insight_platform_contracts::SchedulingLane::Business,
+                        mode: if crate::repository::has_started_worker_attempt(&candidate.job)
+                            && candidate.job.state == "ready"
+                        {
+                            insight_platform_contracts::ClaimMode::Continuation
+                        } else {
+                            insight_platform_contracts::ClaimMode::NewAttempt
+                        },
+                        quota_costs: costs,
+                    },
+                );
+            }
+        }
+        let scheduling = admission.select(&eligible, &available, command.limit)?;
+        let admitted = scheduling
+            .admitted_job_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let mut candidates = candidates
+            .into_iter()
+            .filter(|candidate| admitted.contains(&candidate.job.job_id))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            (
+                &left.job.tenant_id,
+                &left.job.run_id,
+                &left.job.node_id,
+                &left.job.owner_id,
+                &left.job.job_id,
+            )
+                .cmp(&(
+                    &right.job.tenant_id,
+                    &right.job.run_id,
+                    &right.job.node_id,
+                    &right.job.owner_id,
+                    &right.job.job_id,
+                ))
+        });
+        let candidates = candidates
+            .into_iter()
+            .zip(&command.slots)
+            .map(|(mut candidate, slot)| {
+                candidate.slot = slot;
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let mut claimed = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let mut object_transaction = transaction.begin().await?;
+            let mut object_accounts = quota_accounts.clone();
+            let result: Result<ClaimedCapabilityExecution, RepositoryError> = async {
+                // Discovery is lock-free. The authoritative path below locks
+                // Run -> Node -> Invocation -> Job and then rechecks this observation.
+                let CapabilityClaimCandidate {
+                    job: candidate_job,
+                    deployment_id,
+                    slot,
+                } = candidate;
+                let invocation_id = candidate_job
+                    .invocation_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        RepositoryError::CorruptRow("Capability Job has no Invocation".to_owned())
+                    })?
+                    .parse::<ResourceId>()
+                    .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+                if invocation_id.kind() != ResourceKind::CapabilityInvocation
+                    || candidate_job.owner_id != invocation_id.to_string()
+                {
+                    return Err(RepositoryError::CorruptRow(
+                        "Capability Job owner is invalid".to_owned(),
+                    ));
+                }
+                let tenant_id = parse_required_id(
+                    Some(&candidate_job.tenant_id),
+                    ResourceKind::Tenant,
+                    "Capability Job Tenant",
+                )?;
+                let run_id = parse_required_id(
+                    candidate_job.run_id.as_deref(),
+                    ResourceKind::Run,
+                    "Capability Job Run",
+                )?;
+                let node_id = parse_required_id(
+                    candidate_job.node_id.as_deref(),
+                    ResourceKind::NodeExecution,
+                    "Capability Job NodeExecution",
+                )?;
+                let job_id = parse_required_id(
+                    Some(&candidate_job.job_id),
+                    ResourceKind::Job,
+                    "Capability Job",
+                )?;
+                let run = load_run_for_update(&mut object_transaction, &tenant_id, &run_id).await?;
+                let node =
+                    load_capability_node_for_update(&mut object_transaction, &tenant_id, &node_id)
+                        .await?;
+                let current_invocation = load_capability_invocation(
+                    &mut object_transaction,
+                    &tenant_id,
+                    &invocation_id,
+                    true,
+                )
+                .await?;
+                if current_invocation.run_id != run_id
+                    || current_invocation.node_execution_id != node_id
+                {
+                    return Err(RepositoryError::CorruptRow(
+                        "Capability Job parent binding does not match its Invocation".to_owned(),
+                    ));
+                }
+                let external_leaf_waiting = node.state
+                    == insight_platform_contracts::NodeExecutionState::Waiting
+                    && matches!(
+                        current_invocation.payload.admission.origin_key,
+                        insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+                            | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+                    );
+                require_claim_parents(
+                    &mut object_transaction,
+                    &current_invocation,
+                    &run,
+                    &node,
+                    database_now,
+                )
+                .await?;
+                let execution_contract = load_capability_execution_contract(
+                    &mut object_transaction,
+                    &tenant_id,
+                    &current_invocation.payload.admission,
+                )
+                .await?;
+                let leaf = execution_contract
+                    .required_adapter_execution(&current_invocation.payload.admission)
+                    .map_err(|error| RepositoryError::CorruptRow(error.to_string()))?
+                    .ok_or_else(|| {
+                        RepositoryError::CorruptRow("Capability adapter requirement absent".into())
+                    })?;
+                if run.execution_requirement != candidate_job.execution_requirement
+                    || !command
+                        .worker_manifest
+                        .execution_capabilities
+                        .supports(&leaf)
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Capability execution requirement changed",
+                    ));
+                }
+                let input =
+                    load_capability_execution_input(&mut object_transaction, &current_invocation)
+                        .await?;
+                let current_job =
+                    load_capability_job(&mut object_transaction, &tenant_id, &job_id, true).await?;
+                // A concurrent claimant may win between discovery and ordered lock acquisition.
+                // Skipping a stale candidate is the expected scheduler first-winner result.
+                if current_job.version != candidate_job.version
+                    || current_job.state != candidate_job.state
+                    || current_job.worker_id != candidate_job.worker_id
+                    || current_job.lease_epoch != candidate_job.lease_epoch
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Capability claim discovery changed",
+                    ));
+                }
+                let current_projection = crate::recovery_isolation::job(
+                    job_projection(&current_job),
+                    &current_job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let payload: CapabilityJobPayload = crate::recovery_isolation::job(
+                    decode_versioned_payload(&current_job.payload, "Capability Job"),
+                    &current_job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+                )?;
+                crate::recovery_isolation::job(
+                    payload
+                        .validate_for(&current_invocation, &current_projection)
+                        .map_err(RepositoryError::from),
+                    &current_job,
+                    insight_platform_jobs::store::SafetyScanPhase::OwnerValidation,
+                )?;
+                let decision = decide_start_dispatch(
+                    &current_invocation,
+                    &current_projection,
+                    &payload,
+                    command.worker_process_generation_id.clone(),
+                    slot.lease_token_digest.clone(),
+                    LeasePolicy {
+                        requested_milliseconds: command.lease_milliseconds,
+                        hard_maximum_milliseconds: self
+                            .invocation_limits()
+                            .maximum_lease_milliseconds(),
+                    },
+                    database_now,
+                )?;
+                let continuation_input = match decision.job_payload.resume_input.as_ref() {
+                    Some(exact) => Some(
+                        load_capability_continuation_input(
+                            &mut object_transaction,
+                            &decision.invocation,
+                            exact,
+                            decision.job_payload.resume_input_artifact_link_id.as_ref(),
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                crate::recovery_isolation::produced(
+                    async {
+                        let quota_account_ids = reserve_capability_quota(
+                            &mut object_transaction,
+                            &mut object_accounts,
+                            &candidate_job,
+                            &deployment_id,
+                            slot,
+                            &decision.job,
+                        )
+                        .await?;
+                        let resumed_physical_attempt =
+                            decision.job.attempt_count == current_projection.attempt_count;
+                        let job = update_started_capability_job(
+                            &mut object_transaction,
+                            &current_job,
+                            &decision.job,
+                            &decision.job_payload,
+                            &slot.quota_reservation_id,
+                            database_now,
+                            &command.worker_manifest.worker_build_digest,
+                        )
+                        .await?;
+                        update_capability_invocation(
+                            &mut object_transaction,
+                            &current_invocation,
+                            &decision.invocation,
+                        )
+                        .await?;
+                        append_scheduler_event(
+                &mut object_transaction,
+                &current_job.tenant_id,
+                &slot.event_id,
+                &slot.outbox_id,
+                "capability_invocation",
+                &current_invocation.invocation_id.to_string(),
+                as_i64(decision.invocation.version, "Invocation version")?,
+                Some(&current_invocation.run_id.to_string()),
+                "capability.started",
+                &TypedPayload::new(
+                    1,
+                    &serde_json::json!({
+                        "attempt_count": decision.job.attempt_count,
+                        "job_id": decision.job.job_id,
+                        "lease_generation": decision.job.lease_generation,
+                        "start_mode": if resumed_physical_attempt {
+                            "resume_physical_attempt"
+                        } else {
+                            "new_physical_attempt"
+                        },
+                        "quota_account_ids": quota_account_ids,
+                        "quota_reservation_id": slot.quota_reservation_id,
+                        "worker_process_generation_id": command.worker_process_generation_id,
+                    }),
+                )?,
+            )
+            .await?;
+                        let invocation = load_capability_invocation(
+                            &mut object_transaction,
+                            &tenant_id,
+                            &invocation_id,
+                            false,
+                        )
+                        .await?;
+                        Ok(ClaimedCapabilityExecution {
+                            resume_mutations: external_leaf_waiting
+                                .then(|| slot.resume_mutations.clone()),
+                            failure_mutations: external_leaf_waiting
+                                .then(|| slot.failure_mutations.clone()),
+                            invocation,
+                            job,
+                            execution_contract,
+                            input,
+                            continuation_input,
+                            fence: JobFence {
+                                expected_version: decision.job.version,
+                                worker_process_generation_id: command
+                                    .worker_process_generation_id
+                                    .clone(),
+                                lease_generation: decision.job.lease_generation,
+                                token_digest: slot.lease_token_digest.clone(),
+                            },
+                            quota_reservation_entry_ids: slot.quota_entry_ids.clone(),
+                        })
+                    }
+                    .await,
+                )
+            }
+            .await;
+            match result {
+                Ok(record) => {
+                    object_transaction.commit().await?;
+                    quota_accounts = object_accounts;
+                    claimed.push(record);
+                }
+                Err(RepositoryError::InvalidPersistedObject(diagnostic)) => {
+                    object_transaction.rollback().await?;
+                    diagnostics.push(diagnostic);
+                }
+                Err(error) => {
+                    object_transaction.rollback().await?;
+                    return Err(error);
+                }
+            }
+        }
+        let scheduling = admission.settle_actual(
+            &eligible,
+            &available,
+            command.limit,
+            claimed.iter().map(|record| record.job.job_id.clone()),
+        )?;
+        admission.persist(&mut transaction, &scheduling).await?;
+        for diagnostic in &diagnostics {
+            crate::recovery_isolation::observe(diagnostic);
+        }
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+}
+
+fn capability_claim_candidate<'a>(
+    job: JobRecord,
+    slot: &'a insight_platform_invocations::CapabilityClaimSlot,
+) -> Result<CapabilityClaimCandidate<'a>, RepositoryError> {
+    let payload: CapabilityJobPayload = decode_versioned_payload(&job.payload, "Capability Job")?;
+    if job.owner_kind != "capability_invocation"
+        || job.owner_id != payload.binding.invocation_id.to_string()
+        || job.invocation_id.as_deref() != Some(job.owner_id.as_str())
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Job claim binding is invalid".to_owned(),
+        ));
+    }
+    Ok(CapabilityClaimCandidate {
+        job,
+        deployment_id: payload.binding.deployment.deployment_id,
+        slot,
+    })
+}
+
+async fn lock_capability_quota_accounts(
+    transaction: &mut Transaction<'_, Postgres>,
+    candidates: &[CapabilityClaimCandidate<'_>],
+    work_class: WorkClass,
+) -> Result<BTreeMap<String, CapabilityQuotaAccount>, RepositoryError> {
+    let tenants = candidates
+        .iter()
+        .map(|candidate| candidate.job.tenant_id.clone())
+        .collect::<Vec<_>>();
+    let deployments = candidates
+        .iter()
+        .map(|candidate| candidate.deployment_id.to_string())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT tenant_id, quota_account_id, scope_kind, scope_id, work_class, metric,
+               limit_value, reserved_value, used_value, version
+        FROM insight_platform.quota_accounts
+        WHERE work_class = $1 AND (
+            (scope_kind = 'tenant' AND scope_id = ANY($2)
+             AND metric = $4)
+            OR
+            (scope_kind = 'capability_deployment' AND scope_id = ANY($3)
+             AND metric = $5)
+        )
+        ORDER BY tenant_id, quota_account_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(work_class.as_str())
+    .bind(tenants)
+    .bind(deployments)
+    .bind(QuotaDimension::WorkClassConcurrentOperations.as_str())
+    .bind(QuotaDimension::CapabilityConcurrentInvocations.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut accounts = BTreeMap::new();
+    for row in rows {
+        let account = CapabilityQuotaAccount {
+            tenant_id: row.try_get("tenant_id")?,
+            quota_account_id: row.try_get("quota_account_id")?,
+            scope_kind: row.try_get("scope_kind")?,
+            scope_id: row.try_get("scope_id")?,
+            work_class: row.try_get("work_class")?,
+            metric: row.try_get("metric")?,
+            limit_value: row.try_get("limit_value")?,
+            reserved_value: row.try_get("reserved_value")?,
+            used_value: row.try_get("used_value")?,
+            version: row.try_get("version")?,
+        };
+        if accounts
+            .insert(account.quota_account_id.clone(), account)
+            .is_some()
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Capability quota lock returned a duplicate".to_owned(),
+            ));
+        }
+    }
+    Ok(accounts)
+}
+
+fn capability_quota_account_matches(
+    account: &CapabilityQuotaAccount,
+    job: &JobRecord,
+    deployment_id: &ResourceId,
+) -> bool {
+    account.tenant_id == job.tenant_id
+        && account.work_class == job.work_class
+        && ((account.scope_kind == "tenant"
+            && account.scope_id == job.tenant_id
+            && account.metric == QuotaDimension::WorkClassConcurrentOperations.as_str())
+            || (account.scope_kind == "capability_deployment"
+                && account.scope_id == deployment_id.to_string()
+                && account.metric == QuotaDimension::CapabilityConcurrentInvocations.as_str()))
+}
+
+async fn reserve_capability_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    accounts: &mut BTreeMap<String, CapabilityQuotaAccount>,
+    job: &JobRecord,
+    deployment_id: &ResourceId,
+    slot: &insight_platform_invocations::CapabilityClaimSlot,
+    next: &insight_platform_jobs::JobProjection,
+) -> Result<Vec<String>, RepositoryError> {
+    let mut relevant = accounts
+        .values()
+        .filter(|account| capability_quota_account_matches(account, job, deployment_id))
+        .map(|account| account.quota_account_id.clone())
+        .collect::<Vec<_>>();
+    relevant.sort();
+    if relevant.len() != CAPABILITY_QUOTA_LINES {
+        return Err(RepositoryError::QuotaExceeded);
+    }
+    let request = TypedPayload::with_limit(
+        1,
+        &serde_json::json!({
+            "job_id": job.job_id,
+            "lease_generation": next.lease_generation,
+            "quota_account_ids": relevant,
+            "quota_reservation_id": slot.quota_reservation_id,
+        }),
+        65_536,
+    )?;
+    for (account_id, entry_id) in relevant.iter().zip(&slot.quota_entry_ids) {
+        let account = accounts.get_mut(account_id).ok_or_else(|| {
+            RepositoryError::CorruptRow("Capability quota account disappeared".to_owned())
+        })?;
+        if account
+            .reserved_value
+            .checked_add(account.used_value)
+            .and_then(|value| value.checked_add(1))
+            .is_none_or(|value| value > account.limit_value)
+        {
+            return Err(RepositoryError::QuotaExceeded);
+        }
+        let version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value + 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+              AND reserved_value + used_value + 1 <= limit_value
+            RETURNING version
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(&account.quota_account_id)
+        .bind(account.version)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::QuotaExceeded)?;
+        account.version = version;
+        account.reserved_value += 1;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.quota_ledger (
+                tenant_id, quota_entry_id, quota_account_id, correlation_id,
+                entry_kind, reserved_amount, used_amount, account_version, request_digest
+            ) VALUES ($1, $2, $3, $4, 'reserve', 1, 0, $5, $6)
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(entry_id.to_string())
+        .bind(&account.quota_account_id)
+        .bind(slot.quota_reservation_id.to_string())
+        .bind(version)
+        .bind(&request.digest)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(relevant)
+}
+
+async fn lock_capability_quota_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+) -> Result<Vec<CapabilityQuotaAccount>, RepositoryError> {
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("active Capability Job has no quota reservation".to_owned())
+    })?;
+    let payload: CapabilityJobPayload = decode_versioned_payload(&job.payload, "Capability Job")?;
+    let deployment_id = payload.binding.deployment.deployment_id.to_string();
+    let rows = sqlx::query(
+        r#"
+        SELECT account.tenant_id, account.quota_account_id, account.scope_kind,
+               account.scope_id, account.work_class, account.metric, account.limit_value,
+               account.reserved_value, account.used_value, account.version,
+               reserve.reserved_amount, reserve.used_amount AS reservation_used_amount
+        FROM insight_platform.quota_ledger AS reserve
+        JOIN insight_platform.quota_accounts AS account
+          ON account.tenant_id = reserve.tenant_id
+         AND account.quota_account_id = reserve.quota_account_id
+        WHERE reserve.tenant_id = $1 AND reserve.correlation_id = $2
+          AND reserve.entry_kind = 'reserve'
+        ORDER BY account.tenant_id, account.quota_account_id
+        FOR UPDATE OF account
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(reservation_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != CAPABILITY_QUOTA_LINES {
+        return Err(RepositoryError::CorruptRow(
+            "Capability quota bundle does not contain exactly two lines".to_owned(),
+        ));
+    }
+    let already_settled: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM insight_platform.quota_ledger
+            WHERE tenant_id = $1 AND correlation_id = $2 AND entry_kind = 'settle'
+        )
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(reservation_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if already_settled {
+        return Err(RepositoryError::Conflict("Capability quota settlement"));
+    }
+    let mut tenant_lines = 0;
+    let mut deployment_lines = 0;
+    let mut accounts = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.try_get::<i64, _>("reserved_amount")? != 1
+            || row.try_get::<i64, _>("reservation_used_amount")? != 0
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Capability quota reservation amount is invalid".to_owned(),
+            ));
+        }
+        let account = CapabilityQuotaAccount {
+            tenant_id: row.try_get("tenant_id")?,
+            quota_account_id: row.try_get("quota_account_id")?,
+            scope_kind: row.try_get("scope_kind")?,
+            scope_id: row.try_get("scope_id")?,
+            work_class: row.try_get("work_class")?,
+            metric: row.try_get("metric")?,
+            limit_value: row.try_get("limit_value")?,
+            reserved_value: row.try_get("reserved_value")?,
+            used_value: row.try_get("used_value")?,
+            version: row.try_get("version")?,
+        };
+        if account.tenant_id != job.tenant_id
+            || account.work_class != job.work_class
+            || account.reserved_value < 1
+        {
+            return Err(RepositoryError::CorruptRow(
+                "Capability quota account does not match its Job".to_owned(),
+            ));
+        }
+        if account.scope_kind == "tenant"
+            && account.scope_id == job.tenant_id
+            && account.metric == QuotaDimension::WorkClassConcurrentOperations.as_str()
+        {
+            tenant_lines += 1;
+        } else if account.scope_kind == "capability_deployment"
+            && account.scope_id == deployment_id
+            && account.metric == QuotaDimension::CapabilityConcurrentInvocations.as_str()
+        {
+            deployment_lines += 1;
+        } else {
+            return Err(RepositoryError::CorruptRow(
+                "Capability quota bundle has an unexpected scope".to_owned(),
+            ));
+        }
+        accounts.push(account);
+    }
+    if tenant_lines != 1 || deployment_lines != 1 {
+        return Err(RepositoryError::CorruptRow(
+            "Capability quota bundle is incomplete".to_owned(),
+        ));
+    }
+    Ok(accounts)
+}
+
+async fn settle_capability_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    job: &JobRecord,
+    accounts: &[CapabilityQuotaAccount],
+    settlement_entry_ids: &[ResourceId],
+    request_digest: &insight_platform_contracts::Sha256Digest,
+) -> Result<(), RepositoryError> {
+    if accounts.len() != CAPABILITY_QUOTA_LINES
+        || settlement_entry_ids.len() != CAPABILITY_QUOTA_LINES
+    {
+        return Err(RepositoryError::InvalidInput(
+            "Capability quota settlement line count is invalid".to_owned(),
+        ));
+    }
+    let reservation_id = job.quota_reservation_id.as_deref().ok_or_else(|| {
+        RepositoryError::CorruptRow("active Capability Job has no quota reservation".to_owned())
+    })?;
+    for (account, entry_id) in accounts.iter().zip(settlement_entry_ids) {
+        let version: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE insight_platform.quota_accounts
+            SET reserved_value = reserved_value - 1, version = version + 1,
+                updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND quota_account_id = $2 AND version = $3
+              AND reserved_value >= 1
+            RETURNING version
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(&account.quota_account_id)
+        .bind(account.version)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::Conflict("Capability quota account"))?;
+        sqlx::query(
+            r#"
+            INSERT INTO insight_platform.quota_ledger (
+                tenant_id, quota_entry_id, quota_account_id, correlation_id,
+                entry_kind, reserved_amount, used_amount, account_version, request_digest
+            ) VALUES ($1, $2, $3, $4, 'settle', 1, 0, $5, $6)
+            "#,
+        )
+        .bind(&account.tenant_id)
+        .bind(entry_id.to_string())
+        .bind(&account.quota_account_id)
+        .bind(reservation_id)
+        .bind(version)
+        .bind(request_digest.to_string())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn release_capability_plan_leaf_permit(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let run = load_run_for_update(transaction, &invocation.tenant_id, &invocation.run_id).await?;
+    if run.active_work_count < 1 || run.terminal_at.is_some() {
+        return Err(RepositoryError::Conflict(
+            "Capability Plan leaf active permit",
+        ));
+    }
+    let mut current = run.current.clone();
+    if run.active_work_count == 1 && run.state != "cancelling" {
+        current.waiting_reason = Some("capability_invocation".to_owned());
+    }
+    current
+        .validate(&invocation.run_id)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.runs
+        SET state = CASE WHEN active_work_count = 1 AND state <> 'cancelling' THEN 'waiting' ELSE state END,
+            version = version + 1, active_work_count = active_work_count - 1,
+            current_schema_version = $4, current_payload = $5,
+            current_payload_digest = $6, updated_at = $7
+        WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+          AND state IN ('running','waiting','cancelling') AND active_work_count > 0 AND terminal_at IS NULL
+        "#,
+    )
+    .bind(&run.tenant_id)
+    .bind(&run.run_id)
+    .bind(run.version)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepositoryError::Conflict(
+            "Capability Plan leaf permit release",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_claim_parents(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    run: &insight_platform_orchestrator::store::RunRecord,
+    node: &crate::invocation_repository::LockedCapabilityNode,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let deployment = load_deployment(
+        transaction,
+        &invocation.tenant_id,
+        &invocation.deployment_id,
+    )
+    .await?;
+    let resource_id = deployment
+        .resource_id
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let resource = load_resource(transaction, &invocation.tenant_id, &resource_id).await?;
+    let external_leaf = matches!(
+        invocation.payload.admission.origin_key,
+        insight_platform_invocations::InvocationOrigin::PlanNode { .. }
+            | insight_platform_invocations::InvocationOrigin::ModelToolCall { .. }
+    ) && node.state == insight_platform_contracts::NodeExecutionState::Waiting;
+    let run_state = run.state.parse::<RunState>().ok();
+    if invocation.run_id.to_string() != run.run_id
+        || if external_leaf {
+            !matches!(run_state, Some(RunState::Running | RunState::Waiting))
+        } else {
+            run_state != Some(RunState::Running)
+        }
+        || run.current.control.pause_requested
+        || run.current.control.cancel_requested_at.is_some()
+        || run.current.control.timeout_requested_at.is_some()
+        || if external_leaf {
+            node.state != insight_platform_contracts::NodeExecutionState::Waiting
+        } else {
+            node.state != insight_platform_contracts::NodeExecutionState::Running
+        }
+        || node.run_id != run.run_id
+        || database_now >= run.deadline
+        || database_now >= node.deadline
+        || deployment.bindings.digest
+            != invocation
+                .payload
+                .admission
+                .deployment
+                .deployment_digest
+                .to_string()
+        || resource.lifecycle_state != EntityLifecycle::Active.as_str()
+        || resource.gate_state != "enabled"
+    {
+        return Err(RepositoryError::Conflict("Capability dispatch parent"));
+    }
+    if external_leaf {
+        let mut current = run.current.clone();
+        if run_state == Some(RunState::Waiting) {
+            current.waiting_reason = None;
+        }
+        current
+            .validate(&invocation.run_id)
+            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let payload = TypedPayload::from_versioned(1, &current, 1_048_576)?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE insight_platform.runs
+            SET state = 'running', version = version + 1,
+                active_work_count = active_work_count + 1,
+                current_schema_version = $4, current_payload = $5,
+                current_payload_digest = $6, updated_at = $7
+            WHERE tenant_id = $1 AND run_id = $2 AND version = $3
+              AND state IN ('running', 'waiting') AND terminal_at IS NULL
+            "#,
+        )
+        .bind(&run.tenant_id)
+        .bind(&run.run_id)
+        .bind(run.version)
+        .bind(payload.schema_version)
+        .bind(&payload.value)
+        .bind(&payload.digest)
+        .bind(database_now)
+        .execute(&mut **transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(RepositoryError::Conflict(
+                "Capability external leaf claim permit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn insert_capability_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    prepared: &insight_platform_invocations::PreparedCapabilityDispatch,
+) -> Result<(), RepositoryError> {
+    let payload = TypedPayload::from_versioned(1, &prepared.job_payload, 1_048_576)?;
+    sqlx::query(
+        r#"
+        WITH job_creation_time AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+            INSERT INTO insight_platform.jobs (
+                tenant_id, job_id, job_kind, work_class, owner_kind, owner_id, invocation_id, run_id, node_id, state, version, attempt_no, attempt_limit, lease_epoch, scheduled_at, deadline, priority, request_digest, effect_key_digest, payload_schema_version, payload, payload_digest, created_at, updated_at, trace_id, scheduler_partition_id, execution_requirement_version, execution_requirement, execution_requirement_digest
+            ) VALUES (
+                $1, $2, 'capability_invocation', $3, 'capability_invocation', $4, $4, $5, $6, 'ready', 1, 0, $7, 0, $8, $9, 0, $10, $11, $12, $13, $14, (SELECT observed_at FROM job_creation_time), GREATEST($15::timestamptz, (SELECT observed_at FROM job_creation_time)), (SELECT trace_id FROM insight_platform.runs WHERE tenant_id = $1 AND run_id = $5), (SELECT scheduler_partition_id FROM insight_platform.tenants WHERE tenant_id=$1), (SELECT execution_requirement_version FROM insight_platform.runs WHERE tenant_id=$1 AND run_id=$5), (SELECT execution_requirement FROM insight_platform.runs WHERE tenant_id=$1 AND run_id=$5), (SELECT execution_requirement_digest FROM insight_platform.runs WHERE tenant_id=$1 AND run_id=$5)
+            )
+        "#,
+    )
+    .bind(prepared.job.tenant_id.to_string())
+    .bind(prepared.job.job_id.to_string())
+    .bind(prepared.job.work_class.as_str())
+    .bind(prepared.invocation.invocation_id.to_string())
+    .bind(prepared.invocation.run_id.to_string())
+    .bind(prepared.invocation.node_execution_id.to_string())
+    .bind(i32::try_from(prepared.job.attempt_limit).map_err(|_| {
+        RepositoryError::InvalidInput("Capability attempt limit exceeds integer".to_owned())
+    })?)
+    .bind(prepared.job.scheduled_at)
+    .bind(prepared.job.deadline)
+    .bind(prepared.job_payload.binding.admission_digest.to_string())
+    .bind(prepared.job_payload.binding.effect_key_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(prepared.invocation.updated_at)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn update_capability_invocation(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &insight_platform_invocations::CapabilityInvocationRecord,
+    next: &insight_platform_invocations::CapabilityInvocationRecord,
+) -> Result<(), RepositoryError> {
+    next.validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let payload = TypedPayload::from_versioned(1, &next.payload, 1_048_576)?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE insight_platform.invocations
+        SET state = $4, version = $5, output_value_id = $6,
+            payload_schema_version = $7, payload = $8, payload_digest = $9,
+            retry_at = $10, started_at = $11, terminal_at = $12, updated_at = $13
+        WHERE tenant_id = $1 AND invocation_id = $2 AND version = $3
+        RETURNING invocation_id
+        "#,
+    )
+    .bind(next.tenant_id.to_string())
+    .bind(next.invocation_id.to_string())
+    .bind(as_i64(current.version, "Invocation version")?)
+    .bind(next.state.as_str())
+    .bind(as_i64(next.version, "Invocation version")?)
+    .bind(next.output_value_id.as_ref().map(ToString::to_string))
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(next.retry_at)
+    .bind(next.started_at)
+    .bind(next.terminal_at)
+    .bind(next.updated_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if updated.is_none() {
+        return Err(RepositoryError::Conflict("CapabilityInvocation"));
+    }
+    Ok(())
+}
+
+async fn update_started_capability_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &JobRecord,
+    next: &insight_platform_jobs::JobProjection,
+    next_payload: &CapabilityJobPayload,
+    quota_reservation_id: &ResourceId,
+    database_now: DateTime<Utc>,
+    worker_build_digest: &Sha256Digest,
+) -> Result<JobRecord, RepositoryError> {
+    let lease = next.lease.as_ref().ok_or_else(|| {
+        RepositoryError::CorruptRow("started Capability Job has no lease".to_owned())
+    })?;
+    let payload = TypedPayload::from_versioned(1, next_payload, 1_048_576)?;
+    let row = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = 'running', version = $4, attempt_no = $5, lease_epoch = $6,
+            worker_id = $7, lease_token_digest = $8, lease_expires_at = $9,
+            heartbeat_at = $10, retry_at = NULL, started_at = COALESCE(started_at, $10),
+            quota_reservation_id = $11, payload_schema_version = $12, payload = $13,
+            payload_digest = $14, updated_at = $10, attempt_build_digest = $15
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+          AND state IN ('ready', 'retry_scheduled') AND worker_id IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(&current.tenant_id)
+    .bind(&current.job_id)
+    .bind(current.version)
+    .bind(as_i64(next.version, "Job version")?)
+    .bind(i32::try_from(next.attempt_count).map_err(|_| {
+        RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+    })?)
+    .bind(as_i64(next.lease_generation, "Job lease generation")?)
+    .bind(lease.worker_process_generation_id.to_string())
+    .bind(lease.token_digest.to_string())
+    .bind(lease.expires_at)
+    .bind(database_now)
+    .bind(quota_reservation_id.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(worker_build_digest.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability Job claim"))?;
+    job_from_row(row)
+}
+
+pub(crate) async fn load_capability_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &ResourceId,
+    job_id: &ResourceId,
+    for_update: bool,
+) -> Result<JobRecord, RepositoryError> {
+    let query = if for_update {
+        "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2 FOR UPDATE"
+    } else {
+        "SELECT * FROM insight_platform.jobs WHERE tenant_id = $1 AND job_id = $2"
+    };
+    let row = sqlx::query(query)
+        .bind(tenant_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RepositoryError::NotFound("Capability Job"))?;
+    let record = crate::repository::persisted_job_from_row(row)?;
+    if !matches!(
+        record.work_class.as_str(),
+        "capability_native" | "capability_remote"
+    ) || record.owner_kind != "capability_invocation"
+    {
+        return Err(RepositoryError::CorruptRow(
+            "Job is not a Capability Job".to_owned(),
+        ));
+    }
+    Ok(record)
+}
+
+pub(crate) async fn update_capability_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &JobRecord,
+    next: &insight_platform_jobs::JobProjection,
+    next_payload: &CapabilityJobPayload,
+    database_now: DateTime<Utc>,
+) -> Result<JobRecord, RepositoryError> {
+    let payload = TypedPayload::from_versioned(1, next_payload, 1_048_576)?;
+    let (worker_id, lease_token_digest, lease_expires_at, heartbeat_at) = next
+        .lease
+        .as_ref()
+        .map(|lease| {
+            (
+                Some(lease.worker_process_generation_id.to_string()),
+                Some(lease.token_digest.to_string()),
+                Some(lease.expires_at),
+                Some(lease.heartbeat_at),
+            )
+        })
+        .unwrap_or((None, None, None, None));
+    let (wake_kind, wake_state, wake_generation) = next
+        .wake
+        .as_ref()
+        .map(|wake| {
+            (
+                Some(wake.kind.as_str()),
+                Some("pending"),
+                as_i64(wake.generation, "Job wake generation"),
+            )
+        })
+        .transpose_tuple()?;
+    let terminal = matches!(
+        next.state,
+        JobState::Succeeded | JobState::Failed | JobState::Cancelled | JobState::TimedOut
+    );
+    let quota_reservation_id = if next.lease.is_some() {
+        Some(current.quota_reservation_id.as_deref().ok_or_else(|| {
+            RepositoryError::CorruptRow("leased Capability Job has no quota reservation".to_owned())
+        })?)
+    } else {
+        None
+    };
+    let row = sqlx::query(
+        r#"
+        UPDATE insight_platform.jobs
+        SET state = $4, version = $5, attempt_no = $6, lease_epoch = $7,
+            worker_id = $8, lease_token_digest = $9, lease_expires_at = $10,
+            heartbeat_at = $11, scheduled_at = $12, retry_at = $13,
+            wake_kind = $14, wake_state = $15, wake_generation = $16,
+            result_digest = $17, payload_schema_version = $18, payload = $19,
+            payload_digest = $20, terminal_at = $21, updated_at = $22,
+            quota_reservation_id = $23
+        WHERE tenant_id = $1 AND job_id = $2 AND version = $3
+        RETURNING *
+        "#,
+    )
+    .bind(&current.tenant_id)
+    .bind(&current.job_id)
+    .bind(current.version)
+    .bind(next.state.as_str())
+    .bind(as_i64(next.version, "Job version")?)
+    .bind(i32::try_from(next.attempt_count).map_err(|_| {
+        RepositoryError::InvalidInput("Job attempt count exceeds integer".to_owned())
+    })?)
+    .bind(as_i64(next.lease_generation, "Job lease generation")?)
+    .bind(worker_id)
+    .bind(lease_token_digest)
+    .bind(lease_expires_at)
+    .bind(heartbeat_at)
+    .bind(next.scheduled_at)
+    .bind(next.retry_at)
+    .bind(wake_kind)
+    .bind(wake_state)
+    .bind(wake_generation)
+    .bind(terminal.then_some(payload.digest.clone()))
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(terminal.then_some(database_now))
+    .bind(database_now)
+    .bind(quota_reservation_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RepositoryError::Conflict("Capability Job"))?;
+    job_from_row(row)
+}
+
+trait TransposeWakeTuple {
+    fn transpose_tuple(
+        self,
+    ) -> Result<(Option<&'static str>, Option<&'static str>, i64), RepositoryError>;
+}
+
+impl TransposeWakeTuple
+    for Option<(
+        Option<&'static str>,
+        Option<&'static str>,
+        Result<i64, RepositoryError>,
+    )>
+{
+    fn transpose_tuple(
+        self,
+    ) -> Result<(Option<&'static str>, Option<&'static str>, i64), RepositoryError> {
+        match self {
+            Some((kind, state, generation)) => Ok((kind, state, generation?)),
+            None => Ok((None, None, 0)),
+        }
+    }
+}
+
+pub(crate) async fn insert_capability_value_and_reference(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    output: &insight_platform_invocations::CapabilityOutputValue,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    if let ValueRef::Artifact { artifact } = &output.value {
+        require_ready_run_artifact(transaction, &invocation.tenant_id, artifact).await?;
+    }
+    let (inline_value, artifact_id) = match &output.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id, created_at
+        ) VALUES ($1, $2, $3, $4, 'capability_output', $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(output.value_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(output.classification.as_str())
+    .bind(output.schema_digest.to_string())
+    .bind(output.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+
+    let ValueRef::Artifact { artifact } = &output.value else {
+        return Ok(());
+    };
+    let link_id = output.artifact_link_id.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput("Capability Artifact output has no link identity".to_owned())
+    })?;
+    let snapshot = ArtifactReferenceSnapshot {
+        schema_version: 1,
+        artifact_id: artifact.artifact_id().clone(),
+        owner_id: invocation.invocation_id.clone(),
+        reference_kind: ArtifactReferenceKind::Output,
+        purpose: ArtifactPurpose::CapabilityOutput,
+        created_by: invocation.payload.admission.principal.principal_id.clone(),
+    };
+    let payload = TypedPayload::from_versioned(1, &snapshot, 262_144)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_links (
+            tenant_id, artifact_link_id, link_kind, owner_kind, owner_id,
+            target_artifact_id, link_key_digest, state, payload_schema_version,
+            payload, payload_digest, created_at, updated_at
+        ) VALUES ($1, $2, 'reference', 'capability_invocation', $3, $4, $5,
+                  'active', $6, $7, $8, $9, $9)
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(link_id.to_string())
+    .bind(invocation.invocation_id.to_string())
+    .bind(artifact.artifact_id().to_string())
+    .bind(
+        snapshot
+            .link_key_digest()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .to_string(),
+    )
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_capability_input_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    job: &insight_platform_jobs::JobProjection,
+    request: &insight_platform_invocations::BackendInputRequest,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let definition = TaskDefinition::CapabilityInput {
+        owner_version: invocation.version,
+        owner_snapshot_digest: invocation.payload.admission.canonical_digest.clone(),
+        job_id: job.job_id.clone(),
+        wake_generation: job.lease_generation,
+        opaque_state_digest: request.opaque_state_digest.clone(),
+        interaction_kind: request.interaction_kind,
+        response_schema: request.response_schema.clone(),
+        eligible_principal_rule_digest: request.eligible_principal_rule_digest.clone(),
+        exact_eligible_principal_id: request.exact_eligible_principal_id.clone(),
+        safe_prompt_key: request.safe_prompt_key.clone(),
+    };
+    let task_kind = definition.task_kind();
+    let task = TaskPayload {
+        response_schema: None,
+        eligibility_rule: None,
+        definition,
+        created_by: invocation.payload.admission.principal.clone(),
+        resolution: None,
+    };
+    task.validate()
+        .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?;
+    let payload = TypedPayload::new(2, &task)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.tasks (
+            tenant_id, task_id, task_kind, owner_kind, owner_id, run_id, node_id,
+            invocation_id, state, generation, version, response_schema_digest,
+            principal_snapshot_schema_version, payload_schema_version, payload,
+            payload_digest, deadline, created_at, updated_at, trace_id
+        ) VALUES ($1, $2, $3, 'capability_invocation', $4, $5, $6, $4,
+                  'pending', 1, 1, $7, 1, $8, $9, $10, $11, $12, $12,
+                  (SELECT trace_id FROM insight_platform.invocations
+                   WHERE tenant_id = $1 AND invocation_id = $4))
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(request.input_task_id.to_string())
+    .bind(task_kind.as_str())
+    .bind(invocation.invocation_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(request.response_schema_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(request.deadline)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn require_exact_capability_input_task(
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    job: &insight_platform_jobs::JobProjection,
+    job_payload: &CapabilityJobPayload,
+    task: &TaskRecord,
+    command: &ResolveCapabilityInput,
+) -> Result<(), RepositoryError> {
+    job_payload
+        .validate_for(invocation, job)
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    let request = job_payload.input_request.as_ref().ok_or_else(|| {
+        RepositoryError::CorruptRow("Capability input Job has no request binding".to_owned())
+    })?;
+    let projection = task_projection(task)?;
+    let TaskDefinition::CapabilityInput {
+        owner_version,
+        owner_snapshot_digest,
+        job_id,
+        wake_generation,
+        opaque_state_digest,
+        interaction_kind,
+        response_schema,
+        eligible_principal_rule_digest,
+        exact_eligible_principal_id,
+        safe_prompt_key,
+    } = &projection.payload.definition
+    else {
+        return Err(RepositoryError::CorruptRow(
+            "Capability input Task has the wrong definition".to_owned(),
+        ));
+    };
+    if task.owner_kind != "capability_invocation"
+        || task.owner_id != invocation.invocation_id.to_string()
+        || task.invocation_id.as_deref() != Some(invocation.invocation_id.to_string().as_str())
+        || task.run_id.as_deref() != Some(invocation.run_id.to_string().as_str())
+        || task.node_id.as_deref() != Some(invocation.node_execution_id.to_string().as_str())
+        || projection.state != TaskState::Pending
+        || projection.generation != command.expected_task_generation
+        || projection.version != command.expected_task_version
+        || projection.response_schema_digest.as_ref() != Some(&request.response_schema_digest)
+        || projection.deadline != request.deadline
+        || projection.payload.created_by != invocation.payload.admission.principal
+        || *owner_version != invocation.version
+        || owner_snapshot_digest != &invocation.payload.admission.canonical_digest
+        || job_id != &job.job_id
+        || *wake_generation != request.wake_generation
+        || *wake_generation != command.expected_wake_generation
+        || opaque_state_digest != &request.opaque_state_digest
+        || *interaction_kind != request.interaction_kind
+        || response_schema != &request.response_schema
+        || response_schema.canonical_digest != request.response_schema_digest
+        || exact_eligible_principal_id != &request.exact_eligible_principal_id
+        || exact_eligible_principal_id
+            .as_ref()
+            .is_some_and(|principal_id| principal_id != &command.audit.principal_id)
+        || eligible_principal_rule_digest != &request.eligible_principal_rule_digest
+        || eligible_principal_rule_digest != &command.eligible_principal_rule_digest
+        || safe_prompt_key != &request.safe_prompt_key
+    {
+        return Err(RepositoryError::Conflict("Capability input Task binding"));
+    }
+    Ok(())
+}
+
+fn require_exact_detached_capability_input_task(
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    job: &insight_platform_jobs::JobProjection,
+    task: &TaskRecord,
+    command: &ResolveCapabilityInput,
+) -> Result<(), RepositoryError> {
+    let Some(CapabilityDetachedPending::InputRequired {
+        request,
+        resolution: None,
+        ..
+    }) = &invocation.payload.detached_pending
+    else {
+        return Err(RepositoryError::Conflict(
+            "Managed MCP input continuation is not pending",
+        ));
+    };
+    let projection = task_projection(task)?;
+    let TaskDefinition::CapabilityInput {
+        owner_version,
+        owner_snapshot_digest,
+        job_id,
+        wake_generation,
+        opaque_state_digest,
+        interaction_kind,
+        response_schema,
+        eligible_principal_rule_digest,
+        exact_eligible_principal_id,
+        safe_prompt_key,
+    } = &projection.payload.definition
+    else {
+        return Err(RepositoryError::CorruptRow(
+            "Managed MCP input Task has the wrong definition".to_owned(),
+        ));
+    };
+    if job.state != JobState::Succeeded
+        || job.lease.is_some()
+        || job.work_class != WorkClass::Sandbox
+        || task.owner_kind != "capability_invocation"
+        || task.owner_id != invocation.invocation_id.to_string()
+        || task.invocation_id.as_deref() != Some(invocation.invocation_id.to_string().as_str())
+        || task.run_id.as_deref() != Some(invocation.run_id.to_string().as_str())
+        || task.node_id.as_deref() != Some(invocation.node_execution_id.to_string().as_str())
+        || projection.state != TaskState::Pending
+        || projection.generation != command.expected_task_generation
+        || projection.version != command.expected_task_version
+        || projection.response_schema_digest.as_ref() != Some(&request.response_schema_digest)
+        || projection.deadline != request.deadline
+        || projection.payload.created_by != invocation.payload.admission.principal
+        || *owner_version != invocation.version
+        || owner_snapshot_digest != &invocation.payload.admission.canonical_digest
+        || job_id != &job.job_id
+        || *wake_generation != job.lease_generation
+        || *wake_generation != command.expected_wake_generation
+        || opaque_state_digest != &request.opaque_state_digest
+        || *interaction_kind != request.interaction_kind
+        || response_schema != &request.response_schema
+        || response_schema.canonical_digest != request.response_schema_digest
+        || exact_eligible_principal_id != &request.exact_eligible_principal_id
+        || exact_eligible_principal_id
+            .as_ref()
+            .is_some_and(|principal_id| principal_id != &command.audit.principal_id)
+        || eligible_principal_rule_digest != &request.eligible_principal_rule_digest
+        || eligible_principal_rule_digest != &command.eligible_principal_rule_digest
+        || safe_prompt_key != &request.safe_prompt_key
+    {
+        return Err(RepositoryError::Conflict("Managed MCP input Task binding"));
+    }
+    Ok(())
+}
+
+async fn update_capability_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &TaskRecord,
+    next: &insight_platform_tasks::TaskProjection,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let payload = TypedPayload::new(2, &next.payload)?;
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.tasks
+        SET state = $4, version = $5, payload_schema_version = $6,
+            payload = $7, payload_digest = $8, response_value_id = $9,
+            responded_at = $10, updated_at = $10
+        WHERE tenant_id = $1 AND task_id = $2 AND version = $3
+          AND generation = $11 AND state = 'pending' AND responded_at IS NULL
+        "#,
+    )
+    .bind(&current.tenant_id)
+    .bind(&current.task_id)
+    .bind(current.version)
+    .bind(next.state.as_str())
+    .bind(as_i64(next.version, "Task version")?)
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(next.response_value_id.as_ref().map(ToString::to_string))
+    .bind(database_now)
+    .bind(as_i64(next.generation, "Task generation")?)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("Capability input Task"));
+    }
+    Ok(())
+}
+
+async fn cancel_capability_task(
+    transaction: &mut Transaction<'_, Postgres>,
+    current: &TaskRecord,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    let projection = task_projection(current)?;
+    if projection.state != TaskState::Pending {
+        return Err(RepositoryError::Conflict("Capability Task first-winner"));
+    }
+    let next = decide_task_resolution(
+        &projection,
+        ResolveTask {
+            expected_generation: projection.generation,
+            expected_version: projection.version,
+            target: TaskState::Cancelled,
+            principal: None,
+            response_value_id: None,
+            response_schema_digest: None,
+        },
+        database_now,
+    )?;
+    update_capability_task(transaction, current, &next, database_now).await
+}
+
+async fn insert_capability_input_response_value(
+    transaction: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    response: &insight_platform_invocations::CapabilityInputResponse,
+    database_now: DateTime<Utc>,
+) -> Result<(), RepositoryError> {
+    if let ValueRef::Artifact { artifact } = &response.value {
+        require_ready_run_artifact(transaction, &invocation.tenant_id, artifact).await?;
+    }
+    let (inline_value, artifact_id) = match &response.value {
+        ValueRef::Inline { value } => (Some(value), None),
+        ValueRef::Artifact { artifact } => (None, Some(artifact.artifact_id().to_string())),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.run_values (
+            tenant_id, value_id, run_id, node_id, value_kind, classification,
+            schema_digest, content_digest, inline_value, artifact_id, created_at
+        ) VALUES ($1, $2, $3, $4, 'capability_input_response', $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(response.value_id.to_string())
+    .bind(invocation.run_id.to_string())
+    .bind(invocation.node_execution_id.to_string())
+    .bind(response.classification.as_str())
+    .bind(response.schema_digest.to_string())
+    .bind(response.content_digest.to_string())
+    .bind(inline_value)
+    .bind(artifact_id)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+
+    let ValueRef::Artifact { artifact } = &response.value else {
+        return Ok(());
+    };
+    let link_id = response.artifact_link_id.as_ref().ok_or_else(|| {
+        RepositoryError::InvalidInput(
+            "Capability input response Artifact has no link identity".to_owned(),
+        )
+    })?;
+    let snapshot = ArtifactReferenceSnapshot {
+        schema_version: 1,
+        artifact_id: artifact.artifact_id().clone(),
+        owner_id: invocation.invocation_id.clone(),
+        reference_kind: ArtifactReferenceKind::Input,
+        purpose: ArtifactPurpose::CapabilityInput,
+        created_by: invocation.payload.admission.principal.principal_id.clone(),
+    };
+    let payload = TypedPayload::from_versioned(1, &snapshot, 262_144)?;
+    sqlx::query(
+        r#"
+        INSERT INTO insight_platform.artifact_links (
+            tenant_id, artifact_link_id, link_kind, owner_kind, owner_id,
+            target_artifact_id, link_key_digest, state, payload_schema_version,
+            payload, payload_digest, created_at, updated_at
+        ) VALUES ($1, $2, 'reference', 'capability_invocation', $3, $4, $5,
+                  'active', $6, $7, $8, $9, $9)
+        "#,
+    )
+    .bind(invocation.tenant_id.to_string())
+    .bind(link_id.to_string())
+    .bind(invocation.invocation_id.to_string())
+    .bind(artifact.artifact_id().to_string())
+    .bind(
+        snapshot
+            .link_key_digest()
+            .map_err(|failure| RepositoryError::InvalidInput(failure.to_string()))?
+            .to_string(),
+    )
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(database_now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn claim_capability_worker_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CapabilityWorkerAudit,
+    job_id: &ResourceId,
+    operation: &str,
+    payload: &TypedPayload,
+) -> Result<bool, RepositoryError> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+            payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'job_commit', 'job', $3, $4, $5, $6, $7,
+                  'processing', $8, $9, $10, $11)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(job_id.to_string())
+    .bind(audit.worker_process_generation_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'job_commit'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $3
+          AND operation = $4 AND idempotency_key_digest = $5
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .bind(audit.worker_process_generation_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != audit.request_digest.to_string()
+        || row.try_get::<String, _>("payload_digest")? != payload.digest
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Capability worker receipt"));
+    }
+    Ok(true)
+}
+
+async fn terminalize_capability_worker_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CapabilityWorkerAudit,
+    job_id: &ResourceId,
+    disposition: &str,
+    response_reference_id: &ResourceId,
+) -> Result<(), RepositoryError> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND scope_id = $6 AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(disposition)
+    .bind(response_reference_id.to_string())
+    .bind(job_id.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("Capability worker receipt"));
+    }
+    Ok(())
+}
+
+async fn claim_capability_signal_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CapabilitySignalAudit,
+    job_id: &ResourceId,
+    operation: &str,
+    payload: &TypedPayload,
+) -> Result<bool, RepositoryError> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO insight_platform.receipts (
+            tenant_id, receipt_id, receipt_kind, scope_kind, scope_id,
+            dedupe_owner_id, operation, idempotency_key_digest, request_digest, state,
+            payload_schema_version, payload, payload_digest, expires_at
+        ) VALUES ($1, $2, 'callback', 'job', $3, $3, $4, $5, $6,
+                  'processing', $7, $8, $9, $10)
+        ON CONFLICT (
+            tenant_id, receipt_kind, scope_kind, scope_id, dedupe_owner_id,
+            operation, idempotency_key_digest
+        ) DO NOTHING
+        RETURNING receipt_id
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(job_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(payload.schema_version)
+    .bind(&payload.value)
+    .bind(&payload.digest)
+    .bind(audit.receipt_expires_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if inserted.is_some() {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT request_digest, state, payload_digest
+        FROM insight_platform.receipts
+        WHERE tenant_id = $1 AND receipt_kind = 'callback'
+          AND scope_kind = 'job' AND scope_id = $2 AND dedupe_owner_id = $2
+          AND operation = $3 AND idempotency_key_digest = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(job_id.to_string())
+    .bind(operation)
+    .bind(audit.idempotency_key_digest.to_string())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if row.try_get::<String, _>("request_digest")? != audit.request_digest.to_string()
+        || row.try_get::<String, _>("payload_digest")? != payload.digest
+    {
+        return Err(RepositoryError::IdempotencyConflict);
+    }
+    if row.try_get::<String, _>("state")? != "succeeded" {
+        return Err(RepositoryError::Conflict("Capability signal receipt"));
+    }
+    Ok(true)
+}
+
+async fn terminalize_capability_signal_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    audit: &CapabilitySignalAudit,
+    job_id: &ResourceId,
+    disposition: &str,
+    response_reference_id: &ResourceId,
+) -> Result<(), RepositoryError> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE insight_platform.receipts
+        SET state = 'succeeded', disposition = $4, response_reference_id = $5,
+            completed_at = clock_timestamp()
+        WHERE tenant_id = $1 AND receipt_id = $2 AND request_digest = $3
+          AND scope_id = $6 AND state = 'processing'
+        "#,
+    )
+    .bind(audit.tenant_id.to_string())
+    .bind(audit.receipt_id.to_string())
+    .bind(audit.request_digest.to_string())
+    .bind(disposition)
+    .bind(response_reference_id.to_string())
+    .bind(job_id.to_string())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepositoryError::Conflict("Capability signal receipt"));
+    }
+    Ok(())
+}
+
+async fn database_now(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<DateTime<Utc>, RepositoryError> {
+    Ok(sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await?)
+}
+
+fn as_i64(value: u64, kind: &str) -> Result<i64, RepositoryError> {
+    i64::try_from(value)
+        .map_err(|_| RepositoryError::InvalidInput(format!("{kind} exceeds bigint")))
+}
+
+fn parse_required_id(
+    value: Option<&str>,
+    expected_kind: ResourceKind,
+    label: &str,
+) -> Result<ResourceId, RepositoryError> {
+    let value = value.ok_or_else(|| RepositoryError::CorruptRow(format!("{label} is missing")))?;
+    let id = value
+        .parse::<ResourceId>()
+        .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+    if id.kind() != expected_kind {
+        return Err(RepositoryError::CorruptRow(format!(
+            "{label} has the wrong resource kind"
+        )));
+    }
+    Ok(id)
+}
+
+/// Existing Run control is the restricted authority for an admitted Invocation. No new effect,
+/// principal impersonation or Receipt is introduced by this bounded recovery step.
+#[allow(clippy::too_many_arguments)]
+/// The loader only SELECTs and classifies the existing Job, including its owning payload.
+/// Never extend this boundary across quota accounting or a generated control decision.
+async fn load_capability_run_control_job(
+    tx: &mut Transaction<'_, Postgres>,
+    invocation: &insight_platform_invocations::CapabilityInvocationRecord,
+    lock: CapabilityOwnerJobLock,
+) -> Result<Option<(JobRecord, CapabilityOwnerJobKind)>, RepositoryError> {
+    let Some(job_id) = invocation.payload.current_job_id.as_ref() else {
+        return Ok(None);
+    };
+    crate::recovery_isolation::addressed(
+        load_capability_owner_job(tx, invocation, job_id, lock).await,
+        &invocation.tenant_id,
+        job_id,
+        insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+    )
+    .map(Some)
+}
+
+pub(crate) async fn converge_capability_for_run(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &ResourceId,
+    run_id: &ResourceId,
+    invocation_id: &ResourceId,
+    observed_run_version: i64,
+    slot: &insight_platform_orchestrator::store::OrchestrationConvergenceSlot,
+) -> Result<Option<(insight_platform_orchestrator::store::RunRecord, String)>, RepositoryError> {
+    let observed = load_capability_invocation(tx, tenant, invocation_id, false).await?;
+    if observed.terminal_at.is_some()
+        || matches!(
+            observed.state,
+            InvocationState::Cancelling | InvocationState::ReconciliationRequired
+        )
+    {
+        return Ok(None);
+    }
+    let observed_job =
+        load_capability_run_control_job(tx, &observed, CapabilityOwnerJobLock::None).await?;
+    let quota = match observed_job.as_ref() {
+        Some((job, CapabilityOwnerJobKind::Capability)) if job.quota_reservation_id.is_some() => {
+            Some(lock_capability_quota_bundle(tx, job).await?)
+        }
+        _ => None,
+    };
+    let run = load_run_for_update(tx, tenant, run_id).await?;
+    if run.version != observed_run_version
+        || run.state != "cancelling"
+        || run.terminal_at.is_some()
+        || (run.current.control.cancel_requested_at.is_none()
+            && run.current.control.timeout_requested_at.is_none()
+            && run.current.failure.is_none())
+    {
+        return Ok(None);
+    }
+    if observed.run_id != *run_id || observed.tenant_id != *tenant {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Run control owner".into(),
+        ));
+    }
+    let node = crate::recovery_isolation::addressed(
+        load_capability_node_for_update(tx, tenant, &observed.node_execution_id).await,
+        tenant,
+        &observed.node_execution_id,
+        insight_platform_jobs::store::SafetyScanPhase::OwnerDecode,
+    )?;
+    if node.run_id != run.run_id {
+        return Err(RepositoryError::CorruptRow(
+            "Capability Run control Node".into(),
+        ));
+    }
+    let current = load_capability_invocation(tx, tenant, invocation_id, true).await?;
+    if current.version != observed.version || current.payload != observed.payload {
+        return Ok(None);
+    }
+    let current_job =
+        load_capability_run_control_job(tx, &current, CapabilityOwnerJobLock::Update).await?;
+    if let (Some((old, old_kind)), Some((new, new_kind))) = (&observed_job, &current_job) {
+        if old.version != new.version
+            || old.payload.digest != new.payload.digest
+            || old.quota_reservation_id != new.quota_reservation_id
+            || old_kind != new_kind
+        {
+            return Ok(None);
+        }
+    }
+    let now = database_now(tx).await?;
+    let kind = if (run.current.control.timeout_requested_at.is_some() || run.deadline <= now)
+        && current.deadline <= now
+    {
+        CapabilityControlKind::Timeout
+    } else {
+        CapabilityControlKind::Cancel
+    };
+    let evidence = TypedPayload::new(
+        1,
+        &serde_json::json!({"run_id":run_id,"run_version":run.version,
+        "cancel_generation":run.cancel_generation,"timeout_generation":run.timeout_generation,"invocation_id":invocation_id,"control":kind}),
+    )?;
+    let mut release = false;
+    let next_invocation = if let Some((job, CapabilityOwnerJobKind::DetachedSandbox(source_kind))) =
+        &current_job
+    {
+        let projection = job_projection(job)?;
+        let next = decide_detached_job_control(&current, *source_kind, &projection, kind, now)?;
+        let payload: SandboxDispatcherJobPayloadV1 =
+            decode_versioned_payload(&job.payload, "Sandbox control Job")?;
+        let payload = payload.request_control(
+            match kind {
+                CapabilityControlKind::Cancel => SandboxControlKindV1::Cancel,
+                CapabilityControlKind::Timeout => SandboxControlKindV1::Timeout,
+            },
+            now,
+            next.version,
+        )?;
+        let next_job = decide_owner_cancelling(&projection)
+            .map_err(|_| RepositoryError::Conflict("Sandbox Run control Job"))?;
+        update_opensandbox_job(
+            tx,
+            job,
+            &next_job,
+            &payload,
+            now,
+            job.result_digest.as_deref(),
+            job.quota_reservation_id.as_deref(),
+        )
+        .await?;
+        append_scheduler_event(
+            tx,
+            &run.tenant_id,
+            &slot.job_event_id,
+            &slot.job_outbox_id,
+            "job",
+            &job.job_id,
+            as_i64(next_job.version, "Sandbox control version")?,
+            Some(&run.run_id),
+            "job.sandbox_control_requested",
+            &evidence,
+        )
+        .await?;
+        next
+    } else {
+        let job = current_job.as_ref().map(|(job, _)| job);
+        let projection = job.map(job_projection).transpose()?;
+        let payload = job
+            .map(|job| {
+                decode_versioned_payload::<CapabilityJobPayload>(
+                    &job.payload,
+                    "Capability control Job",
+                )
+            })
+            .transpose()?;
+        let decision = decide_control(&current, projection.as_ref(), payload.as_ref(), kind, now)?;
+        release = quota.is_some()
+            && decision
+                .job
+                .as_ref()
+                .is_some_and(|next| next.lease.is_none());
+        if release {
+            settle_capability_quota(
+                tx,
+                job.ok_or_else(|| RepositoryError::CorruptRow("Capability quota owner".into()))?,
+                quota.as_deref().unwrap_or_default(),
+                &slot.quota_entry_ids[..CAPABILITY_QUOTA_LINES],
+                &evidence
+                    .digest
+                    .parse::<Sha256Digest>()
+                    .map_err(|e| RepositoryError::CorruptRow(e.to_string()))?,
+            )
+            .await?;
+        }
+        let task_id = current
+            .payload
+            .input_task_id
+            .as_ref()
+            .or(current.payload.approval_task_id.as_ref());
+        if let Some(task_id) = task_id {
+            let task = load_task_for_update(tx, tenant, task_id).await?;
+            if task.state == TaskState::Pending {
+                cancel_capability_task(tx, &task, now).await?;
+                append_scheduler_event(
+                    tx,
+                    &run.tenant_id,
+                    &slot.node_cancelling_event_id,
+                    &slot.node_cancelling_outbox_id,
+                    "interaction",
+                    &task.task_id,
+                    task.version + 1,
+                    Some(&run.run_id),
+                    "interaction.cancelled_by_run",
+                    &evidence,
+                )
+                .await?;
+            }
+        }
+        if let (Some(job), Some(next), Some(payload)) = (job, &decision.job, &decision.job_payload)
+        {
+            update_capability_job(tx, job, next, payload, now).await?;
+            append_scheduler_event(
+                tx,
+                &run.tenant_id,
+                &slot.job_event_id,
+                &slot.job_outbox_id,
+                "job",
+                &job.job_id,
+                as_i64(next.version, "Capability control Job version")?,
+                Some(&run.run_id),
+                "job.capability_controlled",
+                &evidence,
+            )
+            .await?;
+        }
+        decision.invocation
+    };
+    update_capability_invocation(tx, &current, &next_invocation).await?;
+    if release && node.state == insight_platform_contracts::NodeExecutionState::Waiting {
+        crate::recovery_isolation::produced(
+            release_capability_plan_leaf_permit(tx, &next_invocation, now).await,
+        )?;
+    }
+    let run = crate::recovery_isolation::produced(load_run_for_update(tx, tenant, run_id).await)?;
+    append_scheduler_event(
+        tx,
+        &run.tenant_id,
+        &slot.node_event_id,
+        &slot.node_outbox_id,
+        "capability_invocation",
+        &invocation_id.to_string(),
+        as_i64(next_invocation.version, "Capability control version")?,
+        Some(&run.run_id),
+        "capability.run_controlled",
+        &evidence,
+    )
+    .await?;
+    if release {
+        append_scheduler_event(
+            tx,
+            &run.tenant_id,
+            &slot.run_event_id,
+            &slot.run_outbox_id,
+            "run",
+            &run.run_id,
+            run.version,
+            Some(&run.run_id),
+            "run.capability_permit_settled",
+            &evidence,
+        )
+        .await?;
+    }
+    Ok(Some((run, next_invocation.state.as_str().to_owned())))
+}

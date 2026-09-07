@@ -146,7 +146,7 @@ jobs:
           assets="$RUNNER_TEMP/signed-release-candidate"
           closure="$RUNNER_TEMP/productization-release-candidate.json"
           console_assets="$RUNNER_TEMP/productization-candidate-console"
-          python3 scripts/prepare-productization-release-candidate.py \
+          python3 tools/release/prepare-productization-release-candidate.py \
             --assets "$assets" --repository "$GITHUB_REPOSITORY" \
             --release-tag "$RELEASE_TAG" --revision "$GITHUB_SHA" \
             --platform linux/amd64 --console-output "$console_assets" --output "$closure"
@@ -216,7 +216,7 @@ jobs:
           docker cp "$console_container:/console/." "$RUNNER_TEMP/productization-console-image"
           docker rm "$console_container" >/dev/null
           trap - EXIT INT TERM
-          python3 scripts/verify-productization-console-image.py \
+          python3 tools/checks/verify-productization-console-image.py \
             --candidate-closure "$closure" --archive-directory "$console_assets" \
             --image-directory "$RUNNER_TEMP/productization-console-image"
 
@@ -226,6 +226,9 @@ jobs:
             echo "PRODUCTIZATION_RELEASE_CANDIDATE_CONSOLE=$console_assets"
             echo "PRODUCTIZATION_RELEASE_CANDIDATE_BINARY=$candidate_binary"
           } >> "$GITHUB_ENV"
+      - name: Build owning Kind deployment verifier
+        if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
+        run: cargo build --locked -p insight-platform-contract-tooling --bin platform-qualification
       - name: Build current-SHA Kind images and complete non-Sandbox seed
         if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'source' && (env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox') }}
         run: |
@@ -243,7 +246,7 @@ jobs:
           runner_identity="$RUNNER_TEMP/productization-sandbox-runner.identity.json"
           package_identity="$RUNNER_TEMP/productization-sandbox-package.identity.json"
           cargo build --locked -p insight-cli --bin insight
-          cargo build --locked --release -p insight-platform-postgres --bin platform-schema
+          cargo build --locked --release -p insight-platform-storage-tooling --bin platform-schema --bin platform-database-role -p insight-platform-outbox-worker --bin platform-jetstream-provision
           for target in runtime sandbox-runner sandbox-l3-package; do
             case "$target" in
               runtime)
@@ -263,7 +266,7 @@ jobs:
                 ;;
             esac
             docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-              --target "$target" --tag "${repository}:build-${GITHUB_SHA}" \
+              --file deploy/images/platform.Dockerfile --target "$target" --tag "${repository}:build-${GITHUB_SHA}" \
               --output "type=oci,dest=$archive" --metadata-file "$metadata" .
           done
           for component in runtime runner package; do
@@ -286,14 +289,14 @@ jobs:
             esac
             metadata_digest="$(jq -r '."containerimage.digest"' "$metadata")"
             [[ "$metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            python3 scripts/inspect-platform-oci-image.py \
+            python3 tools/release/inspect-platform-oci-image.py \
               --oci-archive "$archive" --platform linux/amd64 \
               --expected-manifest-digest "$metadata_digest" --output "$identity"
           done
           runtime_digest="$(jq -r '.manifest_digest' "$runtime_identity")"
           runner_digest="$(jq -r '.manifest_digest' "$runner_identity")"
           package_digest="$(jq -r '.manifest_digest' "$package_identity")"
-          python3 scripts/verify-platform-sandbox-package-image.py \
+          python3 tools/checks/verify-platform-sandbox-package-image.py \
             --runner-oci-archive "$runner_archive" \
             --package-oci-archive "$package_archive" \
             --runner-platform-manifest-digest "$runner_digest" \
@@ -369,19 +372,19 @@ jobs:
             --file tests/fixtures/Dockerfile.platform-sandbox-l3 \
             --build-arg "RUNNER_IMAGE=$runner_reference" --tag "$package_image" \
             --output "type=oci,dest=$package_archive" --metadata-file "$package_metadata" .
-          python3 scripts/inspect-platform-oci-image.py \
+          python3 tools/release/inspect-platform-oci-image.py \
             --oci-archive "$runtime_archive" --platform linux/amd64 \
             --expected-manifest-digest "$runtime_platform" --output "$runtime_identity"
-          python3 scripts/inspect-platform-oci-image.py \
+          python3 tools/release/inspect-platform-oci-image.py \
             --oci-archive "$runner_archive" --platform linux/amd64 \
             --expected-manifest-digest "$runner_platform" --output "$runner_identity"
           package_metadata_digest="$(jq -r '."containerimage.digest"' "$package_metadata")"
           [[ "$package_metadata_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          python3 scripts/inspect-platform-oci-image.py \
+          python3 tools/release/inspect-platform-oci-image.py \
             --oci-archive "$package_archive" --platform linux/amd64 \
             --expected-manifest-digest "$package_metadata_digest" --output "$package_identity"
           package_digest="$(jq -r '.manifest_digest' "$package_identity")"
-          python3 scripts/verify-platform-sandbox-package-image.py \
+          python3 tools/checks/verify-platform-sandbox-package-image.py \
             --runner-oci-archive "$runner_archive" \
             --package-oci-archive "$package_archive" \
             --runner-platform-manifest-digest "$runner_platform" \
@@ -427,7 +430,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Bootstrap fresh current-SHA Kind and checked OpenSandbox chart
         if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
-        run: scripts/bootstrap-platform-kind-local.sh
+        run: tools/qualification/bootstrap-platform-kind-local.sh
       - name: Run fail-closed real OpenSandbox L3 qualification
         if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
         run: |
@@ -465,7 +468,7 @@ jobs:
           if [[ "$PRODUCTIZATION_ARTIFACT_MODE" == "signed-release-candidate" ]]; then
             qualification_arguments+=(--release-candidate-closure "$PRODUCTIZATION_RELEASE_CANDIDATE_CLOSURE")
           fi
-          scripts/run-productization-sandbox-qualification.sh "${qualification_arguments[@]}"
+          tools/qualification/run-productization-sandbox-qualification.sh "${qualification_arguments[@]}"
           cp "$INSIGHT_KIND_OUTPUT_DIR/environment.json" \
             "$RUNNER_TEMP/productization-sandbox-environment.json"
       - name: Run fresh public CLI and real Gateway Console journey
@@ -501,7 +504,7 @@ jobs:
               --insight-bin "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY"
             )
           fi
-          scripts/run-productization-journey.sh "${arguments[@]}"
+          tools/qualification/run-productization-journey.sh "${arguments[@]}"
       - name: Preserve bounded runtime diagnostics on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1,0 +1,103 @@
+{
+  "$id": "urn:insight:platform:v1:history-maintenance-config",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "component_role": {
+      "const": "history_maintenance"
+    },
+    "database_acquire_timeout_milliseconds": {
+      "maximum": 5000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "database_max_connections": {
+      "maximum": 8,
+      "minimum": 2,
+      "type": "integer"
+    },
+    "executable_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "maximum_events_per_run": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "maximum_runs": {
+      "maximum": 128,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "observability_listen_address": {
+      "maxLength": 64,
+      "minLength": 3,
+      "type": "string"
+    },
+    "poll_interval_milliseconds": {
+      "maximum": 60000,
+      "minimum": 1000,
+      "type": "integer"
+    },
+    "retention_policy": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_event_minimum_seconds": {
+          "maximum": 315576000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cleanup_minimum_seconds": {
+          "maximum": 315576000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "public_event_minimum_seconds": {
+          "maximum": 315576000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "published_outbox_minimum_seconds": {
+          "maximum": 315576000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "receipt_minimum_seconds": {
+          "maximum": 315576000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 2
+        }
+      },
+      "required": [
+        "schema_version",
+        "public_event_minimum_seconds",
+        "audit_event_minimum_seconds",
+        "receipt_minimum_seconds",
+        "published_outbox_minimum_seconds",
+        "cleanup_minimum_seconds"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "component_role",
+    "executable_digest",
+    "observability_listen_address",
+    "database_max_connections",
+    "database_acquire_timeout_milliseconds",
+    "poll_interval_milliseconds",
+    "maximum_runs",
+    "maximum_events_per_run",
+    "retention_policy"
+  ],
+  "title": "HistoryMaintenanceConfigV1",
+  "type": "object",
+  "x-platform-max-bytes": 65536
+}

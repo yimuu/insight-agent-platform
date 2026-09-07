@@ -1,0 +1,135 @@
+{
+  "cases": [
+    {
+      "bindings": {
+        "model": null
+      },
+      "case_id": "deterministic-yaml",
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Echo Agent\",\"name\":\"echo-agent\"},\"spec\":{\"execution\":{\"kind\":\"deterministic\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":null,\"limits\":{\"deadlineSeconds\":120},\"model\":null,\"output\":{\"schema\":\"schema-message.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689",
+        "deployment_intent_digest": "sha256:b9576e3e8feaedd7418d89b8f4d6f6078644ccda25df2b9fa314aee53228d57c",
+        "execution_kind": "deterministic",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
+        "name": "echo-agent",
+        "required_features": [],
+        "resource_intent_digest": "sha256:f22f6d280d1a118c0f82d024e91df8c20aa5781878204ba628f16adb42cbd420",
+        "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":6,\"schema_documents\":{\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\":{\"canonical_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"properties\":{\"message\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\",\"x-platform-max-bytes\":512}},\"required\":[\"message\"],\"type\":\"object\"},\"schema_version\":1},\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\":{\"canonical_digest\":\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$ref\":\"urn:insight:platform:v1:nominal:Failure@sha256:3a33a7ec0f81aa4a535b30113784bd6e4d620165fcc8d45f49c029d7124fdf62\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"},\"schema_version\":1}}}",
+        "typed_plan_digest": "sha256:b2175d653bb634a3cc2b7c8524883f2f5447fb1a2c6190b954abcd3fe4a3efed"
+      },
+      "input_schema": "schema-message.json",
+      "manifest": "deterministic.yaml",
+      "output_schema": "schema-message.json"
+    },
+    {
+      "bindings": {
+        "model": null
+      },
+      "case_id": "deterministic-json-equivalent",
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Echo Agent\",\"name\":\"echo-agent\"},\"spec\":{\"execution\":{\"kind\":\"deterministic\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":null,\"limits\":{\"deadlineSeconds\":120},\"model\":null,\"output\":{\"schema\":\"schema-message.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689",
+        "deployment_intent_digest": "sha256:b9576e3e8feaedd7418d89b8f4d6f6078644ccda25df2b9fa314aee53228d57c",
+        "execution_kind": "deterministic",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:42318afc9f5ef78eb637b1e33951274cf80f39f04ca147ac07b1486a4a7706c6",
+        "name": "echo-agent",
+        "required_features": [],
+        "resource_intent_digest": "sha256:f22f6d280d1a118c0f82d024e91df8c20aa5781878204ba628f16adb42cbd420",
+        "typed_plan": "{\"dependency_slots\":{},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:24c97f19d79ff6bb89551201e4389803136029e3b7c2bc43fc5180caec8e2689\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"}},\"start\":{\"kind\":\"start\",\"next\":\"finish\"}},\"plan_version\":6,\"schema_documents\":{\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\":{\"canonical_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"properties\":{\"message\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\",\"x-platform-max-bytes\":512}},\"required\":[\"message\"],\"type\":\"object\"},\"schema_version\":1},\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\":{\"canonical_digest\":\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$ref\":\"urn:insight:platform:v1:nominal:Failure@sha256:3a33a7ec0f81aa4a535b30113784bd6e4d620165fcc8d45f49c029d7124fdf62\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"},\"schema_version\":1}}}",
+        "typed_plan_digest": "sha256:b2175d653bb634a3cc2b7c8524883f2f5447fb1a2c6190b954abcd3fe4a3efed"
+      },
+      "input_schema": "schema-message.json",
+      "manifest": "deterministic.json",
+      "output_schema": "schema-message.json"
+    },
+    {
+      "bindings": {
+        "model": {
+          "deployment": {
+            "deployment_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "deployment_id": "mdep_0198f1c5-0787-75e1-a9e8-d95ca0f30028",
+            "resource_kind": "model_deployment"
+          },
+          "manifest_ref": "project/default-model",
+          "selection_policy": {
+            "deployment": {
+              "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f30032",
+              "resource_kind": "policy_deployment"
+            },
+            "revision": {
+              "resource_kind": "policy_revision",
+              "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f30033",
+              "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        }
+      },
+      "case_id": "model-chat-yaml",
+      "expected": {
+        "canonical_manifest": "{\"apiVersion\":\"insight.platform/v1\",\"kind\":\"Agent\",\"metadata\":{\"displayName\":\"Support Agent\",\"name\":\"support-agent\"},\"spec\":{\"execution\":{\"kind\":\"model_chat\"},\"input\":{\"classification\":\"internal\",\"schema\":\"schema-message.json\"},\"instructions\":\"Answer using only the current user input.\\n\",\"limits\":{\"deadlineSeconds\":120},\"model\":{\"ref\":\"project/default-model\"},\"output\":{\"schema\":\"schema-answer.json\"},\"publish\":{\"environment\":\"development\"}}}",
+        "contract_digest": "sha256:2c27aba019e30eecdea7309c0fe9fc073d32f0d9999492f53427472683aa5b3f",
+        "deployment_intent_digest": "sha256:008f18bb18e2a0b1277d5a362d9bd0566bf716ce7907dc9d9450f2f1a1c32d70",
+        "execution_kind": "model_chat",
+        "lifecycle_plan_digest": "sha256:e68cb8fbafea8deca37fe9ec28ad26e53e32f794ac7e07d8ec24cfc963af76cc",
+        "manifest_digest": "sha256:15703291bd66a99070d0114573e8bd7dc3dd48c40905adaea926e490e581045d",
+        "name": "support-agent",
+        "required_features": [
+          "model"
+        ],
+        "resource_intent_digest": "sha256:9ee770bea653d5e17821f3f4015109e298538bbce32a5620062e1fda6e25237e",
+        "typed_plan": "{\"dependency_slots\":{\"primary_model\":{\"kind\":\"model\",\"requirement_digest\":\"sha256:18c8cb8c7d3db6a005f4b0fa8069024a30512813b2804b98fb059875a718bdb5\"}},\"entry_node_id\":\"start\",\"interface_contract_digest\":\"sha256:2c27aba019e30eecdea7309c0fe9fc073d32f0d9999492f53427472683aa5b3f\",\"nodes\":{\"finish\":{\"kind\":\"return\",\"value\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"}},\"model\":{\"capability_slot_ids\":[],\"input\":{\"schema_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"source\":\"run_input\"},\"kind\":\"model_loop\",\"maximum_capability_calls\":1,\"maximum_parallel_calls_per_round\":1,\"maximum_rounds\":1,\"model_route\":null,\"model_slot_id\":\"primary_model\",\"output\":{\"port_id\":\"response\",\"producer_node_id\":\"model\",\"schema_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"source\":\"node_output\"},\"resume\":\"finish\",\"skill_slot_ids\":[],\"token_budget\":2304},\"start\":{\"kind\":\"start\",\"next\":\"model\"}},\"plan_version\":6,\"schema_documents\":{\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\":{\"canonical_digest\":\"sha256:e2fd03f93d9abd3a618d8f46cfc63493f131700366728ed17008326db36ba1e9\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"properties\":{\"message\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\",\"x-platform-max-bytes\":512}},\"required\":[\"message\"],\"type\":\"object\"},\"schema_version\":1},\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\":{\"canonical_digest\":\"sha256:e698a72b78c09039f94a5318fc0c0266e774b12ac7c271c2e9f02fb8cca38329\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$ref\":\"urn:insight:platform:v1:nominal:Failure@sha256:3a33a7ec0f81aa4a535b30113784bd6e4d620165fcc8d45f49c029d7124fdf62\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"},\"schema_version\":1},\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\":{\"canonical_digest\":\"sha256:e88b9224ca57eecf779eea19c320ab23852dd0058c4b225a0bae54d0235ab60d\",\"profile\":\"insight.platform/closed-value-schema/v1\",\"schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"properties\":{\"answer\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\",\"x-platform-max-bytes\":1024}},\"required\":[\"answer\"],\"type\":\"object\"},\"schema_version\":1}}}",
+        "typed_plan_digest": "sha256:9d21777352923c88c86d4e677162be6b67a4d2a08423d27be90867d79d9b10ef"
+      },
+      "input_schema": "schema-message.json",
+      "manifest": "model-chat.yaml",
+      "output_schema": "schema-answer.json"
+    }
+  ],
+  "profile": {
+    "default_deadline_seconds": 120,
+    "default_environment": "development",
+    "deployment_policies": [
+      {
+        "deployment": {
+          "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f30014",
+          "resource_kind": "policy_deployment"
+        },
+        "revision": {
+          "resource_kind": "policy_revision",
+          "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f30015",
+          "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "execution_profile": {
+      "deployment": {
+        "deployment_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deployment_id": "pdep_0198f1c5-0787-75e1-a9e8-d95ca0f3001e",
+        "resource_kind": "policy_deployment"
+      },
+      "revision": {
+        "resource_kind": "policy_revision",
+        "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f3001f",
+        "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "model_loop": {
+      "maximum_capability_calls": 1,
+      "maximum_parallel_calls_per_round": 1,
+      "maximum_rounds": 1,
+      "token_budget": 2304
+    },
+    "policy_versions": [
+      {
+        "resource_kind": "policy_revision",
+        "revision_id": "prev_0198f1c5-0787-75e1-a9e8-d95ca0f3000b",
+        "semantic_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ]
+  },
+  "schema_version": 2
+}

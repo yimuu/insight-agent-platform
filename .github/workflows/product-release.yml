@@ -122,6 +122,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+      - name: Install exact shared compiler WASM binding tool
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.126
       - name: Build immutable Console assets
         shell: bash
         run: |
@@ -129,12 +135,12 @@ jobs:
           started=$(date +%s)
           corepack enable
           corepack install --global pnpm@11.19.0
-          pnpm --dir web/console install --frozen-lockfile
-          pnpm --dir web/console test
-          pnpm --dir web/console build
+          pnpm --dir apps/console install --frozen-lockfile
+          pnpm --dir apps/console test
+          pnpm --dir apps/console build
           finished=$(date +%s)
           mkdir -p "$RUNNER_TEMP/release-assets"
-          tar -czf "$RUNNER_TEMP/release-assets/console-${GITHUB_REF_NAME#v}.tar.gz" -C web/console/dist .
+          tar -czf "$RUNNER_TEMP/release-assets/console-${GITHUB_REF_NAME#v}.tar.gz" -C apps/console/dist .
           printf '%s %s\n' "$started" "$finished" > "$RUNNER_TEMP/console-build.time"
       - name: Mark runtime build start
         run: date +%s > "$RUNNER_TEMP/runtime-start"
@@ -143,6 +149,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: deploy/images/platform.Dockerfile
           target: runtime
           platforms: linux/amd64,linux/arm64
           push: true
@@ -160,6 +167,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: deploy/images/platform.Dockerfile
           target: sandbox-runner
           platforms: linux/amd64,linux/arm64
           push: true
@@ -175,8 +183,8 @@ jobs:
         id: console
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: web/console
-          file: web/console/Dockerfile.release
+          context: apps/console
+          file: deploy/images/console.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.CONSOLE_IMAGE }}:build-${{ github.sha }}
@@ -251,7 +259,7 @@ jobs:
           docker buildx imagetools inspect --raw "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" > "$RUNNER_TEMP/runtime-index.json"
           docker buildx imagetools inspect --raw "${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" > "$RUNNER_TEMP/sandbox-runner-index.json"
           docker buildx imagetools inspect --raw "${CONSOLE_IMAGE}@${CONSOLE_DIGEST}" > "$RUNNER_TEMP/console-index.json"
-          python3 scripts/build-release-image-metadata.py \
+          python3 tools/release/build-release-image-metadata.py \
             --runtime-subject "${RUNTIME_IMAGE}" --runtime-digest "$RUNTIME_DIGEST" --runtime-index "$RUNNER_TEMP/runtime-index.json" \
             --sandbox-runner-subject "${SANDBOX_RUNNER_IMAGE}" --sandbox-runner-digest "$SANDBOX_RUNNER_DIGEST" --sandbox-runner-index "$RUNNER_TEMP/sandbox-runner-index.json" \
             --console-subject "${CONSOLE_IMAGE}" --console-digest "$CONSOLE_DIGEST" --console-index "$RUNNER_TEMP/console-index.json" \
@@ -349,12 +357,12 @@ jobs:
           syft "dir:$assets" -o spdx-json="$assets/cli.spdx.json"
           python3 - <<'PY' > "$assets/development-profile-v1.json"
           import json
-          print(json.dumps(json.load(open("release/development-profile-v1.json")), sort_keys=True, separators=(",", ":")), end="")
+          print(json.dumps(json.load(open("deploy/release/development-profile-v1.json")), sort_keys=True, separators=(",", ":")), end="")
           PY
-          python3 scripts/build-release-performance.py \
+          python3 tools/release/build-release-performance.py \
             --version "${GITHUB_REF_NAME#v}" --git-commit "$GITHUB_SHA" \
             --evidence-directory "$assets" --output "$assets/release-performance.json"
-          python3 scripts/build-product-release.py \
+          python3 tools/release/build-product-release.py \
             --version "${GITHUB_REF_NAME#v}" --git-commit "$GITHUB_SHA" \
             --created-at "$(git show -s --format=%cI "$GITHUB_SHA" | python3 -c 'import datetime,sys; print(datetime.datetime.fromisoformat(sys.stdin.read().strip()).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')" \
             --artifacts "$assets" --images "$assets/images.json" --output "$assets/release-bundle.json"
@@ -369,7 +377,7 @@ jobs:
           umask 077
           key="$RUNNER_TEMP/release-private-key.pem"
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
-          python3 scripts/sign-product-release.py \
+          python3 tools/release/sign-product-release.py \
             --bundle "$RUNNER_TEMP/release-assets/release-bundle.json" --private-key "$key" \
             --public-key-base64="$RELEASE_PUBLIC_KEY" \
             --output "$RUNNER_TEMP/release-assets/release-bundle.signature.json"
@@ -421,7 +429,7 @@ jobs:
           set -euo pipefail
           binary="$RUNNER_TEMP/release-assets/insight-${GITHUB_REF_NAME#v}-x86_64-unknown-linux-gnu"
           chmod 0755 "$binary"
-          scripts/qualify-development-profile.sh \
+          tools/qualification/qualify-development-profile.sh \
             --insight-bin "$binary" \
             --release-assets "$RUNNER_TEMP/release-assets" \
             --network-mbps 100 \
@@ -502,7 +510,7 @@ jobs:
           set -euo pipefail
           assets="$RUNNER_TEMP/release-assets"
           test -s "$RUNNER_TEMP/qualification/development-profile-performance.json"
-          python3 scripts/check-productization-scenario-reports.py \
+          python3 tools/checks/check-productization-scenario-reports.py \
             "$RUNNER_TEMP/qualification/productization-reports" \
             --source-revision "$GITHUB_SHA" \
             --sandbox-evidence "$RUNNER_TEMP/qualification/productization-sandbox/productization-opensandbox-evidence.json" \
@@ -547,7 +555,7 @@ jobs:
             "$assets/development-profile-performance.json"
           rm -f "$assets/release-bundle.json" "$assets/release-bundle.signature.json" \
             "$assets/release-bundle.sigstore.json" "$assets/checksums.txt"
-          python3 scripts/build-product-release.py \
+          python3 tools/release/build-product-release.py \
             --version "${GITHUB_REF_NAME#v}" --git-commit "$GITHUB_SHA" \
             --created-at "$(git show -s --format=%cI "$GITHUB_SHA" | python3 -c 'import datetime,sys; print(datetime.datetime.fromisoformat(sys.stdin.read().strip()).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')" \
             --artifacts "$assets" --images "$assets/images.json" \
@@ -561,7 +569,7 @@ jobs:
             --output "$assets/release-bundle.json"
           key="$RUNNER_TEMP/release-private-key.pem"
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
-          python3 scripts/sign-product-release.py \
+          python3 tools/release/sign-product-release.py \
             --bundle "$assets/release-bundle.json" --private-key "$key" \
             --public-key-base64="$RELEASE_PUBLIC_KEY" \
             --output "$assets/release-bundle.signature.json"

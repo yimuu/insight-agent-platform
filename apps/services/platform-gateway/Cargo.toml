@@ -1,0 +1,46 @@
+[package]
+name = "insight-platform-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-gateway"
+path = "src/main.rs"
+
+[dependencies]
+insight-platform-observability-http.workspace = true
+insight-platform-plan.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+insight-platform-api.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-agent-compiler.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-context.workspace = true
+insight-platform-invocations.workspace = true
+insight-platform-jobs.workspace = true
+insight-platform-mcp-host.workspace = true
+insight-platform-orchestrator.workspace = true
+insight-platform-observability.workspace = true
+insight-platform-postgres.workspace = true
+insight-platform-registry.workspace = true
+insight-platform-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

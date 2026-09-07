@@ -1,9 +1,20 @@
 {
-  "manifest_version": 1,
-  "worker_role": "orchestration.primary",
-  "work_class": "orchestration",
   "adapter_runtime_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "protocol_version": 1,
+  "critical_control_reserved_slots": 2,
+  "execution_capabilities": {
+    "capabilities": [
+      {
+        "family": "program",
+        "ir_abi_version": 6,
+        "program_semantic_identity": "sha256:fe3dd01ea43acca08c604332b480aa7f0fa319877ac351e75f64026995610612"
+      }
+    ],
+    "schema_version": 1
+  },
+  "manifest_version": 2,
   "max_concurrency": 64,
-  "critical_control_reserved_slots": 2
+  "protocol_version": 1,
+  "work_class": "orchestration",
+  "worker_build_digest": "sha256:9e1b62d552fb56c18357af074a413dc5890695328d145332d2e6be1e49c1810b",
+  "worker_role": "orchestration-worker"
 }

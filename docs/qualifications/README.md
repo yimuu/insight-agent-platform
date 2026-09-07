@@ -2,8 +2,13 @@
 
 当前项目处于开发阶段，生产级 L4～L6 不属于当前里程碑，也不阻塞功能开发。
 
-- 仓库合同、单元测试、真实 PostgreSQL 和 OpenSandbox/Kubernetes 进程级 L1～L3 已验证；
-- 2026-09-04 在单台 macOS 宿主的三节点 Kind 中完成本机 L4 mechanics，12/12 动态检查通过；
+2026-09-07 架构重整在当前工作树完成开发验收：工作区检查、Rust 与 Console 回归、真实 PostgreSQL、
+物理进程恢复和消息重启场景通过。全新本地环境中的公共 CLI、真实 Chrome 用户流程及并发读取检查通过，
+其执行入口为 [productization journey](../../tools/qualification/run-productization-journey.sh)。
+本轮没有重建 Kind，也没有执行完整 `all` closure 的签名候选资格；本地通过结果不转授发布或生产资格。
+
+- 仓库合同、单元测试、真实 PostgreSQL 与进程恢复验证按当前提交重新运行，具体证据来自对应的 CI 或 owning qualification harness；
+- 2026-09-04 的 OpenSandbox/Kubernetes L1～L3 与单台 macOS 宿主三节点 Kind L4 mechanics 属于当时 revision 的历史开发证据，不转授后续架构或 exact release 资格；
 - Kind 集群和 `/private/tmp` 原始证据已按要求删除，该结果只保留为 Git 历史中的开发验证记录；
 - 生产级多故障域、容量、24 小时 soak、restore 和 GitOps promotion 当前均不执行，状态保持 `Not run`；
 - 项目不声明 production-ready、生产容量或 SLO。

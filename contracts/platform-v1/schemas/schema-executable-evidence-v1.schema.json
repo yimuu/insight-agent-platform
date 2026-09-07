@@ -1,0 +1,40 @@
+{
+  "$id": "urn:insight:platform:v1:schema-executable-evidence",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Exact distributed file bytes SHA-256 identities for the current schema snapshot and physical provisioning executable.",
+  "properties": {
+    "runner_binary": {
+      "const": "platform-schema"
+    },
+    "runner_build_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "runtime_image_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_contract_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_inventory_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_snapshot_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "runtime_image_digest",
+    "runner_binary",
+    "runner_build_digest",
+    "schema_snapshot_digest",
+    "schema_inventory_digest",
+    "schema_contract_digest"
+  ],
+  "title": "SchemaExecutableEvidenceV1",
+  "type": "object"
+}

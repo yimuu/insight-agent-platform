@@ -22,6 +22,18 @@ spec:
         - namespaceSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.publicGatewayNamespaceSelector | nindent 16 }}
           podSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.publicManagementGatewayPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int (index $component.ports 0).port }}}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.registryValidationNamespaceSelector | nindent 16 }}
+          podSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.registryValidationPodSelector | nindent 16 }}
+      ports: [{protocol: TCP, port: {{ int (index $component.ports 0).port }}}]
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ toYaml $root.Values.networkPolicy.publicGatewayNamespaceSelector | nindent 16 }}
+          podSelector:
             matchLabels: {{ toYaml $root.Values.networkPolicy.publicGatewayPodSelector | nindent 16 }}
       ports: [{protocol: TCP, port: {{ int (index $component.ports 0).port }}}]
     {{- else if eq $role "data-worker" }}

@@ -13,16 +13,16 @@
 
 - [架构决策](adr/README.md)：accepted 决定与 proposed 变更分别列出。
 - [活跃 spec](specs/README.md)：尚未完成实施的目标与交叉评审。
-- [Agent 平台架构重整](specs/architecture-restructuring/README.md)：本轮完整目标、目录设计及合同影响。
+- [工程指南](engineering/README.md)：目录、依赖方向、合同修改与验证流程。
 - [仓库工程规则](../AGENTS.md)：贡献与架构变更的共同约束。
 
 ## 核对合同与证据
 
 - [`insight.platform/v1` 机器合同](../contracts/platform-v1/README.md)。
-- [Agent compiler conformance corpus](../contracts/product-experience/agent-compiler/v1/corpus.json)。
+- [Agent compiler conformance corpus](../contracts/product-experience/agent-compiler/v2/corpus.json)。
 - [开发阶段验证状态](qualifications/README.md)：实际执行范围、证据强度和未运行的生产门禁。
 
-公开及跨进程边界由 OpenAPI、JSON Schema、protobuf 和 owning Rust type 定义，持久化结构由 migration 定义。
+公开及跨进程边界由 OpenAPI、JSON Schema、protobuf 和 owning Rust type 定义，持久化结构由唯一当前 schema 定义。
 ADR 保存架构决定；`current` 解释已实现行为，不维护平行字段表、状态机或通过报告。
 项目的 `/v1` 产品入口与具体内部架构代号分别管理；目标 spec 不自动改变公开协议或生产资格。
 

@@ -1,0 +1,15 @@
+[package]
+name = "insight-platform-plan"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+runtime-validation = ["insight-platform-contracts/runtime-schema-validation"]
+
+[dependencies]
+insight-platform-contracts = { path = "../../foundation/platform-contracts", default-features = false }
+serde.workspace = true
+serde_json.workspace = true

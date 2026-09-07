@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Classify changed repository paths into closed productization CI lanes."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path, PurePosixPath
+import sys
+
+
+def fail(message: str) -> None:
+    print(f"CI path classification failed: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def is_under(path: PurePosixPath, prefix: str) -> bool:
+    parts = PurePosixPath(prefix).parts
+    return path.parts[: len(parts)] == parts
+
+
+def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
+    if force_all:
+        return {
+            "quick": True,
+            "cli": True,
+            "console": True,
+            "runtime": True,
+            "policy": True,
+        }
+    normalized: list[PurePosixPath] = []
+    for raw in paths:
+        value = raw.strip()
+        if not value:
+            continue
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            fail(f"unsafe changed path {value!r}")
+        normalized.append(path)
+    if not normalized:
+        fail("changed path set is empty")
+
+    # The browser executes the shared Rust/WASM compiler and consumes generated public contracts.
+    # Changes to those owners must exercise the actual browser build even without a TS diff.
+    console = any(
+        is_under(path, prefix)
+        for path in normalized
+        for prefix in (
+            "apps/console",
+            "crates/authoring",
+            "crates/definitions/platform-plan",
+            "crates/foundation/platform-contracts",
+            "contracts/platform-v1",
+            "contracts/product-experience",
+        )
+    ) or any(
+        path.as_posix() in {
+            "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/ci.yml",
+            "tools/rust/platform-contract-tooling/src/bin/agent_compiler_resources.rs",
+        }
+        for path in normalized
+    )
+    cli = any(
+        is_under(path, prefix)
+        for path in normalized
+        for prefix in (
+            "apps/insight-cli",
+            "tests/qualification/tests/productization",
+            "tests/fixtures/productization-reports",
+            "examples/productization",
+            "deploy/release",
+        )
+    ) or any(
+        path.name.startswith("check-productization")
+        or path.name.startswith("build-product-release")
+        or path.name.startswith("build-release-")
+        or path.name == "sign-product-release.py"
+        or path.name == "check-product-release.py"
+        or path.name == "test_product_release.py"
+        or path.name == "run-productization-journey.sh"
+        or path.name == "qualify-productization-first-run.py"
+        or path.name == "test_productization_journey_runner.py"
+        for path in normalized
+    )
+    policy = any(
+        path.as_posix() in {"Cargo.toml", "Cargo.lock", "deny.toml"}
+        or (path.name == "Cargo.toml" and any(is_under(path, prefix) for prefix in ("crates", "apps", "tools/rust", "tests/qualification")))
+        for path in normalized
+    )
+
+    non_runtime_prefixes = (
+        "docs",
+        "apps/console",
+        "apps/insight-cli",
+        "examples/productization",
+        "tests/qualification/tests/productization",
+        "tests/fixtures/productization-reports",
+        "deploy/release",
+    )
+    non_runtime_root_files = {
+        ".gitignore",
+        "AGENTS.md",
+        "LICENSE",
+        "README.md",
+    }
+    runtime = policy or any(
+        not (
+            path.as_posix() in non_runtime_root_files
+            or any(is_under(path, prefix) for prefix in non_runtime_prefixes)
+            or (
+                is_under(path, "tools")
+                and (
+                    path.name.startswith("check-productization")
+                    or path.name.startswith("build-product-release")
+                    or path.name.startswith("build-release-")
+                    or path.name == "sign-product-release.py"
+                    or path.name == "check-product-release.py"
+                    or path.name == "test_product_release.py"
+                    or path.name == "classify-ci-paths.py"
+                    or path.name == "run-productization-journey.sh"
+                    or path.name == "qualify-productization-first-run.py"
+                    or path.name == "test_classify_ci_paths.py"
+                    or path.name == "test_productization_journey_runner.py"
+                    or path.name == "test_productization_scenario_reports.py"
+                )
+            )
+        )
+        for path in normalized
+    )
+    return {
+        "quick": True,
+        "cli": cli,
+        "console": console,
+        "runtime": runtime,
+        "policy": policy,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("paths_file", type=Path, nargs="?")
+    parser.add_argument("--all", action="store_true", dest="force_all")
+    parser.add_argument("--github-output", type=Path)
+    arguments = parser.parse_args()
+    if arguments.force_all:
+        paths: list[str] = []
+    elif arguments.paths_file is None:
+        fail("paths_file is required unless --all is used")
+    else:
+        try:
+            paths = arguments.paths_file.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            fail(str(error))
+    result = classify(paths, force_all=arguments.force_all)
+    rendered = "".join(f"{name}={str(value).lower()}\n" for name, value in result.items())
+    if arguments.github_output is None:
+        sys.stdout.write(rendered)
+    else:
+        try:
+            with arguments.github_output.open("a", encoding="utf-8") as output:
+                output.write(rendered)
+        except OSError as error:
+            fail(str(error))
+
+
+if __name__ == "__main__":
+    main()

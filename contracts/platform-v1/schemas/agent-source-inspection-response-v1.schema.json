@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "const": "inspected"
+        },
+        "resolution": {
+          "additionalProperties": false,
+          "properties": {
+            "execution_kind": {
+              "enum": [
+                "deterministic",
+                "model_chat",
+                "full_plan",
+                "framework_graph"
+              ]
+            },
+            "input_schema_path": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "model_ref": {
+              "maxLength": 256,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output_schema_path": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "plan_path": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "execution_kind",
+            "model_ref",
+            "input_schema_path",
+            "output_schema_path",
+            "plan_path"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "outcome",
+        "schema_version",
+        "resolution"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "source_bundle_invalid",
+                  "source_reference_missing",
+                  "authoring_version_unsupported",
+                  "compiler_semantic_unsupported",
+                  "compile_policy_mismatch",
+                  "compiler_limit_exceeded",
+                  "agent_manifest_invalid",
+                  "agent_reference_missing",
+                  "agent_binding_not_ready",
+                  "agent_compile_failed",
+                  "compiler_internal"
+                ]
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "column": {
+                        "maximum": 1048576,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "file": {
+                        "maxLength": 256,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "line": {
+                        "maximum": 1048576,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "source_pointer": {
+                        "maxLength": 1024,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "file",
+                      "source_pointer",
+                      "line",
+                      "column"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "safe_detail": {
+                "maxLength": 2048,
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "location",
+              "safe_detail"
+            ],
+            "type": "object"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "outcome": {
+          "const": "rejected"
+        }
+      },
+      "required": [
+        "outcome",
+        "diagnostics"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "AgentSourceInspectionResponseV1"
+}

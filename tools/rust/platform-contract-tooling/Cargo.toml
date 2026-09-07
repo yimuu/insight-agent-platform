@@ -1,0 +1,36 @@
+[package]
+name = "insight-platform-contract-tooling"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "check-platform-contracts"
+path = "src/bin/check_platform_contracts.rs"
+
+[[bin]]
+name = "platform-qualification"
+path = "src/bin/platform_qualification.rs"
+
+[dependencies]
+insight-platform-sandbox.workspace = true
+insight-platform-registry.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-deployment-contracts.workspace = true
+insight-platform-plan.workspace = true
+insight-platform-orchestrator.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-context.workspace = true
+insight-platform-mcp-host.workspace = true
+insight-platform-agent-compiler.workspace = true
+insight-platform-worker.workspace = true
+chrono.workspace = true
+jsonschema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -913,6 +913,14 @@
           "failed"
         ],
         [
+          "created",
+          "cancelled"
+        ],
+        [
+          "created",
+          "timed_out"
+        ],
+        [
           "awaiting_authorization",
           "ready"
         ],
@@ -1259,6 +1267,14 @@
           "failed"
         ],
         [
+          "created",
+          "cancelled"
+        ],
+        [
+          "created",
+          "timed_out"
+        ],
+        [
           "awaiting_budget",
           "ready"
         ],
@@ -1281,6 +1297,10 @@
         [
           "ready",
           "cancelling"
+        ],
+        [
+          "ready",
+          "cancelled"
         ],
         [
           "ready",
@@ -1313,6 +1333,10 @@
         [
           "retry_scheduled",
           "cancelling"
+        ],
+        [
+          "retry_scheduled",
+          "cancelled"
         ],
         [
           "retry_scheduled",

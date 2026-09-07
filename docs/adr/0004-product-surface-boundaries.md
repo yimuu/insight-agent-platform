@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |
-| 日期 | 2026-08-31（2026-09-04 汇总修订） |
+| 日期 | 2026-08-31（2026-09-06 按 ADR-0009 修订） |
 | 取代 | ADR-0003、ADR-0005、ADR-0006 |
 | 影响范围 | CLI、HTTP authoring、Console、local development identity profile |
 
@@ -33,7 +33,8 @@ Artifact 路径。Sandbox feature 仍使用受审查的 OpenSandbox/Kubernetes �
 mutable tag、隐式下载或源码构建。
 
 `init` 只创建 project-local、gitignored 的 non-production 身份与配置。fresh schema provision 是
-可见的 one-shot transaction；运行时 role 只验证 schema 且不拥有 DDL 权限。签名产物、
+可见的 one-shot transaction；运行时 role 只验证 schema。本地部分角色仍共用测试 owner，
+不能据此宣称凭证已隔离 DDL 权限；生产权限边界见[部署与运维](../current/operations.md)。签名产物、
 schema 和 profile digest 未变时可复用已验证本地资产。`reset` 必须先显示精确范围并
 要求 project name 确认；普通启动失败不得删除 project-local authority。
 
@@ -50,8 +51,9 @@ cursor，但不得吞掉冲突、伪造恢复状态或以新随机值重做不�
 
 ### Console
 
-Console 是不可变的静态单页应用，只访问同源 `/readyz` 和 public `/v1`。它不引入 SSR、
-BFF、Console database、worker credential 或 internal RPC client，也不以 React state、浏览器存储
+Console 是不可变的静态单页应用，业务 API 使用同源 `/readyz` 和 public `/v1`；Artifact 上传按服务端签发的
+预签名 URL 直接 PUT，对象存储的浏览器 origin 规则由[部署合同](../current/operations.md)约束。
+它不引入 SSR、BFF、Console database、worker credential 或 internal RPC client，也不以 React state、浏览器存储
 或 Event 重建 current state。
 
 Console 使用与 CLI 同一 compiler conformance corpus、public bounded list 和 opaque SSE cursor。
@@ -75,6 +77,6 @@ environment class 与 config digest 必须阻止混用。
 
 产品入口可以简化展示和编排，但 PostgreSQL 与现有 Platform role 仍持有唯一业务事实。
 精确字段、命令、profile closure、限制、线上路由与当前验证状态以 owning contract/type、
-migration、[`docs/current`](../current/README.md) 和可执行测试为准，不在本 ADR 维护平行 registry。
+当前 schema、[`docs/current`](../current/README.md) 和可执行测试为准，不在本 ADR 维护平行 registry。
 
 本 ADR 取代 ADR-0003、ADR-0005 和 ADR-0006；三者的过程性清单、里程碑状态与旧 profile 命名不再是当前规范，历史保留在 Git 中。

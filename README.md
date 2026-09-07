@@ -54,7 +54,7 @@ insight doctor --json
 ```bash
 cargo build --locked -p insight-cli --bin insight
 target/debug/insight dev --path ./insight-local --from-source
-scripts/run-productization-journey.sh --console-browser
+tools/qualification/run-productization-journey.sh --console-browser
 ```
 
 `--from-source` 只构建所选 role closure。发行版或 image 验证失败时默认路径不会静默编译源码。

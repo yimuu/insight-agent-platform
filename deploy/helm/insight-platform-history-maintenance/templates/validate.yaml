@@ -1,0 +1,9 @@
+{{- if lt (int .Values.replicas) 2 }}{{- fail "replicas must be at least 2" }}{{- end }}
+{{- if not .Values.networkPolicy.enabled }}{{- fail "networkPolicy.enabled must remain true" }}{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}{{- fail "image.digest must be immutable" }}{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest) }}{{- fail "config.digest must be immutable" }}{{- end }}
+{{- if or (empty .Values.config.existingConfigMap) (empty .Values.config.fileKey) }}{{- fail "Candidate config reference is required" }}{{- end }}
+{{- if empty .Values.networkPolicy.postgresCidrs }}{{- fail "networkPolicy.postgresCidrs is required" }}{{- end }}
+{{- if or (lt (int .Values.observability.port) 1) (gt (int .Values.observability.port) 65535) }}{{- fail "observability port must be in 1..65535" }}{{- end }}
+{{- if and .Values.monitoring.enabled (or (empty .Values.networkPolicy.monitoringNamespaceSelector) (empty .Values.networkPolicy.monitoringPodSelector)) }}{{- fail "monitoring selectors are required" }}{{- end }}
+{{- if empty .Values.database.existingSecret }}{{- fail "independent history database Secret is required" }}{{- end }}

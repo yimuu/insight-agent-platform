@@ -1,0 +1,32 @@
+{
+  "$id": "urn:insight:platform:v1:history-maintenance-executable-evidence",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Deployment-verified non-Job maintenance evidence: canonical configuration identity and exact executable bytes SHA-256.",
+  "properties": {
+    "component_role": {
+      "const": "history_maintenance"
+    },
+    "executable_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "process_config_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "runtime_image_digest": {
+      "$ref": "nominal/digest.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "component_role",
+    "runtime_image_digest",
+    "executable_digest",
+    "process_config_digest"
+  ],
+  "title": "HistoryMaintenanceExecutableEvidenceV1",
+  "type": "object"
+}

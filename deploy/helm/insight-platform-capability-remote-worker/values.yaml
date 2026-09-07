@@ -18,6 +18,8 @@ database:
 egressTls:
   existingSecret: insight-platform-capability-remote-worker-egress-client-tls
   keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
+mcpHost:
+  enabled: true
 mcpHostTls:
   existingSecret: insight-platform-capability-remote-worker-mcp-host-client-tls
   keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}

@@ -1,0 +1,52 @@
+[package]
+name = "insight-platform-artifact-service"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-artifact-data-worker"
+path = "src/main.rs"
+
+[[bin]]
+name = "platform-artifact-gateway"
+path = "src/bin/gateway.rs"
+
+[[bin]]
+name = "platform-artifact-maintenance"
+path = "src/bin/maintenance.rs"
+
+[dependencies]
+insight-platform-worker.workspace = true
+insight-platform-observability-http.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+insight-platform-artifact-broker.workspace = true
+insight-platform-artifact-rpc.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-api.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-jobs.workspace = true
+insight-platform-observability.workspace = true
+insight-platform-postgres.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+uuid.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }

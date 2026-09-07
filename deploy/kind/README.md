@@ -16,8 +16,8 @@ LocalStack 路径在 live Deployment 上使用固定的 `test` AWS 凭据，因�
 - Docker、Kind、Helm、Ruby、Python 3、`jq`、OpenSSL 和与 server 相差不超过一个 minor 的 `kubectl`；
 - 已构建的 `target/debug/insight` 与 `target/release/platform-schema`；
 - 当前宿主平台的 runtime、Sandbox runner 与 Sandbox Package 单平台 OCI 归档。三者必须由
-  `scripts/inspect-platform-oci-image.py` 得到真实 manifest digest；Package 还必须通过
-  `scripts/verify-platform-sandbox-package-image.py` 的 runner layer/file-capability 组合校验；
+  `tools/release/inspect-platform-oci-image.py` 得到真实 manifest digest；Package 还必须通过
+  `tools/checks/verify-platform-sandbox-package-image.py` 的 runner layer/file-capability 组合校验；
 - 首次下载镜像和上游 manifest 前，在当前 shell 开启需要的网络代理。例如本机配置提供 `proxy_on` 时，先执行
   `proxy_on`，再运行下面的脚本。脚本不固化个人代理地址。
 
@@ -43,8 +43,8 @@ export INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST=sha256:<package-platform-manifest>
 export INSIGHT_KIND_SANDBOX_PACKAGE_IMAGE="$INSIGHT_KIND_SANDBOX_PACKAGE_REPOSITORY@$INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST"
 export INSIGHT_KIND_SANDBOX_PACKAGE_OCI_ARCHIVE=/path/to/package.oci.tar
 
-scripts/bootstrap-platform-kind-local.sh
-scripts/verify-platform-kind-l4.sh
+tools/qualification/bootstrap-platform-kind-local.sh
+tools/qualification/verify-platform-kind-l4.sh
 ```
 
 产品镜像没有基于 Docker config ID 的本地 fallback。引导脚本会重新校验 OCI 归档，在每个 Kind 节点上确认

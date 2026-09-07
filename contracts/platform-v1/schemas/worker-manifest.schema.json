@@ -13,8 +13,101 @@
       "minimum": 1,
       "type": "integer"
     },
+    "execution_capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "family": {
+                    "const": "program"
+                  },
+                  "ir_abi_version": {
+                    "maximum": 4294967295,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "program_semantic_identity": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "family",
+                  "program_semantic_identity",
+                  "ir_abi_version"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "compiler_semantic_identity": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "family": {
+                    "const": "agent_compilation"
+                  }
+                },
+                "required": [
+                  "family",
+                  "compiler_semantic_identity"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "adapter": {
+                    "anyOf": [
+                      {
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "family": {
+                    "const": "domain_operation"
+                  },
+                  "operation_abi_identity": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "family",
+                  "operation_abi_identity"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true,
+          "x-insight-maximum-live-program-semantics": 1
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capabilities"
+      ],
+      "type": "object"
+    },
     "manifest_version": {
-      "const": 1,
+      "const": 2,
       "type": "integer"
     },
     "max_concurrency": {
@@ -42,6 +135,10 @@
       ],
       "type": "string"
     },
+    "worker_build_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
     "worker_role": {
       "maxLength": 128,
       "minLength": 1,
@@ -55,6 +152,8 @@
     "worker_role",
     "work_class",
     "adapter_runtime_digest",
+    "worker_build_digest",
+    "execution_capabilities",
     "protocol_version",
     "max_concurrency",
     "critical_control_reserved_slots"

@@ -7,3 +7,8 @@ data
 bench/results
 **/*.log
 **/.DS_Store
+
+**/node_modules
+apps/console/dist
+apps/console/.vite
+**/__pycache__

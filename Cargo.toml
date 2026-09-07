@@ -1,52 +1,65 @@
 [workspace]
 members = [
-    "crates/platform-artifact-broker",
-    "crates/platform-artifact-rpc",
-    "crates/platform-artifact-service",
-    "crates/platform-artifacts",
-    "crates/platform-api",
-    "crates/platform-capability-adapters",
-    "crates/platform-capability-worker",
-    "crates/platform-callback-api",
-    "crates/platform-contracts",
-    "crates/platform-context",
-    "crates/platform-context-worker",
-    "crates/platform-gateway",
-    "crates/platform-egress",
-    "crates/platform-egress-broker",
-    "crates/platform-egress-rpc",
-    "crates/platform-invocations",
-    "crates/platform-jobs",
-    "crates/platform-model-adapters",
-    "crates/platform-model-worker",
-    "crates/platform-models",
-    "crates/platform-mcp-host",
-    "crates/platform-mcp-rpc",
-    "crates/platform-mcp-service",
-    "crates/platform-mcp-cleanup-worker",
-    "crates/platform-observability",
-    "crates/platform-orchestration-worker",
-    "crates/platform-postgres",
-    "crates/platform-qualification-tests",
-    "crates/platform-orchestrator",
-    "crates/platform-registry",
-    "crates/platform-registry-validation-worker",
-    "crates/platform-runtime",
-    "crates/platform-rpc-trace",
-    "crates/platform-sandbox",
-    "crates/platform-sandbox-dispatcher",
-    "crates/platform-sandbox-runner",
-    "crates/platform-opensandbox-client",
-    "crates/platform-scheduler",
-    "crates/platform-secret-broker",
-    "crates/platform-security",
-    "crates/platform-security-authority",
-    "crates/platform-security-rpc",
-    "crates/platform-tasks",
-    "crates/platform-worker",
-    "crates/insight-cli",
+    "apps/services/platform-maintenance-worker",
+    "crates/adapters/platform-mcp-transport",
+    "crates/application/platform-mcp-runtime",
+    "crates/protocols/platform-observability-http",
+    "crates/execution/platform-execution-context",
+    "apps/services/platform-outbox-worker",
+    "crates/adapters/platform-opensandbox-executor",
+    "crates/authoring/platform-agent-compiler",
+    "crates/authoring/platform-agent-compiler-wasm",
+    "tools/rust/platform-storage-tooling",
+    "tools/rust/platform-contract-tooling",
+    "crates/deployment/platform-deployment-contracts",
+    "crates/definitions/platform-plan",
+    "crates/adapters/platform-artifact-broker",
+    "crates/protocols/platform-artifact-rpc",
+    "apps/services/platform-artifact-service",
+    "crates/domains/platform-artifacts",
+    "crates/protocols/platform-api",
+    "crates/adapters/platform-capability-adapters",
+    "apps/services/platform-capability-worker",
+    "apps/services/platform-callback-api",
+    "crates/foundation/platform-contracts",
+    "crates/domains/platform-context",
+    "apps/services/platform-context-worker",
+    "apps/services/platform-gateway",
+    "crates/adapters/platform-egress",
+    "apps/services/platform-egress-broker",
+    "crates/protocols/platform-egress-rpc",
+    "crates/domains/platform-invocations",
+    "crates/execution/platform-jobs",
+    "crates/adapters/platform-model-adapters",
+    "apps/services/platform-model-worker",
+    "crates/domains/platform-models",
+    "crates/domains/platform-mcp-host",
+    "crates/protocols/platform-mcp-rpc",
+    "apps/services/platform-mcp-service",
+    "apps/services/platform-mcp-cleanup-worker",
+    "crates/foundation/platform-observability",
+    "apps/services/platform-orchestration-worker",
+    "crates/adapters/platform-postgres",
+    "tests/qualification",
+    "crates/execution/platform-orchestrator",
+    "crates/definitions/platform-registry",
+    "apps/services/platform-registry-validation-worker",
+    "crates/application/platform-runtime",
+    "crates/protocols/platform-rpc-trace",
+    "crates/domains/platform-sandbox",
+    "apps/services/platform-sandbox-dispatcher",
+    "apps/sandbox/platform-sandbox-runner",
+    "crates/adapters/platform-opensandbox-client",
+    "crates/execution/platform-scheduler",
+    "crates/adapters/platform-secret-broker",
+    "crates/domains/platform-security",
+    "apps/services/platform-security-authority",
+    "crates/protocols/platform-security-rpc",
+    "crates/domains/platform-tasks",
+    "crates/application/platform-worker",
+    "apps/insight-cli",
 ]
-default-members = ["crates/insight-cli"]
+default-members = ["apps/insight-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -55,6 +68,12 @@ rust-version = "1.94.1"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+insight-platform-mcp-transport = { path = "crates/adapters/platform-mcp-transport" }
+insight-platform-mcp-runtime = { path = "crates/application/platform-mcp-runtime" }
+insight-platform-observability-http = { path = "crates/protocols/platform-observability-http" }
+insight-platform-execution-context = { path = "crates/execution/platform-execution-context" }
+insight-platform-agent-compiler = { path = "crates/authoring/platform-agent-compiler" }
+insight-platform-agent-compiler-wasm = { path = "crates/authoring/platform-agent-compiler-wasm" }
 async-trait = "0.1"
 async-nats = { version = "0.50.0", default-features = false, features = ["aws-lc-rs", "nkeys", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
 aws-config = { version = "=1.10.1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -102,46 +121,58 @@ url = "2"
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
 
-insight-platform-artifact-broker = { path = "crates/platform-artifact-broker" }
-insight-platform-artifact-rpc = { path = "crates/platform-artifact-rpc" }
-insight-platform-artifact-service = { path = "crates/platform-artifact-service" }
-insight-platform-artifacts = { path = "crates/platform-artifacts" }
-insight-platform-api = { path = "crates/platform-api" }
-insight-platform-capability-adapters = { path = "crates/platform-capability-adapters" }
-insight-platform-capability-worker = { path = "crates/platform-capability-worker" }
-insight-platform-callback-api = { path = "crates/platform-callback-api" }
-insight-platform-contracts = { path = "crates/platform-contracts" }
-insight-platform-context = { path = "crates/platform-context" }
-insight-platform-context-worker = { path = "crates/platform-context-worker" }
-insight-platform-gateway = { path = "crates/platform-gateway" }
-insight-platform-egress = { path = "crates/platform-egress" }
-insight-platform-egress-broker = { path = "crates/platform-egress-broker" }
-insight-platform-egress-rpc = { path = "crates/platform-egress-rpc" }
-insight-platform-invocations = { path = "crates/platform-invocations" }
-insight-platform-jobs = { path = "crates/platform-jobs" }
-insight-platform-model-adapters = { path = "crates/platform-model-adapters" }
-insight-platform-model-worker = { path = "crates/platform-model-worker" }
-insight-platform-models = { path = "crates/platform-models" }
-insight-platform-mcp-host = { path = "crates/platform-mcp-host" }
-insight-platform-mcp-rpc = { path = "crates/platform-mcp-rpc" }
-insight-platform-mcp-service = { path = "crates/platform-mcp-service" }
-insight-platform-mcp-cleanup-worker = { path = "crates/platform-mcp-cleanup-worker" }
-insight-platform-observability = { path = "crates/platform-observability" }
-insight-platform-orchestration-worker = { path = "crates/platform-orchestration-worker" }
-insight-platform-postgres = { path = "crates/platform-postgres" }
-insight-platform-orchestrator = { path = "crates/platform-orchestrator" }
-insight-platform-registry = { path = "crates/platform-registry" }
-insight-platform-registry-validation-worker = { path = "crates/platform-registry-validation-worker" }
-insight-platform-rpc-trace = { path = "crates/platform-rpc-trace" }
-insight-platform-runtime = { path = "crates/platform-runtime" }
-insight-platform-sandbox = { path = "crates/platform-sandbox" }
-insight-platform-sandbox-dispatcher = { path = "crates/platform-sandbox-dispatcher" }
-insight-platform-sandbox-runner = { path = "crates/platform-sandbox-runner" }
-insight-platform-opensandbox-client = { path = "crates/platform-opensandbox-client" }
-insight-platform-scheduler = { path = "crates/platform-scheduler" }
-insight-platform-secret-broker = { path = "crates/platform-secret-broker" }
-insight-platform-security = { path = "crates/platform-security" }
-insight-platform-security-authority = { path = "crates/platform-security-authority" }
-insight-platform-security-rpc = { path = "crates/platform-security-rpc" }
-insight-platform-tasks = { path = "crates/platform-tasks" }
-insight-platform-worker = { path = "crates/platform-worker" }
+insight-platform-artifact-broker = { path = "crates/adapters/platform-artifact-broker" }
+insight-platform-artifact-rpc = { path = "crates/protocols/platform-artifact-rpc" }
+insight-platform-artifact-service = { path = "apps/services/platform-artifact-service" }
+insight-platform-artifacts = { path = "crates/domains/platform-artifacts" }
+insight-platform-api = { path = "crates/protocols/platform-api" }
+insight-platform-capability-adapters = { path = "crates/adapters/platform-capability-adapters" }
+insight-platform-capability-worker = { path = "apps/services/platform-capability-worker" }
+insight-platform-callback-api = { path = "apps/services/platform-callback-api" }
+insight-platform-contracts = { path = "crates/foundation/platform-contracts" }
+insight-platform-context = { path = "crates/domains/platform-context" }
+insight-platform-context-worker = { path = "apps/services/platform-context-worker" }
+insight-platform-gateway = { path = "apps/services/platform-gateway" }
+insight-platform-egress = { path = "crates/adapters/platform-egress" }
+insight-platform-egress-broker = { path = "apps/services/platform-egress-broker" }
+insight-platform-egress-rpc = { path = "crates/protocols/platform-egress-rpc" }
+insight-platform-invocations = { path = "crates/domains/platform-invocations" }
+insight-platform-jobs = { path = "crates/execution/platform-jobs" }
+insight-platform-model-adapters = { path = "crates/adapters/platform-model-adapters" }
+insight-platform-model-worker = { path = "apps/services/platform-model-worker" }
+insight-platform-models = { path = "crates/domains/platform-models" }
+insight-platform-mcp-host = { path = "crates/domains/platform-mcp-host" }
+insight-platform-mcp-rpc = { path = "crates/protocols/platform-mcp-rpc" }
+insight-platform-mcp-service = { path = "apps/services/platform-mcp-service" }
+insight-platform-mcp-cleanup-worker = { path = "apps/services/platform-mcp-cleanup-worker" }
+insight-platform-observability = { path = "crates/foundation/platform-observability" }
+insight-platform-orchestration-worker = { path = "apps/services/platform-orchestration-worker" }
+insight-platform-postgres = { path = "crates/adapters/platform-postgres" }
+insight-platform-orchestrator = { path = "crates/execution/platform-orchestrator" }
+insight-platform-registry = { path = "crates/definitions/platform-registry" }
+insight-platform-registry-validation-worker = { path = "apps/services/platform-registry-validation-worker" }
+insight-platform-rpc-trace = { path = "crates/protocols/platform-rpc-trace" }
+insight-platform-runtime = { path = "crates/application/platform-runtime" }
+insight-platform-sandbox = { path = "crates/domains/platform-sandbox" }
+insight-platform-sandbox-dispatcher = { path = "apps/services/platform-sandbox-dispatcher" }
+insight-platform-sandbox-runner = { path = "apps/sandbox/platform-sandbox-runner" }
+insight-platform-opensandbox-client = { path = "crates/adapters/platform-opensandbox-client" }
+insight-platform-scheduler = { path = "crates/execution/platform-scheduler" }
+insight-platform-secret-broker = { path = "crates/adapters/platform-secret-broker" }
+insight-platform-security = { path = "crates/domains/platform-security" }
+insight-platform-security-authority = { path = "apps/services/platform-security-authority" }
+insight-platform-security-rpc = { path = "crates/protocols/platform-security-rpc" }
+insight-platform-tasks = { path = "crates/domains/platform-tasks" }
+insight-platform-worker = { path = "crates/application/platform-worker" }
+
+insight-platform-plan = { path = "crates/definitions/platform-plan" }
+
+insight-platform-deployment-contracts = { path = "crates/deployment/platform-deployment-contracts" }
+
+insight-platform-contract-tooling = { path = "tools/rust/platform-contract-tooling" }
+
+insight-platform-storage-tooling = { path = "tools/rust/platform-storage-tooling" }
+
+insight-platform-opensandbox-executor = { path = "crates/adapters/platform-opensandbox-executor" }
+
+insight-platform-outbox-worker = { path = "apps/services/platform-outbox-worker" }

@@ -1,0 +1,360 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "open3"
+require "yaml"
+require "tempfile"
+
+ROOT = File.expand_path("../..", __dir__)
+CHARTS = %w[
+  insight-platform-gateway
+  insight-platform-orchestration-worker
+  insight-platform-outbox-worker
+  insight-platform-history-maintenance
+  insight-platform-registry-validation-worker
+  insight-platform-model-worker
+  insight-platform-capability-native-worker
+  insight-platform-capability-remote-worker
+  insight-platform-context-worker
+  insight-platform-remote-context-worker
+  insight-platform-mcp-host
+  insight-platform-callback-api
+  insight-platform-mcp-cleanup-worker
+  insight-platform-sandbox
+  insight-platform-artifact
+  insight-platform-security-egress
+].freeze
+EXPECTED_COUNTS = {
+  "management_api" => 1,
+  "runtime_api" => 1,
+  "scheduler_recovery" => 1,
+  "outbox_worker" => 1,
+  "history_maintenance" => 1,
+  "model_worker" => 1,
+  "capability_native_worker" => 1,
+  "capability_remote_worker" => 1,
+  "registry_validation_worker" => 1,
+  "context_worker" => 4,
+  "mcp_host" => 6,
+  "sandbox_dispatcher" => 1,
+  "opensandbox_server" => 1,
+  "opensandbox_controller" => 1,
+  "artifact_gateway" => 1,
+  "artifact_data_worker" => 1,
+  "artifact_maintenance" => 1,
+  "egress_secret_broker" => 2
+}.freeze
+DIGEST_IMAGE = /\A[^\s@]+@sha256:[0-9a-f]{64}\z/
+CONFIG_DIGEST = /\Asha256:[0-9a-f]{64}\z/
+CONFIG_DIGEST_ANNOTATION = "insight.platform/deployment-config-digest"
+
+def valid_network_selector?(selector)
+  return false unless selector.is_a?(Hash)
+  return false unless (selector.keys - %w[matchLabels matchExpressions]).empty?
+
+  labels = selector.fetch("matchLabels", {})
+  expressions = selector.fetch("matchExpressions", [])
+  labels.is_a?(Hash) && expressions.is_a?(Array) &&
+    expressions.all? do |expression|
+      expression.is_a?(Hash) && expression["key"].is_a?(String) &&
+        !expression["key"].empty? && expression["operator"].is_a?(String) &&
+        !expression["operator"].empty?
+    end
+end
+
+def schema_shaped_network_peer?(peer)
+  return false unless peer.is_a?(Hash) && !peer.empty?
+  return false unless (peer.keys - %w[ipBlock namespaceSelector podSelector]).empty?
+
+  if peer.key?("ipBlock")
+    return false unless peer.keys == ["ipBlock"]
+
+    block = peer["ipBlock"]
+    return block.is_a?(Hash) && (block.keys - %w[cidr except]).empty? &&
+      block["cidr"].is_a?(String) && !block["cidr"].empty? &&
+      block.fetch("except", []).is_a?(Array)
+  end
+
+  selectors = peer.values_at("namespaceSelector", "podSelector").compact
+  selectors.any? && selectors.all? { |selector| valid_network_selector?(selector) } &&
+    selectors.any? do |selector|
+      !selector.fetch("matchLabels", {}).empty? ||
+        !selector.fetch("matchExpressions", []).empty?
+    end
+end
+
+def selector_matches?(selector, labels)
+  return false unless valid_network_selector?(selector)
+
+  matches_labels = selector.fetch("matchLabels", {}).all? do |key, value|
+    labels[key] == value
+  end
+  matches_expressions = selector.fetch("matchExpressions", []).all? do |expression|
+    key = expression["key"]
+    values = expression.fetch("values", [])
+    case expression["operator"]
+    when "In"
+      values.include?(labels[key])
+    when "NotIn"
+      labels.key?(key) && !values.include?(labels[key])
+    when "Exists"
+      labels.key?(key)
+    when "DoesNotExist"
+      !labels.key?(key)
+    else
+      false
+    end
+  end
+  matches_labels && matches_expressions
+end
+
+def policy_ports(rule)
+  rule.fetch("ports", []).map do |port|
+    number = port["port"]
+    next unless number.is_a?(Integer)
+
+    [port.fetch("protocol", "TCP"), number]
+  end.compact
+end
+
+documents = CHARTS.flat_map do |chart|
+  path = File.join(ROOT, "deploy", "helm", chart)
+  arguments = ["helm", "template", chart.delete_prefix("insight-platform-"), path]
+  fixture = nil
+  if chart == "insight-platform-sandbox"
+    fixture = Tempfile.new("sandbox-render-fixture")
+    _output, error, status = Open3.capture3("python3", File.join(ROOT, "tools/tests/sandbox_helm_fixture.py"), "--output", fixture.path)
+    abort "Sandbox fixture generation failed: #{error}" unless status.success?
+    arguments.concat(["--values", fixture.path])
+  end
+  rendered, error, status = Open3.capture3(*arguments)
+  fixture&.close!
+  abort("#{chart} failed to render: #{error}") unless status.success?
+
+  YAML.load_stream(rendered).compact
+end
+failures = []
+platform_namespaces = documents.select do |item|
+  item["kind"] == "Namespace" && item.dig("metadata", "labels", "insight.platform/workload-namespace")
+end.map { |item| item.dig("metadata", "name") }.uniq
+all_workloads = documents.select { |item| %w[Deployment DaemonSet].include?(item["kind"]) }
+all_workloads.each do |item|
+  namespace = item.dig("metadata", "namespace")
+  role = item.dig("spec", "template", "metadata", "labels", "insight.platform/component-role")
+  if platform_namespaces.include?(namespace) && !role
+    failures << "#{item['kind']}/#{namespace}/#{item.dig('metadata', 'name')} has no component role"
+  elsif role && !platform_namespaces.include?(namespace)
+    failures << "#{item['kind']}/#{namespace}/#{item.dig('metadata', 'name')} is outside a Platform workload namespace"
+  end
+end
+workloads = all_workloads.select do |item|
+  item.dig("spec", "template", "metadata", "labels", "insight.platform/component-role")
+end
+by_role = workloads.group_by do |item|
+  item.dig("spec", "template", "metadata", "labels", "insight.platform/component-role")
+end
+
+EXPECTED_COUNTS.each do |role, count|
+  actual = by_role.fetch(role, []).length
+  failures << "#{role} expected #{count} workload pools, found #{actual}" unless actual == count
+end
+(by_role.keys - EXPECTED_COUNTS.keys).each { |role| failures << "unknown component role #{role}" }
+
+pdbs = documents.select { |item| item["kind"] == "PodDisruptionBudget" }
+hpas = documents.select { |item| item["kind"] == "HorizontalPodAutoscaler" }
+identities = {}
+deployment_config_digests = []
+by_role.each do |role, role_workloads|
+  digests = []
+  role_workloads.each do |workload|
+    namespace = workload.dig("metadata", "namespace")
+    name = workload.dig("metadata", "name")
+    labels = workload.dig("spec", "template", "metadata", "labels") || {}
+    config_digest = workload.dig("spec", "template", "metadata", "annotations", CONFIG_DIGEST_ANNOTATION)
+    failures << "#{role}/#{name} deployment configuration digest is invalid" unless CONFIG_DIGEST.match?(config_digest.to_s)
+    deployment_config_digests << config_digest
+    pod = workload.dig("spec", "template", "spec") || {}
+    account = pod["serviceAccountName"]
+    identity = [namespace, account]
+    previous = identities[identity]
+    failures << "#{role}/#{name} shares ServiceAccount with #{previous}" if previous
+    identities[identity] = "#{role}/#{name}"
+    kubernetes_clients = %w[opensandbox_server opensandbox_controller]
+    expected_automount = kubernetes_clients.include?(role)
+    unless pod["automountServiceAccountToken"] == expected_automount
+      failures << "#{role}/#{name} ServiceAccount token policy drifted"
+    end
+
+    containers = pod["containers"] || []
+    failures << "#{role}/#{name} has no containers" if containers.empty?
+    containers.each do |container|
+      image = container["image"]
+      failures << "#{role}/#{name}/#{container['name']} image is mutable" unless DIGEST_IMAGE.match?(image.to_s)
+      digests << image.to_s.split("@").last if DIGEST_IMAGE.match?(image.to_s)
+      %w[requests limits].each do |side|
+        resources = container.dig("resources", side) || {}
+        missing = %w[cpu memory ephemeral-storage] - resources.keys
+        failures << "#{role}/#{name}/#{container['name']} #{side} misses #{missing.join(',')}" unless missing.empty?
+      end
+    end
+
+    matching_pdbs = pdbs.select do |pdb|
+      next false unless pdb.dig("metadata", "namespace") == namespace
+
+      selector = pdb.dig("spec", "selector", "matchLabels") || {}
+      !selector.empty? && selector.all? { |key, value| labels[key] == value }
+    end
+    failures << "#{role}/#{name} requires exactly one PDB" unless matching_pdbs.length == 1
+    next unless workload["kind"] == "Deployment"
+
+    matching_hpas = hpas.select do |hpa|
+      target = hpa.dig("spec", "scaleTargetRef") || {}
+      hpa.dig("metadata", "namespace") == namespace &&
+        target == {"apiVersion" => "apps/v1", "kind" => "Deployment", "name" => name}
+    end
+    failures << "#{role}/#{name} requires exactly one HPA" unless matching_hpas.length == 1
+  end
+  failures << "#{role} workload pools use different candidate image digests" unless digests.uniq.length == 1
+end
+failures << "workload pools do not share one CandidateManifest deployment configuration digest" unless deployment_config_digests.uniq.length == 1
+
+workload_namespaces = workloads.map { |item| item.dig("metadata", "namespace") }.uniq
+workload_namespaces.each do |namespace|
+  namespace_policies = documents.select do |item|
+    item["kind"] == "NetworkPolicy" && item.dig("metadata", "namespace") == namespace
+  end
+  defaults = documents.select do |item|
+    item["kind"] == "NetworkPolicy" && item.dig("metadata", "namespace") == namespace &&
+      item.dig("metadata", "name") == "default-deny" && item.dig("spec", "podSelector") == {} &&
+      (item.dig("spec", "policyTypes") || []).sort == %w[Egress Ingress] &&
+      !item.dig("spec", "ingress") && !item.dig("spec", "egress")
+  end
+  failures << "#{namespace} requires exactly one bidirectional default-deny" unless defaults.length == 1
+  namespace_policies.each do |policy|
+    next if defaults.include?(policy)
+
+    name = policy.dig("metadata", "name")
+    spec = policy["spec"] || {}
+    failures << "#{namespace}/#{name} selects the entire namespace" if spec["podSelector"] == {}
+    {"ingress" => "from", "egress" => "to"}.each do |direction, peers_key|
+      rules = spec[direction] || []
+      unbounded = !rules.is_a?(Array) || rules.any? do |rule|
+        next true unless rule.is_a?(Hash)
+
+        peers = rule[peers_key]
+        ports = rule["ports"]
+        !peers.is_a?(Array) || peers.empty? || peers.any? { |peer| !schema_shaped_network_peer?(peer) } ||
+          !ports.is_a?(Array) || ports.empty?
+      end
+      if unbounded
+        failures << "#{namespace}/#{name} contains an unbounded #{direction} allow rule"
+      end
+    end
+  end
+end
+
+namespace_labels = documents.select { |item| item["kind"] == "Namespace" }.each_with_object({}) do |item, result|
+  name = item.dig("metadata", "name")
+  labels = (item.dig("metadata", "labels") || {}).merge("kubernetes.io/metadata.name" => name)
+  result[name] = result.fetch(name, {}).merge(labels)
+end
+policies = documents.select do |item|
+  item["kind"] == "NetworkPolicy" && item.dig("metadata", "name") != "default-deny"
+end
+workload_records = workloads.map do |workload|
+  {
+    resource: workload,
+    namespace: workload.dig("metadata", "namespace"),
+    name: workload.dig("metadata", "name"),
+    labels: workload.dig("spec", "template", "metadata", "labels") || {},
+    ports: (workload.dig("spec", "template", "spec", "containers") || []).flat_map do |container|
+      (container["ports"] || []).map do |port|
+        number = port["containerPort"]
+        [port.fetch("protocol", "TCP"), number] if number.is_a?(Integer)
+      end.compact
+    end
+  }
+end
+
+workload_records.each do |source|
+  source_policies = policies.select do |policy|
+    policy.dig("metadata", "namespace") == source[:namespace] &&
+      selector_matches?(policy.dig("spec", "podSelector") || {}, source[:labels])
+  end
+  source_policies.each do |policy|
+    (policy.dig("spec", "egress") || []).each do |rule|
+      rule_ports = policy_ports(rule)
+      (rule["to"] || []).each do |peer|
+        next if peer["ipBlock"]
+
+        namespace_selector = peer["namespaceSelector"] || {}
+        destination_namespaces = namespace_labels.map do |name, labels|
+          name if selector_matches?(namespace_selector, labels)
+        end.compact
+        selector_names_platform_namespace =
+          namespace_selector.fetch("matchLabels", {}).any? do |key, value|
+            key == "insight.platform/workload-namespace" ||
+              (key == "kubernetes.io/metadata.name" && value.start_with?("platform-"))
+          end
+        if destination_namespaces.empty?
+          if selector_names_platform_namespace
+            failures << "#{source[:namespace]}/#{policy.dig('metadata', 'name')} egress selects no Platform namespace"
+          end
+          next
+        end
+
+        destination_selector = peer["podSelector"] || {}
+        destinations = workload_records.select do |destination|
+          destination_namespaces.include?(destination[:namespace]) &&
+            selector_matches?(destination_selector, destination[:labels])
+        end
+        if destinations.empty?
+          dynamic_sandbox_destination = destination_namespaces.all? do |name|
+            namespace_labels.fetch(name, {})["insight.platform/sandbox-workload-namespace"] == "true"
+          end
+          next if dynamic_sandbox_destination
+
+          failures << "#{source[:namespace]}/#{policy.dig('metadata', 'name')} egress selects no Platform workload"
+          next
+        end
+
+        destinations.each do |destination|
+          unless (rule_ports & destination[:ports]).any?
+            failures << "#{source[:namespace]}/#{policy.dig('metadata', 'name')} egress port does not match #{destination[:namespace]}/#{destination[:name]}"
+            next
+          end
+
+          reciprocal = policies.any? do |destination_policy|
+            next false unless destination_policy.dig("metadata", "namespace") == destination[:namespace]
+            next false unless selector_matches?(
+              destination_policy.dig("spec", "podSelector") || {},
+              destination[:labels]
+            )
+
+            (destination_policy.dig("spec", "ingress") || []).any? do |ingress_rule|
+              next false if (rule_ports & policy_ports(ingress_rule)).empty?
+
+              (ingress_rule["from"] || []).any? do |source_peer|
+                next false if source_peer["ipBlock"]
+
+                source_namespace_selector = source_peer["namespaceSelector"] || {}
+                source_pod_selector = source_peer["podSelector"] || {}
+                selector_matches?(
+                  source_namespace_selector,
+                  namespace_labels.fetch(source[:namespace], {})
+                ) && selector_matches?(source_pod_selector, source[:labels])
+              end
+            end
+          end
+          unless reciprocal
+            failures << "#{source[:namespace]}/#{source[:name]} egress has no reciprocal ingress on #{destination[:namespace]}/#{destination[:name]}"
+          end
+        end
+      end
+    end
+  end
+end
+
+abort(failures.map { |failure| "component workload closure: #{failure}" }.join("\n")) unless failures.empty?
+
+puts "Platform ComponentRole workload closure passed (#{EXPECTED_COUNTS.length} roles, #{workloads.length} isolated pools)."

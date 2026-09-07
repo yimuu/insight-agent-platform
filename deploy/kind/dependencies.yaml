@@ -129,14 +129,7 @@ spec:
         - name: nats
           image: insight-kind/nats:b83efabe3e7d
           imagePullPolicy: Never
-          args:
-            - --jetstream
-            - --store_dir=/data
-            - --tls
-            - --tlscert=/etc/nats/tls/server.pem
-            - --tlskey=/etc/nats/tls/server-key.pem
-            - --tlscacert=/etc/nats/tls/ca.pem
-            - --tlsverify
+          args: ["--config", "/etc/nats/config/nats.conf"]
           ports:
             - {name: client, containerPort: 4222}
           readinessProbe:
@@ -148,13 +141,16 @@ spec:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {cpu: "1", memory: 512Mi}
           volumeMounts:
+            - {name: config, mountPath: /etc/nats/config, readOnly: true}
             - {name: tls, mountPath: /etc/nats/tls, readOnly: true}
             - {name: data, mountPath: /data}
       volumes:
+        - name: config
+          configMap: {name: nats-config}
         - name: tls
           secret: {secretName: nats-tls, defaultMode: 288}
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: {claimName: nats-jetstream}
 ---
 apiVersion: v1
 kind: Service
@@ -165,3 +161,13 @@ spec:
   selector: {app: nats}
   ports:
     - {name: client, port: 4222, targetPort: client}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-jetstream
+  namespace: platform-deps
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 2Gi}

@@ -1,6 +1,9 @@
 {{- if or (lt (int .Values.replicas) 2) (lt (int .Values.autoscaling.minReplicas) 2) (lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas)) -}}
 {{- fail "Registry Validation Worker requires an HA replica and HPA closure" -}}
 {{- end -}}
+{{- if or (not (hasPrefix "https://" .Values.artifact.endpoint)) (contains "@" .Values.artifact.endpoint) (empty .Values.artifact.existingSecret) (lt (int .Values.artifact.port) 1) (gt (int .Values.artifact.port) 65535) -}}
+{{- fail "Registry Validation Worker requires its bounded Artifact HTTPS and independent mTLS closure" -}}
+{{- end -}}
 {{- if or (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.config.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.candidate.deploymentConfigDigest)) -}}
 {{- fail "Registry Validation Worker requires immutable digests" -}}
 {{- end -}}
