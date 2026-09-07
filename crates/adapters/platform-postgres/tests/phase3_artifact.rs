@@ -3,7 +3,7 @@ use insight_platform_artifacts::store::DriveExpiredArtifactJobs;
 use insight_platform_jobs::store::JobCommandFence as JobFence;
 use insight_platform_jobs::store::SafetyScanShard;
 mod support;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use insight_platform_artifacts::{
     ArtifactBackendFailure, ArtifactBlobBackend, ArtifactBlobCleanupExecution,
     ArtifactBlobDeletionEvidence, ArtifactDeletionEvidence, ArtifactDeletionExecution,
@@ -1560,7 +1560,7 @@ async fn artifact_upload_lifecycle_fixture() {
         ))
     ));
 
-    let prepared_command = command(
+    let mut prepared_command = command(
         tenant_a.clone(),
         allowed_principal.clone(),
         retention_a.clone(),
@@ -1570,12 +1570,74 @@ async fn artifact_upload_lifecycle_fixture() {
         1_024,
         digest('d'),
     );
+    prepared_command.operation_deadline = prepared_command
+        .grant_expires_at
+        .with_nanosecond(123_456_789)
+        .unwrap();
+    // The Gateway derives both deadlines from the owning microsecond time. Exercise
+    // equal deadlines here: a thirty-minute gap hid JSON/SQL precision disagreement.
+    prepared_command.operation_deadline = DateTime::parse_from_rfc3339(
+        insight_platform_contracts::UtcTimestamp::from_datetime(
+            prepared_command.operation_deadline,
+        )
+        .as_str(),
+    )
+    .unwrap()
+    .with_timezone(&Utc);
+    prepared_command.grant_expires_at = prepared_command.operation_deadline;
     let applied = execute_prepare(&repository, prepared_command.clone())
         .await
         .unwrap();
     let CommandOutcome::Applied(prepared) = applied else {
         panic!("first prepare must apply");
     };
+    insight_platform_artifacts::validate_artifact_prepare_replay(
+        &prepared,
+        &ArtifactUploadReplayIdentity::from_audit(&prepared_command.audit),
+        Utc::now(),
+    )
+    .expect("one upload deadline remains valid after actual PostgreSQL persistence");
+    assert_eq!(
+        prepared.operation.deadline.timestamp_subsec_nanos(),
+        123_456_000
+    );
+    assert_eq!(
+        prepared.grant.snapshot.expires_at,
+        prepared.operation.deadline
+    );
+    let (link_expiry, grant_payload, grant_digest): (DateTime<Utc>, serde_json::Value, String) =
+        sqlx::query_as(
+            "SELECT expires_at, payload, payload_digest FROM insight_platform.artifact_links WHERE tenant_id=$1 AND artifact_link_id=$2",
+        )
+        .bind(tenant_a.to_string())
+        .bind(prepared.grant.upload_grant_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(link_expiry, prepared.operation.deadline);
+    assert_eq!(canonical_digest(&grant_payload).unwrap(), grant_digest);
+    assert_eq!(
+        prepared.grant.snapshot.canonical_digest().unwrap().as_str(),
+        grant_digest
+    );
+    let mut later_grant = prepared.clone();
+    later_grant.grant.snapshot.expires_at += Duration::nanoseconds(1);
+    assert!(matches!(
+        insight_platform_artifacts::validate_artifact_prepare_replay(
+            &later_grant,
+            &ArtifactUploadReplayIdentity::from_audit(&prepared_command.audit),
+            Utc::now(),
+        ),
+        Err(insight_platform_artifacts::ArtifactCommandError::InvalidIdentity)
+    ));
+    assert!(matches!(
+        insight_platform_artifacts::validate_artifact_prepare_replay(
+            &prepared,
+            &ArtifactUploadReplayIdentity::from_audit(&prepared_command.audit),
+            prepared.operation.deadline,
+        ),
+        Err(insight_platform_artifacts::ArtifactCommandError::InvalidTransition)
+    ));
     assert_eq!(prepared.artifact.expected_digest, None);
     assert_eq!(prepared.artifact.declared_media_type, None);
     assert_eq!(prepared.artifact.verified_media_type, None);

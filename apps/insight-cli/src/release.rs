@@ -212,6 +212,14 @@ pub fn load_current_release(
     // Development/source builds deliberately have no release trust root and must fail closed
     // without contacting the release service.
     let public_key = embedded_public_key()?;
+    load_current_release_with_key(cache_root, offline, &public_key)
+}
+
+fn load_current_release_with_key(
+    cache_root: &Path,
+    offline: bool,
+    public_key: &[u8],
+) -> Result<VerifiedRelease, ReleaseError> {
     let version = env!("CARGO_PKG_VERSION");
     let cache = cache_root.join("releases").join(version);
     let bundle_path = cache.join("release-bundle.json");
@@ -240,7 +248,7 @@ pub fn load_current_release(
         )?;
         (bundle, signature)
     };
-    let bundle = verify_release_bundle(&bundle_bytes, &signature_bytes, &public_key)?;
+    let bundle = verify_release_bundle(&bundle_bytes, &signature_bytes, public_key)?;
     if bundle.version != version {
         return Err(ReleaseError::new(format!(
             "verified release {} does not match CLI version {version}",
@@ -797,6 +805,59 @@ mod tests {
             verify_release_bundle(&bytes, &detached, &public).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn cached_restart_reverifies_signed_identity_and_rejects_missing_or_changed_release() {
+        let directory = tempdir().unwrap();
+        let mut expected = bundle();
+        expected.version = env!("CARGO_PKG_VERSION").to_owned();
+        expected.development_profile_digest = dev_profile::registry_content_digest().unwrap();
+        expected.profile_schema_digest = dev_profile::registry_schema_digest();
+        let executable = fs::read(env::current_exe().unwrap()).unwrap();
+        for cli in &mut expected.cli {
+            cli.archive.path = format!("insight-{}-{}.tar.gz", expected.version, cli.target);
+            cli.binary.path = format!("insight-{}-{}", expected.version, cli.target);
+            if Some(cli.target.as_str()) == current_target() {
+                cli.binary.bytes = executable.len() as u64;
+                cli.binary.sha256 = digest_bytes(&executable);
+            }
+        }
+        let (bytes, detached, public) = signed(&expected);
+        let cache = directory.path().join("releases").join(&expected.version);
+        write_release_cache(&cache, &bytes, &detached).unwrap();
+        // This uses the actual signature, embedded profile/schema and current executable checks.
+        // No release server exists for this fixture; the offline branch never constructs a URL.
+        let loaded = load_current_release_with_key(directory.path(), true, &public).unwrap();
+        assert_eq!(loaded.bundle_digest, digest_bytes(&bytes));
+        let identity = crate::RuntimeRestartIdentity {
+            release_identity: format!("release:{}:{}", loaded.version, loaded.bundle_digest),
+            source_fingerprint: loaded.bundle_digest.clone(),
+        };
+        crate::validate_restart_identity(
+            &identity,
+            &format!("release:{}:{}", loaded.version, loaded.bundle_digest),
+            &loaded.bundle_digest,
+        )
+        .unwrap();
+
+        expected.git_commit = "b".repeat(40);
+        let (different, signature, _) = signed(&expected);
+        write_release_cache(&cache, &different, &signature).unwrap();
+        let changed = load_current_release_with_key(directory.path(), true, &public).unwrap();
+        assert!(crate::validate_restart_identity(
+            &identity,
+            &format!("release:{}:{}", changed.version, changed.bundle_digest),
+            &changed.bundle_digest,
+        )
+        .is_err());
+        fs::write(cache.join("release-bundle.json"), &bytes).unwrap();
+        assert!(load_current_release_with_key(directory.path(), true, &public).is_err());
+        write_release_cache(&cache, &bytes, &detached).unwrap();
+        fs::remove_file(cache.join("release-bundle.signature.json")).unwrap();
+        assert!(load_current_release_with_key(directory.path(), true, &public).is_err());
+        fs::remove_file(cache.join("release-bundle.json")).unwrap();
+        assert!(load_current_release_with_key(directory.path(), true, &public).is_err());
     }
 
     #[test]

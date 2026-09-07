@@ -709,7 +709,7 @@ async fn prepare_upload_inner(
     {
         return prepare_upload_response(&state, &principal, &identity, prepared, None).await;
     }
-    let now = Utc::now();
+    let now = upload_admission_time(Utc::now())?;
     let authority = state
         .repository
         .resolve_public_artifact_prepare_authority(
@@ -843,6 +843,14 @@ async fn prepare_upload_inner(
             prepare_upload_response(&state, &principal, &identity, prepared, None).await
         }
     }
+}
+
+fn upload_admission_time(now: DateTime<Utc>) -> Result<DateTime<Utc>, HttpError> {
+    // Derive the signed target, JSON Grant and SQL Job from the same owning precision.
+    // PostgreSQL cannot preserve the sub-microsecond remainder of a host clock.
+    DateTime::parse_from_rfc3339(UtcTimestamp::from_datetime(now).as_str())
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| HttpError::Unavailable)
 }
 
 async fn prepare_upload_response(
@@ -1719,6 +1727,25 @@ impl Error for GatewayError {}
 mod tests {
     use super::*;
     use rcgen::{CertificateParams, KeyPair, SanType};
+
+    #[test]
+    fn upload_admission_time_preserves_the_database_deadline_without_extension() {
+        for nanos in [0, 1, 123_456_789, 999_999_999] {
+            let host_now = DateTime::from_timestamp(1_800_000_000, nanos).unwrap();
+            let admitted = upload_admission_time(host_now).unwrap();
+            assert_eq!(
+                admitted,
+                DateTime::from_timestamp_micros(host_now.timestamp_micros()).unwrap()
+            );
+            assert!(admitted <= host_now);
+            assert!(host_now - admitted < chrono::Duration::microseconds(1));
+            let deadline = admitted + chrono::Duration::seconds(300);
+            let round_trip: DateTime<Utc> =
+                serde_json::from_value(serde_json::to_value(deadline).unwrap()).unwrap();
+            assert_eq!(round_trip, deadline);
+            assert_eq!(deadline.timestamp_subsec_nanos() % 1_000, 0);
+        }
+    }
 
     #[test]
     fn completion_identity_binds_uri_original_precondition_and_proof() {

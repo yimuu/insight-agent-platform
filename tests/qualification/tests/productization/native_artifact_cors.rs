@@ -1,5 +1,50 @@
 //! Actual development dependency checks; CORS never supplies upload authorization.
 use super::*;
+use insight_platform_contracts::{ResourceId, ResourceKind};
+
+fn localstack_container(profile: &Value, processes: &Value) -> Result<String, &'static str> {
+    let tenant = profile["tenant_id"]
+        .as_str()
+        .and_then(|id| ResourceId::parse_expected(id, ResourceKind::Tenant).ok())
+        .ok_or("runtime profile must contain a valid tenant identity")?;
+    let expected = format!("insight-{}", tenant.uuid().simple());
+    if processes["compose_project"].as_str() != Some(expected.as_str()) {
+        return Err("Compose project must match the runtime profile's complete tenant identity");
+    }
+    Ok(format!("{expected}-localstack-1"))
+}
+
+#[test]
+fn localstack_probe_requires_the_exact_current_tenant_namespace() {
+    let profile = json!({"tenant_id": "ten_019a7c80-0000-7000-8000-000000000001"});
+    let processes = json!({"compose_project": "insight-019a7c80000070008000000000000001"});
+    assert_eq!(
+        localstack_container(&profile, &processes).unwrap(),
+        "insight-019a7c80000070008000000000000001-localstack-1"
+    );
+    for wrong in [
+        json!({"compose_project": "insight-019a7c80000070008000000000000002"}),
+        json!({"compose_project": "insight-019a7c80"}),
+        json!({"compose_project": "insight-019A7C80000070008000000000000001"}),
+        json!({"compose_project": null}),
+        json!({}),
+    ] {
+        assert!(localstack_container(&profile, &wrong).is_err(), "{wrong}");
+    }
+    for invalid in [
+        json!("ten_019a7c80"),
+        json!("agt_019a7c80-0000-7000-8000-000000000001"),
+        json!("ten_019a7c80-0000-4000-8000-000000000001"),
+        json!("ten_019A7C80-0000-7000-8000-000000000001"),
+        Value::Null,
+    ] {
+        assert!(
+            localstack_container(&json!({"tenant_id": invalid}), &processes).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(localstack_container(&json!({}), &processes).is_err());
+}
 
 fn aws(container: &str, args: &[&str]) -> Result<Value, String> {
     let output = Command::new("docker")
@@ -32,11 +77,7 @@ pub(super) fn verify(insight: &Path, project: &Path) {
     let profile: Value = serde_json::from_slice(&profile_bytes).unwrap();
     let processes: Value =
         serde_json::from_slice(&fs::read(runtime.join("processes.json")).unwrap()).unwrap();
-    let compose = processes["compose_project"].as_str().unwrap();
-    assert!(compose
-        .strip_prefix("insight-")
-        .is_some_and(|suffix| suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_hexdigit())));
-    let container = format!("{compose}-localstack-1");
+    let container = localstack_container(&profile, &processes).unwrap();
     let bucket = profile["s3_bucket"].as_str().unwrap();
     let expected = json!({"CORSRules":[{"ID":"insight-loopback-upload-v1","AllowedOrigins":["http://127.0.0.1:*"],"AllowedMethods":["PUT"],"AllowedHeaders":["content-type"],"MaxAgeSeconds":0}]});
     let observed = aws(&container, &["get-bucket-cors", "--bucket", bucket]).unwrap();

@@ -234,6 +234,11 @@ Receipt 保证窗口同时覆盖持久 expires_at、完成时间加独立保留�
 
 ### 本地 runtime 配置变更
 
+联合评审接受：`start` 重启已冻结的预构建环境时只消费本地签名 ReleaseBundle 与 exact image cache，重验当前 CLI、
+profile/schema 和原 release/source 身份；缓存缺失或漂移明确拒绝。下载与版本切换仍由显式 `dev` 执行，不新增模式字段或网络兜底。
+候选资格分别验证源码 build cache 与预构建 release/binary cache 的保持，不为预构建环境制造源码记录；同一重启、CORS 与业务恢复检查继续执行。
+Console 候选解包接受发行 tar 产生的唯一根目录条目，所有归一化路径仍须唯一；根文件、链接与路径逃逸继续拒绝。
+
 联合评审接受：发行 CLI 的安装平台与 runtime 的执行平台分别验证。预构建 runtime 从已签名 Linux image 提取后由宿主
 supervisor 执行；macOS 只能显式选择 checkout 源码构建，不新增隐式 fallback。`dev` 在本地变更前校验主机支持，
 `start` 按已验证 profile 或恢复 journal 的目标模式，在恢复写入和 running 分支前校验；观察与清理仍可收口不支持的 profile。
@@ -317,3 +322,12 @@ CORS 仅是浏览器的跨来源约束。短时预签名 URL 仍是 exact 对象
 对真实服务响应进行有界严格解码并核验完整唯一规则；缺失、额外规则、未知字段、类型或范围漂移均以安全依赖错误拒绝，
 重启不自动修补。验证须覆盖真实浏览器的预检和 PUT、非许可来源与请求被拒绝，以及规则漂移导致重启拒绝；
 合成响应和不执行浏览器 CORS 的 HTTP 客户端不能证明该边界已通过。
+
+### Artifact 上传截止的共同精度（已接受）
+
+联合评审接受：Artifact Gateway 在生成上传目标和首次 prepare 命令前，按既有 UtcTimestamp 微秒精度
+规范一次准入时间，再派生 provider、Grant、Job、Receipt 和保留截止。JSON Grant 与 PostgreSQL Job
+共用同一截止时不能保留不同的纳秒余数；向下规范不能延长授权窗口。首次提交和 Receipt 重放均继续
+严格验证当前身份、Grant 不晚于 Job 及实际数据库期限，不对损坏的旧记录放宽比较或回写修复。
+此修复不新增字段、状态、schema、容量或事务，也不改变原秒级上传窗口和回收职责；真实 PG 验证
+覆盖同截止的首次提交、重放、原始摘要与独立 SQL 期限一致，以及越界和到期拒绝。

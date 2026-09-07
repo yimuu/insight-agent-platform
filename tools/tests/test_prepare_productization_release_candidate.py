@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -12,6 +14,9 @@ import unittest
 
 ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / "Cargo.toml").is_file())
 SCRIPT = ROOT / "tools/release/prepare-productization-release-candidate.py"
+SPEC = importlib.util.spec_from_file_location("prepare_candidate", SCRIPT)
+CANDIDATE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(CANDIDATE)
 DIGESTS = {
     name: "sha256:" + character * 64
     for name, character in (("index", "a"), ("amd64", "b"), ("arm64", "c"))
@@ -19,6 +24,49 @@ DIGESTS = {
 
 
 class PrepareProductizationReleaseCandidateTests(unittest.TestCase):
+    def test_release_tar_command_round_trips_root_and_nested_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "dist"
+            (source / "assets").mkdir(parents=True)
+            (source / "index.html").write_bytes(b"<title>actual tar producer</title>")
+            (source / "assets/app.js").write_bytes(b"export const ready = true")
+            archive = root / "console.tar.gz"
+            subprocess.run(
+                ["tar", "-czf", str(archive), "-C", str(source), "."],
+                # macOS bsdtar otherwise adds AppleDouble files absent from the Linux producer.
+                env={**os.environ, "COPYFILE_DISABLE": "1"},
+                check=True, capture_output=True,
+            )
+            output = root / "unpacked"
+            CANDIDATE.extract_console(archive, output)
+            self.assertEqual(CANDIDATE.tree_digest(source), CANDIDATE.tree_digest(output))
+
+    def test_console_root_and_normalized_paths_remain_closed(self) -> None:
+        cases = [
+            [("./", tarfile.DIRTYPE), (".", tarfile.DIRTYPE)],
+            [("./", tarfile.REGTYPE)],
+            [(".", tarfile.SYMTYPE)],
+            [("./index.html", tarfile.REGTYPE), ("index.html", tarfile.REGTYPE)],
+            [("./../index.html", tarfile.REGTYPE)],
+            [("./assets/link", tarfile.LNKTYPE)],
+        ]
+        for entries in cases:
+            with self.subTest(entries=entries), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "console.tar.gz"
+                with tarfile.open(archive, "w:gz") as package:
+                    for name, kind in entries:
+                        member = tarfile.TarInfo(name)
+                        member.type = kind
+                        member.linkname = "../outside" if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ""
+                        member.size = 1 if kind == tarfile.REGTYPE else 0
+                        package.addfile(member, io.BytesIO(b"x") if member.size else None)
+                output = root / "unpacked"
+                with self.assertRaises(ValueError):
+                    CANDIDATE.extract_console(archive, output)
+                self.assertFalse(output.exists())
+
     def fixture(self, root: Path, *, unsafe_console: bool = False) -> Path:
         assets = root / "assets"
         assets.mkdir()

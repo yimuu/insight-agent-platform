@@ -4644,7 +4644,10 @@ fn prepare_runtime_restart(
 fn restart_profile_selection(persisted: &RuntimeProfileState) -> Result<DevProfile, CliError> {
     let features = (!persisted.features.is_empty()).then(|| persisted.features.join(","));
     let from_source = persisted.release_identity.starts_with("source:");
-    DevProfile::parse(features.as_deref(), false, from_source).map_err(CliError::UnsupportedProfile)
+    // Restart consumes the already installed exact release. Only an explicit dev may download
+    // release metadata; a candidate need not be published before its stopped profile can restart.
+    DevProfile::parse(features.as_deref(), !from_source, from_source)
+        .map_err(CliError::UnsupportedProfile)
 }
 
 fn runtime_project_profile_summary(
@@ -11448,6 +11451,13 @@ mod tests {
         let selected = restart_profile_selection(&persisted).unwrap();
         assert_eq!(selected.feature_names(), model.feature_names());
         assert!(selected.is_from_source());
+        assert!(!selected.offline());
+        let mut prebuilt = persisted.clone();
+        prebuilt.release_identity = format!("release:0.2.0:{}", prebuilt.source_fingerprint);
+        let selected_prebuilt = restart_profile_selection(&prebuilt).unwrap();
+        assert_eq!(selected_prebuilt.feature_names(), model.feature_names());
+        assert!(!selected_prebuilt.is_from_source());
+        assert!(selected_prebuilt.offline());
         let summary = runtime_project_profile_summary(&persisted, "ready");
         assert_ne!(project.profiles, summary);
         assert_eq!(summary["starter"].features, persisted.features);

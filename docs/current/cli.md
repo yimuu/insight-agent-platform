@@ -95,6 +95,7 @@ canonical union `all`。同一 release/source 内增加 feature 保留现有本�
 排除构建缓存；实际 executable digest 另行校验，不能由源码指纹代替。切换 exact
 release/source 时必须先以 persisted feature 集合运行一次 `dev`，不能在同一次操作中同时切 identity 和增加 feature。`start` 从已验证的
 runtime profile 恢复 exact feature/release/source closure，并在安全 running 点修复 project summary；它不会从可能滞后的 summary 反向切换。
+预构建 `start` 只读取本地已签名 release 和 exact image cache，重新验证原身份；缓存缺失或漂移会失败，下载与版本切换使用显式 `dev`。
 `--offline` 只使用已验证 cache，缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
 
 不支持的预构建启动在获取 release 和准备配置前拒绝；`start` 对已验证 profile 或待恢复 journal 的目标模式执行同一检查，
