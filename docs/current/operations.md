@@ -72,6 +72,9 @@ seed 清理失败会阻止后续启动；结束阶段的清理仍校验原目录
 受保护 tag workflow 构建四个平台 CLI archive、runtime/fixed Sandbox runner/Console与official OpenSandbox image闭包、checksum、SPDX SBOM、
 SLSA provenance、签名与 canonical ReleaseBundle。资产不可覆盖，修复必须发布新版本。未实际执行的跨架构、push/sign 或
 performance 项必须保留 Not run，不能由本机结果推断。
+写入公开发行 tag 和 Release 之前，[匿名索引检查](../../tools/release/verify-public-release-images.py) 使用已验证候选的精确镜像身份，
+从固定 GHCR 地址取得匿名 token 并核对原始 index 摘要。它不读取账户凭证或 Docker 登录配置，也不更改包权限。
+检查证明 exact index 匿名可读，不能替代已有运行资格或宣称完整跨架构 layer 下载；网络失败按安全类别报告。
 runtime image 的角色与工具 binary 闭包由发行配置固定。PostgreSQL 的唯一结构来源是
 [`schema.sql`](../../crates/adapters/platform-postgres/schema.sql)，`platform-schema provision` 只接受空库并在单事务内建成、核验完整结构；
 运行角色通过 `verify_schema` 只读核验结构清单。项目不保留迁移链或旧结构读取器；已有非当前结构必须由部署侧按明确的数据清理范围重新建立。
@@ -151,6 +154,8 @@ Receipt 的承诺窗口取持久化到期时间、完成后的最低保留期，
 或 tenant binding；它不能复用普通业务测试库，也不能依靠测试排序维持初始化前提。
 Run kernel 的同事务领取与回滚验证使用 `PLATFORM_TEST_RUN_KERNEL_DATABASE_URL` 指定的独立 current-schema 库，
 避免其他测试登记的调度分区改变该夹具的事务快照。
+Coordinator 的单 Job 恢复与 Q1 多进程领取分别使用独立测试库，并在 admission 前拒绝已有 Tenant；子进程只连接对应父测试的库。
+Q1 刻意保留 leased Job 来验证领取与配额，串行测试或等待租约不能隔离这些事实。夹具不删除旧行，也不缩小生产 scheduler 的领取范围。
 [Worker 恢复](../../tools/qualification/qualify-platform-worker-recovery.sh)、
 [MCP 恢复](../../tools/qualification/qualify-platform-mcp-recovery.sh) 与
 [Artifact S3/KMS](../../tools/qualification/qualify-platform-artifact-provider.sh) 入口只选择各自的精确场景。

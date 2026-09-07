@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Run every ordinary integration target; external qualification has explicit owning harnesses.
 
+The coordinator and its four-process Q1 test require separate fresh current-schema databases:
+PLATFORM_TEST_ORCHESTRATION_DATABASE_URL and PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL.
+They reject pre-existing tenants before admission; their children use the corresponding
+exact authority. Serializing test functions cannot isolate deliberately retained leased Jobs.
 The coordinator target also runs its claim-isolation module against the required dedicated
 PLATFORM_TEST_ORCHESTRATION_ISOLATION_DATABASE_URL provisioned by CI; it never shares
 its intentionally damaged owning rows with the ordinary/Q1 coordinator fixture.

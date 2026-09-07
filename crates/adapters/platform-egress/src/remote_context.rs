@@ -994,4 +994,105 @@ mod tests {
         );
         server.await.unwrap();
     }
+
+    #[test]
+    fn public_document_provider_uses_the_actual_encoder_and_result_mapping() {
+        use std::{io::Write as _, path::Path, process::Stdio, time::Instant};
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|candidate| {
+                candidate.join("Cargo.toml").is_file()
+                    && candidate
+                        .join("contracts/platform-v1/manifest.json")
+                        .is_file()
+            })
+            .expect("provider protocol test is inside the marked workspace");
+        let example = workspace.join("examples/productization/document-review");
+        for (question, expected_items) in [
+            ("持久状态 PostgreSQL", 1),
+            ("人工确认 \"PostgreSQL\" \\ 原文", 1),
+            ("zzzzunmatchedzzzz", 0),
+        ] {
+            let (_, mut request) = fixture();
+            let query = serde_json::json!({"question": question});
+            request.normalized_query_digest = closed_digest(&query);
+            request.query_input = ValueRef::Inline { value: query };
+            request.normalized_filter_digest = closed_digest(&serde_json::json!({
+                "schema_version": 1, "filter": null
+            }));
+            request.requested_projection.clear();
+            request.page_size = 1;
+            request.maximum_response_bytes = 65_536;
+            let body = encode_remote_search_body(&request, 8_192).unwrap();
+            let mut child = std::process::Command::new("python3")
+                .arg(example.join("server.py"))
+                .arg("--query-stdin")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&body).unwrap();
+            // A single bounded paragraph fits the pipe; kill a broken provider instead of hanging CI.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("document provider exceeded the local protocol-check deadline");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            assert!(output.stderr.is_empty());
+            let normalized =
+                normalize_remote_search_response(&request, &output.stdout, digest('a')).unwrap();
+            assert_eq!(normalized.items.len(), expected_items);
+            assert_eq!(
+                normalized.backend_request_digest,
+                request.normalized_query_digest
+            );
+            assert!(normalized.next_cursor_digest.is_none());
+            for item in normalized.items {
+                let fields = item.structured_fields;
+                let uri = fields["source_uri"].as_str().unwrap();
+                let revision = fields["source_revision"].as_str().unwrap();
+                assert_eq!(revision, "b8d9a6e2a4043945eb94cf1bcab52df7c91d3963");
+                let path = uri.split(&format!("/{revision}/")).nth(1).unwrap();
+                assert!(matches!(
+                    path,
+                    "docs/current/architecture.md" | "docs/current/agent-authoring.md"
+                ));
+                let source = std::fs::read(
+                    example
+                        .join("corpus")
+                        .join(Path::new(path).file_name().unwrap()),
+                )
+                .unwrap();
+                let source_digest = format!(
+                    "sha256:{}",
+                    ring::digest::digest(&ring::digest::SHA256, &source)
+                        .as_ref()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+                assert_eq!(fields["raw_content_digest"], source_digest);
+                let source = String::from_utf8(source).unwrap();
+                let start = usize::try_from(fields["start_line"].as_u64().unwrap()).unwrap();
+                let end = usize::try_from(fields["end_line"].as_u64().unwrap()).unwrap();
+                assert!(start > 0 && end >= start);
+                let excerpt = source
+                    .split_inclusive('\n')
+                    .skip(start - 1)
+                    .take(end - start + 1)
+                    .collect::<String>();
+                assert_eq!(item.content, excerpt);
+                assert_ne!(canonical_digest(&item.content).unwrap(), source_digest);
+                assert_eq!(item.classification, DataClassification::Public);
+            }
+        }
+    }
 }

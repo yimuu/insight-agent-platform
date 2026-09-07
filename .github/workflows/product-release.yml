@@ -549,6 +549,16 @@ jobs:
               exit 1
             fi
           done
+      - name: Verify exact candidate indexes are anonymously readable
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/verify-public-release-images.py \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$GITHUB_REF_NAME" \
+            --revision "$GITHUB_SHA"
       - name: Finalize and sign qualified ReleaseBundle
         timeout-minutes: 10
         shell: bash
