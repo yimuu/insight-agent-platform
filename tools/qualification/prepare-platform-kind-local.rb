@@ -317,13 +317,25 @@ digests["sandbox-worker-manifest.json"] = digest(sandbox_manifest)
 
 resource_bytes = File.binread(File.expand_path('../../deploy/kind/workload-resources.json', __dir__), 4097)
 abort 'Kind resource profile exceeds byte limit' if resource_bytes.bytesize > 4096
-unique_fields = Class.new(Hash) do
+# A plain object is intentional: JSON versions may insert directly into Hash subclasses,
+# bypassing an overridden []= and silently accepting duplicate fields.
+unique_fields = Class.new do
+  def initialize
+    @fields = {}
+  end
+
   def []=(key, value)
-    abort 'duplicate Kind resource profile field' if key?(key)
-    super
+    abort 'duplicate Kind resource profile field' if @fields.key?(key)
+    @fields[key] = value
+  end
+
+  def to_h
+    @fields
   end
 end
-resource_profile = JSON.parse(resource_bytes, object_class: unique_fields, create_additions: false)
+resource_document = JSON.parse(resource_bytes, object_class: unique_fields, create_additions: false)
+abort 'invalid Kind resource profile' unless resource_document.is_a?(unique_fields)
+resource_profile = resource_document.to_h
 resource_keys = %w[schema_version rust_service_cpu_request_millicores maximum_steady_platform_cpu_millicores]
 abort 'invalid Kind resource profile' unless resource_profile.keys.sort == resource_keys.sort &&
   resource_profile['schema_version'].is_a?(Integer) &&
