@@ -71,6 +71,14 @@ class ProductizationJourneyRunnerTests(unittest.TestCase):
         self.assertIn("trap 'exit 143' TERM", source)
         self.assertIn('--logs-directory "$RUNNER_TEMP/productization-runtime-logs"', WORKFLOW.read_text())
 
+    def test_cli_and_workspace_lanes_both_exercise_real_cleanup(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for name, following in (("test", "cli"), ("cli", "console")):
+            lane = ci.split(f"\n  {name}:", 1)[1].split(f"\n  {following}:", 1)[0]
+            self.assertIn("qualify-fixture-cleanup.py --insight-bin target/debug/insight", lane)
+            self.assertIn("Preserve fixture cleanup evidence", lane)
+            self.assertIn("if: ${{ always() }}", lane)
+
     def test_unknown_option_fails_before_build_or_mutation(self) -> None:
         result = self.run_runner("--unknown")
         self.assertEqual(result.returncode, 2)
