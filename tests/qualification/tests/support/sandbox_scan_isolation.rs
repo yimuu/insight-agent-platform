@@ -221,10 +221,12 @@ async fn sandbox_scans_isolate_bad_objects_and_advance_past_ineligible_prefixes(
     )
     .await;
 
+    // Expire during seed construction so default INSERT clocks deterministically
+    // regress the fixture instead of requiring a slow CI runner to expose the race.
     let bad = seed_fixture_with(
         pool.clone(),
         FixtureOptions {
-            deadline_after: Duration::milliseconds(100),
+            deadline_after: Duration::microseconds(1),
             ..FixtureOptions::default()
         },
     )
@@ -232,7 +234,7 @@ async fn sandbox_scans_isolate_bad_objects_and_advance_past_ineligible_prefixes(
     let good = seed_fixture_with(
         pool,
         FixtureOptions {
-            deadline_after: Duration::milliseconds(100),
+            deadline_after: Duration::microseconds(1),
             ..FixtureOptions::default()
         },
     )
