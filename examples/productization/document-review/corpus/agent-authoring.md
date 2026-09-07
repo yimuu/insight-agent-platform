@@ -69,10 +69,6 @@ Evaluator 的输入协议由生成的 `evaluator-input.schema.json` 定义，包
 
 ## 验证范围
 
-[公开文档检索示例](../../examples/productization/document-review) 提供冻结项目文档的独立 HTTPS provider，复用 Remote Context
-协议。返回的原文、URI 与行范围可单独核对，平台引用仍是 RemoteOpaque / ObservationOnly。该示例的本地检索和 TLS
-测试不证明公开部署、真实模型回答或人工确认；完整流程需要环境中的真实 exact 依赖，并由用户审核实际回答后提交 Task 响应。
-
 [可重现示例生成器](../../tools/rust/platform-contract-tooling/src/bin/product_authoring_examples.rs) 实际调用共享 compiler，并独立以 JSON Schema 验证合法文件及闭合字段、版本、身份和结果负例。[CLI HTTP tests](../../apps/insight-cli/src/evaluation_tests.rs) 覆盖 actual loopback HTTP 的内容读取、授权拒绝、失败无输出、错误 ancestry、digest 与分页；[恢复 tests](../../apps/insight-cli/src/agent_restore.rs) 覆盖原子目录写入与可重新编译性。这些是编译和产品协议证据；普通 Run 的执行、并发和恢复由其 PostgreSQL/runtime tests 验证，不能将 loopback fixture 描述为生产资格证明。
 
 编译输入中的部署特性证据只来自 actual exact 候选解析，并进入完整 source bundle 身份。Capability 后端、Context 的 embedding/MCP 依赖和 ChildAgent 已验证 Plan 的传递依赖共同决定功能要求；Model 节点本身具有模型执行要求。额外、重复或无关证据明确拒绝。Registry 在原验证提交事务内按真实发布的部署闭包重推，客户端编译成功不构成已安装能力证明。`evaluation-init` 也先执行同一只读解析，再生成普通父 Agent 源。
