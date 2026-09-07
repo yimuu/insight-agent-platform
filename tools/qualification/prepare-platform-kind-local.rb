@@ -125,7 +125,15 @@ write_config = lambda do |name, value|
   if worker
     manifest = worker.fetch("manifest_pointer").delete_prefix("/").split("/").reduce(value) { |node, key| node.fetch(key) }
     abort "seed must contain a current owning worker manifest: #{name}" unless manifest.fetch("manifest_version") == 2
+    if name == "model-worker.json"
+      previous_digest = digest(manifest)
+      abort "Model adapters must reference the seed worker manifest" unless
+        value.fetch("installed_adapters").all? { |adapter| adapter.fetch("worker_manifest_digest") == previous_digest }
+    end
     manifest["worker_build_digest"] = executable_digest(options[:worker_binaries], worker.fetch("binary"))
+    if name == "model-worker.json"
+      value.fetch("installed_adapters").each { |adapter| adapter["worker_manifest_digest"] = digest(manifest) }
+    end
     File.write(File.join(worker_manifests, "#{worker.fetch('binary')}.json"), canonical_json(manifest))
     File.write(File.join(worker_configs, "#{worker.fetch('binary')}.json"), canonical_json(value))
   elsif name == "history-maintenance.json"
@@ -160,9 +168,44 @@ artifact_data["observability_listen_address"] = "0.0.0.0:9090"
 artifact_data["artifact_provider_catalog"] = catalog
 write_config.call("artifact-data-worker.json", artifact_data)
 
-artifact_maintenance = load_config(source, "artifact-maintenance.json")
-artifact_maintenance["listen_address"] = "0.0.0.0:8081"
-artifact_maintenance["artifact_provider_catalog"] = catalog
+# This role belongs to the Kind topology, not the CLI's selected development role closure.
+# Compose its physical configuration from the same rebound provider authority as the other
+# Artifact roles; capabilities and executable identity still come from their owning tools/bytes.
+artifact_maintenance = {
+  "schema_version" => 1,
+  "listen_address" => "0.0.0.0:8081",
+  "database_max_connections" => 4,
+  "database_acquire_timeout_milliseconds" => 5000,
+  "artifact_provider_catalog" => catalog,
+  "broker" => {
+    "maximum_in_flight" => 8,
+    "maximum_read_bytes" => 67_108_864,
+    "operation_timeout_milliseconds" => 5000
+  },
+  "worker" => {
+    "claim_batch" => 4, "lease_milliseconds" => 120_000,
+    "receipt_ttl_milliseconds" => 3_600_000, "poll_milliseconds" => 250
+  },
+  "shutdown_grace_milliseconds" => 30_000
+}
+# Hash the explicit physical input before adding the manifest that contains this digest.
+maintenance_runtime_digest = digest({"schema_version" => 1, "profile" => "kind-local-artifact-maintenance", "configuration" => artifact_maintenance})
+maintenance_worker = workers.find { |worker| worker.fetch("binary") == "platform-artifact-maintenance" }
+abort "owning Artifact maintenance worker missing" unless maintenance_worker
+maintenance_catalog_input = File.join(output, "artifact-maintenance-catalog-input.json")
+File.write(maintenance_catalog_input, "{}")
+artifact_maintenance.fetch("worker")["worker_manifest"] = {
+  "manifest_version" => 2,
+  "worker_role" => maintenance_worker.fetch("worker_role"),
+  "work_class" => maintenance_worker.fetch("work_class"),
+  "adapter_runtime_digest" => maintenance_runtime_digest,
+  "worker_build_digest" => executable_digest(options[:worker_binaries], "platform-artifact-maintenance"),
+  "execution_capabilities" => tool_json(options[:qualification_tool], "print-worker-execution-capabilities", "platform-artifact-maintenance", maintenance_catalog_input),
+  "protocol_version" => 1,
+  "max_concurrency" => artifact_maintenance.fetch("worker").fetch("claim_batch"),
+  "critical_control_reserved_slots" => 1
+}
+File.unlink(maintenance_catalog_input)
 write_config.call("artifact-maintenance.json", artifact_maintenance)
 
 orchestration = load_config(source, "orchestration.json")
@@ -237,7 +280,30 @@ mcp_cleanup["observability_listen_address"] = "0.0.0.0:9090"
 mcp_cleanup["egress_endpoint"] = egress_endpoint
 write_config.call("mcp-cleanup-worker.json", mcp_cleanup)
 
+context_native = load_config(source, "context-native.json")
+seed_context_binding = {
+  "schema_version" => 1,
+  "required_worker_manifest_digest" => digest(context_native.fetch("worker_manifest")),
+  "adapter_contract_digest" => context_native.fetch("native_catalog").fetch("adapter_contract_digest"),
+  "installed_adapter_digest" => context_native.fetch("native_catalog").fetch("installed_adapter_digest")
+}
+seed_context_binding["canonical_digest"] = digest(seed_context_binding)
+context_native["observability_listen_address"] = "0.0.0.0:9090"
+write_config.call("context-worker.json", context_native)
+kind_context_binding = seed_context_binding.reject { |key, _| key == "canonical_digest" }
+kind_context_binding["required_worker_manifest_digest"] = digest(context_native.fetch("worker_manifest"))
+kind_context_binding["canonical_digest"] = digest(kind_context_binding)
+
 context_dataset = load_config(source, "context-dataset-worker.json")
+dataset_sources = context_dataset.fetch("sources")
+abort "Dataset sources must have distinct seed binding identities" unless
+  dataset_sources.map { |entry| entry.fetch("binding").fetch("canonical_digest") }.uniq.length == dataset_sources.length
+dataset_sources.each do |entry|
+  binding = entry.fetch("binding")
+  abort "Dataset source must reference the exact seed Native catalog binding" unless
+    binding.fetch("schema_version").is_a?(Integer) && binding == seed_context_binding
+  entry["binding"] = kind_context_binding.dup
+end
 context_dataset["observability_listen_address"] = "0.0.0.0:9290"
 context_dataset.fetch("artifact_data_worker")["endpoint"] = artifact_data_endpoint
 write_config.call("context-dataset-worker.json", context_dataset)
@@ -254,10 +320,6 @@ callback["egress_endpoint"] = egress_endpoint
 callback.fetch("oauth_state")["key_directory"] = "/etc/insight/oauth-state-keys"
 callback.fetch("oauth_state").fetch("keys").fetch(0)["key_material_path"] = "/etc/insight/oauth-state-keys/current"
 write_config.call("callback-api.json", callback)
-
-context_native = load_config(source, "context-native.json")
-context_native["observability_listen_address"] = "0.0.0.0:9090"
-write_config.call("context-worker.json", context_native)
 
 capability_native = load_config(source, "capability-native.json")
 capability_native["observability_listen_address"] = "0.0.0.0:9090"

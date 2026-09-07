@@ -14,6 +14,11 @@ import test_platform_candidate_pipeline as candidate_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 PREPARE = ROOT / 'tools/qualification/prepare-platform-kind-local.rb'
+KMS_KEY_ARN = 'arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789abc'
+
+
+def canonical_digest(value):
+    return 'sha256:' + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def yaml_documents(text):
@@ -30,6 +35,12 @@ class KindConfigurationTests(unittest.TestCase):
         cls.role_tool = Path(metadata['target_directory']) / 'debug/platform-database-role'
         cls.owner = candidate_fixture.CandidatePipelineTests()
         cls.tool = candidate_fixture.CandidatePipelineTests.tool
+        subprocess.run(['cargo', 'build', '--locked', '--quiet', '-p', 'insight-platform-artifact-service',
+                        '--bin', 'platform-artifact-maintenance'], cwd=ROOT, check=True)
+        cls.maintenance_tool = Path(metadata['target_directory']) / 'debug/platform-artifact-maintenance'
+        subprocess.run(['cargo', 'build', '--locked', '--quiet', '-p', 'insight-platform-model-worker',
+                        '--bin', 'platform-model-worker'], cwd=ROOT, check=True)
+        cls.model_tool = Path(metadata['target_directory']) / 'debug/platform-model-worker'
 
     def seed(self, directory):
         runtime = directory / 'runtime'
@@ -44,16 +55,55 @@ class KindConfigurationTests(unittest.TestCase):
                         'artifact-data-worker': 'artifact-data'}
         for config_path in configs.glob('*.json'):
             name = config_path.stem.removeprefix('platform-')
-            if name == 'sandbox-dispatcher':
+            if name in ('sandbox-dispatcher', 'artifact-maintenance'):
                 continue
             config = json.loads(config_path.read_text())
             # This fixture exercises real generation and owning catalog validation, not process startup.
             for key in ('artifact', 'egress', 'mcp_host', 'host', 'artifact_data_worker'):
                 config[key] = {'endpoint': 'https://localhost:9443/'}
             config['live_delta'] = {'servers': ['tls://localhost:4222']}
+            if name == 'model-worker':
+                config['installed_adapters'].append(dict(config['installed_adapters'][0],
+                    qualified_name='openai.responses/v1', adapter_contract_digest='sha256:' + 'b' * 64))
+                config_path.write_text(json.dumps(config))
+                config['worker_manifest']['execution_capabilities'] = json.loads(subprocess.check_output([
+                    str(self.tool), 'print-worker-execution-capabilities', 'platform-model-worker', str(config_path)]))
+                for adapter in config['installed_adapters']:
+                    adapter['worker_manifest_digest'] = canonical_digest(config['worker_manifest'])
+                config = dict(schema_version=1, observability_listen_address='127.0.0.1:9090',
+                    worker_manifest=config['worker_manifest'], installed_adapters=config['installed_adapters'],
+                    database_max_connections=4, database_acquire_timeout_milliseconds=5000,
+                    egress_endpoint='https://localhost:8443/', egress_tls_server_name='localhost',
+                    egress_connect_timeout_milliseconds=5000, egress_request_timeout_milliseconds=30000,
+                    maximum_rpc_metadata_bytes=65536, maximum_rpc_payload_bytes=1048576,
+                    live_delta=dict(servers=['tls://localhost:4222'], namespace='local',
+                        connect_timeout_milliseconds=5000, publish_timeout_milliseconds=1000,
+                        reconnect_backoff_milliseconds=250, drain_timeout_milliseconds=5000,
+                        maximum_pending_messages=1024, maximum_pending_bytes=16777216),
+                    receipt_ttl_seconds=3600, claim_scan_milliseconds=250,
+                    claim_failure_backoff_milliseconds=100, drain_grace_milliseconds=30000)
             (source / (source_names.get(name, name) + '.json')).write_text(json.dumps(config))
-        catalog = {'kms_key_bindings': [{'key_id': 'seed-key'}], 's3_storage_bindings': [{}]}
-        for name in ('artifact-gateway', 'artifact-data', 'artifact-maintenance'):
+        native = json.loads((source / 'context-native.json').read_bytes())
+        binding = dict(schema_version=1, required_worker_manifest_digest=canonical_digest(native['worker_manifest']),
+            adapter_contract_digest=native['native_catalog']['adapter_contract_digest'],
+            installed_adapter_digest=native['native_catalog']['installed_adapter_digest'])
+        binding['canonical_digest'] = canonical_digest(binding)
+        dataset_path = source / 'context-dataset-worker.json'
+        dataset = json.loads(dataset_path.read_bytes())
+        items = ['bounded document index entry']
+        dataset['sources'] = [dict(schema_version=1, binding=binding, items=items,
+            source_manifest_digest=canonical_digest(dict(schema_version=1, items=[dict(content=items[0], ordinal=0)])))]
+        dataset_path.write_text(json.dumps(dataset))
+        kms = {'schema_version': 1, 'endpoint': 'https://kms.platform.example', 'region': 'us-east-1',
+               'key_id': KMS_KEY_ARN, 'connect_timeout_milliseconds': 1000, 'operation_timeout_milliseconds': 5000}
+        kms['kms_binding_digest'] = canonical_digest(dict(kms, provider='aws_kms'))
+        storage = {'schema_version': 1, 'endpoint': 'https://s3.platform.example', 'region': 'us-east-1',
+                   'bucket': 'platform-artifacts', 'force_path_style': True, 'kms_binding_digest': kms['kms_binding_digest'],
+                   'connect_timeout_milliseconds': 1000, 'operation_timeout_milliseconds': 5000, 'maximum_object_bytes': 16 * 1024 * 1024}
+        storage['storage_binding_digest'] = canonical_digest(dict(storage, backend='s3'))
+        catalog = {'schema_version': 1, 'write_storage_binding_digest': storage['storage_binding_digest'],
+                   'kms_key_bindings': [kms], 's3_storage_bindings': [storage]}
+        for name in ('artifact-gateway', 'artifact-data'):
             target = source / (name + '.json')
             config = json.loads(target.read_text()) if target.exists() else {}
             config['artifact_provider_catalog'] = copy.deepcopy(catalog)
@@ -82,7 +132,7 @@ class KindConfigurationTests(unittest.TestCase):
                    '--postgres-cidr', '10.0.0.1/32', '--nats-cidr', '10.0.0.2/32', '--localstack-pod-cidr', '10.0.0.3/32',
                    '--localstack-service-cidr', '10.0.0.4/32', '--kubernetes-api-service-cidr', '10.0.0.5/32',
                    '--kubernetes-api-endpoint-cidr', '10.0.0.6/32', '--kubernetes-api-endpoint-port', '6443',
-                   '--kms-key-arn', 'arn:aws:kms:us-east-1:000000000000:key/kind-test',
+                   '--kms-key-arn', KMS_KEY_ARN,
                    '--readiness-secret-arn', 'arn:aws:secretsmanager:us-east-1:000000000000:secret:kind-test']
         return subprocess.run(command, cwd=ROOT, text=True, capture_output=True), output
 
@@ -293,6 +343,35 @@ class KindConfigurationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(error, result.stderr)
 
+    def test_maintenance_is_composed_without_a_cli_seed_and_binds_actual_image_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            self.assertFalse((runtime / 'config/artifact-maintenance.json').exists())
+            source_files = {path.name: path.read_bytes() for path in (runtime / 'config').iterdir()}
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(source_files, {path.name: path.read_bytes() for path in (runtime / 'config').iterdir()})
+            path = output / 'configs/artifact-maintenance.json'
+            config = json.loads(path.read_bytes())
+            gateway = json.loads((output / 'configs/artifact-gateway.json').read_bytes())
+            self.assertEqual(config['artifact_provider_catalog'], gateway['artifact_provider_catalog'])
+            manifest = config['worker']['worker_manifest']
+            projection = copy.deepcopy(config)
+            del projection['worker']['worker_manifest']
+            identity = {'schema_version': 1, 'profile': 'kind-local-artifact-maintenance', 'configuration': projection}
+            self.assertEqual(manifest['adapter_runtime_digest'], 'sha256:' + hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+            catalog = json.loads(subprocess.check_output([str(self.tool), 'print-worker-execution-capabilities',
+                'platform-artifact-maintenance', str(path)], cwd=ROOT))
+            self.assertEqual(manifest['execution_capabilities'], catalog)
+            binary = binaries / 'platform-artifact-maintenance'
+            self.assertEqual(manifest['worker_build_digest'], 'sha256:' + hashlib.sha256(binary.read_bytes()).hexdigest())
+            binary.write_bytes(binary.read_bytes() + b'changed after deployment evidence')
+            rejected = subprocess.run([str(self.tool), 'validate-worker-deployment', str(output / 'worker-manifests'),
+                str(output / 'worker-configs'), str(binaries), 'sha256:' + 'a' * 64], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+
     def test_missing_binary_or_old_manifest_fails_closed(self):
         for mutation in ('missing', 'old'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
@@ -301,13 +380,134 @@ class KindConfigurationTests(unittest.TestCase):
                 if mutation == 'missing':
                     (binaries / 'platform-history-maintenance').unlink()
                 else:
-                    path = runtime / 'config/artifact-maintenance.json'
+                    path = runtime / 'config/orchestration.json'
                     config = json.loads(path.read_text())
-                    config['worker']['worker_manifest']['manifest_version'] = 1
+                    config['worker_manifest']['manifest_version'] = 1
                     path.write_text(json.dumps(config))
                 result, _ = self.generate(directory, runtime, binaries)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertRegex(result.stderr, 'actual image executable missing|current owning worker manifest')
+
+    def test_manifest_references_follow_actual_image_bytes_without_changing_semantics(self):
+        for rebuilt in (False, True):
+            with self.subTest(rebuilt=rebuilt), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                runtime, binaries = self.seed(directory)
+                source = runtime / 'config'
+                before = {path.name: path.read_bytes() for path in source.iterdir()}
+                if rebuilt:
+                    for binary in ('platform-model-worker', 'platform-context-worker'):
+                        (binaries / binary).write_bytes(('rebuilt image bytes: ' + binary).encode())
+                result, output = self.generate(directory, runtime, binaries)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for old_name, new_name in (('model-worker.json', 'model-worker.json'),
+                                           ('context-native.json', 'context-worker.json')):
+                    old = json.loads(before[old_name])
+                    new = json.loads((output / 'configs' / new_name).read_bytes())
+                    old_manifest = old['worker_manifest']
+                    new_manifest = new['worker_manifest']
+                    self.assertEqual(old_manifest == new_manifest, not rebuilt)
+                    self.assertEqual(dict(old_manifest, worker_build_digest=new_manifest['worker_build_digest']), new_manifest)
+                    if old_name == 'model-worker.json':
+                        self.assertEqual(new['installed_adapters'], [dict(adapter,
+                            worker_manifest_digest=canonical_digest(new_manifest)) for adapter in old['installed_adapters']])
+                old_sources = json.loads(before['context-dataset-worker.json'])['sources']
+                new_sources = json.loads((output / 'configs/context-dataset-worker.json').read_bytes())['sources']
+                self.assertEqual(len(old_sources), len(new_sources))
+                for old, new in zip(old_sources, new_sources):
+                    expected_binding = dict(old['binding'], required_worker_manifest_digest=canonical_digest(new_manifest))
+                    expected_binding.pop('canonical_digest')
+                    expected_binding['canonical_digest'] = canonical_digest(expected_binding)
+                    self.assertEqual(new, dict(old, binding=expected_binding))
+                self.assertEqual(before, {path.name: path.read_bytes() for path in source.iterdir()})
+
+    def test_invalid_seed_manifest_references_cannot_be_repaired_by_rebinding(self):
+        for mutation in ('model-reference', 'dataset-reference', 'dataset-adapter', 'dataset-digest', 'dataset-duplicate', 'dataset-field', 'dataset-schema-float'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                runtime, binaries = self.seed(directory)
+                path = runtime / 'config' / ('model-worker.json' if mutation == 'model-reference' else 'context-dataset-worker.json')
+                config = json.loads(path.read_bytes())
+                if mutation == 'model-reference':
+                    config['installed_adapters'][0]['worker_manifest_digest'] = 'sha256:' + 'f' * 64
+                elif mutation == 'dataset-duplicate':
+                    config['sources'].append(copy.deepcopy(config['sources'][0]))
+                elif mutation == 'dataset-schema-float':
+                    # Ruby Hash equality considers 1.0 equal to 1; the owning schema does not.
+                    config['sources'][0]['binding']['schema_version'] = 1.0
+                else:
+                    binding = config['sources'][0]['binding']
+                    key = {'dataset-reference': 'required_worker_manifest_digest', 'dataset-adapter': 'installed_adapter_digest',
+                           'dataset-digest': 'canonical_digest', 'dataset-field': 'unknown'}[mutation]
+                    binding[key] = 'sha256:' + 'f' * 64
+                    if mutation != 'dataset-digest':
+                        binding.pop('canonical_digest')
+                        binding['canonical_digest'] = canonical_digest(binding)
+                path.write_text(json.dumps(config))
+                before = path.read_bytes()
+                result, _ = self.generate(directory, runtime, binaries)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex(result.stderr, 'Model adapters must reference|Dataset source')
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_rebound_model_configuration_passes_actual_worker_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            seed = json.loads((runtime / 'config/model-worker.json').read_bytes())
+            (binaries / 'platform-model-worker').write_bytes(self.model_tool.read_bytes())
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = output / 'configs/model-worker.json'
+            config = json.loads(path.read_bytes())
+            for stale in (False, True):
+                with self.subTest(stale=stale):
+                    if stale:
+                        config['installed_adapters'][0]['worker_manifest_digest'] = canonical_digest(seed['worker_manifest'])
+                    path.write_text(json.dumps(config))
+                    decoded = subprocess.run([str(self.model_tool)], env={
+                        'PLATFORM_MODEL_WORKER_CONFIG': str(path),
+                        'PLATFORM_MODEL_WORKER_CONFIG_DIGEST': canonical_digest(config),
+                        'PLATFORM_MODEL_WORKER_DATABASE_URL': 'postgresql://[',
+                    }, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(decoded.returncode, 1)
+                    reason = 'configuration is invalid' if stale else 'database is unavailable'
+                    self.assertEqual(decoded.stderr.strip(), 'platform-model-worker failed: ' + reason)
+
+    def test_generated_maintenance_configuration_passes_the_actual_service_decoder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = output / 'configs/artifact-maintenance.json'
+            original = json.loads(path.read_bytes())
+
+            def decode(config):
+                path.write_text(json.dumps(config))
+                # Invalid URL syntax stops immediately after the actual owning load/validate
+                # path, before any database, AWS, listener, or worker startup side effect.
+                return subprocess.run([str(self.maintenance_tool)], env={
+                    'PLATFORM_ARTIFACT_MAINTENANCE_CONFIG': str(path),
+                    'PLATFORM_ARTIFACT_MAINTENANCE_CONFIG_DIGEST': canonical_digest(config),
+                    'PLATFORM_ARTIFACT_MAINTENANCE_DATABASE_URL': 'postgresql://[',
+                }, capture_output=True, text=True, timeout=5)
+
+            accepted = decode(original)
+            self.assertEqual(accepted.returncode, 1)
+            self.assertEqual(accepted.stderr.strip(), 'platform-artifact-maintenance failed: database unavailable')
+            for mutation in ('claim-limit', 'provider-shape', 'unknown-field'):
+                with self.subTest(mutation=mutation):
+                    changed = copy.deepcopy(original)
+                    if mutation == 'claim-limit':
+                        changed['worker']['claim_batch'] = 0
+                    elif mutation == 'provider-shape':
+                        changed['artifact_provider_catalog']['kms_key_bindings'][0]['key_id'] = 'invalid-key'
+                    else:
+                        changed['unexpected'] = True
+                    rejected = decode(changed)
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertEqual(rejected.stderr.strip(), 'platform-artifact-maintenance failed: invalid configuration')
 
     def test_declared_unknown_capability_is_not_accepted_as_installed(self):
         with tempfile.TemporaryDirectory() as temporary:
