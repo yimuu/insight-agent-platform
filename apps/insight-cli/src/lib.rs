@@ -11567,42 +11567,85 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct ReadyIdentityProcess(std::process::Child);
+
+    #[cfg(unix)]
+    impl ReadyIdentityProcess {
+        fn spawn(generation: &str) -> Self {
+            use std::os::fd::OwnedFd;
+            use std::os::unix::process::CommandExt as _;
+
+            let (mut ready_reader, ready_writer) = UnixStream::pair().unwrap();
+            let writer: OwnedFd = ready_writer.into();
+            // Both commands are shell builtins: no descendant can write readiness or
+            // keep the fixture alive after the exact process has been signalled.
+            let mut command = ProcessCommand::new("/bin/sh");
+            command
+                .arg0(generation)
+                .args(["-c", "printf ready; read -r hold"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::from(writer))
+                .stderr(Stdio::null());
+            let child = Self(command.spawn().unwrap());
+            let mut ready = [0u8; 5];
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut received = 0;
+            while received < ready.len() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "fixture readiness deadline elapsed");
+                ready_reader.set_read_timeout(Some(remaining)).unwrap();
+                match ready_reader.read(&mut ready[received..]) {
+                    Ok(0) => panic!("fixture exited before readiness"),
+                    Ok(count) => received += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("bounded fixture readiness read: {error}"),
+                }
+            }
+            assert_eq!(&ready, b"ready");
+            child
+        }
+
+        fn exited_within(&mut self, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            loop {
+                if self.0.try_wait().unwrap().is_some() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReadyIdentityProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn process_generation_matches_argv0_and_mismatch_is_never_signalled() {
-        use std::os::unix::process::CommandExt as _;
-
         let generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
-        let mut command = ProcessCommand::new("/bin/sleep");
-        command
-            .arg0(&generation)
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn().unwrap();
+        let mut child = ReadyIdentityProcess::spawn(&generation);
         let record = RuntimeProcessRecord {
-            pid: child.id(),
+            pid: child.0.id(),
             generation,
             ready_address: "127.0.0.1:1".to_owned(),
             log_file: "logs/test.log".to_owned(),
         };
-        let mut observed = Ok(RuntimeProcessObservation::Stopped);
-        for _ in 0..50 {
-            observed = observe_runtime_process(&record);
-            if !matches!(&observed, Ok(RuntimeProcessObservation::Stopped)) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let observed = observe_runtime_process(&record);
         let mut mismatched = record.clone();
         mismatched.generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
         let mismatch_observation = observe_runtime_process(&mismatched);
         let reconciled = stop_process(&mismatched);
-        let alive_after_reconciliation = child.try_wait().unwrap().is_none();
+        let alive_after_reconciliation = child.0.try_wait().unwrap().is_none();
         let stopped = stop_process(&record);
-        if stopped.is_err() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
+        let owned_exited = child.exited_within(Duration::from_secs(5));
 
         assert_eq!(observed.unwrap(), RuntimeProcessObservation::Owned);
         assert_eq!(
@@ -11612,31 +11655,21 @@ mod tests {
         reconciled.unwrap();
         assert!(alive_after_reconciliation);
         stopped.unwrap();
+        assert!(
+            owned_exited,
+            "the exact owned process must exit after SIGTERM"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn abort_reconciles_owned_processes_without_signalling_mismatched_pid() {
-        use std::os::unix::process::CommandExt as _;
-
         let directory = TempDir::new().unwrap();
         let runtime = directory.path();
         let owned_generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
-        let mut owned_child = ProcessCommand::new("/bin/sleep")
-            .arg0(&owned_generation)
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut owned_child = ReadyIdentityProcess::spawn(&owned_generation);
         let foreign_generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
-        let mut foreign_child = ProcessCommand::new("/bin/sleep")
-            .arg0(&foreign_generation)
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut foreign_child = ReadyIdentityProcess::spawn(&foreign_generation);
         let mut state = RuntimeProcessState {
             schema_version: RUNTIME_PROCESS_SCHEMA_VERSION,
             kind: RUNTIME_PROCESS_KIND.to_owned(),
@@ -11655,7 +11688,7 @@ mod tests {
                 (
                     "owned".to_owned(),
                     RuntimeProcessRecord {
-                        pid: owned_child.id(),
+                        pid: owned_child.0.id(),
                         generation: owned_generation,
                         ready_address: "127.0.0.1:1".to_owned(),
                         log_file: "logs/owned.log".to_owned(),
@@ -11664,7 +11697,7 @@ mod tests {
                 (
                     "stale".to_owned(),
                     RuntimeProcessRecord {
-                        pid: foreign_child.id(),
+                        pid: foreign_child.0.id(),
                         generation: format!(
                             "{RUNTIME_PROCESS_GENERATION_PREFIX}{}",
                             Uuid::now_v7()
@@ -11675,7 +11708,6 @@ mod tests {
                 ),
             ]),
         };
-        std::thread::sleep(Duration::from_millis(20));
         let cause = abort_runtime_start(
             runtime,
             &mut state,
@@ -11684,16 +11716,8 @@ mod tests {
         assert!(matches!(cause, CliError::RuntimeUnavailable(detail) if detail == "injected"));
         assert_eq!(state.lifecycle, RuntimeProcessLifecycle::Stopped);
         assert!(state.processes.is_empty());
-        assert!(foreign_child.try_wait().unwrap().is_none());
-        for _ in 0..100 {
-            if owned_child.try_wait().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(owned_child.try_wait().unwrap().is_some());
-        let _ = foreign_child.kill();
-        let _ = foreign_child.wait();
+        assert!(foreign_child.0.try_wait().unwrap().is_none());
+        assert!(owned_child.exited_within(Duration::from_secs(5)));
     }
 
     #[test]
