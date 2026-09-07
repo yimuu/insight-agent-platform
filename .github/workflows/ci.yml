@@ -256,6 +256,20 @@ jobs:
         run: |
           createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_dev_bootstrap
           bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Orchestration coordinator authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_orchestration
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Orchestration Q1 authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration_q1
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_orchestration_q1
+          bash tools/development/provision-platform-postgres.sh
       - name: Provision isolated Orchestration claim isolation authority
         env:
           PGPASSWORD: insight
@@ -333,6 +347,8 @@ jobs:
           PLATFORM_TEST_DEV_BOOTSTRAP_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_dev_bootstrap
           PLATFORM_TEST_PARTITION_SCHEDULER_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_partition_unit
           PLATFORM_TEST_SCHEMA_INVENTORY_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_inventory_unit
+          PLATFORM_TEST_ORCHESTRATION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration
+          PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration_q1
           PLATFORM_TEST_ORCHESTRATION_ISOLATION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration_isolation
           PLATFORM_TEST_CONTROLLER_TRANSACTION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_controller_transaction
           PLATFORM_TEST_NATS_URL: nats://localhost:4222

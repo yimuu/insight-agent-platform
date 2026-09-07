@@ -147,6 +147,8 @@ Receipt 的承诺窗口取持久化到期时间、完成后的最低保留期，
 或 tenant binding；它不能复用普通业务测试库，也不能依靠测试排序维持初始化前提。
 Run kernel 的同事务领取与回滚验证使用 `PLATFORM_TEST_RUN_KERNEL_DATABASE_URL` 指定的独立 current-schema 库，
 避免其他测试登记的调度分区改变该夹具的事务快照。
+Coordinator 的单 Job 恢复与 Q1 多进程领取分别使用独立测试库，并在 admission 前拒绝已有 Tenant；子进程只连接对应父测试的库。
+Q1 刻意保留 leased Job 来验证领取与配额，串行测试或等待租约不能隔离这些事实。夹具不删除旧行，也不缩小生产 scheduler 的领取范围。
 [Worker 恢复](../../tools/qualification/qualify-platform-worker-recovery.sh)、
 [MCP 恢复](../../tools/qualification/qualify-platform-mcp-recovery.sh) 与
 [Artifact S3/KMS](../../tools/qualification/qualify-platform-artifact-provider.sh) 入口只选择各自的精确场景。

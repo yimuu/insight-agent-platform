@@ -618,7 +618,7 @@ fn wait_recovery_worker_process_entry() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+        let database_url = std::env::var("PLATFORM_TEST_ORCHESTRATION_DATABASE_URL").unwrap();
         let mut profile = checked_in_hard_limit_profile();
         profile.control_data.recovery_batch.q1_default = 1;
         profile.validate().unwrap();
@@ -808,8 +808,8 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
-            panic!("PLATFORM_TEST_DATABASE_URL is unset; real PostgreSQL fixture requires its declared fixture environment");
+        let Ok(database_url) = std::env::var("PLATFORM_TEST_ORCHESTRATION_DATABASE_URL") else {
+            panic!("PLATFORM_TEST_ORCHESTRATION_DATABASE_URL is unset; real PostgreSQL fixture requires its declared fixture environment");
         };
         let _fixture_lock = acquire_phase2_fixture_lock(&database_url).await;
         let mut profile = checked_in_hard_limit_profile();
@@ -832,6 +832,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 .await
                 .unwrap();
         verify_schema(bulkheads.business_pool()).await.unwrap();
+        require_empty_coordinator_authority(bulkheads.business_pool()).await;
         let repository = bulkheads.business_repository();
         let bindings = seed_authorities(&repository).await;
         let admitted = admit_run(&repository, bindings).await;
@@ -1046,7 +1047,7 @@ fn real_postgres_coordinator_claims_with_physical_and_connection_bulkheads() {
                 .arg("--nocapture")
                 .arg("--test-threads=1")
                 .env("PLATFORM_WAIT_RECOVERY_CHILD", "1")
-                .env("PLATFORM_TEST_DATABASE_URL", &database_url)
+                .env("PLATFORM_TEST_ORCHESTRATION_DATABASE_URL", &database_url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -2117,6 +2118,18 @@ const PHASE2_BARRIER_CLASS: i32 = 24_002;
 const PHASE2_BARRIER_OBJECT: i32 = 50;
 const PHASE2_FIXTURE_LOCK_OBJECT: i32 = 51;
 
+async fn require_empty_coordinator_authority(pool: &sqlx::PgPool) {
+    let empty: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM insight_platform.tenants)")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(
+        empty,
+        "coordinator fixture requires a fresh dedicated authority before admission"
+    );
+}
+
 async fn acquire_phase2_fixture_lock(database_url: &str) -> PoolConnection<Postgres> {
     let pool = PgPoolOptions::new()
         .max_connections(1)
@@ -2201,7 +2214,7 @@ fn phase2_claim_worker_process_entry() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let database_url = std::env::var("PLATFORM_TEST_DATABASE_URL").unwrap();
+        let database_url = std::env::var("PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL").unwrap();
         let tenant_ids = std::env::var("PLATFORM_PHASE2_TENANT_IDS")
             .expect("PLATFORM_PHASE2_TENANT_IDS is required for a claim child")
             .split(',')
@@ -2330,8 +2343,8 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let Ok(database_url) = std::env::var("PLATFORM_TEST_DATABASE_URL") else {
-            panic!("PLATFORM_TEST_DATABASE_URL is unset; Phase 2 Q1 fixture requires its declared fixture environment");
+        let Ok(database_url) = std::env::var("PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL") else {
+            panic!("PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL is unset; Phase 2 Q1 fixture requires its declared fixture environment");
         };
         if std::env::var("PLATFORM_PHASE2_CLAIM_CHILD").as_deref() == Ok("1") {
             return;
@@ -2356,6 +2369,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         .await
         .unwrap();
         verify_schema(bulkheads.business_pool()).await.unwrap();
+        require_empty_coordinator_authority(bulkheads.business_pool()).await;
         let repository = bulkheads.business_repository();
         let mut tenants = BTreeSet::new();
         for _ in 0..PHASE2_TENANT_COUNT {
@@ -2397,7 +2411,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
                 .env("PLATFORM_PHASE2_CLAIM_CHILD", "1")
                 .env("PLATFORM_PHASE2_CHILD_ORDINAL", ordinal.to_string())
                 .env("PLATFORM_PHASE2_TENANT_IDS", &child_tenant_ids)
-                .env("PLATFORM_TEST_DATABASE_URL", &database_url)
+                .env("PLATFORM_TEST_ORCHESTRATION_Q1_DATABASE_URL", &database_url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -2414,6 +2428,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
                     FROM pg_locks
                     WHERE locktype = 'advisory'
                       AND classid = $1::oid AND objid = $2::oid
+                      AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
                       AND mode = 'ShareLock' AND NOT granted
                     "#,
                 )
