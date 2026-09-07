@@ -76,6 +76,7 @@ jobs:
             tools/tests/test_required_ci_results.py \
             tools/tests/test_rust_integration_lanes.py \
             tools/tests/test_productization_journey_runner.py \
+            tools/tests/test_fixture_project.py \
             tools/tests/test_prepare_productization_release_candidate.py \
             tools/tests/test_productization_http_lifecycle.py \
             tools/tests/test_productization_north_star_report.py \
@@ -350,6 +351,19 @@ jobs:
           cargo test --locked --workspace --all-targets --all-features --no-run
           cargo test --locked --workspace --lib --bins --all-features
           python3 tools/ci/run-rust-integration-tests.py
+      - name: Verify independent disposable project cleanup
+        run: |
+          cargo build --locked --all-features -p insight-cli --bin insight
+          python3 tools/qualification/qualify-fixture-cleanup.py --insight-bin target/debug/insight \
+            | tee "$RUNNER_TEMP/fixture-cleanup.log"
+      - name: Preserve fixture cleanup evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fixture-cleanup-${{ github.job }}-${{ github.sha }}
+          path: ${{ runner.temp }}/fixture-cleanup.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify durable publication after JetStream restart
         env:
           PLATFORM_OUTBOX_TEST_NATS_URL: nats://localhost:4223
@@ -409,6 +423,19 @@ jobs:
         run: |
           cargo test --locked -p insight-cli
           cargo test --locked -p insight-platform-qualification-tests --test productization --no-run
+      - name: Verify independent disposable project cleanup
+        run: |
+          cargo build --locked -p insight-cli --bin insight
+          python3 tools/qualification/qualify-fixture-cleanup.py --insight-bin target/debug/insight \
+            | tee "$RUNNER_TEMP/fixture-cleanup.log"
+      - name: Preserve fixture cleanup evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fixture-cleanup-${{ github.job }}-${{ github.sha }}
+          path: ${{ runner.temp }}/fixture-cleanup.log
+          if-no-files-found: warn
+          retention-days: 14
 
   console:
     name: Affected Console

@@ -1,3 +1,6 @@
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+use fixture_directory::FixtureDirectory;
 mod support;
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -2005,11 +2008,8 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
     let pending:(String,Option<String>)=sqlx::query_as("SELECT state,current_cleanup_job_id FROM insight_platform.tasks WHERE tenant_id=$1 AND task_id=$2").bind(fixture.tenant_id.to_string()).bind(fixture.intent.task_id.to_string()).fetch_one(&pool).await.unwrap();
     assert_eq!(pending, ("pending".into(), None));
 
-    let temporary = std::env::temp_dir().join(format!(
-        "platform-oauth-cleanup-l3-{}",
-        uuid::Uuid::now_v7()
-    ));
-    std::fs::create_dir(&temporary).unwrap();
+    let _files = FixtureDirectory::new("platform-oauth-cleanup-l3");
+    let temporary = _files.path();
     // The exact-generation provider fixture is a durable external file shared by both
     // egress processes. A stalled call must not remove it; the replacement must delete it.
     let exact_secret_path = temporary.join("exact-pkce-generation");
@@ -2149,7 +2149,6 @@ async fn phase4_mcp_oauth_cleanup_process_recovers_egress_and_worker_kill() {
         serde_json::from_value::<McpOAuthPkceSecretCleanupDisposition>(proof).unwrap(),
         McpOAuthPkceSecretCleanupDisposition::Deleted,
     );
-    std::fs::remove_dir_all(temporary).unwrap();
 }
 
 fn oauth_verification_binding(
@@ -2209,11 +2208,8 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
         .unwrap();
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
-    let temporary = std::env::temp_dir().join(format!(
-        "platform-oauth-exchange-l3-{}",
-        uuid::Uuid::now_v7()
-    ));
-    std::fs::create_dir(&temporary).unwrap();
+    let _files = FixtureDirectory::new("platform-oauth-exchange-l3");
+    let temporary = _files.path();
     let token_address = available_address();
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&pool)
@@ -2496,7 +2492,6 @@ async fn phase4_mcp_oauth_callback_and_egress_recover_after_token_store_before_c
     assert_eq!(task_state, "responded");
     assert_eq!((receipt_count, completion_count), (1, 1));
     assert_eq!(std::fs::read(&token_calls).unwrap(), b"1");
-    std::fs::remove_dir_all(temporary).unwrap();
 }
 
 #[tokio::test]

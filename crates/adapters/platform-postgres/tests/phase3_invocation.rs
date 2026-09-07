@@ -1,3 +1,6 @@
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+use fixture_directory::FixtureDirectory;
 #[path = "support/adapter_claims.rs"]
 mod adapter_claims;
 use adapter_claims::AdapterClaimRounds;
@@ -2427,10 +2430,8 @@ async fn run_native_worker_process_recovery(
         }
     });
     let config_digest = canonical_digest(&config).unwrap();
-    let config_path = PathBuf::from(format!(
-        "/tmp/platform-capability-native-worker-{}.json",
-        std::process::id()
-    ));
+    let _files = FixtureDirectory::new("capability-native");
+    let config_path = _files.path().join("worker.json");
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let spawn_worker = || {
         std::process::Command::new(&binary)
@@ -3830,10 +3831,8 @@ async fn run_remote_http_worker_process_recovery(
         CommandOutcome::Replayed(_) => panic!("remote process recovery prepare replayed"),
     }
 
-    let temp_prefix = format!(
-        "/tmp/platform-capability-remote-worker-{}",
-        std::process::id()
-    );
+    let _files = FixtureDirectory::new("platform-capability-remote-worker");
+    let temp_prefix = _files.path().join("worker").display().to_string();
     let ca_path = PathBuf::from(format!("{temp_prefix}-ca.pem"));
     let cert_path = PathBuf::from(format!("{temp_prefix}-client.pem"));
     let key_path = PathBuf::from(format!("{temp_prefix}-client-key.pem"));

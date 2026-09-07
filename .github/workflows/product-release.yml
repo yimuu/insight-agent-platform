@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  CARGO_INCREMENTAL: "0"
   REGISTRY: ghcr.io
   RUNTIME_IMAGE: ghcr.io/${{ github.repository }}/platform-runtime
   SANDBOX_RUNNER_IMAGE: ghcr.io/${{ github.repository }}/platform-sandbox-runner
@@ -28,9 +29,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -66,6 +67,7 @@ jobs:
           INSIGHT_RELEASE_GIT_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
+          test -n "$INSIGHT_RELEASE_PUBLIC_KEY_BASE64"
           started=$(date +%s)
           cargo build --locked --release -p insight-cli --bin insight
           finished=$(date +%s)
@@ -114,6 +116,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.11.1"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          # Upstream successful install: docker/setup-qemu-action/actions/runs/33498714947 (QEMU 10.2.3).
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -376,6 +383,7 @@ jobs:
           set -euo pipefail
           umask 077
           key="$RUNNER_TEMP/release-private-key.pem"
+          trap 'rm -f "$key"' EXIT
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
           python3 tools/release/sign-product-release.py \
             --bundle "$RUNNER_TEMP/release-assets/release-bundle.json" --private-key "$key" \
@@ -568,6 +576,7 @@ jobs:
             --productization-release-candidate-bundle "$RUNNER_TEMP/qualification/preliminary-release-bundle.json" \
             --output "$assets/release-bundle.json"
           key="$RUNNER_TEMP/release-private-key.pem"
+          trap 'rm -f "$key"' EXIT
           printf '%s' "$RELEASE_PRIVATE_KEY" > "$key"
           python3 tools/release/sign-product-release.py \
             --bundle "$assets/release-bundle.json" --private-key "$key" \
@@ -603,6 +612,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-assets"/* \
+          release_flags=()
+          if [[ "$GITHUB_REF_NAME" == v0.* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-assets"/* "${release_flags[@]}" \
             --verify-tag --title "Insight Agent Platform $GITHUB_REF_NAME" \
             --notes "Signed product release for exact commit $GITHUB_SHA."

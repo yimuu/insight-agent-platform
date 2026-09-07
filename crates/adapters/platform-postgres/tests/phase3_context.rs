@@ -1,3 +1,6 @@
+#[path = "support/fixture_directory.rs"]
+mod fixture_directory;
+use fixture_directory::FixtureDirectory;
 #[path = "support/adapter_claims.rs"]
 mod adapter_claims;
 #[path = "support/context_convergence_isolation.rs"]
@@ -4865,10 +4868,8 @@ fn production_native_context_worker_recovers_commit_window_process_loss() {
             installed_adapter_digest.clone(),
             adapter_contract_digest,
         );
-        let prefix = PathBuf::from(format!(
-            "/tmp/platform-context-worker-process-{}",
-            std::process::id()
-        ));
+        let _files = FixtureDirectory::new("platform-context-worker-process");
+        let prefix = _files.path().join("worker");
         let (config_path, config_digest) = write_context_process_config(&prefix, "correct", &config);
         let mut wrong_config = config.clone();
         let wrong_digest = named_digest("wrong-installed-native-context-adapter");
@@ -5133,10 +5134,8 @@ fn production_remote_context_worker_recovers_mtls_response_commit_window() {
         }
         park_direct_context_leaf(&pool, &fixture, &created.context_query_id, &job_id, 0).await;
 
-        let prefix = PathBuf::from(format!(
-            "/tmp/platform-remote-context-worker-process-{}",
-            std::process::id()
-        ));
+        let _files = FixtureDirectory::new("platform-remote-context-worker-process");
+        let prefix = _files.path().join("worker");
         let ca_path = PathBuf::from(format!("{}-ca.pem", prefix.display()));
         let cert_path = PathBuf::from(format!("{}-client.pem", prefix.display()));
         let key_path = PathBuf::from(format!("{}-client-key.pem", prefix.display()));

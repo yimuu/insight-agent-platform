@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "insight-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2718,6 +2718,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

@@ -117,6 +117,12 @@ Run 根持有有界 history holds。签名维护策略、数据库时间、当�
 
 ## 建库、发布与证据
 
+本地开发依赖的 Compose 命名空间使用已验证 Tenant ID 的完整 UUID。UUIDv7 的时间前缀不能用作项目身份；
+相近时间创建的两个项目必须具有不同的容器和 volume 命名空间。CLI 继续拥有启动、进程身份核验与 reset，
+验证工具只持有自己创建目录的文件系统身份并调用 CLI 清理，不新增数据库事实或资源登记表。
+此修正直接替换截断名称，不发现、接管或清理旧名称。验收必须覆盖相同 UUIDv7 时间前缀的不同项目，
+以及删除其中一套依赖后另一套仍存在的真实 Docker 证据。
+
 Provisioner 在空目标库一次事务建立当前 schema；运行进程只读验证完整实际结构。schema snapshot、inventory 和实际建库 executable
 纳入签名发行闭包。应用 promotion/rollback 由部署系统拥有，业务数据库没有第二发行 authority。
 
