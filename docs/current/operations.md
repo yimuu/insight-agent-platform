@@ -5,6 +5,10 @@
 本地环境使用 `insight init/dev/start/status/logs/stop/reset` 管理 project-local authority。默认 `starter` 与每个显式
 feature 都运行相同 public `/v1` 合同和独立 role；loopback、local OIDC/CA 与单节点部署始终标记 non-production。
 
+预构建 runtime 由 Linux image 提取并在宿主执行，只支持 Linux x86_64/ARM64。macOS 使用仓库 checkout 的显式
+`--from-source` 路径；四平台 CLI archive 不等同于四平台预构建 runtime。启动与恢复在写配置前验证目标运行模式，
+不支持时仍保留状态查看和清理入口。
+
 - `init` 只创建 local identity/config，不启动服务；
 - local identity 与 development bootstrap 只接受当前闭合格式；旧 project state 不自动迁移或启动，备份并移除其 `.insight` 后重新 `init`；
 - 首次 `dev` 通过独立建库工具建立当前 schema，服务启动只读核验结构。本机开发环境的部分角色仍共用测试 owner

@@ -1,7 +1,8 @@
 # `insight` CLI
 
 `insight` 是 public `/v1` 客户端和本地多进程 supervisor，不拥有业务 authority。官方预构建 CLI 是默认入口；
-源码构建只在显式 `--from-source` 时发生。
+预构建本地 runtime 支持 Linux x86_64/ARM64。macOS 的 CLI 安装不包含可直接执行的 runtime，须在仓库 checkout 中
+显式使用 `insight dev --from-source` 并安装 Rust；下方默认 `dev` 示例均以 Linux 为前提。
 
 ## Agent 北极星旅程
 
@@ -95,6 +96,10 @@ canonical union `all`。同一 release/source 内增加 feature 保留现有本�
 release/source 时必须先以 persisted feature 集合运行一次 `dev`，不能在同一次操作中同时切 identity 和增加 feature。`start` 从已验证的
 runtime profile 恢复 exact feature/release/source closure，并在安全 running 点修复 project summary；它不会从可能滞后的 summary 反向切换。
 `--offline` 只使用已验证 cache，缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
+
+不支持的预构建启动在获取 release 和准备配置前拒绝；`start` 对已验证 profile 或待恢复 journal 的目标模式执行同一检查，
+早于恢复写入与已运行判断。源码目标可以正常恢复，`status/logs/stop/reset` 仍可观察或清理不支持的 profile。
+`doctor.ready` 只汇总报告所列依赖检查，不证明主机支持预构建 runtime；源码启动还要求其可选 Rust 检查通过。
 
 Artifact、Policy 与配额的初始化输入由 CLI 和建库工具共用的[部署合同](../../crates/deployment/platform-deployment-contracts/src/development.rs)校验。
 同一项目重建运行配置时保留其原始文件与持久身份，恢复 journal 也不能替换该输入。文件缺失、摘要漂移或当前策略与物理绑定不一致时拒绝，

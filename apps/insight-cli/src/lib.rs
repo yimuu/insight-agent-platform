@@ -4260,6 +4260,7 @@ fn run_development_profile(
     root: &Path,
     profile: DevProfile,
 ) -> Result<String, CliError> {
+    ensure_runtime_host(profile)?;
     let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
         path: root.display().to_string(),
         source,
@@ -4274,11 +4275,17 @@ fn run_development_profile_locked(
     profile: DevProfile,
     restart_identity: Option<&RuntimeRestartIdentity>,
 ) -> Result<String, CliError> {
+    ensure_runtime_host(profile)?;
     let state_directory = root.join(PROJECT_DIRECTORY);
     let mut project = load_local_project_state(&state_directory)?;
     validate_loaded_local_identity(&state_directory, &project.identity)?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    runtime_config_transition::recover(&runtime, &project.identity)?;
+    runtime_config_transition::recover_for_start(
+        &runtime,
+        &project.identity,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )?;
     ensure_embedded_compose(&runtime)?;
     outbox_profile::prepare_files(&runtime)?;
     history_profile::prepare(&runtime)?;
@@ -4570,12 +4577,12 @@ fn restart_development_profile(workspace: &Path, root: &Path) -> Result<String, 
     let mut project = load_local_project_state(&state_directory)?;
     validate_loaded_local_identity(&state_directory, &project.identity)?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    runtime_config_transition::recover(&runtime, &project.identity)?;
-    let persisted = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
-        CliError::RuntimeState(
-            "no local runtime profile exists; run `insight dev` first".to_owned(),
-        )
-    })?;
+    let persisted = prepare_runtime_restart(
+        &runtime,
+        &project.identity,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )?;
     let profile = restart_profile_selection(&persisted)?;
     let compose_project = compose_project_name(&project.identity.tenant_id)?;
     let binding = runtime_process_binding(
@@ -4607,6 +4614,31 @@ fn restart_development_profile(workspace: &Path, root: &Path) -> Result<String, 
         source_fingerprint: persisted.source_fingerprint,
     };
     run_development_profile_locked(workspace, &root, profile, Some(&restart_identity))
+}
+
+fn ensure_runtime_host(profile: DevProfile) -> Result<(), CliError> {
+    profile
+        .validate_host(std::env::consts::OS, std::env::consts::ARCH)
+        .map_err(CliError::RuntimeUnavailable)
+}
+
+/// Called under the lifecycle lock, before any process or project-summary handling.
+fn prepare_runtime_restart(
+    runtime: &Path,
+    identity: &LocalIdentityState,
+    os: &str,
+    arch: &str,
+) -> Result<RuntimeProfileState, CliError> {
+    runtime_config_transition::recover_for_start(runtime, identity, os, arch)?;
+    let persisted = read_runtime_profile_state(runtime, identity)?.ok_or_else(|| {
+        CliError::RuntimeState(
+            "no local runtime profile exists; run `insight dev` first".to_owned(),
+        )
+    })?;
+    restart_profile_selection(&persisted)?
+        .validate_host(os, arch)
+        .map_err(CliError::RuntimeUnavailable)?;
+    Ok(persisted)
 }
 
 fn restart_profile_selection(persisted: &RuntimeProfileState) -> Result<DevProfile, CliError> {
@@ -5300,6 +5332,7 @@ fn ensure_prebuilt_runtime_binaries(
     profile: DevProfile,
     release: &release::VerifiedRelease,
 ) -> Result<PathBuf, CliError> {
+    ensure_runtime_host(DevProfile::starter())?;
     let release_root = runtime.join("releases").join(
         release
             .bundle_digest

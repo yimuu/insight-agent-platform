@@ -371,11 +371,35 @@ pub(super) fn reject_pending(runtime: &Path) -> Result<(), CliError> {
 }
 
 pub(super) fn recover(runtime: &Path, identity: &LocalIdentityState) -> Result<(), CliError> {
+    recover_checked(runtime, identity, |_| Ok(()))
+}
+
+/// Starting may only commit a configuration generation executable on the selected host.
+/// Cleanup and observation retain the original recovery path, including unsupported hosts.
+pub(super) fn recover_for_start(
+    runtime: &Path,
+    identity: &LocalIdentityState,
+    os: &str,
+    arch: &str,
+) -> Result<(), CliError> {
+    recover_checked(runtime, identity, |target| {
+        restart_profile_selection(target)?
+            .validate_host(os, arch)
+            .map_err(CliError::RuntimeUnavailable)
+    })
+}
+
+fn recover_checked(
+    runtime: &Path,
+    identity: &LocalIdentityState,
+    validate_target: impl FnOnce(&RuntimeProfileState) -> Result<(), CliError>,
+) -> Result<(), CliError> {
     let path = runtime.join(JOURNAL_FILE);
     let Some(journal) = read_runtime_json::<RuntimeConfigTransitionV1>(&path)? else {
         return Ok(());
     };
     let staged = preflight(runtime, identity, &journal)?;
+    validate_target(&journal.target_profile)?;
     for (name, value) in staged {
         // Preflight proved this stable input has the same previous/target/staged/current digest.
         // Never replace its original bytes when only derived runtime configuration changes.
@@ -446,9 +470,25 @@ mod tests {
         binaries: &Path,
         features: &str,
     ) -> RuntimeConfigTransitionV1 {
+        staged_target(
+            directory,
+            identity,
+            previous,
+            binaries,
+            DevProfile::parse(Some(features), false, true).unwrap(),
+            &previous.release_identity,
+        )
+    }
+    fn staged_target(
+        directory: &Path,
+        identity: &LocalIdentityState,
+        previous: &RuntimeProfileState,
+        binaries: &Path,
+        selected: DevProfile,
+        release_identity: &str,
+    ) -> RuntimeConfigTransitionV1 {
         let state_directory = directory.join(PROJECT_DIRECTORY);
         let runtime = state_directory.join(RUNTIME_DIRECTORY);
-        let selected = DevProfile::parse(Some(features), false, true).unwrap();
         ensure_selected_feature_identity(
             &state_directory,
             selected,
@@ -478,7 +518,7 @@ mod tests {
                 source_fingerprint: &previous.source_fingerprint,
                 ports: &previous.ports,
                 selected_profile: selected,
-                release_identity: &previous.release_identity,
+                release_identity,
             },
         )
         .unwrap();
@@ -496,6 +536,119 @@ mod tests {
     ) {
         preflight(runtime, identity, journal).unwrap();
         write_private(&runtime.join(JOURNAL_FILE), journal).unwrap();
+    }
+
+    fn runtime_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(root, &entry.path(), files);
+                } else {
+                    files.insert(
+                        entry.path().strip_prefix(root).unwrap().to_owned(),
+                        fs::read(entry.path()).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    #[test]
+    fn unsupported_restart_preserves_pending_and_committed_release_generations() {
+        let (directory, identity, previous, binaries) = setup();
+        let _lock = acquire_runtime_lifecycle_lock(directory.path()).unwrap();
+        let runtime = directory
+            .path()
+            .join(PROJECT_DIRECTORY)
+            .join(RUNTIME_DIRECTORY);
+        let release_identity = format!("release:0.2.0:{}", previous.source_fingerprint);
+        let journal = staged_target(
+            directory.path(),
+            &identity,
+            &previous,
+            &binaries,
+            DevProfile::starter(),
+            &release_identity,
+        );
+        stage_journal(&runtime, &identity, &journal);
+        // Test rejection both before and after the profile commit point. The same
+        // validated pending target must govern recovery, never the previous mode.
+        for committed in [false, true] {
+            if committed {
+                for (name, value) in preflight(&runtime, &identity, &journal).unwrap() {
+                    if name != RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE {
+                        write_private(
+                            &runtime.join(RUNTIME_CONFIGURATION_DIRECTORY).join(name),
+                            &value,
+                        )
+                        .unwrap();
+                    }
+                }
+                write_private(
+                    &runtime.join(RUNTIME_PROFILE_STATE_FILE),
+                    &journal.target_profile,
+                )
+                .unwrap();
+            }
+            let before = runtime_bytes(&runtime);
+            let error =
+                prepare_runtime_restart(&runtime, &identity, "macos", "aarch64").unwrap_err();
+            assert!(
+                matches!(error, CliError::RuntimeUnavailable(detail) if detail.contains("prebuilt runtime"))
+            );
+            assert_eq!(runtime_bytes(&runtime), before);
+        }
+        // Cleanup recovery is still permitted for a profile moved to an unsupported host.
+        recover(&runtime, &identity).unwrap();
+        let before = runtime_bytes(&runtime);
+        assert!(matches!(
+            prepare_runtime_restart(&runtime, &identity, "macos", "x86_64"),
+            Err(CliError::RuntimeUnavailable(_))
+        ));
+        assert_eq!(runtime_bytes(&runtime), before);
+        for arch in ["aarch64", "x86_64"] {
+            assert_eq!(
+                prepare_runtime_restart(&runtime, &identity, "linux", arch).unwrap(),
+                journal.target_profile
+            );
+        }
+        // An explicitly staged source target remains recoverable on macOS, even
+        // when the prior persisted generation came from a Linux release.
+        let source = staged_target(
+            directory.path(),
+            &identity,
+            &journal.target_profile,
+            &binaries,
+            DevProfile::source_starter(),
+            &previous.release_identity,
+        );
+        stage_journal(&runtime, &identity, &source);
+        assert_eq!(
+            prepare_runtime_restart(&runtime, &identity, "macos", "aarch64").unwrap(),
+            source.target_profile
+        );
+        assert!(!runtime.join(JOURNAL_FILE).exists());
+        assert!(!runtime.join(source.staged_directory).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prebuilt_dev_on_macos_rejects_before_lock_or_runtime_writes() {
+        let (directory, _, _, _) = setup();
+        let before = runtime_bytes(directory.path());
+        for offline in [false, true] {
+            let profile = DevProfile::parse(None, offline, false).unwrap();
+            let error =
+                run_development_profile(directory.path(), directory.path(), profile).unwrap_err();
+            assert!(
+                matches!(error, CliError::RuntimeUnavailable(detail) if detail.contains("prebuilt runtime"))
+            );
+            assert_eq!(runtime_bytes(directory.path()), before);
+        }
     }
     #[test]
     fn interrupted_batches_recover_before_and_after_the_profile_commit_point() {
