@@ -2193,6 +2193,104 @@ impl RecordingClaimExecutor {
     }
 }
 
+async fn phase2_failure_diagnostics(pool: &sqlx::PgPool, tenant_ids: &[String]) {
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let tenants: serde_json::Value = sqlx::query_scalar(
+            r#"
+            WITH selected AS (
+                SELECT tenant_id, ordinal FROM unnest($1::text[]) WITH ORDINALITY AS input(tenant_id, ordinal)
+            ), summary AS (
+                SELECT selected.ordinal, tenant.scheduler_partition_id AS partition,
+                       (SELECT count(*) FROM insight_platform.jobs j WHERE j.tenant_id=selected.tenant_id AND j.work_class='orchestration' AND j.state='ready') AS ready,
+                       (SELECT count(*) FROM insight_platform.jobs j WHERE j.tenant_id=selected.tenant_id AND j.work_class='orchestration' AND j.state='leased') AS leased,
+                       (SELECT count(*) FROM insight_platform.jobs j WHERE j.tenant_id=selected.tenant_id AND j.work_class='orchestration' AND j.state='ready' AND j.scheduled_at<=clock_timestamp() AND (j.retry_at IS NULL OR j.retry_at<=clock_timestamp()) AND j.deadline>clock_timestamp()) AS ready_due_unexpired,
+                       (SELECT COALESCE(sum(active_work_count),0) FROM insight_platform.runs r WHERE r.tenant_id=selected.tenant_id) AS active_work,
+                       (SELECT count(*) FROM insight_platform.quota_accounts q WHERE q.tenant_id=selected.tenant_id AND q.work_class='orchestration') AS quota_rows,
+                       (SELECT COALESCE(sum(limit_value),0) FROM insight_platform.quota_accounts q WHERE q.tenant_id=selected.tenant_id AND q.work_class='orchestration') AS quota_limit,
+                       (SELECT COALESCE(sum(used_value),0) FROM insight_platform.quota_accounts q WHERE q.tenant_id=selected.tenant_id AND q.work_class='orchestration') AS quota_used,
+                       (SELECT COALESCE(sum(reserved_value),0) FROM insight_platform.quota_accounts q WHERE q.tenant_id=selected.tenant_id AND q.work_class='orchestration') AS quota_reserved,
+                       fairness.deficit, fairness.credited_round, fairness.last_served_round,
+                       fairness.earliest_eligible_round, fairness.successful_claims,
+                       fairness.job_creation_cutoff IS NOT NULL AS sweep_open,
+                       fairness.job_cursor_id IS NOT NULL AS job_cursor_set,
+                       scheduler.current_round, scheduler.cursor_tenant_id IS NOT NULL AS tenant_cursor_set
+                FROM selected JOIN insight_platform.tenants tenant USING(tenant_id)
+                LEFT JOIN insight_platform.scheduler_tenant_state fairness
+                  ON fairness.tenant_id=selected.tenant_id AND fairness.work_class='orchestration'
+                LEFT JOIN insight_platform.scheduler_state scheduler
+                  ON scheduler.partition_id=tenant.scheduler_partition_id AND scheduler.work_class='orchestration'
+                ORDER BY selected.ordinal
+            ) SELECT COALESCE(jsonb_agg(to_jsonb(summary) ORDER BY ordinal),'[]'::jsonb) FROM summary
+            "#,
+        )
+        .bind(tenant_ids)
+        .fetch_one(pool)
+        .await?;
+        let locks: serde_json::Value = sqlx::query_scalar(
+            r#"
+            WITH allowed AS (
+                SELECT oid, relname FROM pg_class
+                WHERE relnamespace='insight_platform'::regnamespace
+                  AND relname IN ('jobs','run_nodes','runs','quota_accounts','scheduler_state','scheduler_tenant_state')
+            ), relations AS (
+                SELECT oid, relname FROM allowed
+                UNION ALL
+                SELECT idx.indexrelid, parent.relname || ' index'
+                FROM pg_index idx JOIN allowed parent ON parent.oid=idx.indrelid
+            ), summary AS (
+                SELECT relations.relname AS relation, locktype, mode, granted, count(*) AS count
+                FROM pg_locks JOIN relations ON relations.oid=pg_locks.relation
+                WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                GROUP BY relations.relname,locktype,mode,granted
+                ORDER BY relations.relname,locktype,mode,granted
+                LIMIT 129
+            ) SELECT COALESCE(jsonb_agg(to_jsonb(summary)),'[]'::jsonb) FROM summary
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok::<_, sqlx::Error>(json!({"tenants": tenants, "locks": locks}))
+    })
+    .await;
+    match result {
+        Ok(Ok(mut value)) => {
+            let locks = value["locks"].as_array_mut().unwrap();
+            let truncated = locks.len() > 128;
+            locks.truncate(128);
+            value["locks_truncated"] = json!(truncated);
+            let encoded = value.to_string();
+            if encoded.len() <= 16 * 1024 {
+                eprintln!("PHASE2_FAILURE_DIAGNOSTICS {encoded}");
+            } else {
+                eprintln!("PHASE2_FAILURE_DIAGNOSTICS diagnostic_too_large");
+            }
+        }
+        _ => eprintln!("PHASE2_FAILURE_DIAGNOSTICS diagnostic_unavailable"),
+    }
+}
+
+fn phase2_output_tail(bytes: &[u8]) -> serde_json::Value {
+    const MAX_BYTES: usize = 16 * 1024;
+    let text = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(MAX_BYTES)..]);
+    let mut start = text.len().saturating_sub(MAX_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    json!({"text": &text[start..], "truncated": bytes.len() > MAX_BYTES || start != 0})
+}
+
+#[test]
+fn phase2_diagnostic_tail_bounds_lossy_utf8_and_preserves_small_output() {
+    assert_eq!(
+        phase2_output_tail(b"fixture"),
+        json!({"text":"fixture","truncated":false})
+    );
+    let bytes = vec![0xff; 32 * 1024];
+    let tail = phase2_output_tail(&bytes);
+    assert!(tail["text"].as_str().unwrap().len() <= 16 * 1024);
+    assert_eq!(tail["truncated"], true);
+}
+
 #[async_trait]
 impl OrchestrationJobExecutor for RecordingClaimExecutor {
     async fn execute(&self, _job: ActiveOrchestrationJob) -> ExecutionDisposition {
@@ -2319,6 +2417,7 @@ fn phase2_claim_worker_process_entry() {
         .await;
         if drained.is_err() {
             let snapshot = running.snapshot();
+            phase2_failure_diagnostics(bulkheads.critical_control_pool(), &tenant_ids).await;
             let shutdown = running.shutdown().await;
             panic!("multi-process claim fixture did not drain: {snapshot:?}; shutdown={shutdown:?}");
         }
@@ -2417,7 +2516,7 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            children.push(child);
+            children.push((ordinal, child));
         }
 
         tokio::time::timeout(Duration::from_secs(180), async {
@@ -2455,30 +2554,37 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
         drop(barrier);
 
         let mut waits = tokio::task::JoinSet::new();
-        for child in children {
+        for (ordinal, child) in children {
             waits.spawn(async move {
-                tokio::task::spawn_blocking(move || child.wait_with_output())
+                let output = tokio::task::spawn_blocking(move || child.wait_with_output())
                     .await
-                    .unwrap()
+                    .unwrap();
+                (ordinal, output)
             });
         }
-        let outputs = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut outputs = tokio::time::timeout(Duration::from_secs(60), async {
             let mut outputs = Vec::with_capacity(PHASE2_CHILD_COUNT);
             while let Some(joined) = waits.join_next().await {
-                outputs.push(joined.unwrap().unwrap());
+                let (ordinal, output) = joined.unwrap();
+                outputs.push((ordinal, output.unwrap()));
             }
             outputs
         })
         .await
         .expect("claim worker processes did not finish");
         assert_eq!(outputs.len(), PHASE2_CHILD_COUNT);
-        for output in outputs {
-            assert!(
-                output.status.success(),
-                "claim child failed: stdout={} stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        outputs.sort_by_key(|(ordinal, _)| *ordinal);
+        if outputs.iter().any(|(_, output)| !output.status.success()) {
+            for (ordinal, output) in &outputs {
+                eprintln!("PHASE2_CHILD_DIAGNOSTICS {}", json!({
+                    "ordinal": ordinal, "exit_code": output.status.code(),
+                    "stdout": phase2_output_tail(&output.stdout),
+                    "stderr": phase2_output_tail(&output.stderr),
+                }));
+            }
+        }
+        assert!(outputs.iter().all(|(_, output)| output.status.success()), "claim children failed; all bounded outcomes are recorded above");
+        for (_, output) in outputs {
             assert!(String::from_utf8_lossy(&output.stdout).contains("PHASE2_CHILD_RESULT"));
         }
 
