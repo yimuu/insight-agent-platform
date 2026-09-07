@@ -49,8 +49,12 @@ def strict_json(data, maximum):
         raise Rejected("json_rejected")
 
     try:
-        return json.loads(data.decode("utf-8"), object_pairs_hook=pairs,
-                          parse_float=number, parse_constant=number)
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs,
+                           parse_float=number, parse_constant=number)
+        # Candidate documents, registry tokens and worker reports all have object roots.
+        if not isinstance(value, dict):
+            raise Rejected("json_rejected")
+        return value
     except (ValueError, UnicodeError, RecursionError):
         raise Rejected("json_rejected") from None
 

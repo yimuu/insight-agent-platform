@@ -194,7 +194,7 @@ module["fetch"]("/token?fixture",{},16384)
         self.assertLess(time.monotonic() - started, 1)
 
     def test_json_and_safe_main_failure_do_not_expose_inputs(self):
-        for data in (b'{"token":"x","token":"y"}', b'{"token":NaN}', b'\xff', b'[' * 1000 + b']' * 1000):
+        for data in (b'{"token":"x","token":"y"}', b'{"token":NaN}', b'\xff'):
             with self.assertRaises(PUBLIC.Rejected): PUBLIC.strict_json(data, PUBLIC.MAX_TOKEN_BYTES)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -204,6 +204,14 @@ module["fetch"]("/token?fixture",{},16384)
             self.assertEqual(result.returncode, 1)
             self.assertEqual(json.loads(result.stdout), {"status": "failed", "reason": "candidate_identity_rejected"})
             self.assertEqual(result.stderr, b"")
+
+    def test_protocol_json_requires_an_object_root_without_relying_on_recursion_limits(self):
+        self.assertEqual(PUBLIC.strict_json(b'{"token":"valid"}', PUBLIC.MAX_TOKEN_BYTES),
+                         {"token": "valid"})
+        for data in (b'null', b'true', b'false', b'1', b'"token"', b'[]',
+                     b'[{}]', b'[' * 1000 + b']' * 1000):
+            with self.subTest(data_kind=data[:8]), self.assertRaisesRegex(PUBLIC.Rejected, "json_rejected"):
+                PUBLIC.strict_json(data, PUBLIC.MAX_TOKEN_BYTES)
 
 
 class AnonymousGateTests(unittest.TestCase):
