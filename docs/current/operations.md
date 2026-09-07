@@ -210,4 +210,4 @@ Kind 验证要求 Docker 启用 containerd image store，并支持按平台保�
 Outbox、History、Security Authority 与 Artifact 的四个 pool 各用已有 owning grants 的独立数据库角色。Artifact 四角色在同一事务中初始化；其他尚无独立 grants 的本地角色仍使用测试 owner，不能据此声明全生产最小权限资格。初始化工具只允许固定本地或固定 Kind loopback 数据库配置，权限来自 PostgreSQL owner 的 grants。JetStream 使用独立初始化证书创建 owning stream，publisher 仅发布安全通知；本地持久卷保留 Pod 重建前的流数据。Kind 的 PVC 不构成生产备份或跨集群恢复承诺。
 
 生成配置、Helm 渲染和权限边界检查可以离线验证；只有真实启动并完成 owning qualification harness 才能记录该 exact revision 的 Kubernetes 动态证据。
-[源码验收 34154900003](https://github.com/yimuu/insight-agent-platform/actions/runs/34154900003) 已完成新 Kind 启动与 OpenSandbox L3，随后因 Console 编译工具缺失停止，未形成完整产品旅程资格。源码 workflow 先准备 owning WASM compiler；签名候选仍消费发行 Console 资产。后续提交必须独立验收，不能继承该次动态资格。
+源码 workflow 先准备 owning WASM compiler；签名候选仍消费发行 Console 资产。[源码验收 34160479562](https://github.com/yimuu/insight-agent-platform/actions/runs/34160479562) 完成 Kind、OpenSandbox L3、Console 构建与公开 CLI 启动，随后因 CORS 夹具的旧短名称断言停止，未形成完整产品旅程资格。夹具在访问依赖前核对运行 profile 的完整 Tenant 身份；后续提交必须独立验收，不能继承该次动态资格。
