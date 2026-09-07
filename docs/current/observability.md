@@ -47,6 +47,8 @@ admission、硬限制或隔离。
 ## InsightPlatformRecoveryFailureRatioHigh
 
 比较恢复扫描尝试/失败、PostgreSQL 可用性、过期 lease 和发布事件，区分全局故障与单个扫描族故障。
+逐项保留的损坏对象有独立的观测计数，不算成功变更或整页失败；重复扫描会重复计数，因此它不是独立损坏对象总数。
+诊断日志只含有界阶段与原因分类，不输出对象身份、正文或原始错误。
 保留 fencing 和 owner transaction，不得直接改行修复状态。
 
 ## InsightPlatformDurableJobLagHigh
@@ -82,13 +84,13 @@ endpoint/codec 高基数标签。不得移动 WorkClass 或直接改 Job。
 
 ## InsightPlatformSandboxDurableJobLagHigh
 
-关联 Sandbox due 数量/年龄、Controller readiness、executor admission、Artifact response 容量和 PostgreSQL。
-不得绕过 admission、改变 owner，或退回 Controller/宿主机执行。
+关联 Sandbox due 数量/年龄、Dispatcher 与 OpenSandbox readiness、executor admission、Artifact response 容量和 PostgreSQL。
+不得绕过 admission、改变 owner，或使用宿主机执行路径。
 
 ## InsightPlatformSandboxExpiredLeaseRecoveryLagHigh
 
-检查 executor 丢失、process-generation attestation、数据库时间、Controller fence 和恢复容量。只有证明旧 process
-generation 已消失后，Controller 才能允许新的物理 attempt。
+检查 Dispatcher、数据库时间、当前 Job fence、runner boot 与恢复容量。已授权激活的工作只核对同一候选的 state/result，
+不得激活 replacement；观察到 boot rollover 时，由当前 Job fence 提交不确定结果，再通过原 cleanup intent 核对物理删除。
 
 ## InsightPlatformArtifactDurableJobLagHigh
 
@@ -143,14 +145,14 @@ generation 与 lease，由有界恢复扫描重建 session，并通过 owner tra
 ## InsightPlatformDueOutboxLagHigh
 
 关联 due 数量/年龄、publisher readiness、NATS、PostgreSQL 和发布事件。不得手工删除、发布或推进 Outbox 行；
-修复 publisher/transport 后由 fenced owner 保持顺序和重放语义。
+修复 publisher/transport 后由当前 fenced owner 继续投递；消费者按稳定 Event ID 幂等处理，并从 PostgreSQL 读取当前事实。
 
 ## InsightPlatformExpiredOutboxClaimLagHigh
 
 检查 publisher 丢失、数据库时间、claim fence 和 critical-control 容量。不得直接清空 `claim_owner`、增加 epoch
 或改 `next_publish_at`，必须由 Outbox owner reclaim。
 
-## InsightPlatformOutboxDeadEventsPresent
+## InsightPlatformOutboxIncompatibleEventsPresent
 
-用固定队列和安全的 failure-code 聚合定位首次出现时间，不导出 Event payload 或 identity。保留 dead record，
-走 owning domain reconciliation；遇到未知 event kind 时升级处理，不得绕过 owner contract 重放。
+用固定队列和安全的 failure-code 聚合定位首次出现时间，不导出 Event payload 或 identity。不兼容记录保留并持续告警，当前领取路径不会自动重新投递它；先查明元数据或部署合同不一致的原因。
+该状态仍计入未投递积压，不能通过清理记录或直接发布 Event 正文消除告警。

@@ -1,0 +1,54 @@
+[package]
+name = "insight-platform-context-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "platform-context-worker"
+path = "src/main.rs"
+
+[[bin]]
+name = "platform-remote-context-worker"
+path = "src/remote_main.rs"
+
+[[bin]]
+name = "platform-subscription-context-worker"
+path = "src/subscription_main.rs"
+
+[[bin]]
+name = "platform-context-dataset-worker"
+path = "src/dataset_main.rs"
+
+[dependencies]
+insight-platform-plan.workspace = true
+insight-platform-observability-http.workspace = true
+insight-platform-execution-context.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+insight-platform-artifact-rpc.workspace = true
+insight-platform-artifacts.workspace = true
+insight-platform-context.workspace = true
+insight-platform-contracts.workspace = true
+insight-platform-egress-rpc.workspace = true
+insight-platform-jobs.workspace = true
+insight-platform-mcp-rpc.workspace = true
+insight-platform-rpc-trace.workspace = true
+insight-platform-observability.workspace = true
+insight-platform-postgres.workspace = true
+insight-platform-worker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+url.workspace = true
+uuid.workspace = true

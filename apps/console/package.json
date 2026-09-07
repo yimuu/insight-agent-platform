@@ -1,0 +1,33 @@
+{
+  "name": "@insight/operations-console",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.19.0",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm compiler:build && vite",
+    "build": "pnpm compiler:build && tsc -b && vite build",
+    "browser:fixture": "node tests/fixture-server.mjs",
+    "browser:fixture:qualify": "node tests/qualify-browser-fixture.mjs",
+    "browser:gateway": "node tests/gateway-server.mjs",
+    "browser:gateway:journey": "node tests/real-gateway-journey.mjs",
+    "lint": "oxlint",
+    "test": "pnpm compiler:build && node --check tests/fixture-server.mjs && node --check tests/gateway-server.mjs && node --check tests/qualify-browser-fixture.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs src/agent/*.test.mjs src/task/*.test.mjs tests/gateway-server.test.mjs",
+    "preview": "vite preview",
+    "compiler:build": "node scripts/build-agent-compiler.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "oxlint": "^1.79.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.2"
+  }
+}

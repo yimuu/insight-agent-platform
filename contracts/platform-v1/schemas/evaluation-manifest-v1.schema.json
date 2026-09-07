@@ -1,0 +1,627 @@
+{
+  "$defs": {
+    "AgentDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "deployment_id": {
+          "pattern": "^adep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "resource_kind": {
+          "const": "agent_deployment"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "maxLength": 40,
+          "minLength": 40,
+          "pattern": "^(art)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string",
+          "x-platform-max-bytes": 40
+        },
+        "byte_length": {
+          "maximum": 1073741824,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ],
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 32
+        },
+        "content_digest": {
+          "maxLength": 71,
+          "minLength": 71,
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string",
+          "x-platform-max-bytes": 71
+        },
+        "display_name": {
+          "oneOf": [
+            {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string",
+              "x-platform-max-bytes": 1020
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "media_type": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string",
+          "x-platform-max-bytes": 255
+        }
+      },
+      "required": [
+        "artifact_id",
+        "content_digest",
+        "byte_length",
+        "media_type",
+        "classification",
+        "display_name"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "ChildBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_artifact_bytes": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_capability_calls": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_descendant_runs": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_duration_milliseconds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_model_tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_duration_milliseconds",
+        "maximum_model_tokens",
+        "maximum_capability_calls",
+        "maximum_artifact_bytes",
+        "maximum_descendant_runs"
+      ],
+      "type": "object"
+    },
+    "ClosedSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "profile": {
+          "const": "insight.closed-json-schema/1"
+        },
+        "schema": {
+          "description": "Validated by the owning closed object schema profile, including local/pinned references and its byte bound.",
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "profile",
+        "schema",
+        "canonical_digest"
+      ],
+      "type": "object"
+    },
+    "CompilerProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "default_deadline_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "default_environment": {
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "type": "string"
+        },
+        "deployment_policies": {
+          "items": {
+            "$ref": "#/$defs/PolicyBinding"
+          },
+          "type": "array"
+        },
+        "execution_profile": {
+          "$ref": "#/$defs/PolicyBinding"
+        },
+        "model_loop": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum_capability_calls": {
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_parallel_calls_per_round": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_rounds": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "token_budget": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "maximum_rounds",
+            "maximum_capability_calls",
+            "maximum_parallel_calls_per_round",
+            "token_budget"
+          ],
+          "type": "object"
+        },
+        "policy_versions": {
+          "items": {
+            "$ref": "#/$defs/PolicyRevision"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "default_deadline_seconds",
+        "default_environment",
+        "policy_versions",
+        "deployment_policies",
+        "execution_profile",
+        "model_loop"
+      ],
+      "type": "object"
+    },
+    "DeploymentFeatures": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment": {
+          "$ref": "#/$defs/AgentDeployment"
+        },
+        "interface_contract_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "required_features": {
+          "items": {
+            "enum": [
+              "model",
+              "context",
+              "remote-capability",
+              "mcp",
+              "sandbox"
+            ]
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "deployment",
+        "interface_contract_digest",
+        "required_features"
+      ],
+      "type": "object"
+    },
+    "Digest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "maxLength": 71,
+      "minLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Digest",
+      "type": "string",
+      "x-platform-max-bytes": 71
+    },
+    "Evidence": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evaluator_input": {
+              "$ref": "#/$defs/RunValue"
+            },
+            "kind": {
+              "const": "scored"
+            },
+            "output": {
+              "$ref": "#/$defs/RunValue"
+            },
+            "score": {
+              "$ref": "#/$defs/RunValue"
+            },
+            "subject_input": {
+              "$ref": "#/$defs/RunValue"
+            }
+          },
+          "required": [
+            "kind",
+            "subject_input",
+            "evaluator_input",
+            "output",
+            "score"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "failed_run_id": {
+              "$ref": "#/$defs/RunId"
+            },
+            "failure_value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/RunValue"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "const": "failed"
+            },
+            "stage": {
+              "enum": [
+                "subject",
+                "evaluator"
+              ]
+            },
+            "subject_run_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/RunId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "terminal_state": {
+              "enum": [
+                "failed",
+                "timed_out",
+                "cancelled"
+              ]
+            },
+            "terminal_version": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "stage",
+            "failed_run_id",
+            "terminal_state",
+            "terminal_version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "missing"
+            },
+            "reason": {
+              "enum": [
+                "not_started",
+                "cancelled",
+                "deadline_exceeded",
+                "evidence_unavailable"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "$ref": "#/$defs/StableId"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/AgentDeployment"
+        },
+        "metric_schema": {
+          "$ref": "#/$defs/ClosedSchema"
+        },
+        "repetitions": {
+          "maximum": 16,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/Sample"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "subject": {
+          "$ref": "#/$defs/AgentDeployment"
+        }
+      },
+      "required": [
+        "schema_version",
+        "dataset_id",
+        "samples",
+        "repetitions",
+        "subject",
+        "evaluator",
+        "metric_schema"
+      ],
+      "type": "object"
+    },
+    "PolicyBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment": {
+          "$ref": "#/$defs/PolicyDeployment"
+        },
+        "revision": {
+          "$ref": "#/$defs/PolicyRevision"
+        }
+      },
+      "required": [
+        "deployment",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PolicyDeployment": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "deployment_id": {
+          "pattern": "^pdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "resource_kind": {
+          "const": "policy_deployment"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "PolicyRevision": {
+      "additionalProperties": false,
+      "properties": {
+        "resource_kind": {
+          "const": "policy_revision"
+        },
+        "revision_id": {
+          "pattern": "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "semantic_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "revision_id",
+        "resource_kind",
+        "semantic_digest"
+      ],
+      "type": "object"
+    },
+    "Result": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/Evidence"
+        },
+        "expected": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "trial": {
+          "$ref": "#/$defs/Trial"
+        }
+      },
+      "required": [
+        "trial",
+        "input",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "RunId": {
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "RunValue": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "schema_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "value_id": {
+          "pattern": "^val_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "value_id",
+        "schema_digest",
+        "content_digest"
+      ],
+      "type": "object"
+    },
+    "Sample": {
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_schema_digest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "input_schema_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "sample_id": {
+          "$ref": "#/$defs/StableId"
+        }
+      },
+      "required": [
+        "sample_id",
+        "input",
+        "input_schema_digest"
+      ],
+      "type": "object"
+    },
+    "StableId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "type": "string"
+    },
+    "Trial": {
+      "additionalProperties": false,
+      "properties": {
+        "manifest_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "repetition": {
+          "maximum": 15,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sample_id": {
+          "$ref": "#/$defs/StableId"
+        },
+        "trial_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "manifest_digest",
+        "sample_id",
+        "repetition",
+        "trial_digest"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:insight:platform:v1:evaluation-manifest-v1",
+  "$ref": "#/$defs/Manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-insight-max-canonical-bytes": 1048576,
+  "x-insight-semantic-validator": "insight-platform-agent-compiler::evaluation; schemas check structure, owner verifies digests, unique samples/trials, exact bindings, schema profile, byte limits and report counts"
+}

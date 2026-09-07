@@ -47,9 +47,22 @@ async function handleModel(request, response) {
   }
   const serialized = JSON.stringify(body)
   if (serialized.includes('fixture-timeout')) return
+  const combined = serialized.includes('local deterministic context item') && Array.isArray(body.tools) && body.tools.length === 1
+  const toolResult = Array.isArray(body.input) && body.input.some(item => item.type === 'function_call_output')
+  if (combined && !toolResult) {
+    trace({kind: 'combined_tool_intent', context_citation_present: serialized.includes('observation_only')})
+    const item = {id: 'fc_combined_1', type: 'function_call', status: 'completed', call_id: 'call_combined_1', name: body.tools[0].name, arguments: JSON.stringify({message: 'cited tool result approved'})}
+    response.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-store', 'content-encoding': 'identity'})
+    sse(response, 'response.output_item.added', {type: 'response.output_item.added', item: {...item, status: 'in_progress', arguments: ''}})
+    sse(response, 'response.function_call_arguments.delta', {type: 'response.function_call_arguments.delta', item_id: item.id, delta: item.arguments})
+    sse(response, 'response.completed', {type: 'response.completed', response: {status: 'completed', model: 'fixture-model-2026-08', output: [item], usage: {input_tokens: 7, output_tokens: 5, total_tokens: 12}}})
+    response.end()
+    return
+  }
+  if (combined && toolResult) trace({kind: 'combined_tool_result', tool_result_matches: body.input.some(item => item.type === 'function_call_output' && JSON.stringify(item).includes('cited tool result approved'))})
   const text = serialized.includes('fixture-output-limit')
     ? 'x'.repeat(32_768)
-    : JSON.stringify({answer: 'deterministic streamed model response'})
+    : JSON.stringify({answer: combined && toolResult ? 'cited tool result approved' : 'deterministic streamed model response'})
   response.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-store',

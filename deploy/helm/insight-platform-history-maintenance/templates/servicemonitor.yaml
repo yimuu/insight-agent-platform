@@ -1,0 +1,13 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "insight-platform-history-maintenance.name" . }}
+  namespace: {{ .Values.namespace }}
+spec:
+  namespaceSelector: {matchNames: [{{ .Values.namespace }}]}
+  selector:
+    matchLabels: {{ include "insight-platform-history-maintenance.labels" . | nindent 6 }}
+  endpoints:
+    - {port: observability, path: /metrics, interval: {{ .Values.monitoring.interval }}, scrapeTimeout: {{ .Values.monitoring.scrapeTimeout }}, scheme: http}
+{{- end }}

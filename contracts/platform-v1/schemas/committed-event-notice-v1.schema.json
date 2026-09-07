@@ -1,0 +1,84 @@
+{
+  "$id": "urn:insight:platform:v1:committed-event-notice",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "public_sequence": {
+            "type": "integer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "run_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "description": "Committed authority point-read hint only; excludes original Event type, payload, Artifact refs and secret material.",
+  "properties": {
+    "aggregate_id": {
+      "$ref": "resource-id.schema.json"
+    },
+    "aggregate_version": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "event_id": {
+      "$ref": "resource-id.schema.json"
+    },
+    "occurred_at": {
+      "$ref": "nominal/utc-timestamp.schema.json"
+    },
+    "public_sequence": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "$ref": "resource-id.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "tenant_id": {
+      "$ref": "resource-id.schema.json"
+    },
+    "trace_id": {
+      "$ref": "nominal/trace-id.schema.json"
+    }
+  },
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "event_id",
+    "aggregate_id",
+    "aggregate_version",
+    "run_id",
+    "public_sequence",
+    "trace_id",
+    "occurred_at"
+  ],
+  "title": "CommittedEventNoticeV1",
+  "type": "object",
+  "x-platform-max-bytes": 4096
+}

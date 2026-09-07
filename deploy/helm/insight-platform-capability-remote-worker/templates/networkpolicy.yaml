@@ -22,12 +22,14 @@ spec:
       ports: [{protocol: TCP, port: {{ int .Values.observability.port }}}]
     {{- end }}
   egress:
+    {{- if .Values.mcpHost.enabled }}
     - to:
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.mcpHostNamespace }} }
           podSelector:
             matchLabels: {{ toYaml .Values.networkPolicy.mcpHostPodSelector | nindent 16 }}
       ports: [{protocol: TCP, port: {{ int .Values.networkPolicy.mcpHostPort }}}]
+    {{- end }}
     - to:
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.egressNamespace }} }

@@ -39,5 +39,5 @@ identity 文件读取，不写入 stdout、stderr 或报告。失败时 fixture 
 
 契约来源仍是 [`contracts/platform-v1/openapi.yaml`](../../contracts/platform-v1/openapi.yaml)；fixture 的 mock
 authority contract test 位于
-[`scripts/tests/test_productization_http_lifecycle.py`](../../scripts/tests/test_productization_http_lifecycle.py)，真实
+[`tools/tests/test_productization_http_lifecycle.py`](../../tools/tests/test_productization_http_lifecycle.py)，真实
 fresh PostgreSQL/Gateway/Registry Validation Worker 调用则属于 `deterministic-first-run` P2 journey。

@@ -49,7 +49,9 @@
           "artifact_gateway",
           "artifact_data_worker",
           "artifact_maintenance",
-          "egress_secret_broker"
+          "egress_secret_broker",
+          "outbox_worker",
+          "history_maintenance"
         ]
       },
       "type": "object"
@@ -278,7 +280,9 @@
           "artifact_gateway",
           "artifact_data_worker",
           "artifact_maintenance",
-          "egress_secret_broker"
+          "egress_secret_broker",
+          "outbox_worker",
+          "history_maintenance"
         ]
       },
       "type": "object"

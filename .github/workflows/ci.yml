@@ -42,7 +42,7 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" || "$EVENT_NAME" == "schedule" ]]; then
-            python3 scripts/classify-ci-paths.py --all --github-output "$GITHUB_OUTPUT"
+            python3 tools/checks/classify-ci-paths.py --all --github-output "$GITHUB_OUTPUT"
             exit 0
           fi
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -52,7 +52,7 @@ jobs:
           else
             git diff --name-only "$BEFORE_SHA" "$HEAD_SHA" > changed-paths.txt
           fi
-          python3 scripts/classify-ci-paths.py changed-paths.txt --github-output "$GITHUB_OUTPUT"
+          python3 tools/checks/classify-ci-paths.py changed-paths.txt --github-output "$GITHUB_OUTPUT"
 
   quick:
     name: Quick contracts
@@ -62,29 +62,30 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check cutover and Productization contracts
         run: |
-          bash scripts/check-cutover-residuals.sh
-          python3 scripts/check-productization-m0.py
-          python3 scripts/check-productization-ci.py
-          python3 scripts/check-product-release.py
-          python3 scripts/check-productization-scenario-reports.py \
+          bash tools/checks/check-cutover-residuals.sh
+          python3 tools/checks/check-productization-m0.py
+          python3 tools/checks/check-productization-ci.py
+          python3 tools/checks/check-product-release.py
+          python3 tools/checks/check-productization-scenario-reports.py \
             tests/fixtures/productization-reports/incomplete \
             --allow-incomplete \
             --source-revision 0000000000000000000000000000000000000000
           python3 -m unittest \
-            scripts/tests/test_classify_ci_paths.py \
-            scripts/tests/test_platform_observability_redaction.py \
-            scripts/tests/test_required_ci_results.py \
-            scripts/tests/test_productization_journey_runner.py \
-            scripts/tests/test_prepare_productization_release_candidate.py \
-            scripts/tests/test_productization_http_lifecycle.py \
-            scripts/tests/test_productization_north_star_report.py \
-            scripts/tests/test_productization_scenario_reports.py \
-            scripts/tests/test_productization_sandbox_qualification.py \
-            scripts/tests/test_inspect_platform_oci_image.py \
-            scripts/tests/test_verify_platform_sandbox_package_image.py \
-            scripts/tests/test_platform_kind_l4_opensandbox_probe.py \
-            scripts/tests/test_development_profile_performance.py \
-            scripts/tests/test_product_release.py
+            tools/tests/test_classify_ci_paths.py \
+            tools/tests/test_platform_observability_redaction.py \
+            tools/tests/test_required_ci_results.py \
+            tools/tests/test_rust_integration_lanes.py \
+            tools/tests/test_productization_journey_runner.py \
+            tools/tests/test_prepare_productization_release_candidate.py \
+            tools/tests/test_productization_http_lifecycle.py \
+            tools/tests/test_productization_north_star_report.py \
+            tools/tests/test_productization_scenario_reports.py \
+            tools/tests/test_productization_sandbox_qualification.py \
+            tools/tests/test_inspect_platform_oci_image.py \
+            tools/tests/test_verify_platform_sandbox_package_image.py \
+            tools/tests/test_platform_kind_l4_opensandbox_probe.py \
+            tools/tests/test_development_profile_performance.py \
+            tools/tests/test_product_release.py
 
   lint:
     name: Static contracts and formatting
@@ -104,48 +105,54 @@ jobs:
           cache-targets: "false"
           cache-on-failure: "false"
       - name: Check Platform v1 machine contracts and fixtures
-        run: python3 scripts/check-platform-v1-contracts.py
+        run: python3 tools/checks/check-platform-v1-contracts.py
       - name: Check production qualification topology preflight
         run: |
           python3 -m unittest \
-            scripts/tests/test_platform_production_topology.py \
-            scripts/tests/test_platform_production_workloads.py \
-            scripts/tests/test_platform_candidate_pipeline.py
-          bash -n scripts/preflight-platform-production-qualification.sh
+            tools/tests/test_platform_production_topology.py \
+            tools/tests/test_platform_production_workloads.py \
+            tools/tests/test_platform_candidate_pipeline.py
+          bash -n tools/qualification/preflight-platform-production-qualification.sh
       - name: Check signed candidate pipeline contract
-        run: python3 scripts/check-platform-candidate-pipeline.py
+        run: python3 tools/checks/check-platform-candidate-pipeline.py
       - name: Check Platform v1 PostgreSQL schema contract
-        run: python3 scripts/check-platform-postgres-schema.py
+        run: python3 tools/checks/check-platform-postgres-schema.py
       - name: Check crate boundaries and dependency feature baseline
-        run: bash scripts/check-crate-boundaries.sh
+        run: bash tools/checks/check-crate-boundaries.sh
       - name: Install Helm for Sandbox deployment contract
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.19.0
+      - name: Verify generated Kind configs, executable identities, TLS names and chart closure
+        run: python3 -m unittest discover -s tools/tests -p test_platform_kind_configuration.py
       - name: Check closed ComponentRole workload closure
-        run: ruby scripts/check-platform-component-workload-closure.rb
+        run: ruby tools/checks/check-platform-component-workload-closure.rb
       - name: Check Sandbox deployment contract
-        run: bash scripts/check-platform-sandbox-deployment.sh
+        run: bash tools/checks/check-platform-sandbox-deployment.sh
       - name: Check Security Authority and Egress deployment boundary
-        run: bash scripts/check-platform-security-deployment.sh
+        run: bash tools/checks/check-platform-security-deployment.sh
       - name: Check Model Worker deployment boundary
-        run: bash scripts/check-platform-model-worker-deployment.sh
+        run: bash tools/checks/check-platform-model-worker-deployment.sh
       - name: Check Context Worker deployment boundary
-        run: bash scripts/check-platform-context-worker-deployment.sh
+        run: bash tools/checks/check-platform-context-worker-deployment.sh
       - name: Check Remote Context Worker deployment boundary
-        run: bash scripts/check-platform-remote-context-worker-deployment.sh
+        run: bash tools/checks/check-platform-remote-context-worker-deployment.sh
       - name: Check Orchestration Worker deployment boundary
-        run: bash scripts/check-platform-orchestration-worker-deployment.sh
+        run: bash tools/checks/check-platform-orchestration-worker-deployment.sh
       - name: Check Artifact Broker deployment boundary
-        run: bash scripts/check-platform-artifact-deployment.sh
+        run: bash tools/checks/check-platform-artifact-deployment.sh
       - name: Check observability dashboards and alerts
-        run: bash scripts/check-platform-observability-deployment.sh
+        run: bash tools/checks/check-platform-observability-deployment.sh
       - name: Check production telemetry redaction
-        run: python3 scripts/check-platform-observability-redaction.py
+        run: python3 tools/checks/check-platform-observability-redaction.py
       - name: Check callback API deployment boundary
-        run: bash scripts/check-platform-callback-deployment.sh
+        run: bash tools/checks/check-platform-callback-deployment.sh
+      - name: Check Outbox worker deployment boundary
+        run: bash tools/checks/check-platform-outbox-deployment.sh
+      - name: Check History maintenance deployment boundary
+        run: bash tools/checks/check-platform-history-maintenance-deployment.sh
       - name: Check MCP cleanup worker deployment boundary
-        run: bash scripts/check-platform-mcp-cleanup-deployment.sh
+        run: bash tools/checks/check-platform-mcp-cleanup-deployment.sh
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -191,34 +198,116 @@ jobs:
           cache-on-failure: "false"
       - name: Run authoritative Rust contract validators
         run: |
-          cargo run --locked -p insight-platform-contracts --bin check-platform-contracts
-          cargo run --locked -p insight-platform-contracts --bin platform-qualification -- \
+          cargo run --locked -p insight-platform-contract-tooling --bin check-platform-contracts
+          cargo run --locked -p insight-platform-contract-tooling --bin platform-qualification -- \
             validate-production-profile \
             contracts/platform-v1/qualification/production-release-profile.json
-          cargo run --locked -p insight-platform-postgres --bin check-platform-schema-contract
-      - name: Provision clean-cut Platform PostgreSQL baseline
+          cargo run --locked -p insight-platform-storage-tooling --bin check-platform-schema-contract
+      - name: Provision current Platform PostgreSQL snapshot
         env:
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
-        run: bash scripts/provision-platform-postgres.sh
-      - name: Provision isolated Model conformance baseline
+        run: bash tools/development/provision-platform-postgres.sh
+      - name: Verify Kind database roles against isolated PostgreSQL
+        run: |
+          cargo build --locked -p insight-platform-storage-tooling --bin platform-database-role
+          python3 tools/qualification/qualify-platform-kind-database-roles.py --schema-bin target/debug/platform-schema --role-bin target/debug/platform-database-role
+      - name: Provision isolated Model conformance authority
         env:
           PGPASSWORD: insight
           PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
         run: |
           createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_model
-          bash scripts/provision-platform-postgres.sh
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Run kernel transaction authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_run_kernel
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_run_kernel
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated History retention authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_history
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_history
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Evaluation execution authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_evaluation
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_evaluation
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Installation bootstrap authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_installation
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_installation
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Development bootstrap authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_dev_bootstrap
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_dev_bootstrap
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Orchestration claim isolation authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration_isolation
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_orchestration_isolation
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Controller transaction authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_controller_transaction
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_controller_transaction
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated History process authority
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_history_process
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_history_process
+          bash tools/development/provision-platform-postgres.sh
+      - name: Provision isolated Outbox authority and JetStream fixture
+        env:
+          PGPASSWORD: insight
+          PLATFORM_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_outbox
+          PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_outbox
+          PLATFORM_OUTBOX_WORKER_ROLE: platform_outbox_qualification
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_outbox
+          bash tools/development/provision-platform-postgres.sh
+          psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_outbox_qualification NOLOGIN'
+          bash tools/development/provision-platform-outbox-role.sh
+          docker run --detach --name insight-outbox-qualification --publish 127.0.0.1:4223:4222 nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927 --jetstream --store_dir /data/jetstream
+      - name: Provision isolated mTLS publication permission fixture
+        run: |
+          python3 tools/qualification/prepare-outbox-tls-fixture.py "$RUNNER_TEMP/outbox-tls"
+          docker run --detach --name insight-outbox-tls-qualification --publish 127.0.0.1:4224:4222 --mount type=bind,source="$RUNNER_TEMP/outbox-tls",target=/etc/nats/tls,readonly --mount type=bind,source="$RUNNER_TEMP/outbox-tls/nats.conf",target=/etc/nats/nats.conf,readonly nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927 --config=/etc/nats/nats.conf
       - name: Create fresh schema-provisioning fixture
         env:
           PGPASSWORD: insight
         run: |
           createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_provision
+      - name: Create isolated transactional schema unit fixtures
+        env:
+          PGPASSWORD: insight
+        run: |
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_partition_unit
+          createdb --host localhost --username insight --no-password --maintenance-db postgres insight_agent_platform_inventory_unit
       - name: Provision Security Authority least-privilege role
         env:
           PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
           PLATFORM_SECURITY_AUTHORITY_ROLE: platform_security_authority_qualification
         run: |
           psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_security_authority_qualification NOLOGIN'
-          bash scripts/provision-platform-security-authority-role.sh
+          bash tools/development/provision-platform-security-authority-role.sh
       - name: Provision Artifact role permission matrix
         env:
           PLATFORM_DATABASE_ADMIN_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
@@ -228,21 +317,69 @@ jobs:
           PLATFORM_ARTIFACT_MAINTENANCE_ROLE: platform_artifact_maintenance_qualification
         run: |
           psql "$PLATFORM_DATABASE_ADMIN_URL" --no-psqlrc --set ON_ERROR_STOP=1 --command 'CREATE ROLE platform_artifact_gateway_qualification NOLOGIN; CREATE ROLE platform_artifact_data_reader_qualification NOLOGIN; CREATE ROLE platform_artifact_data_worker_qualification NOLOGIN; CREATE ROLE platform_artifact_maintenance_qualification NOLOGIN'
-          bash scripts/provision-platform-artifact-roles.sh
+          bash tools/development/provision-platform-artifact-roles.sh
       - name: Test
         env:
           PLATFORM_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform
           # Model conformance performs consecutive global WDRR claims and therefore needs an
           # independent durable authority rather than competing with earlier fixture tenants.
           PLATFORM_MODEL_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_model
+          PLATFORM_TEST_RUN_KERNEL_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_run_kernel
+          PLATFORM_TEST_EVALUATION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_evaluation
+          PLATFORM_TEST_INSTALLATION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_installation
+          PLATFORM_TEST_DEV_BOOTSTRAP_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_dev_bootstrap
+          PLATFORM_TEST_PARTITION_SCHEDULER_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_partition_unit
+          PLATFORM_TEST_SCHEMA_INVENTORY_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_inventory_unit
+          PLATFORM_TEST_ORCHESTRATION_ISOLATION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_orchestration_isolation
+          PLATFORM_TEST_CONTROLLER_TRANSACTION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_controller_transaction
           PLATFORM_TEST_NATS_URL: nats://localhost:4222
+          PLATFORM_TEST_HISTORY_PROCESS_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_history_process
+          PLATFORM_TEST_HISTORY_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_history
+          PLATFORM_OUTBOX_TEST_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_outbox
+          PLATFORM_OUTBOX_TEST_NATS_URL: nats://localhost:4223
+          PLATFORM_OUTBOX_TEST_ROLE: platform_outbox_qualification
+          PLATFORM_OUTBOX_TLS_TEST_NATS_URL: tls://localhost:4224
+          PLATFORM_OUTBOX_TLS_TEST_DIRECTORY: ${{ runner.temp }}/outbox-tls
           PLATFORM_TEST_PROVISION_DATABASE_URL: postgres://insight:insight@localhost:5432/insight_agent_platform_provision
           PLATFORM_SECURITY_AUTHORITY_TEST_ROLE: platform_security_authority_qualification
           PLATFORM_ARTIFACT_DATA_READER_TEST_ROLE: platform_artifact_data_reader_qualification
           PLATFORM_ARTIFACT_GATEWAY_TEST_ROLE: platform_artifact_gateway_qualification
           PLATFORM_ARTIFACT_DATA_WORKER_TEST_ROLE: platform_artifact_data_worker_qualification
           PLATFORM_ARTIFACT_MAINTENANCE_TEST_ROLE: platform_artifact_maintenance_qualification
-        run: cargo test --locked --workspace --all-targets --all-features
+        run: |
+          cargo test --locked --workspace --all-targets --all-features --no-run
+          cargo test --locked --workspace --lib --bins --all-features
+          python3 tools/ci/run-rust-integration-tests.py
+      - name: Verify durable publication after JetStream restart
+        env:
+          PLATFORM_OUTBOX_TEST_NATS_URL: nats://localhost:4223
+        run: |
+          docker restart insight-outbox-qualification
+          python3 - <<'PY'
+          import os, socket, time
+          from urllib.parse import urlsplit
+          endpoint = urlsplit(os.environ["PLATFORM_OUTBOX_TEST_NATS_URL"])
+          deadline = time.monotonic() + 15
+          while time.monotonic() < deadline:
+              try:
+                  with socket.create_connection((endpoint.hostname, endpoint.port), timeout=1) as connection:
+                      greeting = connection.makefile("rb").readline(65536)
+                      if greeting.startswith(b"INFO ") and greeting.endswith(b"\r\n"):
+                          break
+              except OSError:
+                  pass
+              time.sleep(0.1)
+          else:
+              raise SystemExit("restarted NATS fixture did not become ready")
+          PY
+          cargo test --locked -p insight-platform-outbox-worker --test durable_delivery accepted_notice_survives_jetstream_process_restart -- --ignored --exact
+      - name: Verify Model live publication with actual mTLS NATS
+        env:
+          PLATFORM_TEST_NATS_URL: tls://localhost:4224
+          PLATFORM_TEST_NATS_CA_PATH: ${{ runner.temp }}/outbox-tls/ca.pem
+          PLATFORM_TEST_NATS_CERT_PATH: ${{ runner.temp }}/outbox-tls/live.pem
+          PLATFORM_TEST_NATS_KEY_PATH: ${{ runner.temp }}/outbox-tls/live-key.pem
+        run: bash tools/qualification/qualify-platform-model-live-nats.sh
       - name: Documentation tests
         run: cargo test --locked --workspace --doc --all-features
       - name: Clippy workspace crates without dependency relint
@@ -282,6 +419,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+      - name: Install exact shared compiler WASM binding tool
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.126
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.11.1"
@@ -290,13 +433,24 @@ jobs:
           corepack enable
           corepack install --global pnpm@11.19.0
       - name: Install exact Console dependencies
-        run: corepack pnpm --dir web/console install --frozen-lockfile
+        run: corepack pnpm --dir apps/console install --frozen-lockfile
       - name: Test, build and lint Console
         run: |
-          corepack pnpm --dir web/console test
-          corepack pnpm --dir web/console build
-          corepack pnpm --dir web/console lint
-          corepack pnpm --dir web/console browser:fixture:qualify
+          corepack pnpm --dir apps/console test
+          corepack pnpm --dir apps/console build
+          corepack pnpm --dir apps/console lint
+          corepack pnpm --dir apps/console browser:fixture:qualify
+      - name: Measure actual native and WASM compiler resource use
+        run: |
+          cargo build --locked -p insight-platform-contract-tooling --bin agent_compiler_resources
+          node apps/console/tests/compiler-resources.mjs target/debug/agent_compiler_resources "$RUNNER_TEMP/compiler-resources.json"
+      - name: Retain compiler resource observations
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compiler-resource-observations
+          path: ${{ runner.temp }}/compiler-resources.json
+          if-no-files-found: error
+          retention-days: 14
 
   policy:
     name: Dependency policy
@@ -344,7 +498,7 @@ jobs:
           CONSOLE_RESULT: ${{ needs.console.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
         run: |
-          python3 scripts/check-required-ci-results.py \
+          python3 tools/checks/check-required-ci-results.py \
             --runtime-selected "$RUNTIME_SELECTED" \
             --cli-selected "$CLI_SELECTED" \
             --console-selected "$CONSOLE_SELECTED" \

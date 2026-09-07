@@ -1,0 +1,1860 @@
+use axum::{
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG},
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use chrono::{DateTime, Utc};
+use futures::Stream;
+use insight_platform_api::artifact::{
+    artifact_etag, view_from_record, ArtifactMutationAcceptedV1, CompleteArtifactUploadRequestV1,
+    OpaqueUploadCompletionProof, PrepareArtifactUploadRequestV1, PrepareArtifactUploadResponseV1,
+    SecretBearingUploadTargetV1,
+};
+use insight_platform_artifact_broker::{
+    ArtifactBrokerLimits, ArtifactBrokerReadPermit, AwsArtifactProviderCatalog,
+    AwsArtifactProviderCatalogConfig, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
+    BrokeredGatewayArtifactReader, GatewayArtifactReadError, PreparedAwsArtifactUpload,
+};
+use insight_platform_artifacts::{
+    validate_artifact_prepare_replay, ArtifactCommandError, ArtifactStore, ArtifactTransaction,
+    ArtifactUploadCompletionReplay, ArtifactUploadReplayIdentity, CompleteArtifactUpload,
+    FinalizeArtifact, GatewayArtifactReadRequest, MarkArtifactDeletion, PrepareArtifact,
+    PreparedArtifact, ScheduleInitialArtifactScan,
+};
+use insight_platform_contracts::{
+    canonical_digest, parse_strict_json, ArtifactReferenceKind, CommandAudit, CommandOutcome,
+    JsonLimits, PrincipalKind, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
+};
+use insight_platform_observability::{ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS};
+use insight_platform_observability_http::process_observability_router;
+use insight_platform_postgres::{
+    dependency_health::run_postgres_health_sampler,
+    repository::{PgRepository, RepositoryError},
+    verify_schema,
+};
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    RootCertStore, ServerConfig,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use sqlx::postgres::PgPoolOptions;
+use std::{
+    convert::Infallible,
+    error::Error,
+    fmt,
+    io::Read as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_util::sync::CancellationToken;
+use x509_parser::{extensions::GeneralName, parse_x509_certificate};
+
+#[path = "../capacity.rs"]
+mod capacity;
+use capacity::artifact_capacity_metric;
+#[path = "../dependency_observer.rs"]
+mod dependency_observer;
+use dependency_observer::install_artifact_dependency_metrics;
+
+const CONFIG_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG";
+const CONFIG_DIGEST_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST";
+const DATABASE_URL_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL";
+const CLIENT_CA_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH";
+const SERVER_CERT_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_CERT_PATH";
+const SERVER_KEY_PATH_ENV: &str = "PLATFORM_ARTIFACT_GATEWAY_KEY_PATH";
+const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
+const REGISTRY_VALIDATION_WORKLOAD_IDENTITY: &str =
+    "spiffe://insight.platform/workload/registry-validation-worker";
+const REGISTRY_VALIDATION_ARTIFACT_ROUTE: &str = "/internal/v1/registry-validation/artifacts:read";
+const MAX_CONFIG_BYTES: usize = 1_048_576;
+const MAX_REQUEST_BYTES: usize = 262_144;
+const MAX_GRANT_TOKEN_BYTES: usize = 1_024;
+const MAX_TLS_FILE_BYTES: usize = 1_048_576;
+
+struct ExactMtlsListener {
+    tcp: tokio::net::TcpListener,
+    acceptor: TlsAcceptor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactGatewayPeerRole {
+    PublicGateway,
+    RegistryValidationWorker,
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, ExactMtlsListener>>
+    for ArtifactGatewayPeerRole
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, ExactMtlsListener>) -> Self {
+        stream
+            .io()
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .and_then(|certificate| artifact_gateway_peer_role(certificate.as_ref()))
+            .expect("the listener admits only a validated exact workload role")
+    }
+}
+
+fn artifact_gateway_peer_role(certificate: &[u8]) -> Option<ArtifactGatewayPeerRole> {
+    if has_exact_workload_identity(certificate, PUBLIC_GATEWAY_WORKLOAD_IDENTITY) {
+        Some(ArtifactGatewayPeerRole::PublicGateway)
+    } else if has_exact_workload_identity(certificate, REGISTRY_VALIDATION_WORKLOAD_IDENTITY) {
+        Some(ArtifactGatewayPeerRole::RegistryValidationWorker)
+    } else {
+        None
+    }
+}
+
+fn artifact_peer_route_allowed(peer: ArtifactGatewayPeerRole, path: &str) -> bool {
+    peer == ArtifactGatewayPeerRole::PublicGateway || path == REGISTRY_VALIDATION_ARTIFACT_ROUTE
+}
+
+async fn require_artifact_peer_route(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<ArtifactGatewayPeerRole>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !artifact_peer_route_allowed(peer, request.uri().path()) {
+        return problem(HttpError::Forbidden);
+    }
+    next.run(request).await
+}
+
+impl axum::serve::Listener for ExactMtlsListener {
+    type Io = TlsStream<tokio::net::TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, address) = match self.tcp.accept().await {
+                Ok(value) => value,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let tls =
+                match tokio::time::timeout(Duration::from_secs(5), self.acceptor.accept(stream))
+                    .await
+                {
+                    Ok(Ok(value)) => value,
+                    _ => continue,
+                };
+            let authorized = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .and_then(|certificate| artifact_gateway_peer_role(certificate.as_ref()))
+                .is_some();
+            if authorized {
+                return (tls, address);
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.tcp.local_addr()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayConfig {
+    schema_version: u32,
+    listen_address: String,
+    observability_listen_address: String,
+    database_max_connections: u32,
+    database_acquire_timeout_milliseconds: u64,
+    artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
+    write_encryption_domain_id: ResourceId,
+    scanner_contract_digest: Sha256Digest,
+    scan_evidence_ttl_milliseconds: u64,
+    scan_retry_backoff_milliseconds: u64,
+    finalize_batch_size: u16,
+    finalize_poll_milliseconds: u64,
+    maximum_upload_target_seconds: u64,
+    maximum_download_bytes: usize,
+    maximum_download_in_flight: usize,
+    download_timeout_milliseconds: u64,
+    shutdown_grace_milliseconds: u64,
+}
+
+impl GatewayConfig {
+    fn load() -> Result<Self, GatewayError> {
+        let bytes = read_bounded(&absolute_path(CONFIG_PATH_ENV)?, MAX_CONFIG_BYTES)?;
+        let value = parse_strict_json(
+            &bytes,
+            JsonLimits {
+                max_bytes: MAX_CONFIG_BYTES,
+                max_depth: 32,
+                max_items_per_array: 128,
+                max_properties_per_object: 128,
+                max_string_bytes: 16_384,
+            },
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+        let expected: Sha256Digest = required(CONFIG_DIGEST_ENV)?
+            .parse()
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        if canonical_digest(&value).ok().as_deref() != Some(expected.as_str()) {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+        let config: Self =
+            serde_json::from_value(value).map_err(|_| GatewayError::InvalidConfiguration)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), GatewayError> {
+        let listen: SocketAddr = self
+            .listen_address
+            .parse()
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        let observability: SocketAddr = self
+            .observability_listen_address
+            .parse()
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        self.artifact_provider_catalog
+            .validate()
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        if self.schema_version != 1
+            || listen.port() == 0
+            || observability.port() == 0
+            || observability == listen
+            || !(2..=64).contains(&self.database_max_connections)
+            || !(1..=30_000).contains(&self.database_acquire_timeout_milliseconds)
+            || !(60..=3_600).contains(&self.maximum_upload_target_seconds)
+            || self.write_encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || self.scan_evidence_ttl_milliseconds == 0
+            || self.scan_evidence_ttl_milliseconds > 86_400_000
+            || self.scan_retry_backoff_milliseconds == 0
+            || self.scan_retry_backoff_milliseconds > 60_000
+            || self.finalize_batch_size == 0
+            || self.finalize_batch_size > 256
+            || !(10..=60_000).contains(&self.finalize_poll_milliseconds)
+            || self.maximum_download_bytes == 0
+            || self.maximum_download_bytes > 64 * 1024 * 1024
+            || !(1..=4_096).contains(&self.maximum_download_in_flight)
+            || !(1..=30_000).contains(&self.download_timeout_milliseconds)
+            || !(1..=120_000).contains(&self.shutdown_grace_milliseconds)
+        {
+            return Err(GatewayError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct GatewayState {
+    repository: Arc<PgRepository>,
+    uploads: AwsArtifactUploadProvider,
+    reader: Arc<BrokeredGatewayArtifactReader>,
+    maximum_upload_target_seconds: u64,
+    write_encryption_domain_id: ResourceId,
+    scanner_contract_digest: Sha256Digest,
+    scan_evidence_ttl_milliseconds: u64,
+    scan_retry_backoff_milliseconds: u64,
+    maximum_download_bytes: usize,
+    download_timeout_milliseconds: u64,
+}
+
+#[derive(Clone)]
+struct PrincipalHeaders {
+    tenant_id: ResourceId,
+    principal_id: ResourceId,
+    principal_kind: PrincipalKind,
+    idempotency_key_digest: Option<Sha256Digest>,
+}
+
+struct PermitResponseStream {
+    bytes: Option<bytes::Bytes>,
+    _permit: ArtifactBrokerReadPermit,
+}
+
+impl Stream for PermitResponseStream {
+    type Item = Result<bytes::Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.bytes.take().map(Ok))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("platform-artifact-gateway failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), GatewayError> {
+    let config = GatewayConfig::load()?;
+    let pool = PgPoolOptions::new()
+        .max_connections(config.database_max_connections)
+        .acquire_timeout(Duration::from_millis(
+            config.database_acquire_timeout_milliseconds,
+        ))
+        .connect(&required(DATABASE_URL_ENV)?)
+        .await
+        .map_err(|_| GatewayError::DatabaseUnavailable)?;
+    verify_schema(&pool)
+        .await
+        .map_err(|_| GatewayError::SchemaMismatch)?;
+    let database_health_pool = pool.clone();
+    let dependency_metrics =
+        install_artifact_dependency_metrics().map_err(|_| GatewayError::InvalidConfiguration)?;
+    let providers = AwsArtifactProviderCatalog::install_with_observer(
+        config.artifact_provider_catalog,
+        dependency_metrics.artifact,
+    )
+    .await
+    .map_err(|_| GatewayError::InvalidConfiguration)?;
+    providers
+        .check_readiness()
+        .await
+        .map_err(|_| GatewayError::ProviderUnavailable)?;
+    let repository = Arc::new(PgRepository::new(pool));
+    let finalize_repository = Arc::clone(&repository);
+    let (uploads, unsealer, stores) = providers.into_gateway_components();
+    let reader = Arc::new(
+        BrokeredGatewayArtifactReader::new(
+            repository.clone(),
+            unsealer,
+            stores,
+            ArtifactBrokerLimits {
+                maximum_in_flight: config.maximum_download_in_flight,
+                maximum_read_bytes: config.maximum_download_bytes,
+                operation_timeout: Duration::from_millis(config.download_timeout_milliseconds),
+            },
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?,
+    );
+    let state = GatewayState {
+        repository,
+        uploads,
+        reader: Arc::clone(&reader),
+        maximum_upload_target_seconds: config.maximum_upload_target_seconds,
+        write_encryption_domain_id: config.write_encryption_domain_id,
+        scanner_contract_digest: config.scanner_contract_digest,
+        scan_evidence_ttl_milliseconds: config.scan_evidence_ttl_milliseconds,
+        scan_retry_backoff_milliseconds: config.scan_retry_backoff_milliseconds,
+        maximum_download_bytes: config.maximum_download_bytes,
+        download_timeout_milliseconds: config.download_timeout_milliseconds,
+    };
+    let app = Router::new()
+        .route("/v1/artifacts:prepare-upload", post(prepare_upload))
+        .route(
+            REGISTRY_VALIDATION_ARTIFACT_ROUTE,
+            post(read_registry_validation_artifact),
+        )
+        .route(
+            "/v1/artifacts/{artifact_action}",
+            get(get_artifact).post(mutate_artifact),
+        )
+        .route(
+            "/v1/artifacts/{artifact_id}/content",
+            get(get_artifact_content),
+        )
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(axum::middleware::from_fn(require_artifact_peer_route))
+        .with_state(state);
+    let address: SocketAddr = config
+        .listen_address
+        .parse()
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let listener = install_mtls_listener(address).await?;
+    let metrics = Arc::new(
+        ProcessHttpMetrics::install_with_capacities(
+            "artifact-gateway",
+            PROCESS_OBSERVABILITY_OPERATIONS,
+            vec![artifact_capacity_metric(
+                "download",
+                reader,
+                BrokeredGatewayArtifactReader::capacity_snapshot,
+            )],
+        )
+        .map_err(|_| GatewayError::InvalidConfiguration)?
+        .with_dependency_observations(dependency_metrics.process),
+    );
+    let observability_listener =
+        tokio::net::TcpListener::bind(&config.observability_listen_address)
+            .await
+            .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+    let cancellation = CancellationToken::new();
+    let postgres_health = run_postgres_health_sampler(
+        database_health_pool,
+        dependency_metrics.postgres,
+        cancellation.child_token(),
+    );
+    tokio::pin!(postgres_health);
+    let http_cancellation = cancellation.child_token();
+    let mut http = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<ArtifactGatewayPeerRole>(),
+        )
+        .with_graceful_shutdown(http_cancellation.cancelled_owned())
+        .await
+    });
+    let observability_cancellation = cancellation.child_token();
+    let router = process_observability_router(Arc::clone(&metrics));
+    let mut observability = tokio::spawn(async move {
+        axum::serve(observability_listener, router)
+            .with_graceful_shutdown(observability_cancellation.cancelled_owned())
+            .await
+    });
+    let finalize_cancellation = cancellation.child_token();
+    let mut finalizer = tokio::spawn(run_public_upload_finalizer(
+        finalize_repository,
+        config.finalize_batch_size,
+        Duration::from_millis(config.finalize_poll_milliseconds),
+        finalize_cancellation,
+    ));
+    metrics.mark_ready();
+    tokio::select! {
+        _ = shutdown_signal() => cancellation.cancel(),
+        result = &mut http => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability.await.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            return Err(GatewayError::HttpUnavailable);
+        }
+        result = &mut observability => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            http.await.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            return Err(GatewayError::ObservabilityUnavailable);
+        }
+        _ = &mut postgres_health => {
+            cancellation.cancel();
+            http.await.map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability.await.map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            return Err(GatewayError::DependencyObserverUnavailable);
+        }
+        result = &mut finalizer => {
+            cancellation.cancel();
+            result.map_err(|_| GatewayError::FinalizerUnavailable)??;
+            return Err(GatewayError::FinalizerUnavailable);
+        }
+    }
+    tokio::time::timeout(
+        Duration::from_millis(config.shutdown_grace_milliseconds),
+        async {
+            http.await
+                .map_err(|_| GatewayError::HttpUnavailable)?
+                .map_err(|_| GatewayError::HttpUnavailable)?;
+            observability
+                .await
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?
+                .map_err(|_| GatewayError::ObservabilityUnavailable)?;
+            postgres_health.await;
+            finalizer
+                .await
+                .map_err(|_| GatewayError::FinalizerUnavailable)??;
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|_| GatewayError::ShutdownDeadlineExceeded)?
+}
+
+async fn run_public_upload_finalizer(
+    repository: Arc<PgRepository>,
+    batch_size: u16,
+    poll_interval: Duration,
+    cancellation: CancellationToken,
+) -> Result<(), GatewayError> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        match repository
+            .scan_public_artifact_finalize_candidates(batch_size)
+            .await
+        {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    if let Err(error) = finalize_public_upload(&repository, candidate).await {
+                        // A concurrent owner winner is expected. Every retry starts from a fresh,
+                        // bounded database scan and the final transaction revalidates exact CAS.
+                        if !matches!(
+                            error,
+                            RepositoryError::Conflict(_) | RepositoryError::StaleFence
+                        ) {
+                            eprintln!("Artifact public upload finalize attempt failed: {error}");
+                        }
+                    }
+                }
+            }
+            Err(error) => eprintln!("Artifact public upload finalize scan failed: {error}"),
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+async fn finalize_public_upload(
+    repository: &PgRepository,
+    candidate: insight_platform_postgres::artifact_repository::PublicArtifactFinalizeCandidate,
+) -> Result<(), RepositoryError> {
+    let operation_id = candidate.operation.operation_id.clone();
+    let content_digest = candidate.blob.content_digest.clone().ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no content digest".to_owned())
+    })?;
+    let size_bytes = candidate.blob.size_bytes.ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no byte length".to_owned())
+    })?;
+    let object_generation = candidate.blob.object_generation.clone().ok_or_else(|| {
+        RepositoryError::CorruptRow("Verified Artifact Blob has no generation".to_owned())
+    })?;
+    let verified_media_type = candidate
+        .artifact
+        .verified_media_type
+        .clone()
+        .ok_or_else(|| {
+            RepositoryError::CorruptRow("Verified Artifact has no media type".to_owned())
+        })?;
+    let idempotency_key_digest = owner_digest(
+        "artifact.public_upload.finalize.idempotency",
+        &serde_json::json!({"operation_id": operation_id, "schema_version": 1}),
+    )?;
+    let request_digest = owner_digest(
+        "artifact.public_upload.finalize.request",
+        &serde_json::json!({
+            "artifact_id": candidate.artifact.artifact_id,
+            "artifact_version": candidate.artifact.version,
+            "blob_id": candidate.blob.blob_id,
+            "blob_version": candidate.blob.version,
+            "content_digest": content_digest,
+            "grant_id": candidate.grant.upload_grant_id,
+            "grant_version": candidate.grant.version,
+            "object_generation": object_generation,
+            "operation_id": operation_id,
+            "operation_version": candidate.operation.version,
+            "quota_account_id": candidate.quota_account_id,
+            "quota_account_version": candidate.quota_account_version,
+            "schema_version": 1,
+            "size_bytes": size_bytes,
+            "verified_media_type": verified_media_type,
+        }),
+    )?;
+    let command = FinalizeArtifact {
+        audit: CommandAudit {
+            trace: insight_platform_contracts::TraceIdentityV1::generate(),
+            tenant_id: candidate.artifact.tenant_id.clone(),
+            principal_id: candidate.grant.snapshot.subject_principal_id.clone(),
+            principal_kind: candidate.grant.snapshot.subject_principal_kind,
+            receipt_id: correlated_id(ResourceKind::Receipt, &operation_id),
+            event_id: correlated_id(ResourceKind::Event, &operation_id),
+            outbox_id: correlated_id(ResourceKind::OutboxEvent, &operation_id),
+            idempotency_key_digest,
+            request_digest,
+            receipt_expires_at: candidate.operation.deadline,
+        },
+        operation_id: operation_id.clone(),
+        artifact_id: candidate.artifact.artifact_id,
+        blob_id: candidate.blob.blob_id,
+        upload_grant_id: candidate.grant.upload_grant_id,
+        artifact_reference_id: correlated_id(ResourceKind::ArtifactLink, &operation_id),
+        quota_account_id: candidate.quota_account_id,
+        quota_settle_entry_id: correlated_id(ResourceKind::QuotaLedgerEntry, &operation_id),
+        expected_artifact_version: candidate.artifact.version,
+        expected_blob_version: candidate.blob.version,
+        expected_operation_version: candidate.operation.version,
+        expected_grant_version: candidate.grant.version,
+        expected_quota_account_version: candidate.quota_account_version,
+        grant_generation: candidate.grant.snapshot.generation,
+        object_generation,
+        content_digest,
+        size_bytes,
+        verified_media_type,
+        reference_kind: ArtifactReferenceKind::Attachment,
+    };
+    let mut transaction = repository.begin_artifact_transaction().await?;
+    match transaction.finalize_artifact(command).await {
+        Ok(_) => transaction.commit().await,
+        Err(error) => {
+            transaction.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
+fn correlated_id(kind: ResourceKind, operation_id: &ResourceId) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, operation_id.uuid())
+        .expect("an Operation ID always contains an RFC4122 UUIDv7")
+}
+
+fn owner_digest<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Digest, RepositoryError> {
+    canonical_digest(&serde_json::json!({
+        "domain": domain,
+        "value": value,
+    }))
+    .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?
+    .parse()
+    .map_err(|error| RepositoryError::InvalidInput(format!("invalid owner digest: {error}")))
+}
+
+async fn install_mtls_listener(address: SocketAddr) -> Result<ExactMtlsListener, GatewayError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let ca = read_bounded(&absolute_path(CLIENT_CA_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let certificate = read_bounded(&absolute_path(SERVER_CERT_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let key = read_bounded(&absolute_path(SERVER_KEY_PATH_ENV)?, MAX_TLS_FILE_BYTES)?;
+    let mut roots = RootCertStore::empty();
+    let mut ca_count = 0_usize;
+    for certificate in CertificateDer::pem_slice_iter(&ca) {
+        roots
+            .add(certificate.map_err(|_| GatewayError::InvalidConfiguration)?)
+            .map_err(|_| GatewayError::InvalidConfiguration)?;
+        ca_count += 1;
+    }
+    if ca_count == 0 {
+        return Err(GatewayError::InvalidConfiguration);
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let certificate_chain = CertificateDer::pem_slice_iter(&certificate)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    if certificate_chain.is_empty() {
+        return Err(GatewayError::InvalidConfiguration);
+    }
+    let private_key =
+        PrivateKeyDer::from_pem_slice(&key).map_err(|_| GatewayError::InvalidConfiguration)?;
+    let tls = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|_| GatewayError::InvalidConfiguration)?;
+    let tcp = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|_| GatewayError::HttpUnavailable)?;
+    Ok(ExactMtlsListener {
+        tcp,
+        acceptor: TlsAcceptor::from(Arc::new(tls)),
+    })
+}
+
+fn has_exact_workload_identity(certificate: &[u8], expected: &str) -> bool {
+    let Ok((remainder, certificate)) = parse_x509_certificate(certificate) else {
+        return false;
+    };
+    if !remainder.is_empty() {
+        return false;
+    }
+    let Ok(Some(alternative_names)) = certificate.subject_alternative_name() else {
+        return false;
+    };
+    let mut uris = alternative_names
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::URI(uri) => Some(*uri),
+            _ => None,
+        });
+    uris.next() == Some(expected) && uris.next().is_none()
+}
+
+async fn prepare_upload(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(request): Json<PrepareArtifactUploadRequestV1>,
+) -> Response {
+    match prepare_upload_inner(state, &headers, request).await {
+        Ok(response) => no_store((StatusCode::CREATED, Json(response)).into_response()),
+        Err(error) => problem(error),
+    }
+}
+
+async fn prepare_upload_inner(
+    state: GatewayState,
+    headers: &HeaderMap,
+    request: PrepareArtifactUploadRequestV1,
+) -> Result<PrepareArtifactUploadResponseV1, HttpError> {
+    request.validate().map_err(|_| HttpError::Invalid)?;
+    let principal = mutation_principal(headers)?;
+    let request_digest = request_digest("artifact.prepare_upload", &request)?;
+    let identity = upload_replay_identity(&principal, request_digest.clone())?;
+    if let Some(prepared) = state
+        .repository
+        .load_gateway_artifact_prepare_replay(identity.clone())
+        .await
+        .map_err(map_repository_error)?
+    {
+        return prepare_upload_response(&state, &principal, &identity, prepared, None).await;
+    }
+    let now = Utc::now();
+    let authority = state
+        .repository
+        .resolve_public_artifact_prepare_authority(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+        )
+        .await
+        .map_err(map_repository_error)?;
+    if request
+        .declared_media_type
+        .as_ref()
+        .is_some_and(|media_type| {
+            !authority
+                .artifact_io_policy
+                .allowed_input_media_types
+                .iter()
+                .any(|allowed| allowed == media_type)
+        })
+    {
+        return Err(HttpError::Forbidden);
+    }
+    if authority.artifact_io_policy.scanner_contract_digest != state.scanner_contract_digest
+        || authority.artifact_io_policy.write_storage_binding_digest
+            != *state.uploads.storage_binding_digest()
+        || authority.artifact_io_policy.encryption_domain_id != state.write_encryption_domain_id
+        || authority
+            .artifact_io_policy
+            .verification_evidence_ttl_milliseconds
+            > state.scan_evidence_ttl_milliseconds
+        || authority
+            .artifact_io_policy
+            .verification_retry_backoff_milliseconds
+            > state.scan_retry_backoff_milliseconds
+    {
+        return Err(HttpError::Unavailable);
+    }
+    let target_seconds = state.maximum_upload_target_seconds;
+    let target_duration =
+        chrono::Duration::seconds(i64::try_from(target_seconds).map_err(|_| HttpError::Invalid)?);
+    let operation_deadline = now + target_duration;
+    let retention_duration = chrono::Duration::seconds(
+        i64::try_from(authority.retention_policy.minimum_retention_seconds)
+            .map_err(|_| HttpError::Invalid)?,
+    );
+    // The repository validates retention against its later database clock. Starting retention at
+    // request admission races that clock and makes every positive minimum a few milliseconds too
+    // short. Preserve the complete upload window, then begin the exact minimum retention period.
+    let retain_until = operation_deadline
+        .checked_add_signed(retention_duration)
+        .ok_or(HttpError::Invalid)?;
+    let operation_id = server_id(ResourceKind::Job);
+    let artifact_id = server_id(ResourceKind::Artifact);
+    let blob_id = server_id(ResourceKind::InternalBlob);
+    let upload_grant_id = server_id(ResourceKind::ArtifactGrant);
+    let quota_entry_id = server_id(ResourceKind::QuotaLedgerEntry);
+    let candidate_proof = completion_proof(&principal, &artifact_id, &upload_grant_id)?;
+    let upload = state
+        .uploads
+        .prepare_upload(AwsArtifactUploadRequest {
+            tenant_id: &principal.tenant_id,
+            artifact_id: &artifact_id,
+            blob_id: &blob_id,
+            encryption_domain_id: &authority.artifact_io_policy.encryption_domain_id,
+            expected_size_bytes: request.expected_size_bytes,
+            declared_media_type: request.declared_media_type.as_deref(),
+            expires_at: operation_deadline.into(),
+        })
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let token_digest = token_digest(candidate_proof.as_str())?;
+    let command = PrepareArtifact {
+        audit: audit(
+            principal.clone(),
+            server_id(ResourceKind::Receipt),
+            server_id(ResourceKind::Event),
+            server_id(ResourceKind::OutboxEvent),
+            request_digest,
+            operation_deadline,
+        ),
+        operation_id,
+        artifact_id: artifact_id.clone(),
+        blob_id: blob_id.clone(),
+        upload_grant_id: upload_grant_id.clone(),
+        quota_account_id: authority.quota_account_id,
+        quota_entry_id,
+        purpose: request.purpose,
+        classification: request.classification,
+        expected_size_bytes: request.expected_size_bytes,
+        expected_digest: request.expected_digest,
+        declared_media_type: request.declared_media_type,
+        retention_policy_revision_id: authority.retention_policy_revision.revision_id,
+        scan_policy_revision: authority.artifact_io_policy_revision,
+        scanner_contract_digest: authority.artifact_io_policy.scanner_contract_digest,
+        ruleset_digest: authority.artifact_io_rules_digest,
+        evidence_ttl_milliseconds: authority
+            .artifact_io_policy
+            .verification_evidence_ttl_milliseconds,
+        retry_backoff_milliseconds: authority
+            .artifact_io_policy
+            .verification_retry_backoff_milliseconds,
+        retain_until,
+        operation_deadline,
+        grant_expires_at: operation_deadline,
+        grant_token_digest: token_digest,
+        storage_backend: upload.storage_backend.clone(),
+        storage_binding_digest: upload.storage_binding_digest.clone(),
+        object_reference_ciphertext: upload.object_reference_ciphertext.clone(),
+        key_id: upload.key_id.clone(),
+        encryption_domain_id: authority.artifact_io_policy.encryption_domain_id,
+        display_name: request.display_name,
+    };
+    let mut transaction = state
+        .repository
+        .begin()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let outcome = transaction
+        .prepare_artifact(command)
+        .await
+        .map_err(map_repository_error)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    match outcome {
+        CommandOutcome::Applied(prepared) => {
+            prepare_upload_response(&state, &principal, &identity, prepared, Some(upload)).await
+        }
+        CommandOutcome::Replayed(prepared) => {
+            prepare_upload_response(&state, &principal, &identity, prepared, None).await
+        }
+    }
+}
+
+async fn prepare_upload_response(
+    state: &GatewayState,
+    principal: &PrincipalHeaders,
+    identity: &ArtifactUploadReplayIdentity,
+    prepared: PreparedArtifact,
+    candidate_upload: Option<PreparedAwsArtifactUpload>,
+) -> Result<PrepareArtifactUploadResponseV1, HttpError> {
+    validate_artifact_prepare_replay(&prepared, identity, Utc::now())
+        .map_err(map_upload_authority_error)?;
+    if prepared.blob.storage_binding_digest != *state.uploads.storage_binding_digest()
+        || prepared.blob.encryption_domain_id != state.write_encryption_domain_id
+    {
+        return Err(HttpError::Unavailable);
+    }
+    let completion_proof = completion_proof(
+        principal,
+        &prepared.artifact.artifact_id,
+        &prepared.grant.upload_grant_id,
+    )?;
+    if token_digest(completion_proof.as_str())? != prepared.grant.snapshot.token_digest {
+        return Err(HttpError::Unavailable);
+    }
+    let expiry = prepared.grant.snapshot.expires_at;
+    let upload = match candidate_upload {
+        Some(upload) => upload,
+        None => state
+            .uploads
+            .prepare_upload(AwsArtifactUploadRequest {
+                tenant_id: &principal.tenant_id,
+                artifact_id: &prepared.artifact.artifact_id,
+                blob_id: &prepared.blob.blob_id,
+                encryption_domain_id: &prepared.blob.encryption_domain_id,
+                expected_size_bytes: prepared.artifact.expected_size_bytes,
+                declared_media_type: prepared.artifact.declared_media_type.as_deref(),
+                expires_at: expiry.into(),
+            })
+            .await
+            .map_err(|_| HttpError::Unavailable)?,
+    };
+    let response = PrepareArtifactUploadResponseV1 {
+        schema_version: 1,
+        artifact_id: prepared.artifact.artifact_id.clone(),
+        operation_id: prepared.operation.operation_id,
+        upload_grant_id: prepared.grant.upload_grant_id,
+        artifact_etag: artifact_etag(&prepared.artifact.artifact_id, prepared.artifact.version),
+        upload_target: SecretBearingUploadTargetV1 {
+            url: upload.upload_url,
+            completion_proof,
+        },
+        upload_expires_at: UtcTimestamp::from_datetime(expiry),
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
+}
+
+async fn mutate_artifact(
+    State(state): State<GatewayState>,
+    AxumPath(artifact_action): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(artifact_id) = artifact_action.strip_suffix(":complete-upload") {
+        let Ok(artifact_id) = artifact_id.parse::<ResourceId>() else {
+            return problem(HttpError::NotFound);
+        };
+        let Ok(request) = serde_json::from_slice::<CompleteArtifactUploadRequestV1>(&body) else {
+            return problem(HttpError::Invalid);
+        };
+        return match complete_upload_inner(state, &headers, artifact_id, request).await {
+            Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
+            Err(error) => problem(error),
+        };
+    }
+    if let Some(artifact_id) = artifact_action.strip_suffix(":delete") {
+        let Ok(artifact_id) = artifact_id.parse::<ResourceId>() else {
+            return problem(HttpError::NotFound);
+        };
+        if !body.is_empty() {
+            return problem(HttpError::Invalid);
+        }
+        return match delete_artifact_inner(state, &headers, artifact_id).await {
+            Ok(response) => no_store((StatusCode::ACCEPTED, Json(response)).into_response()),
+            Err(error) => problem(error),
+        };
+    }
+    problem(HttpError::NotFound)
+}
+
+async fn complete_upload_inner(
+    state: GatewayState,
+    headers: &HeaderMap,
+    artifact_id: ResourceId,
+    request: CompleteArtifactUploadRequestV1,
+) -> Result<ArtifactMutationAcceptedV1, HttpError> {
+    request.validate().map_err(|_| HttpError::Invalid)?;
+    let principal = mutation_principal(headers)?;
+    let expected_artifact_version = headers
+        .get("x-insight-artifact-expected-version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or(HttpError::Invalid)?;
+    let grant_token_digest = token_digest(request.completion_proof.as_str())?;
+    let (complete_digest, scan_digest) = upload_completion_request_digests(
+        &artifact_id,
+        expected_artifact_version,
+        &grant_token_digest,
+    )?;
+    if let Some(completed) = state
+        .repository
+        .load_gateway_artifact_completion_replay(ArtifactUploadCompletionReplay {
+            identity: upload_replay_identity(&principal, complete_digest.clone())?,
+            artifact_id: artifact_id.clone(),
+            expected_artifact_version,
+            grant_token_digest: grant_token_digest.clone(),
+            scan_request_digest: scan_digest.clone(),
+        })
+        .await
+        .map_err(map_repository_error)?
+    {
+        let response = ArtifactMutationAcceptedV1 {
+            schema_version: 1,
+            artifact_id: completed.artifact.artifact_id.clone(),
+            artifact_etag: artifact_etag(
+                &completed.artifact.artifact_id,
+                completed.artifact.version,
+            ),
+            operation_id: completed.operation.operation_id,
+        };
+        response.validate().map_err(|_| HttpError::Unavailable)?;
+        return Ok(response);
+    }
+    let target = state
+        .repository
+        .load_gateway_artifact_upload_target(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+            artifact_id,
+        )
+        .await
+        .map_err(map_repository_error)?;
+    if target.artifact.version != expected_artifact_version {
+        return Err(HttpError::Conflict);
+    }
+    validate_artifact_prepare_replay(
+        &target,
+        &upload_replay_identity(&principal, complete_digest.clone())?,
+        Utc::now(),
+    )
+    .map_err(map_upload_authority_error)?;
+    if target.grant.snapshot.token_digest != grant_token_digest {
+        return Err(HttpError::Forbidden);
+    }
+    let observed = state
+        .uploads
+        .complete_current_upload(
+            &principal.tenant_id,
+            &target.artifact.artifact_id,
+            &target.blob.blob_id,
+            target.artifact.expected_size_bytes,
+        )
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let mut transaction = state
+        .repository
+        .begin()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let completed = transaction
+        .complete_upload(CompleteArtifactUpload {
+            audit: audit(
+                principal.clone(),
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
+                complete_digest.clone(),
+                target.operation.deadline,
+            ),
+            operation_id: target.operation.operation_id.clone(),
+            artifact_id: target.artifact.artifact_id.clone(),
+            blob_id: target.blob.blob_id.clone(),
+            upload_grant_id: target.grant.upload_grant_id.clone(),
+            expected_artifact_version: target.artifact.version,
+            expected_blob_version: target.blob.version,
+            expected_operation_version: target.operation.version,
+            expected_grant_version: target.grant.version,
+            grant_generation: target.grant.snapshot.generation,
+            grant_token_digest: grant_token_digest.clone(),
+            object_generation: observed.object_generation,
+            observed_size_bytes: observed.observed_size_bytes,
+            backend_evidence_digest: observed.backend_evidence_digest,
+        })
+        .await
+        .map_err(map_repository_error)?;
+    let completed = match completed {
+        CommandOutcome::Applied(completed) => completed,
+        CommandOutcome::Replayed(_) => {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| HttpError::Unavailable)?;
+            let completed = state
+                .repository
+                .load_gateway_artifact_completion_replay(ArtifactUploadCompletionReplay {
+                    identity: upload_replay_identity(&principal, complete_digest)?,
+                    artifact_id: target.artifact.artifact_id.clone(),
+                    expected_artifact_version,
+                    grant_token_digest,
+                    scan_request_digest: scan_digest,
+                })
+                .await
+                .map_err(map_repository_error)?
+                .ok_or(HttpError::Conflict)?;
+            let response = ArtifactMutationAcceptedV1 {
+                schema_version: 1,
+                artifact_id: completed.artifact.artifact_id.clone(),
+                artifact_etag: artifact_etag(
+                    &completed.artifact.artifact_id,
+                    completed.artifact.version,
+                ),
+                operation_id: completed.operation.operation_id,
+            };
+            response.validate().map_err(|_| HttpError::Unavailable)?;
+            return Ok(response);
+        }
+    };
+    let scan = transaction
+        .schedule_initial_scan(ScheduleInitialArtifactScan {
+            audit: audit(
+                principal,
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
+                scan_digest,
+                target.operation.deadline,
+            ),
+            scan_job_id: target.operation.operation_id.clone(),
+            operation_id: target.operation.operation_id,
+            artifact_id: target.artifact.artifact_id,
+            blob_id: target.blob.blob_id,
+            expected_artifact_version: completed.artifact.version,
+            expected_blob_version: completed.blob.version,
+            expected_operation_version: completed.operation.version,
+            scan_policy_revision: target.operation.snapshot.scan_policy_revision,
+            scanner_contract_digest: target.operation.snapshot.scanner_contract_digest,
+            ruleset_digest: target.operation.snapshot.ruleset_digest,
+            evidence_ttl_milliseconds: target.operation.snapshot.evidence_ttl_milliseconds,
+            retry_backoff_milliseconds: target.operation.snapshot.retry_backoff_milliseconds,
+            deadline: target.operation.deadline,
+        })
+        .await
+        .map_err(map_repository_error)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let scan = outcome_value(scan);
+    let artifact_etag = artifact_etag(&scan.artifact.artifact_id, scan.artifact.version);
+    let response = ArtifactMutationAcceptedV1 {
+        schema_version: 1,
+        artifact_id: scan.artifact.artifact_id,
+        artifact_etag,
+        operation_id: scan.operation.operation_id,
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
+}
+
+async fn get_artifact(
+    State(state): State<GatewayState>,
+    AxumPath(artifact_id): AxumPath<ResourceId>,
+    headers: HeaderMap,
+) -> Response {
+    let result = async {
+        let principal = read_principal(&headers)?;
+        let snapshot = state
+            .repository
+            .load_gateway_artifact(
+                principal.tenant_id,
+                principal.principal_id,
+                principal.principal_kind,
+                artifact_id,
+            )
+            .await
+            .map_err(map_repository_error)?;
+        let response = view_from_record(snapshot.artifact, snapshot.content);
+        response.validate().map_err(|_| HttpError::Unavailable)?;
+        Ok::<_, HttpError>(response)
+    }
+    .await;
+    match result {
+        Ok(response) => {
+            let etag = response.etag.clone();
+            let mut response = no_store((StatusCode::OK, Json(response)).into_response());
+            if let Ok(value) = HeaderValue::from_str(&etag) {
+                response.headers_mut().insert(ETAG, value);
+            }
+            response
+        }
+        Err(error) => problem(error),
+    }
+}
+
+async fn read_registry_validation_artifact(
+    State(state): State<GatewayState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<ArtifactGatewayPeerRole>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use insight_platform_artifacts::{
+        RegistryArtifactReadAuthorityV1, RegistryArtifactReadRequestV1,
+        RegistryArtifactReadResponseV1, MAX_REGISTRY_ARTIFACT_READ_REQUEST_BYTES,
+        MAX_REGISTRY_ARTIFACT_RESPONSE_BYTES,
+    };
+    let result = async {
+        let principal = read_principal(&headers)?;
+        let value = parse_strict_json(
+            &body,
+            JsonLimits {
+                max_bytes: MAX_REGISTRY_ARTIFACT_READ_REQUEST_BYTES,
+                max_depth: 8,
+                max_properties_per_object: 24,
+                max_items_per_array: 1,
+                max_string_bytes: 1024,
+            },
+        )
+        .map_err(|_| HttpError::Invalid)?;
+        let request: RegistryArtifactReadRequestV1 =
+            serde_json::from_value(value).map_err(|_| HttpError::Invalid)?;
+        request
+            .validate_at(Utc::now())
+            .map_err(|_| HttpError::Invalid)?;
+        match (&request.authority, peer) {
+            (
+                RegistryArtifactReadAuthorityV1::RegistryDraft { .. },
+                ArtifactGatewayPeerRole::PublicGateway,
+            ) => {}
+            (
+                RegistryArtifactReadAuthorityV1::RegistryJob { .. },
+                ArtifactGatewayPeerRole::RegistryValidationWorker,
+            ) if principal.principal_kind == PrincipalKind::ServiceIdentity => {}
+            _ => return Err(HttpError::Forbidden),
+        }
+        let (authorized_request, purpose) = state
+            .repository
+            .resolve_registry_validation_artifact(
+                &principal.tenant_id,
+                &principal.principal_id,
+                principal.principal_kind,
+                &request,
+            )
+            .await
+            .map_err(map_repository_error)?;
+        let read = state
+            .reader
+            .read(&authorized_request)
+            .await
+            .map_err(|error| match error {
+                GatewayArtifactReadError::Unavailable => HttpError::Unavailable,
+                GatewayArtifactReadError::Denied => HttpError::Forbidden,
+                GatewayArtifactReadError::NotFound => HttpError::NotFound,
+                GatewayArtifactReadError::TooLarge => HttpError::TooLarge,
+                GatewayArtifactReadError::Integrity => HttpError::Conflict,
+            })?;
+        let (bytes, permit) = read.into_response_parts();
+        let result = RegistryArtifactReadResponseV1::from_verified(
+            authorized_request.artifact,
+            purpose,
+            &bytes,
+        )
+        .map_err(|_| HttpError::Conflict)?;
+        let encoded = serde_json::to_vec(&result).map_err(|_| HttpError::Unavailable)?;
+        if encoded.len() > MAX_REGISTRY_ARTIFACT_RESPONSE_BYTES {
+            return Err(HttpError::TooLarge);
+        }
+        let mut response = no_store(
+            (
+                StatusCode::OK,
+                Body::from_stream(PermitResponseStream {
+                    bytes: Some(bytes::Bytes::from(encoded)),
+                    _permit: permit,
+                }),
+            )
+                .into_response(),
+        );
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Ok::<_, HttpError>(response)
+    }
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(error) => problem(error),
+    }
+}
+
+async fn get_artifact_content(
+    State(state): State<GatewayState>,
+    AxumPath(artifact_id): AxumPath<ResourceId>,
+    headers: HeaderMap,
+) -> Response {
+    match get_artifact_content_inner(state, &headers, artifact_id).await {
+        Ok(response) => response,
+        Err(error) => problem(error),
+    }
+}
+
+async fn get_artifact_content_inner(
+    state: GatewayState,
+    headers: &HeaderMap,
+    artifact_id: ResourceId,
+) -> Result<Response, HttpError> {
+    let principal = read_principal(headers)?;
+    let snapshot = state
+        .repository
+        .load_gateway_artifact(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+            artifact_id,
+        )
+        .await
+        .map_err(map_repository_error)?;
+    let artifact = snapshot.content.ok_or(HttpError::Conflict)?;
+    let request = GatewayArtifactReadRequest {
+        authority: insight_platform_artifacts::GatewayArtifactReadAuthority::PublicContent,
+        tenant_id: principal.tenant_id,
+        principal_id: principal.principal_id,
+        principal_kind: principal.principal_kind,
+        request_digest: request_digest("artifact.read_content", &artifact)?,
+        maximum_bytes: state.maximum_download_bytes,
+        deadline: Utc::now()
+            + chrono::Duration::milliseconds(
+                i64::try_from(state.download_timeout_milliseconds)
+                    .map_err(|_| HttpError::Invalid)?,
+            ),
+        artifact: artifact.clone(),
+    };
+    let read = state
+        .reader
+        .read(&request)
+        .await
+        .map_err(|error| match error {
+            GatewayArtifactReadError::Unavailable => HttpError::Unavailable,
+            GatewayArtifactReadError::Denied => HttpError::Forbidden,
+            GatewayArtifactReadError::NotFound => HttpError::NotFound,
+            GatewayArtifactReadError::TooLarge => HttpError::TooLarge,
+            GatewayArtifactReadError::Integrity => HttpError::Conflict,
+        })?;
+    let (bytes, permit) = read.into_response_parts();
+    let body = Body::from_stream(PermitResponseStream {
+        bytes: Some(bytes::Bytes::from(bytes)),
+        _permit: permit,
+    });
+    let mut response = no_store((StatusCode::OK, body).into_response());
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(artifact.media_type()).map_err(|_| HttpError::Conflict)?,
+    );
+    response.headers_mut().insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&artifact.byte_length().to_string())
+            .map_err(|_| HttpError::Conflict)?,
+    );
+    response
+        .headers_mut()
+        .insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+    response.headers_mut().insert(
+        ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", artifact.content_digest().as_str()))
+            .map_err(|_| HttpError::Conflict)?,
+    );
+    Ok(response)
+}
+
+async fn delete_artifact_inner(
+    state: GatewayState,
+    headers: &HeaderMap,
+    artifact_id: ResourceId,
+) -> Result<ArtifactMutationAcceptedV1, HttpError> {
+    let principal = mutation_principal(headers)?;
+    let expected_artifact_version = headers
+        .get("x-insight-artifact-expected-version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or(HttpError::Invalid)?;
+    let request_digest = request_digest(
+        "artifact.delete",
+        &serde_json::json!({
+            "artifact_id": artifact_id,
+            "expected_artifact_version": expected_artifact_version,
+            "schema_version": 1,
+        }),
+    )?;
+    let target = state
+        .repository
+        .load_gateway_artifact_deletion_target(
+            principal.tenant_id.clone(),
+            principal.principal_id.clone(),
+            principal.principal_kind,
+            artifact_id.clone(),
+        )
+        .await
+        .map_err(map_repository_error)?;
+    if target.artifact.version != expected_artifact_version {
+        return Err(HttpError::Conflict);
+    }
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::hours(1);
+    let operation_id = server_id(ResourceKind::Job);
+    let approval_task_id = target
+        .retention_policy
+        .delete_requires_approval
+        .then(|| server_id(ResourceKind::ApprovalTask));
+    let mut transaction = state
+        .repository
+        .begin()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let marked = transaction
+        .mark_deletion(MarkArtifactDeletion {
+            audit: audit(
+                principal,
+                server_id(ResourceKind::Receipt),
+                server_id(ResourceKind::Event),
+                server_id(ResourceKind::OutboxEvent),
+                request_digest,
+                deadline,
+            ),
+            deletion_operation_id: operation_id.clone(),
+            deletion_job_id: operation_id.clone(),
+            artifact_id: artifact_id.clone(),
+            blob_id: target.blob.blob_id,
+            expected_artifact_version,
+            expected_blob_version: target.blob.version,
+            approval_task_id,
+            retry_backoff_milliseconds: 1_000,
+            deadline,
+        })
+        .await
+        .map_err(map_repository_error)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| HttpError::Unavailable)?;
+    let marked = outcome_value(marked);
+    let response = ArtifactMutationAcceptedV1 {
+        schema_version: 1,
+        artifact_id: marked.artifact.artifact_id,
+        artifact_etag: artifact_etag(&artifact_id, marked.artifact.version),
+        operation_id: marked.deletion.operation_id,
+    };
+    response.validate().map_err(|_| HttpError::Unavailable)?;
+    Ok(response)
+}
+
+fn read_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {
+    let value = |name: &'static str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 512)
+            .ok_or(HttpError::Unauthenticated)
+    };
+    Ok(PrincipalHeaders {
+        tenant_id: value("x-insight-verified-tenant-id")?
+            .parse()
+            .map_err(|_| HttpError::Unauthenticated)?,
+        principal_id: value("x-insight-verified-principal-id")?
+            .parse()
+            .map_err(|_| HttpError::Unauthenticated)?,
+        principal_kind: PrincipalKind::from_str(value("x-insight-verified-principal-kind")?)
+            .map_err(|_| HttpError::Unauthenticated)?,
+        idempotency_key_digest: None,
+    })
+}
+
+fn mutation_principal(headers: &HeaderMap) -> Result<PrincipalHeaders, HttpError> {
+    let mut principal = read_principal(headers)?;
+    let idempotency_key_digest = headers
+        .get("x-insight-idempotency-key-digest")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Sha256Digest>().ok())
+        .ok_or(HttpError::Invalid)?;
+    principal.idempotency_key_digest = Some(idempotency_key_digest);
+    Ok(principal)
+}
+
+fn server_id(kind: ResourceKind) -> ResourceId {
+    ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).expect("server-generated ID kind")
+}
+
+fn completion_proof(
+    principal: &PrincipalHeaders,
+    artifact_id: &ResourceId,
+    upload_grant_id: &ResourceId,
+) -> Result<OpaqueUploadCompletionProof, HttpError> {
+    let idempotency_key_digest = principal
+        .idempotency_key_digest
+        .as_ref()
+        .ok_or(HttpError::Invalid)?;
+    let message = format!(
+        "insight.platform/artifact-upload-completion/v1\0{}\0{}\0{}\0{}",
+        principal.tenant_id, principal.principal_id, artifact_id, upload_grant_id
+    );
+    let key = ring::hmac::Key::new(
+        ring::hmac::HMAC_SHA256,
+        idempotency_key_digest.as_str().as_bytes(),
+    );
+    let tag = ring::hmac::sign(&key, message.as_bytes());
+    OpaqueUploadCompletionProof::new(format!("v1.{}", lower_hex(tag.as_ref())))
+        .map_err(|_| HttpError::Invalid)
+}
+
+fn upload_replay_identity(
+    principal: &PrincipalHeaders,
+    request_digest: Sha256Digest,
+) -> Result<ArtifactUploadReplayIdentity, HttpError> {
+    Ok(ArtifactUploadReplayIdentity {
+        tenant_id: principal.tenant_id.clone(),
+        principal_id: principal.principal_id.clone(),
+        principal_kind: principal.principal_kind,
+        idempotency_key_digest: principal
+            .idempotency_key_digest
+            .clone()
+            .ok_or(HttpError::Invalid)?,
+        request_digest,
+    })
+}
+
+fn upload_completion_request_digests(
+    artifact_id: &ResourceId,
+    expected_artifact_version: u64,
+    grant_token_digest: &Sha256Digest,
+) -> Result<(Sha256Digest, Sha256Digest), HttpError> {
+    let identity = serde_json::json!({
+        "artifact_id": artifact_id,
+        "expected_artifact_version": expected_artifact_version,
+        "grant_token_digest": grant_token_digest,
+    });
+    Ok((
+        request_digest("artifact.complete_upload", &identity)?,
+        request_digest("artifact.schedule_scan", &identity)?,
+    ))
+}
+
+fn audit(
+    principal: PrincipalHeaders,
+    receipt_id: ResourceId,
+    event_id: ResourceId,
+    outbox_id: ResourceId,
+    request_digest: Sha256Digest,
+    deadline: DateTime<Utc>,
+) -> CommandAudit {
+    CommandAudit {
+        trace: insight_platform_contracts::TraceIdentityV1::generate(),
+        tenant_id: principal.tenant_id,
+        principal_id: principal.principal_id,
+        principal_kind: principal.principal_kind,
+        receipt_id,
+        event_id,
+        outbox_id,
+        idempotency_key_digest: principal
+            .idempotency_key_digest
+            .expect("mutation principal has an idempotency digest"),
+        request_digest,
+        receipt_expires_at: deadline,
+    }
+}
+
+fn request_digest<T: Serialize>(operation: &str, request: &T) -> Result<Sha256Digest, HttpError> {
+    canonical_digest(&serde_json::json!({
+        "operation": operation,
+        "request": request,
+        "schema_version": 1,
+    }))
+    .map_err(|_| HttpError::Invalid)?
+    .parse()
+    .map_err(|_| HttpError::Invalid)
+}
+
+fn token_digest(value: &str) -> Result<Sha256Digest, HttpError> {
+    if value.is_empty()
+        || value.len() > MAX_GRANT_TOKEN_BYTES
+        || !value.is_ascii()
+        || value.chars().any(char::is_control)
+    {
+        return Err(HttpError::Invalid);
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    format!("sha256:{}", lower_hex(&digest))
+        .parse()
+        .map_err(|_| HttpError::Invalid)
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn outcome_value<T>(outcome: CommandOutcome<T>) -> T {
+    match outcome {
+        CommandOutcome::Applied(value) | CommandOutcome::Replayed(value) => value,
+    }
+}
+
+fn map_upload_authority_error(error: ArtifactCommandError) -> HttpError {
+    match error {
+        ArtifactCommandError::InvalidTransition => HttpError::Conflict,
+        _ => HttpError::Unavailable,
+    }
+}
+
+fn map_repository_error(
+    error: insight_platform_postgres::repository::RepositoryError,
+) -> HttpError {
+    use insight_platform_postgres::repository::RepositoryError;
+    match error {
+        RepositoryError::PermissionDenied => HttpError::Forbidden,
+        RepositoryError::NotFound(_) => HttpError::NotFound,
+        RepositoryError::Conflict(_) => HttpError::Conflict,
+        RepositoryError::IdempotencyConflict => HttpError::IdempotencyConflict,
+        RepositoryError::QuotaExceeded => HttpError::TooLarge,
+        RepositoryError::InvalidInput(_) => HttpError::Invalid,
+        _ => HttpError::Unavailable,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HttpError {
+    Invalid,
+    Unauthenticated,
+    Forbidden,
+    NotFound,
+    Conflict,
+    IdempotencyConflict,
+    TooLarge,
+    Unavailable,
+}
+
+fn problem(error: HttpError) -> Response {
+    let (status, code) = match error {
+        HttpError::Invalid => (StatusCode::BAD_REQUEST, "invalid_request"),
+        HttpError::Unauthenticated => (StatusCode::UNAUTHORIZED, "authentication_required"),
+        HttpError::Forbidden => (StatusCode::FORBIDDEN, "permission_denied"),
+        HttpError::NotFound => (StatusCode::NOT_FOUND, "artifact_not_found"),
+        HttpError::Conflict => (StatusCode::PRECONDITION_FAILED, "artifact_conflict"),
+        HttpError::IdempotencyConflict => (StatusCode::CONFLICT, "idempotency_conflict"),
+        HttpError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "artifact_limit_exceeded"),
+        HttpError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "artifact_unavailable"),
+    };
+    no_store(
+        (
+            status,
+            Json(serde_json::json!({
+                "type": format!("https://insight.platform/problems/{code}"),
+                "title": code,
+                "status": status.as_u16(),
+            })),
+        )
+            .into_response(),
+    )
+}
+
+fn no_store(mut response: Response<Body>) -> Response<Body> {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async { if let Some(signal) = &mut terminate { signal.recv().await; } } => {},
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn required(name: &'static str) -> Result<String, GatewayError> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty() && value.len() <= 16_384)
+        .ok_or(GatewayError::MissingConfiguration(name))
+}
+
+fn absolute_path(name: &'static str) -> Result<PathBuf, GatewayError> {
+    let path = PathBuf::from(required(name)?);
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(GatewayError::InvalidConfiguration);
+    }
+    Ok(path)
+}
+
+fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, GatewayError> {
+    let file = std::fs::File::open(path).map_err(|_| GatewayError::FileUnavailable)?;
+    let metadata = file.metadata().map_err(|_| GatewayError::FileUnavailable)?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > u64::try_from(maximum).unwrap_or(u64::MAX)
+    {
+        return Err(GatewayError::FileUnavailable);
+    }
+    let mut bytes = Vec::new();
+    file.take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| GatewayError::FileUnavailable)?;
+    if bytes.is_empty() || bytes.len() > maximum {
+        return Err(GatewayError::FileUnavailable);
+    }
+    Ok(bytes)
+}
+
+#[derive(Debug)]
+enum GatewayError {
+    MissingConfiguration(&'static str),
+    InvalidConfiguration,
+    FileUnavailable,
+    DatabaseUnavailable,
+    SchemaMismatch,
+    ProviderUnavailable,
+    HttpUnavailable,
+    ObservabilityUnavailable,
+    DependencyObserverUnavailable,
+    FinalizerUnavailable,
+    ShutdownDeadlineExceeded,
+}
+
+impl fmt::Display for GatewayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingConfiguration(name) => write!(formatter, "missing configuration {name}"),
+            Self::InvalidConfiguration => formatter.write_str("invalid configuration"),
+            Self::FileUnavailable => formatter.write_str("configuration file unavailable"),
+            Self::DatabaseUnavailable => formatter.write_str("database unavailable"),
+            Self::SchemaMismatch => formatter.write_str("database schema mismatch"),
+            Self::ProviderUnavailable => formatter.write_str("Artifact provider unavailable"),
+            Self::HttpUnavailable => formatter.write_str("Artifact Gateway HTTP unavailable"),
+            Self::ObservabilityUnavailable => {
+                formatter.write_str("Artifact Gateway observability unavailable")
+            }
+            Self::DependencyObserverUnavailable => {
+                formatter.write_str("Artifact Gateway dependency observer stopped")
+            }
+            Self::FinalizerUnavailable => {
+                formatter.write_str("Artifact Gateway public upload finalizer stopped")
+            }
+            Self::ShutdownDeadlineExceeded => {
+                formatter.write_str("Artifact Gateway shutdown deadline exceeded")
+            }
+        }
+    }
+}
+
+impl Error for GatewayError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{CertificateParams, KeyPair, SanType};
+
+    #[test]
+    fn completion_identity_binds_uri_original_precondition_and_proof() {
+        let artifact = server_id(ResourceKind::Artifact);
+        let token = token_digest("original-proof").unwrap();
+        let original = upload_completion_request_digests(&artifact, 1, &token).unwrap();
+        assert_ne!(original.0, original.1);
+        for changed in [
+            upload_completion_request_digests(&server_id(ResourceKind::Artifact), 1, &token)
+                .unwrap(),
+            upload_completion_request_digests(&artifact, 2, &token).unwrap(),
+            upload_completion_request_digests(&artifact, 1, &token_digest("other-proof").unwrap())
+                .unwrap(),
+        ] {
+            assert_ne!(original.0, changed.0);
+            assert_ne!(original.1, changed.1);
+        }
+        assert_eq!(
+            original,
+            upload_completion_request_digests(&artifact, 1, &token).unwrap()
+        );
+    }
+
+    fn certificate_with_uris(uris: &[&str]) -> Vec<u8> {
+        let mut parameters = CertificateParams::default();
+        parameters.subject_alt_names = uris
+            .iter()
+            .map(|uri| SanType::URI((*uri).try_into().unwrap()))
+            .collect();
+        let key = KeyPair::generate().unwrap();
+        parameters.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    #[test]
+    fn registry_peer_is_exact_and_cannot_reach_public_artifact_routes() {
+        let worker = certificate_with_uris(&[REGISTRY_VALIDATION_WORKLOAD_IDENTITY]);
+        assert_eq!(
+            artifact_gateway_peer_role(&worker),
+            Some(ArtifactGatewayPeerRole::RegistryValidationWorker)
+        );
+        let ambiguous = certificate_with_uris(&[
+            REGISTRY_VALIDATION_WORKLOAD_IDENTITY,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY,
+        ]);
+        assert_eq!(artifact_gateway_peer_role(&ambiguous), None);
+        for path in [
+            "/v1/artifacts",
+            "/v1/artifacts/art_foo:prepareUpload",
+            "/v1/artifacts/art_foo/content",
+            "/internal/v1/registry-validation/artifacts:read/",
+            "/healthz",
+        ] {
+            assert!(!artifact_peer_route_allowed(
+                ArtifactGatewayPeerRole::RegistryValidationWorker,
+                path
+            ));
+        }
+        assert!(artifact_peer_route_allowed(
+            ArtifactGatewayPeerRole::RegistryValidationWorker,
+            REGISTRY_VALIDATION_ARTIFACT_ROUTE
+        ));
+        assert!(artifact_peer_route_allowed(
+            ArtifactGatewayPeerRole::PublicGateway,
+            "/v1/artifacts/art_foo/content"
+        ));
+    }
+
+    #[test]
+    fn public_gateway_workload_identity_must_be_the_only_uri_san() {
+        let exact = certificate_with_uris(&[PUBLIC_GATEWAY_WORKLOAD_IDENTITY]);
+        assert!(has_exact_workload_identity(
+            &exact,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+
+        let wrong = certificate_with_uris(&["spiffe://insight.platform/workload/model-worker"]);
+        assert!(!has_exact_workload_identity(
+            &wrong,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+
+        let ambiguous = certificate_with_uris(&[
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY,
+            "spiffe://insight.platform/workload/also-public-gateway",
+        ]);
+        assert!(!has_exact_workload_identity(
+            &ambiguous,
+            PUBLIC_GATEWAY_WORKLOAD_IDENTITY
+        ));
+    }
+
+    #[test]
+    fn forwarded_principal_assertion_is_closed_and_digest_only() {
+        let tenant = ResourceId::from_uuid_v7(ResourceKind::Tenant, uuid::Uuid::now_v7()).unwrap();
+        let principal =
+            ResourceId::from_uuid_v7(ResourceKind::Principal, uuid::Uuid::now_v7()).unwrap();
+        let digest: Sha256Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-insight-verified-tenant-id",
+            HeaderValue::from_str(&tenant.to_string()).unwrap(),
+        );
+        headers.insert(
+            "x-insight-verified-principal-id",
+            HeaderValue::from_str(&principal.to_string()).unwrap(),
+        );
+        headers.insert(
+            "x-insight-verified-principal-kind",
+            HeaderValue::from_static("agent_runner"),
+        );
+        headers.insert(
+            "x-insight-idempotency-key-digest",
+            HeaderValue::from_str(digest.as_str()).unwrap(),
+        );
+        let parsed = mutation_principal(&headers).unwrap();
+        assert_eq!(parsed.tenant_id, tenant);
+        assert_eq!(parsed.principal_id, principal);
+        assert_eq!(parsed.idempotency_key_digest, Some(digest));
+
+        let mut legacy = HeaderMap::new();
+        legacy.insert(
+            "x-platform-tenant-id",
+            HeaderValue::from_str(&tenant.to_string()).unwrap(),
+        );
+        legacy.insert(
+            "x-platform-principal-id",
+            HeaderValue::from_str(&principal.to_string()).unwrap(),
+        );
+        legacy.insert(
+            "x-platform-principal-kind",
+            HeaderValue::from_static("agent_runner"),
+        );
+        legacy.insert("idempotency-key", HeaderValue::from_static("raw-secret"));
+        assert!(matches!(
+            mutation_principal(&legacy),
+            Err(HttpError::Unauthenticated)
+        ));
+    }
+}

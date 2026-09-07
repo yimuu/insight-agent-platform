@@ -6,6 +6,8 @@
     "code": {
       "enum": [
         "invalid_request",
+        "invalid_task_input",
+        "task_form_unavailable",
         "schema_validation_failed",
         "unauthenticated",
         "permission_denied",
@@ -25,6 +27,8 @@
         "content_rejected",
         "cursor_invalid",
         "cursor_expired",
+        "run_event_history_gap",
+        "recompile_required",
         "run_not_terminal",
         "operation_not_terminal",
         "deadline_exceeded",

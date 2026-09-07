@@ -38,6 +38,8 @@ runtimeContract:
   networkPolicyDigest: sha256:2bc456ef5f8427de8b142de9347d030fec638078dd11df111bc05ef85110e66e
 
 dispatcher:
+  # Required release input, verified against the executable extracted from the exact runtime image.
+  workerManifest: null
   replicas: 1
   observabilityPort: 9090
   serviceAccountName: sandbox-dispatcher

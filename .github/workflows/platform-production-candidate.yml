@@ -63,7 +63,7 @@ jobs:
         run: test "$(git -C target/gitops-environment rev-parse HEAD)" = "$ENVIRONMENT_COMMIT"
       - name: Validate closed production environment input
         run: |
-          python3 scripts/validate-platform-gitops-environment.py \
+          python3 tools/checks/validate-platform-gitops-environment.py \
             --closure "target/gitops-environment/${{ inputs.environment_path }}" \
             --application-repository "$GITHUB_REPOSITORY" \
             --application-commit "$GITHUB_SHA" \
@@ -84,6 +84,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: deploy/images/platform.Dockerfile
           target: runtime
           push: true
           tags: ${{ env.RUNTIME_IMAGE }}:candidate-${{ github.sha }}
@@ -96,6 +97,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: deploy/images/platform.Dockerfile
           target: sandbox-runner
           push: true
           tags: ${{ env.SANDBOX_RUNNER_IMAGE }}:candidate-${{ github.sha }}
@@ -163,32 +165,44 @@ jobs:
           gh attestation verify "oci://${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" --repo "$GITHUB_REPOSITORY"
           gh attestation verify "oci://${RUNTIME_IMAGE}@${RUNTIME_DIGEST}" --repo "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document
           gh attestation verify "oci://${SANDBOX_RUNNER_IMAGE}@${SANDBOX_RUNNER_DIGEST}" --repo "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document
+      - name: Extract executable bytes from the verified runtime image
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+        run: |
+          mkdir -p target/platform-worker-binaries
+          container_id="$(docker create "${RUNTIME_IMAGE}@${RUNTIME_DIGEST}")"
+          trap 'docker rm "$container_id"' EXIT
+          docker cp "$container_id:/usr/local/bin/." target/platform-worker-binaries/
       - name: Build deterministic CandidateManifest closure
         env:
           RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
           SANDBOX_RUNNER_DIGEST: ${{ steps.sandbox_runner.outputs.digest }}
         run: |
           created_at="$(git show -s --format=%cI "$GITHUB_SHA" | python3 -c 'import datetime,sys; value=datetime.datetime.fromisoformat(sys.stdin.read().strip()); print(value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')"
-          python3 scripts/build-platform-production-candidate.py --runtime-image-digest "$RUNTIME_DIGEST" --sandbox-runner-image-digest "$SANDBOX_RUNNER_DIGEST" --git-commit "sha1:$GITHUB_SHA" --created-at "$created_at" --output-dir target/platform-candidate \
-            --environment-closure "target/gitops-environment/${{ inputs.environment_path }}"
-          cp crates/platform-postgres/migrations/0001_platform_baseline.sql target/platform-candidate/migration-baseline.sql
+          python3 tools/release/build-platform-production-candidate.py --runtime-image-digest "$RUNTIME_DIGEST" --sandbox-runner-image-digest "$SANDBOX_RUNNER_DIGEST" --git-commit "sha1:$GITHUB_SHA" --created-at "$created_at" --output-dir target/platform-candidate \
+            --environment-closure "target/gitops-environment/${{ inputs.environment_path }}" \
+            --worker-manifests "target/gitops-environment/${{ inputs.environment_path }}/worker-manifests" \
+            --worker-configs "target/gitops-environment/${{ inputs.environment_path }}/worker-configs" \
+            --worker-binaries target/platform-worker-binaries \
+            --history-maintenance-config "target/gitops-environment/${{ inputs.environment_path }}/history-maintenance.json"
           cp target/platform-supply-chain/*.spdx.json target/platform-candidate/
-          sha256sum target/platform-candidate/migration-baseline.sql > target/platform-candidate/migration-baseline.sha256
       - name: Run and preserve candidate qualification checks
         run: |
           set -o pipefail
           {
-            python3 scripts/check-platform-candidate-pipeline.py
-            python3 scripts/check-platform-v1-contracts.py
-            python3 scripts/check-platform-postgres-schema.py
+            python3 tools/checks/check-platform-candidate-pipeline.py
+            python3 tools/checks/check-platform-v1-contracts.py
+            python3 tools/checks/check-platform-postgres-schema.py
             cargo test --locked -p insight-platform-contracts
-            cargo run --locked -p insight-platform-contracts --bin platform-qualification -- validate-production-candidate contracts/platform-v1/qualification/production-release-profile.json target/platform-candidate/candidate-manifest.json
+            cargo run --locked -p insight-platform-contract-tooling --bin platform-qualification -- verify-schema-executable-evidence target/platform-candidate/schema target/platform-candidate/platform-schema target/platform-candidate/schema-executable-evidence.json
+            cargo run --locked -p insight-platform-contract-tooling --bin platform-qualification -- verify-history-maintenance-deployment target/platform-candidate/history-maintenance.json target/platform-worker-binaries/platform-history-maintenance target/platform-candidate/history-maintenance-executable-evidence.json
+            cargo run --locked -p insight-platform-contract-tooling --bin platform-qualification -- validate-production-candidate contracts/platform-v1/qualification/production-release-profile.json target/platform-candidate/candidate-manifest.json
           } 2>&1 | tee target/platform-candidate/qualification-tests.txt
       - name: Sign candidate and transitive artifact closure
         run: |
           cosign sign-blob --yes --bundle target/platform-candidate/candidate-manifest.sigstore.json target/platform-candidate/candidate-manifest.json
           cosign verify-blob --bundle target/platform-candidate/candidate-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/candidate-manifest.json
-          python3 scripts/build-platform-release-bundle.py target/platform-candidate
+          python3 tools/release/build-platform-release-bundle.py target/platform-candidate
           cosign sign-blob --yes --bundle target/platform-candidate/release-bundle-manifest.sigstore.json target/platform-candidate/release-bundle-manifest.json
           cosign verify-blob --bundle target/platform-candidate/release-bundle-manifest.sigstore.json --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/platform-production-candidate.yml@refs/heads/main$" --certificate-oidc-issuer https://token.actions.githubusercontent.com target/platform-candidate/release-bundle-manifest.json
       - name: Preserve content-addressed candidate bundle

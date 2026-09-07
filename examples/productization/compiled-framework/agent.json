@@ -1,0 +1,1 @@
+{"apiVersion":"insight.platform/v1","kind":"Agent","metadata":{"displayName":"Compiled framework echo","name":"compiled-echo"},"spec":{"execution":{"kind":"framework_graph","plan":"framework.json"},"input":{"classification":"internal","schema":"input.json"},"output":{"schema":"output.json"}}}

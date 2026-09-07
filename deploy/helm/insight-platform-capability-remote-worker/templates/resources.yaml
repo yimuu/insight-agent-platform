@@ -71,9 +71,11 @@ spec:
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CA_PATH, value: /etc/insight/egress-tls/ca.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_CERT_PATH, value: /etc/insight/egress-tls/client.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_EGRESS_KEY_PATH, value: /etc/insight/egress-tls/client-key.pem}
+            {{- if .Values.mcpHost.enabled }}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CA_PATH, value: /etc/insight/mcp-host-tls/ca.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_CERT_PATH, value: /etc/insight/mcp-host-tls/client.pem}
             - {name: PLATFORM_CAPABILITY_REMOTE_WORKER_MCP_HOST_KEY_PATH, value: /etc/insight/mcp-host-tls/client-key.pem}
+            {{- end }}
           startupProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 2, timeoutSeconds: 2, failureThreshold: 30}
           readinessProbe: {httpGet: {path: /readyz, port: observability}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
           livenessProbe: {httpGet: {path: /livez, port: observability}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
@@ -85,7 +87,9 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/insight/config, readOnly: true}
             - {name: egress-tls, mountPath: /etc/insight/egress-tls, readOnly: true}
+            {{- if .Values.mcpHost.enabled }}
             - {name: mcp-host-tls, mountPath: /etc/insight/mcp-host-tls, readOnly: true}
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: config
@@ -99,6 +103,7 @@ spec:
               - {key: {{ .Values.egressTls.keys.ca }}, path: ca.pem}
               - {key: {{ .Values.egressTls.keys.certificate }}, path: client.pem}
               - {key: {{ .Values.egressTls.keys.privateKey }}, path: client-key.pem}
+        {{- if .Values.mcpHost.enabled }}
         - name: mcp-host-tls
           secret:
             secretName: {{ .Values.mcpHostTls.existingSecret }}
@@ -106,6 +111,7 @@ spec:
               - {key: {{ .Values.mcpHostTls.keys.ca }}, path: ca.pem}
               - {key: {{ .Values.mcpHostTls.keys.certificate }}, path: client.pem}
               - {key: {{ .Values.mcpHostTls.keys.privateKey }}, path: client-key.pem}
+        {{- end }}
         - {name: tmp, emptyDir: {sizeLimit: 64Mi}}
 {{- if .Values.podDisruptionBudget.enabled }}
 ---

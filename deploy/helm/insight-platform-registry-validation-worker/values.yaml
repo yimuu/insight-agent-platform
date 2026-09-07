@@ -15,6 +15,13 @@ config:
 database:
   existingSecret: insight-platform-registry-validation-worker-database
   urlKey: database-url
+artifact:
+  endpoint: https://insight-platform-artifact-gateway.platform-artifacts.svc.cluster.local:8080
+  existingSecret: insight-platform-registry-validation-artifact-client-tls
+  keys: {ca: ca.pem, certificate: client.pem, privateKey: client-key.pem}
+  port: 8080
+  namespaceSelector: {insight.platform/workload-namespace: artifact}
+  podSelector: {app.kubernetes.io/component: artifact-gateway}
 networkPolicy:
   enabled: true
   dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}

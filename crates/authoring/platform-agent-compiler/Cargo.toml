@@ -1,0 +1,16 @@
+[package]
+name = "insight-platform-agent-compiler"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+insight-platform-contracts = { path = "../../foundation/platform-contracts", default-features = false }
+insight-platform-plan.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+yaml-rust2.workspace = true
+yaml_serde.workspace = true

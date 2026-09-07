@@ -94,7 +94,7 @@ restore 或 production readiness；未完成的资格门禁必须保持 `Not run
 ## Authority 与证据
 
 当前机器合同与拥有类型优先于本文：[`contracts/platform-v1`](../../contracts/platform-v1/README.md)、
-[`sandbox.rs`](../../crates/platform-contracts/src/sandbox.rs) 与 [`sandbox_policy.rs`](../../crates/platform-contracts/src/sandbox_policy.rs)。
-持久化裁决见 [`sandbox_repository.rs`](../../crates/platform-postgres/src/sandbox_repository.rs)，runner 协议见
-[`platform-sandbox-runner`](../../crates/platform-sandbox-runner/src/lib.rs)，部署边界见 [`Sandbox Helm chart`](../../deploy/helm/insight-platform-sandbox/)；
+[`sandbox.rs`](../../crates/foundation/platform-contracts/src/sandbox.rs) 与 [`sandbox_policy.rs`](../../crates/foundation/platform-contracts/src/sandbox_policy.rs)。
+持久化裁决见 [`sandbox_repository.rs`](../../crates/adapters/platform-postgres/src/sandbox_repository.rs)，runner 协议见
+[`platform-sandbox-runner`](../../apps/sandbox/platform-sandbox-runner/src/lib.rs)，部署边界见 [`Sandbox Helm chart`](../../deploy/helm/insight-platform-sandbox)；
 当前行为与资格状态见 [`architecture.md`](../current/architecture.md)、[`mcp.md`](../current/mcp.md) 和 [`operations.md`](../current/operations.md)。

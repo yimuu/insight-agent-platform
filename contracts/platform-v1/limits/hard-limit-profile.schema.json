@@ -17,7 +17,7 @@
   ],
   "properties": {
     "profile_id": { "const": "q1-50" },
-    "profile_version": { "const": 5 },
+    "profile_version": { "const": 6 },
     "api": { "$ref": "#/$defs/api" },
     "registry_plan": { "$ref": "#/$defs/registry_plan" },
     "run_scheduler": { "$ref": "#/$defs/run_scheduler" },
@@ -258,7 +258,7 @@
       "additionalProperties": false,
       "required": [
         "database_connections", "transaction_milliseconds", "outbox_batch", "callback_batch",
-        "recovery_batch", "recovery_shards", "nats_payload_bytes", "telemetry_buffer_events", "metric_label_values", "audit_batch"
+        "recovery_batch", "recovery_shards", "nats_payload_bytes", "telemetry_buffer_events", "metric_label_values", "audit_batch", "outbox_admission_backlog"
       ],
       "properties": {
         "database_connections": { "$ref": "#/$defs/limit" },
@@ -270,7 +270,17 @@
         "nats_payload_bytes": { "$ref": "#/$defs/limit" },
         "telemetry_buffer_events": { "$ref": "#/$defs/limit" },
         "metric_label_values": { "$ref": "#/$defs/limit" },
-        "audit_batch": { "$ref": "#/$defs/limit" }
+        "audit_batch": { "$ref": "#/$defs/limit" },
+        "outbox_admission_backlog": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unit", "hard_max", "q1_default", "overflow_outcome"],
+          "properties": {
+            "unit": { "const": "count" },
+            "hard_max": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+            "q1_default": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+            "overflow_outcome": { "const": "temporarily_unavailable" }
+          }
+        }
       }
     }
   }

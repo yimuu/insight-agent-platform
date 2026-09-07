@@ -1,0 +1,686 @@
+{
+  "choices": {
+    "cancellation_policy": [
+      "cascade_and_wait",
+      "cascade_with_deadline"
+    ],
+    "dependency_kind": [
+      "model",
+      "capability",
+      "context",
+      "child_agent",
+      "skill"
+    ],
+    "eligibility_rule": [
+      {
+        "kind": "any_authorized"
+      },
+      {
+        "kind": "creator"
+      },
+      {
+        "kind": "exact_principal",
+        "principal_id": "prn_018f3e20-0000-7000-8000-000000000000"
+      }
+    ],
+    "human_definition": [
+      {
+        "eligibility_rule": {
+          "kind": "any_authorized"
+        },
+        "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+        "kind": "human_work",
+        "safe_prompt_key": "replace_prompt"
+      },
+      {
+        "eligibility_rule": {
+          "kind": "any_authorized"
+        },
+        "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+        "interaction_kind": "form",
+        "kind": "interaction",
+        "safe_prompt_key": "replace_prompt"
+      },
+      {
+        "eligibility_rule": {
+          "kind": "any_authorized"
+        },
+        "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+        "interaction_kind": "url_consent",
+        "kind": "interaction",
+        "safe_prompt_key": "replace_prompt"
+      },
+      {
+        "eligibility_rule": {
+          "kind": "any_authorized"
+        },
+        "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+        "interaction_kind": "business_input",
+        "kind": "interaction",
+        "safe_prompt_key": "replace_prompt"
+      }
+    ],
+    "instruction": [
+      {
+        "op": "load_port",
+        "port": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        }
+      },
+      {
+        "op": "literal",
+        "value": {
+          "canonical_digest": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "schema_digest": "sha256:b1cd4929e2550e5743a36c545df994d9d2796e4e26828159b0844034ea4fe65a",
+          "value": null
+        }
+      },
+      {
+        "field": "replace_field",
+        "op": "get_field"
+      },
+      {
+        "op": "get_index"
+      },
+      {
+        "op": "array_length"
+      },
+      {
+        "item_count": 0,
+        "op": "make_array"
+      },
+      {
+        "op": "make_object",
+        "ordered_fields": []
+      },
+      {
+        "op": "equal"
+      },
+      {
+        "op": "not_equal"
+      },
+      {
+        "op": "less"
+      },
+      {
+        "op": "less_or_equal"
+      },
+      {
+        "op": "greater"
+      },
+      {
+        "op": "greater_or_equal"
+      },
+      {
+        "op": "boolean_and"
+      },
+      {
+        "op": "boolean_or"
+      },
+      {
+        "op": "boolean_not"
+      },
+      {
+        "op": "integer_add"
+      },
+      {
+        "op": "integer_subtract"
+      },
+      {
+        "op": "decimal_add"
+      },
+      {
+        "op": "decimal_subtract"
+      },
+      {
+        "op": "string_concat"
+      },
+      {
+        "op": "coalesce"
+      },
+      {
+        "op": "select"
+      }
+    ],
+    "join_policy": [
+      "all_success",
+      "all_settled",
+      "quorum"
+    ],
+    "map_failure_policy": [
+      {
+        "kind": "fail_fast"
+      },
+      {
+        "kind": "all_settled"
+      },
+      {
+        "kind": "bounded_error_count",
+        "maximum_failures": 0
+      }
+    ],
+    "port": [
+      {
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "run_input"
+      },
+      {
+        "port_id": "replace_port",
+        "producer_node_id": "replace_node",
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "node_output"
+      }
+    ],
+    "remainder": [
+      "cancel",
+      "drain"
+    ]
+  },
+  "compiler_semantic_identity": "sha256:b9af0db422de065196c852ddb4045ca8041e25202886d3dc92cdcd157611137e",
+  "draft_only": true,
+  "nodes": [
+    {
+      "kind": "start",
+      "template": {
+        "kind": "start",
+        "next": "replace_node"
+      }
+    },
+    {
+      "kind": "compute",
+      "template": {
+        "assignments": [
+          {
+            "expression": {
+              "expression_version": 1,
+              "input_ports": [
+                {
+                  "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                  "source": "run_input"
+                }
+              ],
+              "instructions": [
+                {
+                  "op": "load_port",
+                  "port": {
+                    "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "source": "run_input"
+                  }
+                }
+              ],
+              "maximum_stack_depth": 1,
+              "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "output_port": {
+              "port_id": "replace_port",
+              "producer_node_id": "replace_node",
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "node_output"
+            }
+          }
+        ],
+        "kind": "compute",
+        "next": "replace_node"
+      }
+    },
+    {
+      "kind": "branch",
+      "template": {
+        "kind": "branch",
+        "ordered_arms": [
+          {
+            "target": "replace_node",
+            "when": {
+              "expression_version": 1,
+              "input_ports": [
+                {
+                  "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                  "source": "run_input"
+                }
+              ],
+              "instructions": [
+                {
+                  "op": "load_port",
+                  "port": {
+                    "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "source": "run_input"
+                  }
+                }
+              ],
+              "maximum_stack_depth": 1,
+              "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          }
+        ],
+        "otherwise": "replace_node"
+      }
+    },
+    {
+      "kind": "fork",
+      "template": {
+        "join": "replace_node",
+        "kind": "fork",
+        "legs": [
+          "replace_node"
+        ]
+      }
+    },
+    {
+      "kind": "join",
+      "template": {
+        "kind": "join",
+        "next": "replace_node",
+        "policy": "all_settled",
+        "quorum": null,
+        "remainder": null
+      }
+    },
+    {
+      "kind": "map",
+      "template": {
+        "body": "replace_node",
+        "failure_policy": {
+          "kind": "fail_fast"
+        },
+        "item_port": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "items": {
+          "expression_version": 1,
+          "input_ports": [
+            {
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "run_input"
+            }
+          ],
+          "instructions": [
+            {
+              "op": "load_port",
+              "port": {
+                "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "source": "run_input"
+              }
+            }
+          ],
+          "maximum_stack_depth": 1,
+          "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "kind": "map",
+        "maximum_items": 0,
+        "next": "replace_node"
+      }
+    },
+    {
+      "kind": "loop",
+      "template": {
+        "body": "replace_node",
+        "carried_ports": [
+          {
+            "body_output_port": {
+              "port_id": "replace_port",
+              "producer_node_id": "replace_node",
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "node_output"
+            },
+            "next_iteration_port": {
+              "port_id": "replace_port",
+              "producer_node_id": "replace_node",
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "node_output"
+            }
+          }
+        ],
+        "condition": {
+          "expression_version": 1,
+          "input_ports": [
+            {
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "run_input"
+            }
+          ],
+          "instructions": [
+            {
+              "op": "load_port",
+              "port": {
+                "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "source": "run_input"
+              }
+            }
+          ],
+          "maximum_stack_depth": 1,
+          "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "exit": "replace_node",
+        "kind": "loop",
+        "maximum_iterations": 0
+      }
+    },
+    {
+      "kind": "error_boundary",
+      "template": {
+        "body": "replace_node",
+        "handlers": {
+          "replace_failure_code": "replace_node"
+        },
+        "kind": "error_boundary"
+      }
+    },
+    {
+      "kind": "model_loop",
+      "template": {
+        "capability_slot_ids": [],
+        "input": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        },
+        "kind": "model_loop",
+        "maximum_capability_calls": 0,
+        "maximum_parallel_calls_per_round": 0,
+        "maximum_rounds": 0,
+        "model_route": null,
+        "model_slot_id": "replace_model_slot",
+        "output": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "resume": "replace_node",
+        "skill_slot_ids": [],
+        "token_budget": 0
+      }
+    },
+    {
+      "kind": "capability_call",
+      "template": {
+        "attempt_limit": 0,
+        "candidate_route": null,
+        "capability_slot_id": "replace_capability_slot",
+        "input": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        },
+        "kind": "capability_call",
+        "output": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "resume": "replace_node",
+        "retry_backoff_milliseconds": 0
+      }
+    },
+    {
+      "kind": "context_query",
+      "template": {
+        "context_slot_id": "replace_context_slot",
+        "kind": "context_query",
+        "maximum_items": 0,
+        "request": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        },
+        "result": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "resume": "replace_node"
+      }
+    },
+    {
+      "kind": "child_agent_call",
+      "template": {
+        "attempt_limit": 0,
+        "budget": {
+          "maximum_artifact_bytes": 0,
+          "maximum_capability_calls": 0,
+          "maximum_descendant_runs": 0,
+          "maximum_duration_milliseconds": 0,
+          "maximum_model_tokens": 0
+        },
+        "cancellation_policy": "cascade_and_wait",
+        "candidate_route": null,
+        "child_agent_slot_id": "replace_agent_slot",
+        "input": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        },
+        "kind": "child_agent_call",
+        "output": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "resume": "replace_node",
+        "retry_backoff_milliseconds": 0
+      }
+    },
+    {
+      "kind": "human_task",
+      "template": {
+        "definition": {
+          "eligibility_rule": {
+            "kind": "any_authorized"
+          },
+          "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+          "kind": "human_work",
+          "safe_prompt_key": "replace_prompt"
+        },
+        "kind": "human_task",
+        "response": {
+          "port_id": "replace_port",
+          "producer_node_id": "replace_node",
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "node_output"
+        },
+        "resume": "replace_node",
+        "timeout_milliseconds": 0
+      }
+    },
+    {
+      "kind": "timer_wait",
+      "template": {
+        "delay_milliseconds": 0,
+        "kind": "timer_wait",
+        "resume": "replace_node"
+      }
+    },
+    {
+      "kind": "signal_wait",
+      "template": {
+        "kind": "signal_wait",
+        "payload": null,
+        "resume": "replace_node",
+        "signal_key": "replace_signal",
+        "timeout_milliseconds": 0
+      }
+    },
+    {
+      "kind": "return",
+      "template": {
+        "kind": "return",
+        "value": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        }
+      }
+    },
+    {
+      "kind": "raise",
+      "template": {
+        "failure": {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        },
+        "kind": "raise"
+      }
+    }
+  ],
+  "plan_version": 6,
+  "schema_version": 1,
+  "templates": {
+    "assignment": {
+      "expression": {
+        "expression_version": 1,
+        "input_ports": [
+          {
+            "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source": "run_input"
+          }
+        ],
+        "instructions": [
+          {
+            "op": "load_port",
+            "port": {
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "run_input"
+            }
+          }
+        ],
+        "maximum_stack_depth": 1,
+        "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "output_port": {
+        "port_id": "replace_port",
+        "producer_node_id": "replace_node",
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "node_output"
+      }
+    },
+    "branch_arm": {
+      "target": "replace_node",
+      "when": {
+        "expression_version": 1,
+        "input_ports": [
+          {
+            "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source": "run_input"
+          }
+        ],
+        "instructions": [
+          {
+            "op": "load_port",
+            "port": {
+              "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "source": "run_input"
+            }
+          }
+        ],
+        "maximum_stack_depth": 1,
+        "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "child_budget": {
+      "maximum_artifact_bytes": 0,
+      "maximum_capability_calls": 0,
+      "maximum_descendant_runs": 0,
+      "maximum_duration_milliseconds": 0,
+      "maximum_model_tokens": 0
+    },
+    "dependency_slot": {
+      "kind": "model",
+      "requirement_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "eligibility_rule": {
+      "kind": "any_authorized"
+    },
+    "expression": {
+      "expression_version": 1,
+      "input_ports": [
+        {
+          "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "source": "run_input"
+        }
+      ],
+      "instructions": [
+        {
+          "op": "load_port",
+          "port": {
+            "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "source": "run_input"
+          }
+        }
+      ],
+      "maximum_stack_depth": 1,
+      "output_schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "semantic_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "failure_policy": {
+      "kind": "fail_fast"
+    },
+    "human_definition": {
+      "eligibility_rule": {
+        "kind": "any_authorized"
+      },
+      "eligible_principal_rule_digest": "sha256:93b3e421e6a512d75c2b9cddd4f912097c8ba22cc37b1828db7fef2b672035d6",
+      "kind": "human_work",
+      "safe_prompt_key": "replace_prompt"
+    },
+    "instruction": {
+      "op": "load_port",
+      "port": {
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "run_input"
+      }
+    },
+    "loop_carried_port": {
+      "body_output_port": {
+        "port_id": "replace_port",
+        "producer_node_id": "replace_node",
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "node_output"
+      },
+      "next_iteration_port": {
+        "port_id": "replace_port",
+        "producer_node_id": "replace_node",
+        "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "node_output"
+      }
+    },
+    "null_schema_document": {
+      "canonical_digest": "sha256:b1cd4929e2550e5743a36c545df994d9d2796e4e26828159b0844034ea4fe65a",
+      "profile": "insight.platform/closed-value-schema/v1",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "null"
+      },
+      "schema_version": 1
+    },
+    "output_port": {
+      "port_id": "replace_port",
+      "producer_node_id": "replace_node",
+      "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "node_output"
+    },
+    "port": {
+      "schema_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "run_input"
+    },
+    "schema_document": {
+      "canonical_digest": "sha256:7cce9970b1299f7789482edd63b456ed5edd6cb79dd6d9be98e076866db957e5",
+      "profile": "insight.platform/closed-value-schema/v1",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "schema_version": 1
+    }
+  }
+}

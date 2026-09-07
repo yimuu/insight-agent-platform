@@ -1,0 +1,27 @@
+[package]
+name = "insight-platform-contracts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["runtime-identity", "runtime-schema-validation"]
+runtime-identity = ["uuid/v4", "uuid/v7", "chrono/clock"]
+runtime-schema-validation = ["dep:jsonschema"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+jsonschema = { workspace = true, optional = true }
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid = { version = "1", default-features = false, features = ["serde", "std"] }
+
+[dev-dependencies]
+tempfile.workspace = true

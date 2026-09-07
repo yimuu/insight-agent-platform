@@ -1,0 +1,69 @@
+{
+  "architecture": {
+    "adr": "docs/adr/0001-platform-v2-postgres-baseline.md",
+    "business_state_triggers": false,
+    "compatibility_schema": false,
+    "current_state_is_not_reconstructed_from_events": true,
+    "event_payload_is_not_duplicated_in_outbox": true
+  },
+  "contract": "insight.platform/v1/postgres-baseline",
+  "functions": [
+    "history_delete_event(text, text, text)",
+    "history_delete_prefix(text, text, bigint, bigint)",
+    "history_delete_published_outbox(text, text, timestamp with time zone)",
+    "history_delete_receipt(text, text, text)",
+    "history_event_obligations(text, text, bigint)",
+    "history_lock_event(text, text)",
+    "history_lock_event_prefix(text, text, bigint, bigint, integer)",
+    "history_lock_owner(text, text)",
+    "history_lock_receipt(text, text)",
+    "history_lock_run(text, text)",
+    "history_lock_task_chain(text, text)",
+    "history_owner_delivery(text, text[])",
+    "history_retire_oauth_chain(text, text, bigint, text, text, text, text)",
+    "history_scan_records(text, timestamp with time zone, text, text, text, text, integer)",
+    "history_scan_runs(timestamp with time zone, text, text, text, text, integer)",
+    "is_bounded_object(jsonb, integer)",
+    "is_platform_id(text)",
+    "is_sha256(text)",
+    "is_trace_id(text)"
+  ],
+  "physical_inventory": {
+    "digest": "sha256:aec3331937c1e43784ac85eaab888602b7e22784bee7ce558c7dd7c305a2cede",
+    "path": "schema-inventory.json"
+  },
+  "postgres_major": 16,
+  "schema": "insight_platform",
+  "schema_contract_version": 14,
+  "schema_snapshot": {
+    "digest": "sha256:627762273fbb539b5c7a55768f73e1726ca2f20fc4cb3bd189e88d817ab6819c",
+    "path": "schema.sql"
+  },
+  "schema_snapshot_digest": "sha256:627762273fbb539b5c7a55768f73e1726ca2f20fc4cb3bd189e88d817ab6819c",
+  "table_count": 23,
+  "tables": [
+    "artifact_blobs",
+    "artifact_links",
+    "artifacts",
+    "deployments",
+    "events",
+    "invocations",
+    "jobs",
+    "outbox_events",
+    "principals",
+    "quota_accounts",
+    "quota_ledger",
+    "receipts",
+    "resource_versions",
+    "resources",
+    "run_nodes",
+    "run_values",
+    "runs",
+    "scheduler_state",
+    "scheduler_tenant_state",
+    "secret_bindings",
+    "tasks",
+    "tenant_principals",
+    "tenants"
+  ]
+}

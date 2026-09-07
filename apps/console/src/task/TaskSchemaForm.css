@@ -1,0 +1,15 @@
+.task-schema-form__body { border: 0; padding: 0; margin: 0; min-width: 0; }
+.task-schema-field { min-width: 0; }
+.task-schema-form__group { border: 1px solid var(--line, #d7dce0); border-radius: 8px; padding: 16px; margin: 0; min-width: 0; }
+.task-schema-form__group legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+.task-schema-field--root > .task-schema-form__group { border: 0; padding: 0; }
+.task-schema-field--root > .task-schema-form__group > legend { padding: 0; margin-bottom: 16px; }
+.task-schema-form__include { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.task-schema-form__include input { width: auto; }
+.task-schema-form__include span { margin: 0; }
+.task-schema-form__item { display: grid; gap: 8px; margin: 12px 0; }
+.task-schema-form__item > button { justify-self: start; }
+.task-schema-form__error { color: var(--danger, #ad2533); font-size: 13px; margin: 8px 0; overflow-wrap: anywhere; }
+.task-schema-form [aria-invalid="true"] { border-color: var(--danger, #ad2533); }
+.task-schema-form [disabled] { cursor: not-allowed; opacity: .65; }
+.task-schema-form .notice li { overflow-wrap: anywhere; }

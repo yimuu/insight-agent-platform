@@ -1,0 +1,35 @@
+image:
+  repository: insight-agent-platform
+  digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+candidate:
+  deploymentConfigDigest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+namespace: platform-history-maintenance
+replicas: 2
+observability: {port: 9090}
+
+config:
+  existingConfigMap: insight-platform-history-maintenance-candidate
+  fileKey: history-maintenance.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+database:
+  existingSecret: insight-platform-history-maintenance-database
+  urlKey: database-url
+
+networkPolicy:
+  enabled: true
+  dnsNamespaceSelector: {kubernetes.io/metadata.name: kube-system}
+  dnsPodSelector: {k8s-app: kube-dns}
+  monitoringNamespaceSelector: {insight.platform/monitoring-namespace: "true"}
+  monitoringPodSelector: {app.kubernetes.io/name: prometheus}
+  postgresCidrs: [10.10.0.0/24]
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+  limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 512Mi}
+
+podDisruptionBudget: {enabled: true, minAvailable: 1}
+autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 16, targetCPUUtilizationPercentage: 70}
+monitoring: {enabled: true, interval: 30s, scrapeTimeout: 5s}

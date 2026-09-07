@@ -1,7 +1,7 @@
 # Insight Agent Platform Engineering Rules
 
 These rules apply to the entire repository. They are durable engineering guardrails, not a second
-source of product truth. Machine-readable boundary contracts, database migrations, and owning Rust
+source of product truth. Machine-readable boundary contracts, the current database schema definition, and owning Rust
 types define current behaviour; accepted ADRs record durable architecture decisions. If code,
 documentation, tests, and an owning authority disagree, stop and repair the authority and
 cross-review before continuing.
@@ -27,7 +27,7 @@ cross-review before continuing.
 ## Contract workflow
 
 - Before changing a public, persistence, or process boundary, read its machine contract or owning
-  type, the relevant migration, linked ADRs, and the corresponding `docs/current` page.
+  type, the current schema definition, linked ADRs, and the corresponding `docs/current` page.
 - Update affected upstream machine contracts before downstream consumers. Architecture changes
   require an accepted ADR and a cross-review covering ownership, identities, schemas, errors,
   transactions, events, security, capacity, recovery, and test evidence.
@@ -44,9 +44,11 @@ cross-review before continuing.
   validated. Generate boundary representations from the owning type where practical.
 - Database constraints enforce structure and concurrency; do not duplicate the full business state
   machine in both application code and database triggers.
-- Migrations represent real physical schema changes. Once shipped, they are immutable and
-  forward-only. Never rewrite or delete shipped schema or production data without an explicit,
-  reviewed, and deployment-aware plan.
+- This architecture uses one current schema definition and fresh provisioning. Do not retain old
+  migration chains, payload readers, or data-conversion paths. A reset must target the explicitly
+  authorized database or workspace data; never discover and erase unrelated installations.
+- Provisioning owns DDL. Serving processes only verify the complete installed schema and refuse
+  incompatible structures; they never migrate or reset a database during startup.
 
 ## Delivery discipline
 

@@ -20,6 +20,61 @@ x-insight-trace-contract:
 servers:
   - url: /v1
 paths:
+  /agent-authoring-dependencies:
+    get:
+      operationId: discoverAgentAuthoringDependencies
+      summary: Discover current exact dependencies with separate contract and permission observations
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: current_domain_read_and_policy_read
+      parameters:
+        - {name: kind, in: query, required: true, schema: {type: string, enum: [model, capability, context, child_agent, skill]}}
+        - {name: environment, in: query, schema: {type: string, minLength: 1, maxLength: 64}}
+        - {name: interface_contract_digest, in: query, schema: {$ref: "#/components/schemas/Digest"}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+      responses:
+        "200":
+          description: Bounded current metadata; call_authorized is an observation, not an execution grant.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthoringDependencyPageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /agent-authoring-bindings:resolve:
+    post:
+      operationId: resolveAgentAuthoringBindings
+      summary: Resolve bounded author selections to exact logical binding inputs
+      description: This registered POST operation is a query. Gateway authentication, current per-item authorization and request bounds apply. It creates no Receipt, Job, Artifact or Event; callers cannot exempt other operations by supplying a flag. Active selectors are resolved once and never remain an execution fallback.
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: current_domain_read_and_policy_read
+      x-insight-maximum-request-bytes: 262144
+      x-insight-maximum-response-bytes: 1048576
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ResolveAgentBindingsRequestV1"}
+      responses:
+        "200":
+          description: One ordered resolution per requested slot; denied entries reveal no target identity or digest.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ResolveAgentBindingsResponseV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "413": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /agent-authoring-profile:
     get:
       operationId: getAgentAuthoringProfile
@@ -281,6 +336,108 @@ paths:
         "409": {$ref: "#/components/responses/ApiProblem"}
         "412": {$ref: "#/components/responses/ApiProblem"}
         "428": {$ref: "#/components/responses/ApiProblem"}
+  /recovery/run-history-holds:place:
+    post:
+      operationId: placeRunHistoryHold
+      summary: Place an auditable retention hold on an exact Run version
+      x-insight-component-role: management_api
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: history.hold.manage
+      x-insight-idempotency: tenant_principal_operation_target_scoped_receipt
+      x-insight-maximum-request-bytes: 4096
+      x-insight-deadline-milliseconds: 10000
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PlaceHistoryHoldRequestV1"}
+      responses:
+        "200":
+          description: Safe committed authority projection; the result ETag is a content identity and request expected versions remain the CAS authority.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecoveryResultV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "413": {description: The bounded request body exceeds the route limit.}
+        "500": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /recovery/run-history-holds:release:
+    post:
+      operationId: releaseRunHistoryHold
+      summary: Release one exact hold without replacing other holds
+      x-insight-component-role: management_api
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: history.hold.manage
+      x-insight-idempotency: tenant_principal_operation_target_scoped_receipt
+      x-insight-maximum-request-bytes: 4096
+      x-insight-deadline-milliseconds: 10000
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReleaseHistoryHoldRequestV1"}
+      responses:
+        "200":
+          description: Safe committed authority projection; the result ETag is a content identity and request expected versions remain the CAS authority.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecoveryResultV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "413": {description: The bounded request body exceeds the route limit.}
+        "500": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /recovery/mcp-pkce-cleanup:recover:
+    post:
+      operationId: recoverMcpPkceCleanup
+      summary: Create a fenced cleanup Job for an exact terminal Task generation
+      x-insight-component-role: management_api
+      x-insight-authentication: oidc_or_workload_credential
+      x-insight-permission: mcp.cleanup.recover
+      x-insight-idempotency: tenant_principal_operation_target_scoped_receipt
+      x-insight-maximum-request-bytes: 4096
+      x-insight-deadline-milliseconds: 10000
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RecoverPkceCleanupRequestV1"}
+      responses:
+        "200":
+          description: Safe committed authority projection; the result ETag is a content identity and request expected versions remain the CAS authority.
+          headers:
+            ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecoveryResultV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409": {$ref: "#/components/responses/ApiProblem"}
+        "413": {description: The bounded request body exceeds the route limit.}
+        "500": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /runs:
     get:
       operationId: listRuns
@@ -359,12 +516,124 @@ paths:
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/definition:
+    get:
+      operationId: getRunDefinition
+      summary: Read exact frozen definition references without disclosing source content
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+      responses:
+        "200":
+          description: Safe definition references from the current Run and exact deployment.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunDefinitionV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/children:
+    get:
+      operationId: listChildRuns
+      summary: Read safe child Run links from the current parent and Node authority
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+        - {name: node_id, in: query, required: false, schema: {$ref: "#/components/schemas/NodeExecutionId"}}
+        - {name: page_size, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, required: false, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+      responses:
+        "200":
+          description: A bounded ancestry page; no input, output or error body is disclosed.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ChildRunPageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/values:
+    get:
+      operationId: listRunValues
+      summary: List safe Run value metadata without reading bodies
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+        - {name: node_id, in: query, required: false, schema: {$ref: "#/components/schemas/NodeExecutionId"}}
+        - {name: page_size, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, required: false, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+      responses:
+        "200":
+          description: A bounded snapshot page; every continuation rechecks current authorization.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunValuePageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/values/{value_id}:
+    get:
+      operationId: getRunValueMetadata
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+        - {name: value_id, in: path, required: true, schema: {$ref: "#/components/schemas/RunValueId"}}
+      responses:
+        "200":
+          description: Exact authorized Run value projection.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunValueMetadataV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/values/{value_id}/content:
+    get:
+      operationId: getRunValueContent
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      x-insight-content-permission: artifact.read
+      x-insight-authorization-purpose: content_disclosure
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+        - {name: value_id, in: path, required: true, schema: {$ref: "#/components/schemas/RunValueId"}}
+      responses:
+        "200":
+          description: Exact authorized Run value projection.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunResultViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
   /runs/{run_id}/result:
     get:
       operationId: getRunResult
       summary: Read the typed output of a terminal Run
       tags: [Runs]
       x-insight-permission: runtime.read
+      x-insight-content-permission: artifact.read
+      x-insight-authorization-purpose: content_disclosure
       parameters:
         - $ref: "#/components/parameters/RunId"
       responses:
@@ -388,6 +657,8 @@ paths:
         Returns at most 128 ordered durable events and then closes the stream. Reconnect with the
         last received opaque SSE id in Last-Event-ID. The signed cursor is scoped to the current
         principal binding and Run, expires after 15 minutes, and is never an event authority.
+        A cursor below the durable replay floor returns nonretryable run_event_history_gap even
+        before expiry; consumers must not automatically reset it to an initial read.
       tags: [Runs]
       x-insight-permission: runtime.read
       x-insight-idempotency: read_only
@@ -405,6 +676,10 @@ paths:
           description: A finite ordered SSE page containing only closed public event projections.
           headers:
             Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+            x-insight-run-replay-floor: {schema: {type: integer, minimum: 0, maximum: 9007199254740991}}
+            x-insight-run-high-water: {schema: {type: integer, minimum: 0, maximum: 9007199254740991}}
+            x-insight-history-truncated: {schema: {type: boolean}}
+            Access-Control-Expose-Headers: {schema: {type: string, const: "x-insight-run-replay-floor, x-insight-run-high-water, x-insight-history-truncated"}}
           content:
             text/event-stream:
               schema:
@@ -417,6 +692,13 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
+        "409":
+          description: The durable replay floor is ahead of the requested cursor.
+          headers:
+            x-insight-run-replay-floor: {schema: {type: integer, minimum: 0, maximum: 9007199254740991}}
+          content:
+            application/problem+json:
+              schema: {$ref: "#/components/schemas/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
   /runs/{run_id}/signals/{signal_key}:
     post:
@@ -502,12 +784,69 @@ paths:
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+  /tasks:
+    get:
+      operationId: listTasks
+      summary: Read a bounded inbox using the selected current Task query authority
+      tags: [Tasks]
+      x-insight-operation-kind: query
+      x-insight-idempotency: read_only
+      x-insight-maximum-scanned-rows: 200
+      description: Signed cursors bind subject, current binding, filters and page size. An empty items page may still have next_cursor; consumers must continue from it.
+      parameters:
+        - {name: purpose, in: query, schema: {type: string, enum: [respondable, viewable], default: respondable}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: kind, in: query, schema: {type: string}}
+        - {name: run_id, in: query, schema: {$ref: "#/components/schemas/RunId"}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 25}}
+        - {name: cursor, in: query, schema: {$ref: "#/components/schemas/OpaqueListCursor"}}
+      responses:
+        "200":
+          description: Safe metadata for eligible Tasks; next_cursor follows the last scanned row.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaskListPageV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /tasks/{task_id}/form:
+    get:
+      operationId: getTaskForm
+      summary: Read the frozen actual schema after current content and responder authorization
+      tags: [Tasks]
+      x-insight-operation-kind: query
+      x-insight-content-permission: artifact.read
+      x-insight-authorization-purpose: content_disclosure
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Exact immutable Task schema and generation/version binding.
+          headers:
+            ETag: {description: Matches the validated Task version in the response body., schema: {type: string, minLength: 1, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaskFormV2"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "409":
+          description: task_form_unavailable; this Task has no frozen form and clients must not invent one.
+          content:
+            application/problem+json:
+              schema: {$ref: "#/components/schemas/ApiProblem"}
   /tasks/{task_id}:
     get:
       operationId: getTask
       summary: Read a safe authorized Task projection
       tags: [Tasks]
       parameters:
+        - {name: purpose, in: query, schema: {type: string, enum: [respondable, viewable], default: respondable}}
         - $ref: "#/components/parameters/TaskId"
       responses:
         "200":
@@ -517,7 +856,8 @@ paths:
             Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/TaskViewV1"}
+              schema: {$ref: "#/components/schemas/TaskViewV2"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
@@ -590,6 +930,11 @@ paths:
     post:
       operationId: prepareArtifactUpload
       summary: Prepare a server-owned staging Artifact and short-lived upload target
+      description: >-
+        A Receipt replay can issue a target only for its original, still-live staging
+        Artifact, Blob, Grant and Job within the original upload deadline. A completed
+        or otherwise non-uploadable attempt returns artifact_conflict (412); replay
+        never grants PUT access to a deduplicated Ready Blob.
       tags: [Artifacts]
       x-insight-authentication: oidc_or_workload_credential
       x-insight-permission: artifact.write
@@ -603,7 +948,7 @@ paths:
             schema: {$ref: "#/components/schemas/PrepareArtifactUploadRequestV1"}
       responses:
         "201":
-          description: Staging Artifact, shared verification Job, Grant, and secret-bearing target.
+          description: Original live staging Artifact, shared verification Job, Grant, and secret-bearing target.
           headers:
             Location: {schema: {type: string, pattern: "^/v1/artifacts/art_"}}
             ETag: {schema: {type: string, minLength: 1, maxLength: 128}}
@@ -615,6 +960,7 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "409": {$ref: "#/components/responses/ApiProblem"}
+        "412": {$ref: "#/components/responses/ApiProblem"}
         "413": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
   /artifacts/{artifact_id}:
@@ -646,6 +992,13 @@ paths:
     post:
       operationId: completeArtifactUpload
       summary: Verify the current provider generation and schedule the frozen scan
+      description: >-
+        Request identity binds the Artifact, original If-Match and completion proof.
+        After current authorization, an existing successful complete-and-scan Receipt
+        replays the original Artifact and Job identities with current safe metadata
+        and ETag, without object I/O, another scan or another quota settlement.
+        Retained success is recognized after the original upload deadline and Blob
+        deduplication. Fresh requests retain the normal CAS, grant and deadline checks.
       tags: [Artifacts]
       x-insight-authentication: oidc_or_workload_credential
       x-insight-permission: artifact.write
@@ -1172,7 +1525,7 @@ components:
         Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
       content:
         application/json:
-          schema: {$ref: "#/components/schemas/TaskViewV1"}
+          schema: {$ref: "#/components/schemas/TaskViewV2"}
   headers:
     TraceId:
       required: true
@@ -1270,8 +1623,9 @@ components:
     ResourceViewV1:
       type: object
       additionalProperties: false
-      required: [schema_version, resource_id, resource_kind, lifecycle_state, gate_state, draft_generation, version, draft, etag]
+      required: [schema_version, resource_id, resource_kind, lifecycle_state, gate_state, draft_generation, version, draft, etag, active_deployment_id]
       properties:
+        active_deployment_id: {oneOf: [{$ref: "#/components/schemas/PublicManagementDeploymentId"}, {type: "null"}]}
         schema_version: {const: 1}
         resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
         resource_kind: {$ref: "#/components/schemas/PublicManagementResourceKind"}
@@ -1455,13 +1809,13 @@ components:
             slots:
               type: array
               maxItems: 512
-              items: {$ref: "#/components/schemas/FrozenSlotBindingInputV1"}
+              items: {$ref: "#/components/schemas/AgentSlotBindingInputV1"}
             policies:
               type: array
               maxItems: 64
               items: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
             execution_profile: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
-    FrozenSlotBindingInputV1:
+    AgentSlotBindingInputV1:
       type: object
       additionalProperties: false
       required: [slot_id, requirement_digest, target]
@@ -1494,6 +1848,9 @@ components:
     RunId:
       type: string
       pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    NodeExecutionId:
+      type: string
+      pattern: "^nod_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     RunValueId:
       type: string
       pattern: "^val_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -1505,7 +1862,7 @@ components:
       enum: [draft, validating, publishing, ready, blocked]
     AgentRequiredFeature:
       type: string
-      enum: [model]
+      enum: [model, context, remote-capability, mcp, sandbox]
     PublicRunState:
       type: string
       enum: [queued, running, waiting, cancelling, succeeded, failed, cancelled, timed_out]
@@ -1553,6 +1910,190 @@ components:
         alias: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
         deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
         selection_policy: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
+    AuthoringDeploymentSelectorV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, deployment]
+          properties:
+            kind: {const: exact}
+            deployment: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+        - type: object
+          additionalProperties: false
+          required: [kind, resource_id, environment]
+          properties:
+            kind: {const: active}
+            resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+            environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]*$"}
+    AuthoringSlotTargetV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, candidates, selection_policy]
+          properties:
+            kind: {const: model}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+        - type: object
+          additionalProperties: false
+          required: [kind, candidates, selection_policy, tool_alias]
+          properties:
+            kind: {const: capability}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+            tool_alias: {type: [string, "null"], minLength: 1, maxLength: 128}
+        - type: object
+          additionalProperties: false
+          required: [kind, candidates, selection_policy]
+          properties:
+            kind: {const: child_agent}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+        - type: object
+          additionalProperties: false
+          required: [kind, candidates, selection_policy]
+          properties:
+            kind: {const: skill}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
+        - type: object
+          additionalProperties: false
+          required: [kind, deployment, consistency, allowed_projection, authorization_policy, ranking_policy]
+          properties:
+            kind: {const: context}
+            deployment: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}
+            consistency: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/consistency"}
+            allowed_projection: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/allowed_projection"}
+            authorization_policy: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/authorization_policy"}
+            ranking_policy: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/ranking_policy"}
+    ResolveAgentBindingsRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, slots]
+      properties:
+        schema_version: {const: 1}
+        slots:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [slot_id, requirement_digest, interface_contract_digest, target]
+            properties:
+              slot_id: {type: string, minLength: 1, maxLength: 128}
+              requirement_digest: {$ref: "#/components/schemas/Digest"}
+              interface_contract_digest: {oneOf: [{$ref: "#/components/schemas/Digest"}, {type: "null"}]}
+              target: {$ref: "#/components/schemas/AuthoringSlotTargetV1"}
+    ResolveAgentBindingsResponseV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, slots]
+      properties:
+        schema_version: {const: 1}
+        slots:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [slot_id, resolution]
+            properties:
+              slot_id: {type: string, minLength: 1, maxLength: 128}
+              resolution:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required: [kind, binding, observed_contract_digests, contract_match, call_authorized, deployment_features]
+                    properties:
+                      kind: {const: resolved}
+                      binding: {$ref: "#/components/schemas/AgentSlotBindingInputV1"}
+                      observed_contract_digests: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/Digest"}}
+                      contract_match: {type: [boolean, "null"]}
+                      call_authorized: {type: boolean}
+                      deployment_features: {type: array, maxItems: 16, items: {$ref: "#/components/schemas/AgentDeploymentFeaturesV1"}}
+                  - type: object
+                    additionalProperties: false
+                    required: [kind, code]
+                    properties:
+                      kind: {const: rejected}
+                      code: {type: string, enum: [invalid, denied, not_found, disabled, contract_mismatch, unavailable]}
+    AgentDeploymentFeaturesV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, deployment, interface_contract_digest, required_features]
+      properties:
+        schema_version: {const: 1}
+        deployment: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+        interface_contract_digest: {$ref: "#/components/schemas/Digest"}
+        required_features: {type: array, maxItems: 16, uniqueItems: true, items: {$ref: "#/components/schemas/AgentRequiredFeature"}}
+    AuthoringDependencyV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, kind, resource_id, environment, deployment, interface_contract_digest, contract_match, call_authorized]
+      properties:
+        schema_version: {const: 1}
+        kind: {type: string, enum: [model, capability, context, child_agent, skill]}
+        resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
+        environment: {type: string, minLength: 1, maxLength: 64}
+        deployment: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+        interface_contract_digest: {$ref: "#/components/schemas/Digest"}
+        contract_match: {type: [boolean, "null"]}
+        call_authorized: {type: boolean}
+    AuthoringDependencyPageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/AuthoringDependencyV1"}}
+        next_cursor: {oneOf: [{$ref: "#/components/schemas/OpaqueListCursor"}, {type: "null"}]}
+    ChildRunPageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/ChildRunViewV1"}}
+        next_cursor: {oneOf: [{$ref: "#/components/schemas/OpaqueListCursor"}, {type: "null"}]}
+    ChildRunViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, parent_run_id, parent_node_id, parent_plan_node_key, child_run_id, child_agent_deployment, child_state, child_version, input_value_id, output_value_id, created_at]
+      properties:
+        schema_version: {const: 1}
+        parent_run_id: {$ref: "#/components/schemas/RunId"}
+        parent_node_id: {$ref: "#/components/schemas/NodeExecutionId"}
+        parent_plan_node_key: {type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"}
+        child_run_id: {$ref: "#/components/schemas/RunId"}
+        child_agent_deployment: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+        child_state: {$ref: "#/components/schemas/PublicRunState"}
+        child_version: {type: integer, minimum: 1, maximum: 9007199254740991}
+        input_value_id: {$ref: "#/components/schemas/RunValueId"}
+        output_value_id: {oneOf: [{$ref: "#/components/schemas/RunValueId"}, {type: "null"}]}
+        created_at: {$ref: "#/components/schemas/UtcTimestamp"}
+    RunValuePageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/RunValueMetadataV1"}}
+        next_cursor: {oneOf: [{$ref: "#/components/schemas/OpaqueListCursor"}, {type: "null"}]}
+    RunValueMetadataV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, value_id, node_id, classification, schema_digest, content_digest, storage_kind]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        value_id: {$ref: "#/components/schemas/RunValueId"}
+        node_id: {oneOf: [{$ref: "#/components/schemas/NodeExecutionId"}, {type: "null"}]}
+        classification: {$ref: "#/components/schemas/DataClassification"}
+        schema_digest: {$ref: "#/components/schemas/Digest"}
+        content_digest: {$ref: "#/components/schemas/Digest"}
+        storage_kind: {type: string, enum: [inline, artifact]}
     AgentAuthoringProfileV1:
       type: object
       additionalProperties: false
@@ -1570,12 +2111,16 @@ components:
     AgentSummaryV1:
       type: object
       additionalProperties: false
-      required: [schema_version, name, display_name, agent_id, state, environment, updated_at, published_at, required_features, latest_run_state]
+      required: [schema_version, name, display_name, agent_id, active_deployment, state, environment, updated_at, published_at, required_features, latest_run_state]
       properties:
         schema_version: {const: 1}
         name: {type: string, minLength: 1, maxLength: 63, pattern: "^[a-z][a-z0-9-]{0,62}$"}
         display_name: {type: string, minLength: 1, maxLength: 255}
         agent_id: {$ref: "#/components/schemas/AgentId"}
+        active_deployment:
+          oneOf:
+            - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+            - {type: "null"}
         state: {$ref: "#/components/schemas/AgentProductState"}
         environment:
           oneOf:
@@ -1680,11 +2225,90 @@ components:
           properties:
             kind: {const: artifact}
             artifact: {$ref: "#/components/schemas/ArtifactRef"}
+    PlaceHistoryHoldRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, expected_run_version, reason_evidence_digest]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        expected_run_version: {type: integer, minimum: 1, maximum: 9007199254740991}
+        reason_evidence_digest: {$ref: "#/components/schemas/Digest"}
+    ReleaseHistoryHoldRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, expected_run_version, hold_key, release_evidence_digest]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        expected_run_version: {type: integer, minimum: 1, maximum: 9007199254740991}
+        hold_key: {$ref: "#/components/schemas/Digest"}
+        release_evidence_digest: {$ref: "#/components/schemas/Digest"}
+    RecoverPkceCleanupRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, task_id, expected_task_version, expected_task_generation, previous_job_id, attempt_limit, recovery_evidence_digest]
+      properties:
+        schema_version: {const: 1}
+        task_id: {$ref: "#/components/schemas/TaskId"}
+        expected_task_version: {type: integer, minimum: 1, maximum: 9007199254740991}
+        expected_task_generation: {type: integer, minimum: 1, maximum: 9007199254740991}
+        previous_job_id: {$ref: "#/components/schemas/JobId"}
+        attempt_limit: {type: integer, minimum: 1, maximum: 8}
+        recovery_evidence_digest: {$ref: "#/components/schemas/Digest"}
+    RunHistoryHoldsV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, holds]
+      properties:
+        schema_version: {const: 1}
+        holds:
+          type: object
+          maxProperties: 32
+          propertyNames: {$ref: "#/components/schemas/Digest"}
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            required: [reason_evidence_digest, placed_by, placed_at]
+            properties:
+              reason_evidence_digest: {$ref: "#/components/schemas/Digest"}
+              placed_by: {type: string, pattern: "^prn_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+              placed_at: {$ref: "#/components/schemas/UtcTimestamp"}
+    RecoveryResultV1:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, schema_version, hold_key, current]
+          properties:
+            kind: {const: history_hold}
+            schema_version: {const: 1}
+            hold_key: {$ref: "#/components/schemas/Digest"}
+            current:
+              type: object
+              additionalProperties: false
+              required: [run_id, run_version, holds]
+              properties:
+                run_id: {$ref: "#/components/schemas/RunId"}
+                run_version: {type: integer, minimum: 1, maximum: 9007199254740991}
+                holds: {$ref: "#/components/schemas/RunHistoryHoldsV1"}
+        - type: object
+          additionalProperties: false
+          required: [kind, schema_version, task_id, cleanup_job_id]
+          properties:
+            kind: {const: pkce_cleanup}
+            schema_version: {const: 1}
+            task_id: {$ref: "#/components/schemas/TaskId"}
+            cleanup_job_id: {$ref: "#/components/schemas/JobId"}
     CreateRunRequestV1:
       type: object
       additionalProperties: false
       required: [agent_id, input, deadline]
       properties:
+        expected_agent_deployment:
+          description: Optional exact active-head condition for new admission; Receipt replay keeps the committed Run.
+          oneOf:
+            - {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+            - {type: "null"}
         agent_id: {$ref: "#/components/schemas/AgentId"}
         input:
           type: object
@@ -1714,6 +2338,17 @@ components:
             - {$ref: "#/components/schemas/ContextDatasetId"}
             - {type: "null"}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+    RunDefinitionV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, agent_id, agent_deployment, agent_interface, plan]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        agent_id: {$ref: "#/components/schemas/AgentId"}
+        agent_deployment: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}
+        agent_interface: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactVersionRef"}
+        plan: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactVersionRef"}
     RunViewV1:
       type: object
       additionalProperties: false
@@ -1766,6 +2401,36 @@ components:
         classification: {$ref: "#/components/schemas/DataClassification"}
         schema_digest: {$ref: "#/components/schemas/Digest"}
         value: {$ref: "#/components/schemas/ValueRef"}
+    TaskListPageV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, items, next_cursor]
+      properties:
+        schema_version: {type: integer, const: 1}
+        items: {type: array, maxItems: 50, items: {$ref: "#/components/schemas/TaskViewV2"}}
+        next_cursor: {oneOf: [{$ref: "#/components/schemas/OpaqueListCursor"}, {type: "null"}]}
+    TaskFormV2:
+      type: object
+      additionalProperties: false
+      required: [schema_version, task_id, generation, version, response_schema, response_schema_digest, etag, safe_prompt_key, allowed_actions]
+      properties:
+        schema_version: {type: integer, const: 2}
+        allowed_actions: {type: array, maxItems: 4, uniqueItems: true, items: {$ref: "#/components/schemas/TaskAction"}}
+        etag: {type: string, minLength: 1, maxLength: 128}
+        safe_prompt_key: {type: string, minLength: 1, maxLength: 128}
+        task_id: {$ref: "#/components/schemas/TaskId"}
+        generation: {type: integer, minimum: 1, maximum: 9007199254740991}
+        version: {type: integer, minimum: 1, maximum: 9007199254740991}
+        response_schema:
+          type: object
+          additionalProperties: false
+          required: [schema_version, profile, schema, canonical_digest]
+          properties:
+            schema_version: {type: integer, const: 1}
+            profile: {type: string, enum: [insight.closed-json-schema/1, mcp.form-json-schema/2025-11-25]}
+            schema: {type: object}
+            canonical_digest: {$ref: "#/components/schemas/Digest"}
+        response_schema_digest: {$ref: "#/components/schemas/Digest"}
     SubmitTaskInputV1:
       type: object
       additionalProperties: false
@@ -1774,17 +2439,21 @@ components:
         classification: {$ref: "#/components/schemas/DataClassification"}
         schema_digest: {$ref: "#/components/schemas/Digest"}
         value: {$ref: "#/components/schemas/ValueRef"}
-    TaskViewV1:
+    TaskAction:
+      type: string
+      enum: [submit_input, approve, reject, cancel]
+    TaskViewV2:
       type: object
       additionalProperties: false
-      required: [schema_version, task_id, task_kind, state, generation, version, safe_prompt_key, response_schema_digest, owner, deadline, responded_at, created_at, updated_at, etag]
+      required: [schema_version, task_id, task_kind, state, generation, version, safe_prompt_key, response_schema_digest, owner, deadline, responded_at, created_at, updated_at, etag, allowed_actions]
       properties:
-        schema_version: {const: 1}
+        schema_version: {const: 2}
+        allowed_actions: {type: array, maxItems: 4, uniqueItems: true, items: {$ref: "#/components/schemas/TaskAction"}}
         task_id: {$ref: "#/components/schemas/TaskId"}
         task_kind: {type: string, enum: [approval, interaction_form, interaction_url_consent, interaction_business_input, external_authorization, human_work]}
         state: {type: string, enum: [pending, responded, declined, approved, rejected, cancelled, expired]}
-        generation: {type: integer, minimum: 1}
-        version: {type: integer, minimum: 1}
+        generation: {type: integer, minimum: 1, maximum: 9007199254740991}
+        version: {type: integer, minimum: 1, maximum: 9007199254740991}
         safe_prompt_key: {type: string, minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9_.-]*$"}
         response_schema_digest: {oneOf: [{$ref: "#/components/schemas/Digest"}, {type: "null"}]}
         owner:
@@ -1801,6 +2470,10 @@ components:
               additionalProperties: false
               required: [kind, artifact_id]
               properties: {kind: {const: artifact}, artifact_id: {$ref: "#/components/schemas/ArtifactId"}}
+            - type: object
+              additionalProperties: false
+              required: [kind, authorization_binding_id]
+              properties: {kind: {const: mcp_authorization}, authorization_binding_id: {$ref: "#/components/schemas/PlatformResourceId"}}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
         responded_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
         created_at: {$ref: "#/components/schemas/UtcTimestamp"}
