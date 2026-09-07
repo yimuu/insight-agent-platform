@@ -518,6 +518,15 @@ jobs:
             )
           fi
           tools/qualification/run-productization-journey.sh "${arguments[@]}"
+      - name: Capture bounded Kind scheduling diagnostics
+        if: ${{ always() && env.INSIGHT_KIND_CLUSTER_NAME != '' }}
+        run: |
+          if [[ -f "$INSIGHT_KIND_KUBECONFIG" ]]; then
+            python3 tools/qualification/collect-kind-diagnostics.py \
+              --kubeconfig "$INSIGHT_KIND_KUBECONFIG" \
+              --context "kind-$INSIGHT_KIND_CLUSTER_NAME" \
+              --output "$RUNNER_TEMP/productization-kind-diagnostics.json"
+          fi
       - name: Always clean the exact seed project and volumes
         if: ${{ always() && env.PRODUCTIZATION_SEED_IDENTITY != '' }}
         run: |
@@ -535,6 +544,7 @@ jobs:
           path: |
             ${{ runner.temp }}/productization-runtime-logs/*.log
             ${{ runner.temp }}/productization-seed-logs/*.log
+            ${{ runner.temp }}/productization-kind-diagnostics.json
             ${{ runner.temp }}/productization-kind/environment.json
             ${{ runner.temp }}/productization-opensandbox-evidence.json
           if-no-files-found: warn

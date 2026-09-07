@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -72,9 +73,9 @@ class KindConfigurationTests(unittest.TestCase):
         (runtime / 'run-event-cursor-key').write_bytes(b'dedicated Kind render fixture cursor')
         return runtime, binaries
 
-    def generate(self, directory, runtime, binaries):
+    def generate(self, directory, runtime, binaries, prepare=PREPARE):
         output = directory / 'generated'
-        command = ['ruby', str(PREPARE), '--seed-runtime', str(runtime), '--worker-binaries', str(binaries),
+        command = ['ruby', str(prepare), '--seed-runtime', str(runtime), '--worker-binaries', str(binaries),
                    '--qualification-tool', str(self.tool), '--output', str(output), '--git-commit', 'c' * 40,
                    '--platform-image-digest', 'sha256:' + 'a' * 64, '--platform-image-repository', 'example.invalid/runtime',
                    '--sandbox-runner-image-digest', 'sha256:' + 'b' * 64, '--sandbox-runner-image-repository', 'example.invalid/runner',
@@ -138,6 +139,153 @@ class KindConfigurationTests(unittest.TestCase):
                 if values == 'registry':
                     self.assertIn('insight-platform-registry-validation-artifact-client-tls', rendered)
                     self.assertIn('https://insight-platform-artifact-gateway.platform-artifacts.svc.cluster.local:8080', rendered)
+
+    def test_complete_kind_closure_fits_development_cpu_budget(self):
+        charts = {
+            'artifact': 'artifact', 'callback': 'callback-api',
+            'capability-native': 'capability-native-worker', 'capability-remote': 'capability-remote-worker',
+            'context': 'context-worker', 'gateway': 'gateway', 'mcp': 'mcp-host',
+            'mcp-cleanup': 'mcp-cleanup-worker', 'model': 'model-worker', 'outbox': 'outbox-worker',
+            'history': 'history-maintenance', 'orchestration': 'orchestration-worker',
+            'registry': 'registry-validation-worker', 'remote-context': 'remote-context-worker',
+            'security': 'security-egress', 'sandbox': 'sandbox',
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runtime, binaries = self.seed(directory)
+            result, output = self.generate(directory, runtime, binaries)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            total_cpu = 0
+            largest_surge = 0
+            busiest_worker = 0
+            resource_profile = json.loads((ROOT / 'deploy/kind/workload-resources.json').read_text())
+            self.assertEqual({path.stem for path in (output / 'helm-values').glob('*.yaml')}, set(charts))
+            identity = {'schema_version': 1, 'profile': 'kind-local-mechanics', 'git_commit': 'c' * 40,
+                        'platform_image_repository': 'example.invalid/runtime', 'platform_image_digest': 'sha256:' + 'a' * 64,
+                        'sandbox_runner_image_repository': 'example.invalid/runner', 'sandbox_runner_image_digest': 'sha256:' + 'b' * 64,
+                        'configuration_digests': json.loads((output / 'digests.json').read_text()),
+                        'resource_profile': resource_profile}
+            expected_digest = 'sha256:' + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            self.assertEqual(json.loads((output / 'local-workload-candidate.json').read_text())['deployment_config_digest'], expected_digest)
+
+            def millicores(request):
+                request = str(request)
+                return int(request[:-1]) if request.endswith('m') else int(float(request) * 1000)
+
+            def remove_cpu_overrides(value):
+                if isinstance(value, dict):
+                    return {key: remove_cpu_overrides(item) for key, item in value.items()
+                            if key != 'resources'}
+                return value
+
+            def normalize_cpu(document):
+                normalized = copy.deepcopy(document)
+                pod = normalized['spec']['template']['spec']
+                for container in pod.get('containers', []) + pod.get('initContainers', []):
+                    container.get('resources', {}).get('requests', {}).pop('cpu', None)
+                return normalized
+
+            for values, chart in charts.items():
+                release_surge = 0
+                chart_path = str(ROOT / 'deploy/helm' / ('insight-platform-' + chart))
+                values_path = output / 'helm-values' / (values + '.yaml')
+                rendered = subprocess.check_output(['helm', 'template', 'kind-test', chart_path,
+                    '--values', str(values_path)], text=True)
+                original_values = yaml_documents(values_path.read_text())[0]
+                baseline_path = directory / 'baseline.json'
+                baseline_path.write_text(json.dumps(remove_cpu_overrides(original_values)))
+                baseline_docs = yaml_documents(subprocess.check_output(['helm', 'template', 'kind-test', chart_path,
+                    '--values', str(baseline_path)], text=True))
+                baseline = {doc['metadata']['name']: doc for doc in baseline_docs if doc and doc['kind'] == 'Deployment'}
+                docs = yaml_documents(rendered)
+                hpa_bounds = {doc['spec']['scaleTargetRef']['name']: doc['spec']['maxReplicas']
+                              for doc in docs if doc and doc['kind'] == 'HorizontalPodAutoscaler'}
+                for doc in docs:
+                    if not doc or doc['kind'] != 'Deployment':
+                        continue
+                    pod = doc['spec']['template']['spec']
+                    self.assertEqual(normalize_cpu(doc), normalize_cpu(baseline[doc['metadata']['name']]))
+                    application_cpu = sum(millicores(container['resources']['requests']['cpu']) for container in pod['containers'])
+                    restartable = 0
+                    init_peak = 0
+                    for container in pod.get('initContainers', []):
+                        request = millicores(container.get('resources', {}).get('requests', {}).get('cpu', '0'))
+                        if container.get('restartPolicy') == 'Always':
+                            restartable += request
+                            init_peak = max(init_peak, restartable)
+                        else:
+                            init_peak = max(init_peak, restartable + request)
+                    cpu = max(application_cpu + restartable, init_peak)
+                    replicas = max(doc['spec']['replicas'], hpa_bounds.get(doc['metadata']['name'], 0))
+                    if values != 'sandbox':
+                        self.assertEqual(replicas, 2)
+                        spreads = any(constraint['topologyKey'] == 'topology.kubernetes.io/zone' and
+                                      constraint['whenUnsatisfiable'] == 'DoNotSchedule' and constraint['maxSkew'] == 1
+                                      for constraint in pod.get('topologySpreadConstraints', []))
+                        busiest_worker += cpu if spreads else cpu * replicas
+                        self.assertTrue(all(millicores(container['resources']['requests']['cpu']) ==
+                                            resource_profile['rust_service_cpu_request_millicores'] for container in pod['containers']))
+                    else:
+                        busiest_worker += cpu * replicas
+                    total_cpu += cpu * replicas
+                    surge = doc['spec'].get('strategy', {}).get('rollingUpdate', {}).get('maxSurge', '25%')
+                    surge = (replicas * int(surge[:-1]) + 99) // 100 if str(surge).endswith('%') else int(surge)
+                    release_surge += cpu * surge
+                # A Helm release can roll its multiple Deployments concurrently.
+                largest_surge = max(largest_surge, release_surge)
+            self.assertLessEqual(resource_profile['maximum_steady_platform_cpu_millicores'], 3000)
+            self.assertLessEqual(total_cpu, resource_profile['maximum_steady_platform_cpu_millicores'])
+            # Read the actual owning physical fixtures: the provider core holds two candidates
+            # together; the domain journey can hold one larger candidate. execd is an ordinary
+            # init container, so its request takes the Pod maximum rather than an extra sum.
+            def fixture_cpu(path):
+                source = path.read_text()
+                match = re.search(r'fn resource_limits\(\).*?cpu_millicores:\s*([0-9_]+)', source, re.S)
+                self.assertIsNotNone(match)
+                return int(match.group(1).replace('_', ''))
+            domain_cpu = fixture_cpu(ROOT / 'tests/qualification/tests/phase3_opensandbox.rs')
+            provider_cpu = fixture_cpu(ROOT / 'crates/adapters/platform-opensandbox-client/tests/kubernetes_l3.rs')
+            sandbox_values = yaml_documents((ROOT / 'deploy/helm/insight-platform-sandbox/values.yaml').read_text())[0]
+            init_cpu = millicores(sandbox_values['server']['execdInitResources']['requests']['cpu'])
+            sandbox_peak = max(domain_cpu, init_cpu, 2 * max(provider_cpu, init_cpu))
+            dependency_cpu = 0
+            for doc in yaml_documents((ROOT / 'deploy/kind/dependencies.yaml').read_text()):
+                if not doc or doc['kind'] != 'Deployment':
+                    continue
+                pod = doc['spec']['template']['spec']
+                self.assertEqual(pod['nodeSelector'], {'node-role.kubernetes.io/control-plane': ''})
+                dependency_cpu += sum(millicores(container['resources']['requests']['cpu']) for container in pod['containers']) * doc['spec']['replicas']
+            cluster = yaml_documents((ROOT / 'deploy/kind/cluster.yaml').read_text())[0]
+            workers = sum(node['role'] == 'worker' for node in cluster['nodes'])
+            self.assertEqual(workers, 2)
+            # The two virtual workers each report the same four-CPU CI host. These checks prove
+            # Kubernetes scheduling headroom only, not eight physical cores or host performance.
+            self.assertLessEqual(total_cpu + largest_surge + dependency_cpu + 500 + sandbox_peak, workers * 4000)
+            self.assertLessEqual(busiest_worker + largest_surge + 500 + sandbox_peak, 4000)
+
+    def test_kind_resource_input_is_bounded_unique_and_closed(self):
+        profile = (ROOT / 'deploy/kind/workload-resources.json').read_text()
+        cases = [
+            (profile.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1'), 'duplicate'),
+            (profile + ' ' * 4096, 'byte limit'),
+            (profile.replace('"schema_version": 1', '"schema_version": 1.0'), 'invalid'),
+            (profile.replace('"schema_version": 1', '"unexpected": true, "schema_version": 1'), 'invalid'),
+        ]
+        for source, error in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                runtime, binaries = self.seed(directory)
+                isolated = directory / 'isolated'
+                prepare = isolated / 'tools/qualification/prepare.rb'
+                prepare.parent.mkdir(parents=True)
+                prepare.write_bytes(PREPARE.read_bytes())
+                resource = isolated / 'deploy/kind/workload-resources.json'
+                resource.parent.mkdir(parents=True)
+                resource.write_text(source)
+                (isolated / 'deploy/helm').symlink_to(ROOT / 'deploy/helm', target_is_directory=True)
+                result, _ = self.generate(directory, runtime, binaries, prepare)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
 
     def test_missing_binary_or_old_manifest_fails_closed(self):
         for mutation in ('missing', 'old'):

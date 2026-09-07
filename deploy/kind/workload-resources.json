@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "rust_service_cpu_request_millicores": 50,
+  "maximum_steady_platform_cpu_millicores": 3000
+}

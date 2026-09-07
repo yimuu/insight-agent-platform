@@ -185,6 +185,8 @@ python3 tools/release/platform-recovery.py verify --set verified-recovery-set \
 
 `tools/qualification/bootstrap-platform-kind-local.sh` 创建新的隔离 Kind 环境。输入包括 exact OCI archives、CLI seed 配置以及预构建的 `platform-schema`、`platform-database-role`、`platform-jetstream-provision` 和 `platform-qualification`。生成器读取已验证镜像内的实际 worker bytes，通过 owning catalog 验证本地配置；Sandbox chart 必须收到完整 WorkerManifest，不能依赖默认身份。Management 与 Runtime 共用 Gateway 的 Artifact mTLS Secret，Registry 使用独立受限客户端 Secret。
 
+[开发资源输入](../../deploy/kind/workload-resources.json)单独降低 Rust 服务的 CPU 预留，并进入本地部署身份。内存、limits、双副本与安全配置仍来自各 owning chart。完整渲染检查开发调度预算，实际运行是否存在 CPU 饱和、内存压力或恢复问题仍以动态验收为准。
+
 开发初始化在同一事务内建立租户与真实 Scheduling Policy 绑定，初始任务可以直接进入正常领取流程。重复启动只核验当前绑定，保留调度额度与进度；合法的后续策略改绑可继续使用。绑定缺失或漂移会拒绝启动，需要通过拥有域诊断，不能依赖 worker 或启动工具自动修补。
 
 Outbox、History、Security Authority 与 Artifact 的四个 pool 各用已有 owning grants 的独立数据库角色。Artifact 四角色在同一事务中初始化；其他尚无独立 grants 的本地角色仍使用测试 owner，不能据此声明全生产最小权限资格。初始化工具只允许固定本地或固定 Kind loopback 数据库配置，权限来自 PostgreSQL owner 的 grants。JetStream 使用独立初始化证书创建 owning stream，publisher 仅发布安全通知；本地持久卷保留 Pod 重建前的流数据。Kind 的 PVC 不构成生产备份或跨集群恢复承诺。
