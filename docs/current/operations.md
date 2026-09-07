@@ -57,6 +57,7 @@ Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用�
 
 ## 发行与生产
 
+0.x 版本由 GitHub Release 标记为开发预览，不替换稳定版 latest；签名、内容身份与真实资格门槛仍完整执行。
 受保护 tag workflow 构建四个平台 CLI archive、runtime/fixed Sandbox runner/Console与official OpenSandbox image闭包、checksum、SPDX SBOM、
 SLSA provenance、签名与 canonical ReleaseBundle。资产不可覆盖，修复必须发布新版本。未实际执行的跨架构、push/sign 或
 performance 项必须保留 Not run，不能由本机结果推断。
