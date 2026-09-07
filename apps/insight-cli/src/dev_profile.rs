@@ -145,6 +145,22 @@ impl DevProfile {
         self.from_source
     }
 
+    /// Runtime binaries are executed by the host supervisor. CLI archive support does not
+    /// imply that a Linux image's extracted executables can run on another operating system.
+    pub(super) fn validate_host(self, os: &str, arch: &str) -> Result<(), String> {
+        let supported_arch = matches!(arch, "x86_64" | "aarch64");
+        if supported_arch && (os == "linux" || (self.from_source && os == "macos")) {
+            return Ok(());
+        }
+        if self.from_source {
+            Err(format!("source runtime is unavailable on {os}/{arch}"))
+        } else {
+            Err(format!(
+                "prebuilt runtime is unavailable on {os}/{arch}; use a supported Linux host, or run `insight dev --from-source` from a repository checkout on macOS"
+            ))
+        }
+    }
+
     pub const fn has_features(self) -> bool {
         self.features != 0
     }
@@ -290,5 +306,25 @@ mod tests {
         let model = DevProfile::parse(Some("model"), false, false).unwrap();
         assert!(model.includes_role("model-worker"));
         assert!(model.includes_role("security-authority"));
+    }
+
+    #[test]
+    fn host_support_distinguishes_cli_archives_from_runtime_executables() {
+        for arch in ["x86_64", "aarch64"] {
+            for offline in [false, true] {
+                let prebuilt = DevProfile::parse(Some("all"), offline, false).unwrap();
+                assert!(prebuilt.validate_host("linux", arch).is_ok());
+                assert!(prebuilt.validate_host("macos", arch).is_err());
+            }
+            for os in ["linux", "macos"] {
+                assert!(DevProfile::source_starter().validate_host(os, arch).is_ok());
+            }
+        }
+        for (os, arch) in [("windows", "x86_64"), ("linux", "s390x"), ("macos", "arm")] {
+            assert!(DevProfile::starter().validate_host(os, arch).is_err());
+            assert!(DevProfile::source_starter()
+                .validate_host(os, arch)
+                .is_err());
+        }
     }
 }

@@ -6,8 +6,9 @@ Insight Agent Platform 是面向关键业务 Agent 的高保证 durable executio
 
 ## 四条命令完成首次 Run
 
-安装与本机架构匹配的官方签名 `insight` CLI 后，只需 Docker Engine 与 Docker Compose v2；普通用户不需要 Rust、
-Node.js、Kubernetes 或数据库客户端。
+以下预构建启动适用于 Linux x86_64/ARM64。安装匹配的官方签名 `insight` CLI 后，只需 Docker Engine 与 Docker Compose v2；
+普通用户不需要 Rust、Node.js、Kubernetes 或数据库客户端。macOS CLI 可安装，但本地服务须在仓库 checkout 中显式
+使用下方的 `--from-source` 入口，并安装 Rust 工具链。
 
 ```bash
 insight init --path ./my-agent --name my-agent
@@ -44,8 +45,8 @@ insight doctor --json
 `update apply` 只原子安装已签名的 exact CLI，不会隐式改写现有 project runtime；随后先以原 feature 集合运行
 `insight stop && insight dev` 完成 release transition，再用另一次 `dev` 增加 feature。
 
-`doctor` 的预构建路径要求 Docker/Compose、可用端口、至少 4 CPU、8 GiB memory 与 8 GiB free disk；Rust 仅作为
-`--from-source` contributor 路径的可选检查，Node.js 只用于构建 Console 和远端框架 reference。
+`doctor` 检查 Docker/Compose、可用端口、至少 4 CPU、8 GiB memory 与 8 GiB free disk；其 `ready` 只汇总已列依赖检查，
+不证明 runtime 可在当前主机执行。Rust 是报告中的可选检查，但 `--from-source` 启动必需；Node.js 只用于构建 Console 和远端框架 reference。
 
 ## Contributor 资格入口
 

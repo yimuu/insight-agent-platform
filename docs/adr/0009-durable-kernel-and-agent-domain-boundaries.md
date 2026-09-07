@@ -190,6 +190,11 @@ Receipt 保证窗口同时覆盖持久 expires_at、完成时间加独立保留�
 
 ### 本地 runtime 配置变更
 
+联合评审接受：发行 CLI 的安装平台与 runtime 的执行平台分别验证。预构建 runtime 从已签名 Linux image 提取后由宿主
+supervisor 执行；macOS 只能显式选择 checkout 源码构建，不新增隐式 fallback。`dev` 在本地变更前校验主机支持，
+`start` 按已验证 profile 或恢复 journal 的目标模式，在恢复写入和 running 分支前校验；观察与清理仍可收口不支持的 profile。
+该保护复用现有 profile 和错误类型，不改变签名资产闭包、持久 schema、业务事务或进程身份模型。
+
 联合评审接受：CLI 在既有 lifecycle lock 下执行显式 stop 后的配置变更；有仍由本项目拥有的活动角色时拒绝改写。
 版本化、有界的本地 transition journal 绑定旧 profile 和完整目标 profile，以及固定角色文件的旧、新摘要。
 配置由实际安装 binary、feature 和原持久身份重新派生；独占同目录 staging 保存经完整摘要校验的目标文件，原子 profile
