@@ -45,6 +45,7 @@ for path in "$insight_bin" "$schema_bin" "$database_role_bin" "$jetstream_provis
     exit 2
   fi
 done
+bash "$root/tools/qualification/check-kind-image-store.sh"
 if "$kind_bin" get clusters | grep -Fxq "$cluster_name"; then
   printf 'Kind cluster already exists; choose a fresh INSIGHT_KIND_CLUSTER_NAME: %s\n' "$cluster_name" >&2
   exit 2
@@ -176,15 +177,17 @@ python3 "$root/tools/checks/verify-platform-sandbox-package-image.py" \
 platform_config_digest=$(jq -er '.config_digest' "$platform_identity")
 sandbox_runner_config_digest=$(jq -er '.config_digest' "$runner_identity")
 sandbox_package_config_digest=$(jq -er '.config_digest' "$package_identity")
-# Inspect first, then copy bytes from a stopped container created by immutable image config ID.
+# Inspect first, then copy bytes from a stopped container created by immutable platform manifest ID.
 # No image entrypoint or worker code executes during extraction.
 docker image load --input "$platform_oci_archive" >"$output/image-load.log"
-observed_config=$(docker image inspect "$platform_config_digest" --format '{{.Id}}')
-observed_platform=$(docker image inspect "$platform_config_digest" --format '{{.Os}}/{{.Architecture}}')
-if [[ "$observed_config" != "$platform_config_digest" || "$observed_platform" != "$docker_platform" ]]; then
+observed_manifest=$(docker image inspect "$platform_digest" --format '{{.Id}}')
+observed_descriptor=$(docker image inspect "$platform_digest" --format '{{.Descriptor.digest}}')
+observed_platform=$(docker image inspect "$platform_digest" --format '{{.Os}}/{{.Architecture}}')
+if [[ "$observed_manifest" != "$platform_digest" || \
+      "$observed_descriptor" != "$platform_digest" || "$observed_platform" != "$docker_platform" ]]; then
   printf 'loaded image identity differs from verified OCI archive\n' >&2; exit 1
 fi
-image_container=$(docker create --platform "$docker_platform" --entrypoint /bin/false "$platform_config_digest")
+image_container=$(docker create --pull=never --platform "$docker_platform" --entrypoint /bin/false "$platform_digest")
 cleanup_image_container() { docker rm -v "$image_container" >/dev/null; }
 trap cleanup_image_container EXIT INT TERM
 mkdir "$output/image-binaries"

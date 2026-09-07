@@ -150,7 +150,7 @@ ADR-0007/0008 的 Sandbox 物理路径、两阶段激活与权限隔离继续有
 完整渲染验证稳态、HPA 上界和滚动更新余量；实际调度、内存压力、恢复与运行性能仍须在对应环境验证。
 失败诊断在删除隔离集群之前采集，只保留有界的调度状态与资源信息，不输出 Pod 环境变量、凭证或完整配置。
 
-联合评审接受：Helm 不生成 WorkerManifest 的版本、能力或执行文件身份。Sandbox Dispatcher 与其他 worker 一样，由部署输入提供完整 owning manifest；缺少输入必须拒绝渲染。Kind 本地组合先验证 exact OCI manifest，从 immutable image config 创建停止的容器读取 binary bytes，不运行镜像代码，再使用 owning catalog 校验本地 manifest。该本地组合不会修改已签名的生产 candidate，也不继承其部署配置资格。
+联合评审接受：Helm 不生成 WorkerManifest 的版本、能力或执行文件身份。Sandbox Dispatcher 与其他 worker 一样，由部署输入提供完整 owning manifest；缺少输入必须拒绝渲染。Kind 本地组合先验证 exact OCI manifest、config 与 layers，在 containerd image store 中核对已加载的 immutable platform manifest 身份并禁止拉取，以该身份创建停止的容器读取 binary bytes，不运行镜像代码，再使用 owning catalog 校验本地 manifest。该本地组合不会修改已签名的生产 candidate，也不继承其部署配置资格。
 
 Kind 的 Outbox 与 History 使用独立 PostgreSQL 凭证，并调用同一 closed-purpose provisioning 工具的固定 loopback Kind profile。JetStream 使用独立 provisioning 身份、持久卷和 owning certificate ACL；publisher 不取得流管理权限。Management 与 Runtime 复用既有 Gateway Artifact 身份，Registry 使用独立已受限的 Artifact 读取身份。
 
