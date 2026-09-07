@@ -42,6 +42,7 @@ Console 直接使用 Artifact 授予的短时 HTTPS URL 上传对象。本地 bu
 默认发行路径从签名 ReleaseBundle 解析 exact runtime image tag@index digest，并把所选 binary closure 提取到
 `.insight/runtime/releases/<bundle-digest>/bin`。缓存不完整、image/profile/schema drift 或签名失败均 fail closed；不会回退
 到 Cargo。`--offline` 需要 bundle、signature、image 与 binary cache 全部已存在。
+预构建 `start` 同样使用本地签名缓存并重验当前 CLI 和原 release 身份，不向发行服务下载另一份 bundle。
 `insight update apply` 只原子安装已签名的 exact CLI；随后显式运行同 feature 的 `insight stop && insight dev` 才完成 project-local
 release transition，之后另一次 `dev` 才可增加 feature。
 
@@ -208,4 +209,5 @@ Kind 验证要求 Docker 启用 containerd image store，并支持按平台保�
 
 Outbox、History、Security Authority 与 Artifact 的四个 pool 各用已有 owning grants 的独立数据库角色。Artifact 四角色在同一事务中初始化；其他尚无独立 grants 的本地角色仍使用测试 owner，不能据此声明全生产最小权限资格。初始化工具只允许固定本地或固定 Kind loopback 数据库配置，权限来自 PostgreSQL owner 的 grants。JetStream 使用独立初始化证书创建 owning stream，publisher 仅发布安全通知；本地持久卷保留 Pod 重建前的流数据。Kind 的 PVC 不构成生产备份或跨集群恢复承诺。
 
-生成配置、Helm 渲染和权限边界检查可以离线验证；只有真实启动并完成 owning qualification harness 才能记录该 exact revision 的 Kubernetes 动态证据。当前本轮新增 Kind 闭环的动态资格尚未运行，历史 Kind 记录不会自动继承。
+生成配置、Helm 渲染和权限边界检查可以离线验证；只有真实启动并完成 owning qualification harness 才能记录该 exact revision 的 Kubernetes 动态证据。
+[源码验收 34154900003](https://github.com/yimuu/insight-agent-platform/actions/runs/34154900003) 已完成新 Kind 启动与 OpenSandbox L3，随后因 Console 编译工具缺失停止，未形成完整产品旅程资格。源码 workflow 先准备 owning WASM compiler；签名候选仍消费发行 Console 资产。后续提交必须独立验收，不能继承该次动态资格。

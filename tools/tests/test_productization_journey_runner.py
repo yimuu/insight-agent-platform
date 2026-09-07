@@ -16,6 +16,43 @@ BOOTSTRAP = ROOT / "tools/qualification/bootstrap-platform-kind-local.sh"
 
 
 class ProductizationJourneyRunnerTests(unittest.TestCase):
+    def test_source_console_compiler_guard_rejects_missing_or_weakened_setup(self) -> None:
+        source = WORKFLOW.read_text(encoding="utf-8")
+        title = "      - name: Prepare the exact source Console compiler\n"
+        start = source.index(title)
+        end = source.index("\n      - ", start + len(title))
+        step = source[start:end]
+        mutations = [
+            source[:start] + source[end:],
+            source.replace(step, step.replace("--version 0.2.126", "--version 0.2.125")),
+            source.replace(step, step.replace("if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'source' }}", "if: ${{ always() }}")),
+            source.replace(step, step.replace("rustup target add wasm32-unknown-unknown --toolchain 1.94.1", "true")),
+            source.replace(step, step.replace(title, title + "        continue-on-error: true\n")),
+            source[:start] + source[end:] + "\n" + step,
+        ]
+        script = """
+import pathlib, runpy, sys
+from unittest.mock import patch
+replacement = sys.stdin.read()
+original = pathlib.Path.read_text
+workflow = pathlib.Path(sys.argv[1])
+def read(path, *args, **kwargs):
+    return replacement if path == workflow else original(path, *args, **kwargs)
+with patch.object(pathlib.Path, 'read_text', read):
+    runpy.run_path(sys.argv[2], run_name='__main__')
+"""
+        for mutated in mutations:
+            with self.subTest(step=mutated[start:start + 150]):
+                result = subprocess.run(
+                    [sys.executable, "-c", script, str(WORKFLOW), str(ROOT / "tools/checks/check-productization-ci.py")],
+                    input=mutated, cwd=ROOT, check=False, capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                if title in mutated:
+                    self.assertIn("source Console", result.stderr)
+                else:
+                    self.assertIn("source journey", result.stderr)
+
     def test_consumed_seed_step_uses_owned_cleanup_and_preserves_failure_fallback(self) -> None:
         steps = json.loads(subprocess.check_output(['ruby', '-ryaml', '-rjson', '-e',
             'puts JSON.generate(YAML.load_file(ARGV[0])["jobs"]["exact-revision-journey"]["steps"])', str(WORKFLOW)]))

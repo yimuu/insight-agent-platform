@@ -24,6 +24,9 @@ mod native_cli_authoring;
 #[path = "native_artifact_cors.rs"]
 mod native_artifact_cors;
 
+#[path = "runtime_restart_cache.rs"]
+mod runtime_restart_cache;
+
 #[path = "product_read_probe.rs"]
 mod product_read_probe;
 
@@ -1261,13 +1264,10 @@ fn public_cli_deterministic_first_run() {
 
     // A complete profile restart re-runs the exact PostgreSQL bootstrap ensure. Existing business
     // state is neither treated as a bootstrap conflict nor used as a reason to skip verification.
-    let build_state_path = project.join(".insight/runtime/build.json");
     let profile_state_path = project.join(".insight/runtime/profile.json");
-    let build_state_before = fs::read(&build_state_path).expect("build state is readable");
+    let restart_cache = runtime_restart_cache::RuntimeRestartCache::capture(project)
+        .expect("the actual source or prebuilt cache is complete before restart");
     let profile_state_before = fs::read(&profile_state_path).expect("profile state is readable");
-    let build_state_modified_before = fs::metadata(&build_state_path)
-        .and_then(|metadata| metadata.modified())
-        .expect("build state modification time is readable");
     replacement
         .terminate()
         .expect("the replacement orchestration Worker terminates before profile restart");
@@ -1322,18 +1322,9 @@ fn public_cli_deterministic_first_run() {
         String::from_utf8_lossy(&restarted.stdout),
         String::from_utf8_lossy(&restarted.stderr)
     );
-    assert_eq!(
-        fs::read(&build_state_path).expect("restarted build state is readable"),
-        build_state_before,
-        "unchanged source must preserve the exact build cache state"
-    );
-    assert_eq!(
-        fs::metadata(&build_state_path)
-            .and_then(|metadata| metadata.modified())
-            .expect("restarted build state modification time is readable"),
-        build_state_modified_before,
-        "unchanged source must not invoke the release build path"
-    );
+    restart_cache
+        .verify_unchanged(project)
+        .expect("restart preserves the selected cache without source compilation or replacement");
     assert_eq!(
         fs::read(&profile_state_path).expect("restarted profile state is readable"),
         profile_state_before,

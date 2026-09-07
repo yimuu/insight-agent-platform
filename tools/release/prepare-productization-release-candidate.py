@@ -159,8 +159,8 @@ def safe_member_name(raw: str) -> str:
     value = PurePosixPath(raw)
     if value.is_absolute() or ".." in value.parts:
         raise ValueError("Console archive contains an escaping path")
-    normalized = PurePosixPath(*[part for part in value.parts if part not in {"", "."}])
-    return normalized.as_posix()
+    parts = [part for part in value.parts if part not in {"", "."}]
+    return PurePosixPath(*parts).as_posix() if parts else ""
 
 
 def extract_console(archive_path: Path, output: Path) -> None:
@@ -176,13 +176,13 @@ def extract_console(archive_path: Path, output: Path) -> None:
                 raise ValueError("Console archive contains too many members")
             for member in members:
                 name = safe_member_name(member.name)
+                if name in names:
+                    raise ValueError("Console archive contains duplicate members")
+                names.add(name)
                 if not name:
                     if not member.isdir():
                         raise ValueError("Console archive root member is not a directory")
                     continue
-                if name in names:
-                    raise ValueError("Console archive contains duplicate members")
-                names.add(name)
                 if not member.isdir() and not member.isfile():
                     raise ValueError("Console archive contains a non-regular member")
                 destination = output.joinpath(*PurePosixPath(name).parts)

@@ -202,6 +202,11 @@ Receipt 保证窗口同时覆盖持久 expires_at、完成时间加独立保留�
 
 ### 本地 runtime 配置变更
 
+联合评审接受：`start` 重启已冻结的预构建环境时只消费本地签名 ReleaseBundle 与 exact image cache，重验当前 CLI、
+profile/schema 和原 release/source 身份；缓存缺失或漂移明确拒绝。下载与版本切换仍由显式 `dev` 执行，不新增模式字段或网络兜底。
+候选资格分别验证源码 build cache 与预构建 release/binary cache 的保持，不为预构建环境制造源码记录；同一重启、CORS 与业务恢复检查继续执行。
+Console 候选解包接受发行 tar 产生的唯一根目录条目，所有归一化路径仍须唯一；根文件、链接与路径逃逸继续拒绝。
+
 联合评审接受：发行 CLI 的安装平台与 runtime 的执行平台分别验证。预构建 runtime 从已签名 Linux image 提取后由宿主
 supervisor 执行；macOS 只能显式选择 checkout 源码构建，不新增隐式 fallback。`dev` 在本地变更前校验主机支持，
 `start` 按已验证 profile 或恢复 journal 的目标模式，在恢复写入和 running 分支前校验；观察与清理仍可收口不支持的 profile。

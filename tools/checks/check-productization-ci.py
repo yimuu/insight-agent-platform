@@ -79,6 +79,30 @@ wasm_binding = re.findall(r'^wasm-bindgen\s*=\s*"=([0-9]+\.[0-9]+\.[0-9]+)"$', (
 if len(wasm_binding) != 1:
     raise SystemExit("WASM owner must pin exactly one wasm-bindgen version")
 wasm_binding = wasm_binding[0]
+source_compiler_name = "Prepare the exact source Console compiler"
+source_compiler_step = starter_journey.split(f"      - name: {source_compiler_name}\n", 1)
+if len(source_compiler_step) != 2:
+    failures.append("source journey must prepare its owning Console compiler")
+else:
+    source_compiler_step = source_compiler_step[1].split("\n      - ", 1)[0]
+    for marker in (
+        "if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'source' }}",
+        "set -euo pipefail",
+        "rustup target add wasm32-unknown-unknown --toolchain 1.94.1",
+        f"cargo install --locked wasm-bindgen-cli --version {wasm_binding}",
+        f'test "$(wasm-bindgen --version)" = "wasm-bindgen {wasm_binding}"',
+    ):
+        if marker not in source_compiler_step:
+            failures.append(f"source Console preparation lacks {marker}")
+    if "continue-on-error" in source_compiler_step or "always()" in source_compiler_step:
+        failures.append("source Console compiler preparation must fail closed")
+    if not (
+        starter_journey.index("shared-key: \"productization-")
+        < starter_journey.index(source_compiler_name)
+        < starter_journey.index("Build current-SHA Kind images and complete non-Sandbox seed")
+        < starter_journey.index("Run fresh public CLI and real Gateway Console journey")
+    ):
+        failures.append("source Console compiler must be prepared before expensive journey builds")
 for marker in (
     "targets: wasm32-unknown-unknown",
     f"cargo install --locked wasm-bindgen-cli --version {wasm_binding}",

@@ -132,6 +132,13 @@ jobs:
         run: |
           corepack enable
           corepack install --global pnpm@11.19.0
+      - name: Prepare the exact source Console compiler
+        if: ${{ env.PRODUCTIZATION_ARTIFACT_MODE == 'source' }}
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown --toolchain 1.94.1
+          cargo install --locked wasm-bindgen-cli --version 0.2.126
+          test "$(wasm-bindgen --version)" = "wasm-bindgen 0.2.126"
       - name: Install exact Kind builder
         if: ${{ env.PRODUCTIZATION_FEATURES == 'all' || env.PRODUCTIZATION_FEATURES == 'sandbox' }}
         run: |
