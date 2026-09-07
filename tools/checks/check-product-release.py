@@ -122,6 +122,32 @@ for marker in (
 if "gh release create" not in publish_job:
     failures.append("qualified publish job must create the immutable GitHub Release")
 
+anonymous_gate = re.search(
+    r"^      - name: Verify exact candidate indexes are anonymously readable\n(?P<body>.*?)(?=^      - |\Z)",
+    publish_job, re.MULTILINE | re.DOTALL,
+)
+expected_anonymous_body = '''        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/verify-public-release-images.py \\
+            --assets "$RUNNER_TEMP/release-assets" \\
+            --repository "$GITHUB_REPOSITORY" \\
+            --release-tag "$GITHUB_REF_NAME" \\
+            --revision "$GITHUB_SHA"
+'''
+if anonymous_gate is None or anonymous_gate["body"] != expected_anonymous_body:
+    failures.append("public release requires the unconditional fail-closed exact index anonymous gate")
+elif not (
+    publish_job.find('cosign verify-blob --bundle') < anonymous_gate.start()
+    < publish_job.find('Finalize and sign qualified ReleaseBundle')
+    < publish_job.find('docker buildx imagetools create --tag')
+    < publish_job.find('gh release create')
+):
+    failures.append("anonymous index verification must follow candidate verification and precede publication")
+if "tools/tests/test_public_release_images.py" not in (ROOT / ".github/workflows/ci.yml").read_text():
+    failures.append("CI must verify anonymous image access boundaries and pipeline enforcement")
+
 if failures:
     raise SystemExit("\n".join(failures))
 print("Product release pipeline contract passed.")
