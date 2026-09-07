@@ -57,7 +57,10 @@ Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用�
 验证脚本创建的临时项目属于单次运行，结束时使用 CLI 的 `stop/reset` 清理进程、Compose 容器与 volume，
 随后删除该次项目目录。`run-productization-journey.sh --logs-directory <new-path>` 在删除前导出有界日志；CI 自动上传日志及独立的验证报告。
 只有显式传入 `--keep-failed-resources` 才保留失败旅程，成功运行始终清理。PostgreSQL 物理测试使用独立临时目录与进程守卫；
-排查断言失败时可设置 `INSIGHT_TEST_KEEP_FAILED_RESOURCES=1` 保留该测试目录。清理失败会使验证失败，保留所属目录供重试。
+排查断言失败时可设置 `INSIGHT_TEST_KEEP_FAILED_RESOURCES=1` 保留该测试目录。未完成的清理会保留所属目录供重试；
+日志导出失败即使发生在目录删除之后，也会使验证失败。
+Kind 产品旅程在 bootstrap 和 Sandbox 验证成功后清理已消费的 seed 项目，释放依赖端口后才启动新的公开验证项目。
+seed 清理失败会阻止后续启动；结束阶段的清理仍校验原目录身份，不会删除替换进来的其他目录。
 
 ## 发行与生产
 

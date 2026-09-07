@@ -308,6 +308,29 @@ for marker in (
 candidate_preparation = starter_journey.split(
     "- name: Prepare exact signed runtime and Sandbox runner for Kind", 1
 )[-1].split("- name: Bootstrap fresh current-SHA Kind", 1)[0]
+seed_release_name = "- name: Release consumed seed before the fresh public journey"
+seed_release = starter_journey.split(seed_release_name, 1)[-1].split("- name:", 1)[0]
+for marker in (
+    "if: ${{ env.PRODUCTIZATION_SEED_IDENTITY != '' }}",
+    "set -euo pipefail",
+    "python3 tools/qualification/fixture_project.py cleanup",
+    '--project "$RUNNER_TEMP/productization-kind-seed"',
+    '--identity "$PRODUCTIZATION_SEED_IDENTITY"',
+    '--insight-bin "$PRODUCTIZATION_SEED_BINARY"',
+    "--project-name productization-kind-seed",
+    '--logs-directory "$RUNNER_TEMP/productization-seed-consumed-logs"',
+    'echo "PRODUCTIZATION_SEED_IDENTITY=" >> "$GITHUB_ENV"',
+):
+    if marker not in seed_release:
+        failures.append(f"consumed Kind seed lifecycle misses {marker!r}")
+seed_stages = ["- name: Run fail-closed real OpenSandbox L3 qualification", seed_release_name,
+               "- name: Run fresh public CLI and real Gateway Console journey"]
+if any(stage not in starter_journey for stage in seed_stages) or [starter_journey.find(stage) for stage in seed_stages] != sorted(starter_journey.find(stage) for stage in seed_stages):
+    failures.append("consumed Kind seed must be released after L3 and before the fresh public journey")
+if "always()" in seed_release or "continue-on-error:" in seed_release:
+    failures.append("consumed seed cleanup must block a fresh journey on failure")
+if "productization-seed-consumed-logs/*.log" not in starter_journey:
+    failures.append("consumed seed diagnostics must be preserved with bounded log selection")
 for forbidden in (
     "cargo build",
     "docker build --target runtime",
