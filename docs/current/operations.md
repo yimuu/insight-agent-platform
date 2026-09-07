@@ -65,6 +65,9 @@ runtime image 的角色与工具 binary 闭包由发行配置固定。PostgreSQL
 [`schema.sql`](../../crates/adapters/platform-postgres/schema.sql)，`platform-schema provision` 只接受空库并在单事务内建成、核验完整结构；
 运行角色通过 `verify_schema` 只读核验结构清单。项目不保留迁移链或旧结构读取器；已有非当前结构必须由部署侧按明确的数据清理范围重新建立。
 
+发行[基础镜像](../../deploy/images/platform.Dockerfile)的构建与运行阶段使用同一受支持的 Debian 代际，并固定多架构摘要。
+CLI 会在宿主运行从镜像提取的角色程序，因此更换基础镜像也需要重新验证宿主 ABI、Sandbox 静态入口、文件权限与完整候选；旧镜像资格不自动继承。
+
 候选发布使用实际部署的每份 WorkerManifest 与 process config，并从已验证的 runtime image 提取可执行文件。工具核对真实 binary
 字节摘要、固定角色和当前编译的能力目录，再生成签名包内的执行证据；启动时重复核对同一目录和当前 executable。
 配置不能自行宣告未安装的解释器能力。构建身份用于每次尝试的来源记录，Program/领域操作的语义身份决定能否执行冻结的工作。

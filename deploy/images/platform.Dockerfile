@@ -1,4 +1,4 @@
-FROM rust:1.94-bullseye@sha256:f4f82b80e5f2945fed4ba17af177c6d6be85d98cde38ff318fc7666ce4505617 AS chef
+FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS chef
 RUN cargo install --locked --version 0.1.78 cargo-chef
 WORKDIR /workspace
 
@@ -110,7 +110,7 @@ RUN ! readelf -d /workspace/platform-sandbox-runner-core | grep -q NEEDED
 RUN ! readelf -l /workspace/platform-sandbox-launcher | grep -q INTERP
 RUN ! readelf -d /workspace/platform-sandbox-launcher | grep -q NEEDED
 
-FROM debian:bullseye-slim@sha256:f313b4bd62667092a59b3a664d7d3ab8b5e65f41675f48e81455a15dc5abe792 AS runtime-base
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime-base
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
