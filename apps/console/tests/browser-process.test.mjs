@@ -12,18 +12,26 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const exists = async path => lstat(path).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error })
 const pidExists = pid => { try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error } }
 
-async function fakeBrowser(t, mode = 'ready', { ignoreTerm = false } = {}) {
+async function fakeBrowser(t, mode = 'ready', { ignoreTerm = false, pauseAfterRecord = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'insight-browser-test-'))
   const executable = join(directory, 'browser.mjs')
   const recordPath = join(directory, 'record.json')
+  const releasePath = join(directory, 'release')
   await writeFile(executable, `#!${process.execPath}
 import {createServer} from 'node:http';
-import {writeFileSync,symlinkSync,linkSync,renameSync,mkdirSync} from 'node:fs';
+import {writeFileSync,symlinkSync,linkSync,renameSync,mkdirSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 const mode=${JSON.stringify(mode)}, recordPath=${JSON.stringify(recordPath)};
 const profile=process.argv.find(arg=>arg.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
 const pageOrigin=process.argv.at(-1), record={profile,pid:process.pid,requests:[]};
 const save=()=>{writeFileSync(recordPath+'.pending',JSON.stringify(record));renameSync(recordPath+'.pending',recordPath)};save();
+if(${pauseAfterRecord}){
+ const deadline=performance.now()+2000;
+ while(!existsSync(${JSON.stringify(releasePath)})){
+  if(performance.now()>=deadline)process.exit(9);
+  await new Promise(resolve=>setTimeout(resolve,10));
+ }
+}
 process.stderr.write('test-secret-canary https://private.invalid/secret\\n');
 if(mode==='exit')process.exit(7);
 if(mode==='signal')process.kill(process.pid,'SIGTERM');
@@ -82,7 +90,7 @@ process.on('SIGTERM',()=>{${ignoreTerm ? 'return;' : 'for(const socket of socket
     }
     await rm(directory, { recursive: true, force: true })
   })
-  return { executable, record }
+  return { executable, record, release: () => writeFile(releasePath, '') }
 }
 
 test('termination does not finish before the owned process exits', async () => {
@@ -291,7 +299,7 @@ test('SIGTERM during browser startup cleans up and cannot emit Passed', async t 
 
 test('the real journey entry retains safe startup errors and does not pass on cleanup failure', async t => {
   for (const mode of ['exit', 'missing', 'replace-profile-invalid']) await t.test(mode, async t => {
-    const fixture = await fakeBrowser(t, mode)
+    const fixture = await fakeBrowser(t, mode, { pauseAfterRecord: mode === 'replace-profile-invalid' })
     const bundle = join(dirname(fixture.executable), 'bundle')
     await mkdir(bundle)
     await writeFile(join(bundle, 'index.html'), '<!doctype html><title>startup failure fixture</title>')
@@ -313,9 +321,17 @@ test('the real journey entry retains safe startup errors and does not pass on cl
     owner.child.stderr.on('data', chunk => { stderr += chunk })
     try {
       for (let attempt = 0; attempt < 200 && !await fixture.record(); attempt++) await delay(10)
+      const initial = await fixture.record()
+      assert.ok(initial)
+      if (mode === 'replace-profile-invalid') {
+        assert.equal(initial.moved, undefined, 'capture the initial record before profile replacement')
+        await fixture.release()
+      }
+      const status = mode === 'missing' ? await owner.terminate() : await waitForFixtureChild(owner, 2000)
       const observed = await fixture.record()
       assert.ok(observed)
-      const status = mode === 'missing' ? await owner.terminate() : await waitForFixtureChild(owner, 2000)
+      assert.equal(observed.pid, initial.pid)
+      assert.equal(observed.profile, initial.profile)
       assert.equal(status.code, mode === 'missing' ? 143 : 1)
       assert.equal(stdout, '')
       assert.ok(stderr.includes(mode === 'missing' ? 'interrupted' : mode === 'exit' ? 'child_exited' : 'invalid_endpoint_file'))
@@ -326,7 +342,10 @@ test('the real journey entry retains safe startup errors and does not pass on cl
         assert.ok(stderr.includes('cleanup_identity_mismatch'))
         assert.equal(await exists(observed.moved), true)
       }
-    } finally { await owner.terminate() }
+    } finally {
+      try { if (mode === 'replace-profile-invalid') await fixture.release() }
+      finally { await owner.terminate() }
+    }
   })
 })
 
