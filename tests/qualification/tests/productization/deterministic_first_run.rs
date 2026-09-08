@@ -21,6 +21,9 @@ use tempfile::TempDir;
 #[path = "native_cli_authoring.rs"]
 mod native_cli_authoring;
 
+#[path = "native_development_progress.rs"]
+mod native_development_progress;
+
 #[path = "native_artifact_cors.rs"]
 mod native_artifact_cors;
 
@@ -1131,6 +1134,14 @@ fn public_cli_deterministic_first_run() {
         json!({"kind": "inline", "value": {"message": "after restart"}})
     );
     assert_eq!(result["schema_digest"], schema_digest);
+
+    native_development_progress::verify(
+        insight,
+        project,
+        fixture.path(),
+        &authoring_ref,
+        &qualification_ref,
+    );
 
     let mut capability_evidence = feature_enabled("remote-capability").then(|| {
         native_and_remote_capability::run(
