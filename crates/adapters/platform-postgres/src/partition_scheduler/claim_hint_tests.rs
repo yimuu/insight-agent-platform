@@ -6,7 +6,8 @@ use insight_platform_orchestrator::store::{
     ClaimOrchestrationJobs, OrchestrationClaimSlot, MAX_ORCHESTRATION_QUOTA_LINES,
 };
 use insight_platform_scheduler::partitioned::{
-    select_admissible_partition_batch, LockedTenantVisit, PartitionSchedulerLimits,
+    select_admissible_partition_batch, AdmissionCandidate, LockedTenantVisit,
+    PartitionSchedulerLimits,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{collections::BTreeSet, time::Duration};
@@ -276,4 +277,249 @@ async fn exact_partition_visits_commit_independently_without_cross_partition_cre
         vec![(0, 0), (0, 0)],
         "empty visits never mint business credit or claims"
     );
+}
+
+async fn persistence_visit(
+    tx: &mut Transaction<'_, Postgres>,
+    hint: SchedulerPartitionId,
+    next_sweep: Option<JobSweepContinuation>,
+    control_claim: bool,
+) -> (
+    LockedPartition,
+    TenantFairnessWindow,
+    PartitionAdmissionDecision,
+) {
+    // Exercise the legal coarse fairness predicate independently of fixture size.
+    // Partition lookup and writes remain exact indexed operations. These planner
+    // settings belong only to this mechanism test, never to the actual Q1 claim.
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+    let partition = lock_exact_partition(tx, WorkClass::Orchestration, hint)
+        .await
+        .unwrap()
+        .unwrap();
+    for setting in [
+        "SET LOCAL enable_seqscan=on",
+        "SET LOCAL enable_indexscan=off",
+        "SET LOCAL enable_indexonlyscan=off",
+        "SET LOCAL enable_bitmapscan=off",
+    ] {
+        sqlx::query(setting).execute(&mut **tx).await.unwrap();
+    }
+    let window = lock_tenant_window(tx, &partition, 128, 4096).await.unwrap();
+    for setting in [
+        "SET LOCAL enable_seqscan=off",
+        "SET LOCAL enable_indexscan=on",
+        "SET LOCAL enable_indexonlyscan=on",
+        "SET LOCAL enable_bitmapscan=on",
+    ] {
+        sqlx::query(setting).execute(&mut **tx).await.unwrap();
+    }
+    assert_eq!(window.tenants.len(), 1);
+    let candidates = if control_claim {
+        vec![AdmissionCandidate {
+            job_id: fresh(ResourceKind::Job),
+            mode: insight_platform_contracts::ClaimMode::NewAttempt,
+            lane: insight_platform_contracts::SchedulingLane::RestrictedControl,
+            currently_eligible: true,
+            quota_costs: Vec::new(),
+        }]
+    } else {
+        Vec::new()
+    };
+    // This tests only owning fairness persistence: the selector supplies a real
+    // sweep/counter decision, but no domain Job, lease or quota is manufactured.
+    let visits = vec![LockedTenantVisit {
+        state: window.tenants[0].state.clone(),
+        business_policy: None,
+        candidates,
+        next_job_sweep: next_sweep,
+    }];
+    let decision = select_admissible_partition_batch(
+        &partition.state,
+        &visits,
+        &Default::default(),
+        PartitionSchedulerLimits {
+            maximum_deficit: 4096,
+            maximum_tenant_window: 128,
+            maximum_candidates_per_tenant: 1,
+            maximum_claims: 1,
+            maximum_control_claims_per_tenant: 1,
+            maximum_quota_lines_per_candidate: MAX_ORCHESTRATION_QUOTA_LINES,
+        },
+        1,
+        window.range_exhausted,
+    )
+    .unwrap();
+    (partition, window, decision)
+}
+
+async fn fairness_row(pool: &PgPool, tenant: &ResourceId) -> String {
+    sqlx::query_scalar("SELECT row_to_json(fairness)::text FROM insight_platform.scheduler_tenant_state AS fairness WHERE tenant_id=$1 AND work_class='orchestration'")
+        .bind(tenant.to_string()).fetch_one(pool).await.unwrap()
+}
+
+#[tokio::test]
+async fn empty_fairness_visit_does_not_abort_a_changed_partition() {
+    let _fixture_lock = super::CONTROLLER_FIXTURE_LOCK.lock().await;
+    let (url, admin) = fixture().await;
+    for plan_mode in [
+        "SET LOCAL plan_cache_mode=force_custom_plan",
+        "SET LOCAL plan_cache_mode=force_generic_plan",
+    ] {
+        let (left_tenant, left_hint) = enroll_distinct_partition(&admin).await;
+        let (empty_tenant, empty_hint) = enroll_distinct_partition(&admin).await;
+        for hint in [left_hint, empty_hint] {
+            let mut opening = admin.begin().await.unwrap();
+            empty_partition_visit(&mut opening, hint).await;
+            opening.commit().await.unwrap();
+        }
+        // Fresh sessions keep the tested prepared statements' planning settings
+        // independent of whichever other fixture previously used the admin pool.
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut left = pool.begin().await.unwrap();
+        let mut empty = pool.begin().await.unwrap();
+        for tx in [&mut left, &mut empty] {
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .execute(&mut **tx)
+                .await
+                .unwrap();
+            sqlx::query(plan_mode).execute(&mut **tx).await.unwrap();
+        }
+        let cutoff: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *left)
+            .await
+            .unwrap();
+        let sweep = JobSweepContinuation {
+            creation_cutoff: cutoff,
+            upper_bound: JobCreationKey {
+                created_at: cutoff - chrono::Duration::seconds(1),
+                job_id: fresh(ResourceKind::Job),
+            },
+            after: None,
+        };
+        let (left_partition, left_window, left_decision) =
+            persistence_visit(&mut left, left_hint, Some(sweep), false).await;
+        let (empty_partition, empty_window, empty_decision) =
+            persistence_visit(&mut empty, empty_hint, None, false).await;
+        assert_ne!(left_window.tenants[0].state, left_decision.next_tenants[0]);
+        assert_eq!(
+            empty_window.tenants[0].state,
+            empty_decision.next_tenants[0]
+        );
+        let mut backend_ids = Vec::new();
+        for tx in [&mut left, &mut empty] {
+            backend_ids.push(
+                sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                    .fetch_one(&mut **tx)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let predicate_readers: i64 = sqlx::query_scalar("SELECT count(DISTINCT pid) FROM pg_locks WHERE pid=ANY($1) AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND relation='insight_platform.scheduler_tenant_state'::regclass AND locktype='relation' AND mode='SIReadLock'")
+            .bind(backend_ids).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            predicate_readers, 2,
+            "both owning windows must hold the coarse predicate"
+        );
+        let empty_before = fairness_row(&pool, &empty_tenant).await;
+        persist_admission(
+            &mut empty,
+            &empty_partition,
+            &empty_window.tenants,
+            &empty_decision,
+        )
+        .await
+        .unwrap();
+        empty.commit().await.unwrap();
+        // Under the old unconditional fairness UPDATE, the committed empty
+        // visit creates the opposite rw edge and this actual write gets 40001.
+        persist_admission(
+            &mut left,
+            &left_partition,
+            &left_window.tenants,
+            &left_decision,
+        )
+        .await
+        .expect("an unchanged empty visit must not abort a real sweep update");
+        left.commit().await.unwrap();
+        assert_eq!(fairness_row(&pool, &empty_tenant).await, empty_before,
+            "an empty visit must preserve the entire fairness row, including version and updated_at");
+        let persisted = tenant_from_row(sqlx::query("SELECT * FROM insight_platform.scheduler_tenant_state WHERE tenant_id=$1 AND work_class='orchestration'")
+            .bind(left_tenant.to_string()).fetch_one(&pool).await.unwrap(), WorkClass::Orchestration, 4096).unwrap();
+        assert_eq!(persisted.state, left_decision.next_tenants[0]);
+        assert_eq!(persisted.version, left_window.tenants[0].version + 1);
+        for (locked, decision) in [
+            (&left_partition, &left_decision),
+            (&empty_partition, &empty_decision),
+        ] {
+            let persisted: (i64, i64, Option<String>, Option<String>) = sqlx::query_as("SELECT version,current_round,cursor_tenant_id,tenant_upper_bound FROM insight_platform.scheduler_state WHERE work_class='orchestration' AND partition_id=$1")
+                .bind(i16::from(locked.state.partition_id.0)).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                persisted,
+                (
+                    locked.version + 1,
+                    decision.next_partition.current_round as i64,
+                    decision
+                        .next_partition
+                        .cursor_tenant_id
+                        .as_ref()
+                        .map(ToString::to_string),
+                    decision
+                        .next_partition
+                        .tenant_upper_bound
+                        .as_ref()
+                        .map(ToString::to_string)
+                )
+            );
+            assert_eq!(
+                decision.next_partition.current_round,
+                locked.state.current_round + 1
+            );
+        }
+        pool.close().await;
+    }
+}
+
+#[tokio::test]
+async fn changed_fairness_still_persists_counters_and_rejects_a_stale_version() {
+    let _fixture_lock = super::CONTROLLER_FIXTURE_LOCK.lock().await;
+    let (_, pool) = fixture().await;
+    let (tenant, hint) = enroll_distinct_partition(&pool).await;
+    let mut opening = pool.begin().await.unwrap();
+    empty_partition_visit(&mut opening, hint).await;
+    opening.commit().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let (partition, window, decision) = persistence_visit(&mut tx, hint, None, true).await;
+    assert_eq!(decision.admitted_job_ids.len(), 1);
+    assert_eq!(
+        decision.next_tenants[0].successful_claims,
+        window.tenants[0].state.successful_claims + 1
+    );
+    assert_eq!(
+        decision.next_tenants[0].last_served_round,
+        Some(partition.state.current_round)
+    );
+    persist_admission(&mut tx, &partition, &window.tenants, &decision)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let persisted = tenant_from_row(sqlx::query("SELECT * FROM insight_platform.scheduler_tenant_state WHERE tenant_id=$1 AND work_class='orchestration'")
+        .bind(tenant.to_string()).fetch_one(&pool).await.unwrap(), WorkClass::Orchestration, 4096).unwrap();
+    assert_eq!(persisted.state, decision.next_tenants[0]);
+    assert_eq!(persisted.version, window.tenants[0].version + 1);
+    let before = fairness_row(&pool, &tenant).await;
+    let mut stale = pool.begin().await.unwrap();
+    assert!(matches!(
+        persist_admission(&mut stale, &partition, &window.tenants, &decision).await,
+        Err(RepositoryError::Conflict("tenant scheduler state"))
+    ));
+    stale.rollback().await.unwrap();
+    assert_eq!(fairness_row(&pool, &tenant).await, before);
 }

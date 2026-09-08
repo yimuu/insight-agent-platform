@@ -301,6 +301,11 @@ pub(crate) async fn persist_admission(
                 "admission cannot change fairness ownership or policy",
             ));
         }
+        // The partition records the visit. Rewriting unchanged tenant state can
+        // turn a short empty scan into an SSI writer against another partition.
+        if locked.state == *next {
+            continue;
+        }
         let sweep = next.job_sweep.as_ref();
         let affected = sqlx::query("UPDATE insight_platform.scheduler_tenant_state SET version=version+1,deficit=$4,credited_round=$5,last_served_round=$6,successful_claims=$7,job_creation_cutoff=$8,job_upper_created_at=$9,job_upper_id=$10,job_cursor_created_at=$11,job_cursor_id=$12,updated_at=clock_timestamp() WHERE tenant_id=$1 AND work_class=$2 AND version=$3")
             .bind(next.tenant_id.to_string()).bind(next.work_class.as_str()).bind(locked.version)
