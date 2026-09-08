@@ -156,6 +156,7 @@ Run kernel 的同事务领取与回滚验证使用 `PLATFORM_TEST_RUN_KERNEL_DAT
 避免其他测试登记的调度分区改变该夹具的事务快照。
 Coordinator 的单 Job 恢复与 Q1 多进程领取分别使用独立测试库，并在 admission 前拒绝已有 Tenant；子进程只连接对应父测试的库。
 Q1 刻意保留 leased Job 来验证领取与配额，串行测试或等待租约不能隔离这些事实。夹具不删除旧行，也不缩小生产 scheduler 的领取范围。
+领取超时会记录所有子进程的有界结果，以及该夹具的待领取量、配额、调度游标和数据库锁摘要；诊断失败仍保留原测试失败，不改变领取时限。
 [Worker 恢复](../../tools/qualification/qualify-platform-worker-recovery.sh)、
 [MCP 恢复](../../tools/qualification/qualify-platform-mcp-recovery.sh) 与
 [Artifact S3/KMS](../../tools/qualification/qualify-platform-artifact-provider.sh) 入口只选择各自的精确场景。
