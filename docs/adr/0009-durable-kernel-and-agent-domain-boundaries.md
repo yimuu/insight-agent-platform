@@ -198,6 +198,8 @@ ADR-0007/0008 的 Sandbox 物理路径、两阶段激活与权限隔离继续有
 
 本地 OCI archive 的唯一直接 image manifest descriptor 可省略可选的 `platform`，平台仍由摘要验证后的 image config 与目标平台精确比对；字段存在时必须与目标完全一致。该读取规则不重写归档或已签名的镜像字节，不改变 registry index 的平台选择与身份验证。
 
+联合评审接受：Kind 的产品镜像输入必须使用显式 registry 与规范 repository，拒绝需要 Docker 隐式补全的名称。导入使用同一 repository 命名 containerd 生成的 layout index 引用，使 CRI 规范化后的候选引用仍对应实际存在的记录；workload 继续绑定原 platform manifest digest。该规则只适用于新建的隔离集群，不修补旧集群引用，不改写 archive、镜像或签名内容。容器创建失败诊断只增加固定分类信号，不输出原始错误消息或其中的镜像引用、路径与凭证。
+
 Kind 独立部署的 Artifact maintenance 不属于 CLI 开发角色集合。Kind 使用其 Artifact provider catalog 生成维护配置，
 执行能力来自拥有域，build identity 来自镜像内实际 executable；物理配置身份排除 manifest 后计算，完整配置仍纳入部署摘要。
 不要求 CLI 生成未选择角色的文件，也不为 Kind 增加隐式本地进程。完整配置合法性由维护服务的 owning decoder 与实际启动验证。

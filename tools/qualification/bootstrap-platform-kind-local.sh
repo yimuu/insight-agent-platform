@@ -31,7 +31,20 @@ sandbox_package_image=${INSIGHT_KIND_SANDBOX_PACKAGE_IMAGE:-}
 sandbox_package_digest=${INSIGHT_KIND_SANDBOX_PACKAGE_DIGEST:-}
 sandbox_package_repository=${INSIGHT_KIND_SANDBOX_PACKAGE_REPOSITORY:-}
 sandbox_package_oci_archive=${INSIGHT_KIND_SANDBOX_PACKAGE_OCI_ARCHIVE:-}
-oci_repository_pattern='^([a-z0-9.-]+(:[0-9]+)?/)?[a-z0-9._/-]+$'
+
+# Keep names byte-stable when CRI applies Docker reference normalization.
+valid_kind_oci_repository() {
+  local repository=$1
+  local host=${repository%%/*}
+  local image_path=${repository#*/}
+  local domain_component='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+  local path_component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+  local pattern="^${domain_component}(\.${domain_component})*(:[0-9]+)?/${path_component}(/${path_component})*$"
+  [[ ${#repository} -le 255 && "$repository" =~ $pattern && \
+     ( "$host" == localhost || "$host" == *.* || "$host" == *:* ) && \
+     "$host" != index.docker.io && \
+     ( "$host" != docker.io || "$image_path" == */* ) ]]
+}
 
 for command_name in "$kubectl_bin" "$kind_bin" "$helm_bin" docker ruby python3 jq curl openssl shasum; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -107,10 +120,9 @@ ensure_image() {
   docker tag "$repository@$digest" "$tag"
 }
 
-if [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ || \
-      -z "$platform_repository" || \
-      ! "$platform_repository" =~ $oci_repository_pattern || \
-      "$platform_image" != "$platform_repository@$platform_digest" ]]; then
+if ! valid_kind_oci_repository "$platform_repository" || \
+    [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ || \
+       "$platform_image" != "$platform_repository@$platform_digest" ]]; then
   printf 'platform image must be an exact repository@platform-manifest digest\n' >&2
   exit 1
 fi
@@ -125,10 +137,9 @@ if [[ -z "$platform_oci_archive" || ! -f "$platform_oci_archive" || \
     "$platform_oci_archive" >&2
   exit 1
 fi
-if [[ ! "$sandbox_runner_digest" =~ ^sha256:[0-9a-f]{64}$ || \
-      -z "$sandbox_runner_repository" || \
-      ! "$sandbox_runner_repository" =~ $oci_repository_pattern || \
-      "$sandbox_runner_image" != "$sandbox_runner_repository@$sandbox_runner_digest" ]]; then
+if ! valid_kind_oci_repository "$sandbox_runner_repository" || \
+    [[ ! "$sandbox_runner_digest" =~ ^sha256:[0-9a-f]{64}$ || \
+       "$sandbox_runner_image" != "$sandbox_runner_repository@$sandbox_runner_digest" ]]; then
   printf 'Sandbox runner image must be an exact repository@platform-manifest digest\n' >&2
   exit 1
 fi
@@ -148,12 +159,11 @@ if [[ (-n "$platform_index_digest" && -z "$sandbox_runner_index_digest") || \
   printf 'runtime and Sandbox runner must both be source manifests or signed candidate images\n' >&2
   exit 1
 fi
-if [[ ! "$sandbox_package_digest" =~ ^sha256:[0-9a-f]{64}$ || \
-      -z "$sandbox_package_repository" || \
-      ! "$sandbox_package_repository" =~ $oci_repository_pattern || \
-      "$sandbox_package_image" != "$sandbox_package_repository@$sandbox_package_digest" || \
-      -z "$sandbox_package_oci_archive" || ! -f "$sandbox_package_oci_archive" || \
-      -L "$sandbox_package_oci_archive" || ! -s "$sandbox_package_oci_archive" ]]; then
+if ! valid_kind_oci_repository "$sandbox_package_repository" || \
+    [[ ! "$sandbox_package_digest" =~ ^sha256:[0-9a-f]{64}$ || \
+       "$sandbox_package_image" != "$sandbox_package_repository@$sandbox_package_digest" || \
+       -z "$sandbox_package_oci_archive" || ! -f "$sandbox_package_oci_archive" || \
+       -L "$sandbox_package_oci_archive" || ! -s "$sandbox_package_oci_archive" ]]; then
   printf 'Sandbox package must be an exact repository@manifest OCI archive\n' >&2
   exit 1
 fi
@@ -344,13 +354,22 @@ import_exact_oci_image_into_kind() {
   local expected_digest=$3
   local expected_config_digest=$4
   local expected_platform=$5
+  local repository=${desired_reference%@*}
   local expected_os=${expected_platform%/*}
   local expected_arch=${expected_platform#*/}
   local node source_reference observed_digest observed_config_digest observed_os observed_arch reference_status
 
+  if ! valid_kind_oci_repository "$repository" || \
+      [[ ! "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ || \
+         "$desired_reference" != "$repository@$expected_digest" ]]; then
+    printf 'Kind import requires a canonical repository@expected-digest reference\n' >&2
+    exit 1
+  fi
   for node in $("$kind_bin" get nodes --name "$cluster_name"); do
+    # Name the layout index as well as its child: an unqualified import-date alias
+    # can be selected by CRI after normalization even though that new name is absent.
     docker exec --privileged -i "$node" ctr --namespace=k8s.io images import \
-      --digests --snapshotter=overlayfs - <"$archive" >/dev/null
+      --digests --base-name "$repository" --snapshotter=overlayfs - <"$archive" >/dev/null
     if ! source_reference=$(find_kind_image_by_target_digest "$node" "$expected_digest"); then
       printf 'Kind node %s OCI import did not contain target digest %s\n' \
         "$node" "$expected_digest" >&2

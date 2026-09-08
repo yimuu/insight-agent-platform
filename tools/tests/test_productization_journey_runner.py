@@ -507,6 +507,83 @@ with patch.object(pathlib.Path, 'read_text', read):
         self.assertNotIn('"docker.io/library/$sandbox_package_image"', bootstrap)
         self.assertNotIn("images inspect", bootstrap)
 
+    def test_kind_repository_names_do_not_require_docker_normalization(self) -> None:
+        bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+        validator = "valid_kind_oci_repository() {" + bootstrap.split(
+            "valid_kind_oci_repository() {", 1
+        )[1].split("\n}\n", 1)[0] + "\n}\n"
+        accepted = [
+            "ghcr.io/example/platform-runtime", "docker.io/insight-qualification/runtime",
+            "docker.io/library/busybox", "localhost/runtime", "localhost:5000/team/runtime",
+            "registry:5000/team/image__name--part.v2", "127.0.0.1:5000/runtime",
+        ]
+        rejected = [
+            "", "runtime", "team/runtime", "index.docker.io/team/runtime", "docker.io/runtime",
+            "ghcr.io/Example/runtime", "ghcr.io//runtime", "ghcr.io/team/", "ghcr.io/team/../runtime",
+            "ghcr.io/team/runtime:latest", "ghcr.io/team/runtime@sha256:" + "a" * 64,
+            "-registry.test/team/runtime", "registry-.test/team/runtime", "ghcr.io/.runtime",
+            "https://ghcr.io/team/runtime", "ghcr.io/team/runtime\nsecret", "ghcr.io/" + "a" * 248,
+        ]
+        for repository in accepted + rejected:
+            with self.subTest(repository=repository):
+                result = subprocess.run(
+                    ["bash", "-c", validator + '\nvalid_kind_oci_repository "$1"', "test", repository],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode == 0, repository in accepted, result.stderr)
+
+    def test_kind_import_passes_verified_repository_before_touching_the_node(self) -> None:
+        bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+        validator = "valid_kind_oci_repository() {" + bootstrap.split(
+            "valid_kind_oci_repository() {", 1
+        )[1].split("\n}\n", 1)[0] + "\n}\n"
+        importer = "import_exact_oci_image_into_kind() {" + bootstrap.split(
+            "import_exact_oci_image_into_kind() {", 1
+        )[1].split("\n}\n", 1)[0] + "\n}\n"
+        digest = "sha256:" + "a" * 64
+        config = "sha256:" + "b" * 64
+        script = '''
+set -euo pipefail
+kind_bin=fixture_kind
+cluster_name=owned-test
+fixture_kind() { printf '%s\n' "$*" >>"$KIND_LOG"; printf '%s\n' owned-node; }
+docker() { printf '%s\\0' "$@" >"$DOCKER_LOG"; return 73; }
+''' + validator + importer + '\nimport_exact_oci_image_into_kind "$1" "$2" "$3" "$4" linux/amd64\n'
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            archive = temporary / "image.tar"
+            archive.write_bytes(b"test archive input")
+            docker_log, kind_log = temporary / "docker.log", temporary / "kind.log"
+            cases = [
+                ("ghcr.io/example/runtime@" + digest, digest, True),
+                ("docker.io/insight-qualification/runtime@" + digest, digest, True),
+                ("team/runtime@" + digest, digest, False),
+                ("docker.io/runtime@" + digest, digest, False),
+                ("ghcr.io/example/runtime@" + digest, "sha256:" + "c" * 64, False),
+                ("ghcr.io/example/runtime:tag", digest, False),
+                ("ghcr.io/example/runtime@bad", "bad", False),
+            ]
+            for reference, expected_digest, accepted in cases:
+                with self.subTest(reference=reference, digest=expected_digest):
+                    docker_log.unlink(missing_ok=True)
+                    kind_log.unlink(missing_ok=True)
+                    environment = dict(os.environ, DOCKER_LOG=str(docker_log), KIND_LOG=str(kind_log))
+                    result = subprocess.run(
+                        ["bash", "-c", script, "test", str(archive), reference, expected_digest, config],
+                        env=environment, capture_output=True, text=True, check=False,
+                    )
+                    if accepted:
+                        self.assertEqual(result.returncode, 73, result.stderr)
+                        self.assertEqual(docker_log.read_bytes().split(b"\0")[:-1], [argument.encode() for argument in [
+                            "exec", "--privileged", "-i", "owned-node", "ctr", "--namespace=k8s.io", "images", "import",
+                            "--digests", "--base-name", reference.split("@")[0], "--snapshotter=overlayfs", "-",
+                        ]])
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("canonical repository@expected-digest", result.stderr)
+                        self.assertFalse(docker_log.exists())
+                        self.assertFalse(kind_log.exists())
+
     def test_kind_image_digest_query_uses_unique_ctr_list_row(self) -> None:
         bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
         query_functions = "kind_image_listing() {" + bootstrap.split(

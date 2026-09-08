@@ -13,6 +13,29 @@ spec.loader.exec_module(diagnostics)
 
 
 class KindDiagnosticsTests(unittest.TestCase):
+    def test_container_image_failure_is_classified_without_exposing_message(self):
+        message = ('failed to check if this is a checkpoint image: failed to get image from containerd '
+                   '"private-image": image "docker.io/library/import-private": not found '
+                   'https://user:secret-marker@example.test/private --token=argv-marker')
+        for category in ('state', 'lastState'):
+            with self.subTest(category=category):
+                pod = {'status': {'containerStatuses': [{'name': 'worker', category: {
+                    'waiting': {'reason': 'CreateContainerError', 'message': message}}}]}}
+                report = diagnostics.summarize('pods', {'items': [pod]})
+                state = report['items'][0]['container_statuses'][0][category]['waiting']
+                self.assertEqual(state['runtime_signals'], ['containerd_image_not_found'])
+                self.assertEqual(state['reason'], 'CreateContainerError')
+                for private in ('secret-marker', 'private-image', 'import-private', 'https://', 'argv-marker'):
+                    self.assertNotIn(private, json.dumps(report))
+        event = diagnostics.summarize('events', {'items': [{'reason': 'Failed', 'message': message}]})
+        self.assertEqual(event['items'][0]['runtime_signals'], ['containerd_image_not_found'])
+        self.assertNotIn('secret-marker', json.dumps(event))
+        self.assertNotIn('private-image', json.dumps(event))
+        for unknown in ('not found', 'failed to get image from containerd', 'other failure', None,
+                        {'message': message}, [message], 1):
+            with self.subTest(message=unknown):
+                self.assertEqual(diagnostics.runtime_signals(unknown), [])
+
     def test_pod_projection_excludes_credentials_and_keeps_failure_evidence(self):
         pod = {'metadata': {'name': 'worker', 'namespace': 'platform-model-worker', 'annotations': {'private': 'secret-marker'}},
                'spec': {'nodeName': 'worker-a', 'containers': [{'name': 'worker', 'args': ['secret-marker'],
