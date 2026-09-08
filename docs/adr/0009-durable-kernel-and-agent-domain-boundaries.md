@@ -265,6 +265,9 @@ supervisor 执行；macOS 只能显式选择 checkout 源码构建，不新增�
 
 该分离避免短空扫描与长业务领取通过广域谓词读反复形成 SSI 冲突；不降低业务事务隔离，不改变预算、wire 或持久 authority。单连接池必须能够先完成预读再开始事务。独立精确分区的并发提交、陈旧提示和原五十 Run 四进程场景共同验证边界；仍可能发生的明确事务 abort 使用既有有界重试，不能视为新的业务 attempt。
 
+补充联合评审：访问位置与轮次由分区状态记录；完整租户公平状态未变化时，保留该行及其版本、更新时间，避免空访问产生无业务变化的写依赖。判断复用 owning `TenantSchedulerState` 的完整相等语义，仍先校验身份与 Policy，持有原公平行锁；实际公平状态变化继续通过原版本条件更新，并与分区、额度和领取事实原子提交。分区轮转、SERIALIZABLE、并发和验收期限不变。
+该决策覆盖正常小表扫描及其较粗的谓词读；[PostgreSQL 的串行化隔离说明](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-SERIALIZABLE)解释了顺序扫描使用表级谓词锁的行为。确定性事务交错验证空访问不打断真实公平状态变更，原多进程用例在已准备统计信息的小库中继续验证完整领取。
+
 ### 作者特性和 Run 的冻结来源
 
 联合评审接受：作者所需运行特性从唯一 Plan 和 exact dependency Deployment 的实际不可变闭包派生。只读 resolver 提供有界、去重且绑定 exact 身份和接口的安全特性证据；source bundle 固定该输入，Registry 在原 validation 提交事务内独立重推并核对。特性证据不包含 endpoint、Secret 或 worker build，不授予安装、发布或执行资格；后端名称本身不能证明物理 adapter 已安装。Native、Remote、MCP、Sandbox、Context 和子 Agent 的真实要求分别沿已有部署合同取得，不能把所有 Capability 猜成 Remote。编译语义随该派生规则明确升级，IR 不因产品提示字段而升级。
