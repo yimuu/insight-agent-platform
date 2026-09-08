@@ -5,7 +5,7 @@
 ## 使用平台
 
 - [根 README](../README.md)：安装 CLI 并完成首次 Run。
-- [0.2.0 开发预览安装说明](releases/0.2.0.md)：精确版本安装与验证范围。
+- [0.2.1 开发预览安装说明](releases/0.2.1.md)：精确版本安装与验证范围。
 - [当前产品文档](current/README.md)：CLI、HTTP、Console、MCP 与运行机制。
 - [当前架构](current/architecture.md)：authority 与隔离边界。
 - [部署与运维](current/operations.md)、[可观测性与处置](current/observability.md)。

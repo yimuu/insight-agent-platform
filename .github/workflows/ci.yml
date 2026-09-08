@@ -79,6 +79,7 @@ jobs:
             tools/tests/test_fixture_project.py \
             tools/tests/test_document_review.py \
             tools/tests/test_public_release_images.py \
+            tools/tests/test_native_release_images.py \
             tools/tests/test_kind_diagnostics.py \
             tools/tests/test_prepare_productization_release_candidate.py \
             tools/tests/test_productization_http_lifecycle.py \
