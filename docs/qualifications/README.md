@@ -9,8 +9,9 @@
 通过六个场景，公共 CLI、真实 Gateway 和 Console 及退出清理均完成；报告独立校验为 partial，不能替代完整 `all` 资格。
 模型响应和审批输入来自验收夹具，不是外部真实模型调用或人工确认的证据。
 同一修订的[完整源码旅程](https://github.com/yimuu/insight-agent-platform/actions/runs/34169971017)完成真实 OpenSandbox L3、公共 CLI／Gateway／Console 十个场景与严格 10/10 汇总，下载后的报告也通过独立重算。
-该工作流最终在 `stop` 读取已退出进程身份时清理失败；功能报告通过不等于整个工作流通过，退出清理仍需修复并重新验证。
-`0.2.0` 尚未发布；源码验收通过也不能替代签名候选、性能、匿名镜像读取与实际发行资产核验。
+该工作流最终在 `stop` 读取已退出进程身份时清理失败；功能报告通过不等于整个工作流通过。Linux 退出身份读取已修复并通过真实进程回归，完整签名候选仍需重新验证退出清理。
+[首次 `0.2.0` 候选](https://github.com/yimuu/insight-agent-platform/actions/runs/34175910582)完成四平台 CLI 构建，但 runtime 镜像构建超过既有预算后取消；签名候选与发行均未生成。
+`0.2.1` 正在准备；源码验收不能替代签名候选、性能、匿名镜像读取与实际发行资产核验。
 
 - 仓库合同、单元测试、真实 PostgreSQL 与进程恢复验证按当前提交重新运行，具体证据来自对应的 CI 或 owning qualification harness；
 - 2026-09-04 的 OpenSandbox/Kubernetes L1～L3 与单台 macOS 宿主三节点 Kind L4 mechanics 属于当时 revision 的历史开发证据，不转授后续架构或 exact release 资格；

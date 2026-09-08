@@ -72,6 +72,10 @@ seed 清理失败会阻止后续启动；结束阶段的清理仍校验原目录
 受保护 tag workflow 构建四个平台 CLI archive、runtime/fixed Sandbox runner/Console与official OpenSandbox image闭包、checksum、SPDX SBOM、
 SLSA provenance、签名与 canonical ReleaseBundle。资产不可覆盖，修复必须发布新版本。未实际执行的跨架构、push/sign 或
 performance 项必须保留 Not run，不能由本机结果推断。
+runtime 与 runner 在各自架构的原生宿主构建；跨作业记录由
+[`native_image_contract.py`](../../tools/release/native_image_contract.py) 绑定当前源码、工作流批次和实际 OCI 字节。
+汇总只合并已验证摘要，并核对运行镜像与 attestation 描述符完整保留。构建计时包含分支等待、工件传递与最终索引验证，
+Console 的同一份已验证资产另行生成不执行目标架构代码的双平台镜像。
 写入公开发行 tag 和 Release 之前，[匿名索引检查](../../tools/release/verify-public-release-images.py) 使用已验证候选的精确镜像身份，
 从固定 GHCR 地址取得匿名 token 并核对原始 index 摘要。它不读取账户凭证或 Docker 登录配置，也不更改包权限。
 检查证明 exact index 匿名可读，不能替代已有运行资格或宣称完整跨架构 layer 下载；网络失败按安全类别报告。
@@ -147,6 +151,8 @@ Receipt 的承诺窗口取持久化到期时间、完成后的最低保留期，
 凭证；生产部署由数据库管理员对预先建立的角色应用同一 owner grants，运行进程不持有 DDL 权限。
 
 ## 恢复验证
+
+CI 对标签、新建引用和手动或定时运行执行完整验证；已有分支与 PR 按明确的前后提交差异选择验证范围，空差异不会被当作验证通过。
 
 普通 PostgreSQL 集成测试由 [CI runner](../../tools/ci/run-rust-integration-tests.py) 逐目标运行。依赖实际工作进程、HTTPS
 对象存储或 Kubernetes 的测试使用显式资格入口；缺失环境或实际 executable 会失败，不能记为通过。

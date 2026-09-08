@@ -38,6 +38,8 @@ for marker in (
     "Workspace Rust verification",
     "Required CI summary",
     "tools/checks/classify-ci-paths.py",
+    "REF_TYPE: ${{ github.ref_type }}",
+    '[[ "$EVENT_NAME" == "push" && ( "$REF_TYPE" == "tag" || "$BEFORE_SHA" =~ ^0{40}$ ) ]]',
     "tools/checks/check-product-release.py",
     "tools/checks/check-required-ci-results.py",
     "tools/tests/test_product_release.py",

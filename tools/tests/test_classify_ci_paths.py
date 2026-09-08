@@ -1,5 +1,10 @@
 import importlib.util
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 
@@ -89,6 +94,73 @@ class ClassifyCiPathsTests(unittest.TestCase):
     def test_ci_workflow_change_fails_closed_to_runtime(self) -> None:
         result = MODULE.classify([".github/workflows/ci.yml"])
         self.assertTrue(result["runtime"])
+
+    def test_actual_workflow_dispatch_with_root_merge_and_tag_refs(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = workflow.split("      - name: Resolve closed CI lane set\n", 1)[1].split("\n  quick:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                           "BASH_ENV": os.devnull}
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, env=environment, check=True,
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+
+            git("init", "--quiet", "--initial-branch=main")
+            git("config", "user.name", "CI fixture")
+            git("config", "user.email", "ci@example.invalid")
+            (root / "tools/checks").mkdir(parents=True)
+            shutil.copyfile(ROOT / "tools/checks/classify-ci-paths.py", root / "tools/checks/classify-ci-paths.py")
+            (root / "README.md").write_text("initial\n")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "Initial fixture")
+            initial = git("rev-parse", "HEAD")
+            git("switch", "--quiet", "-c", "feature")
+            (root / "docs").mkdir()
+            (root / "docs/feature.md").write_text("feature\n")
+            git("add", "docs/feature.md")
+            git("commit", "--quiet", "-m", "Feature documentation")
+            git("switch", "--quiet", "main")
+            (root / "README.md").write_text("main documentation\n")
+            git("commit", "--quiet", "-am", "Main documentation")
+            before_merge = git("rev-parse", "HEAD")
+            git("merge", "--quiet", "--no-ff", "feature", "-m", "Merge fixture")
+            merged = git("rev-parse", "HEAD")
+            git("tag", "-a", "v1.2.3", "-m", "Tag fixture")
+            self.assertEqual(git("rev-parse", "v1.2.3^{commit}"), merged)
+            # This is the actual old failure trigger, not a mocked empty diff.
+            self.assertEqual(git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", merged), "")
+            all_lanes = {"quick": True, "cli": True, "console": True, "runtime": True, "policy": True}
+            docs_only = {"quick": True, "cli": False, "console": False, "runtime": False, "policy": False}
+            cases = [
+                ("new-tag-merge", "push", "tag", "0" * 40, "", merged, all_lanes),
+                ("tag-nonzero-before", "push", "tag", before_merge, "", merged, all_lanes),
+                ("new-branch-merge", "push", "branch", "0" * 40, "", merged, all_lanes),
+                ("new-branch-root", "push", "branch", "0" * 40, "", initial, all_lanes),
+                ("docs-push", "push", "branch", before_merge, "", merged, docs_only),
+                ("docs-pr", "pull_request", "branch", "0" * 40, initial, merged, docs_only),
+                ("manual", "workflow_dispatch", "branch", "", "", merged, all_lanes),
+                ("scheduled", "schedule", "branch", "", "", merged, all_lanes),
+                ("unchanged-push", "push", "branch", merged, "", merged, None),
+                ("invalid-short-zero", "push", "branch", "0", "", merged, None),
+            ]
+            for name, event, ref_type, before, base, head, expected in cases:
+                with self.subTest(name=name):
+                    output = root / (name + ".output")
+                    env = {**environment, "EVENT_NAME": event, "REF_TYPE": ref_type,
+                           "BEFORE_SHA": before, "BASE_SHA": base, "HEAD_SHA": head,
+                           "GITHUB_OUTPUT": str(output)}
+                    result = subprocess.run(["bash", "-e", "-c", script], cwd=root, env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        observed = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                        self.assertEqual(observed, {key: str(value).lower() for key, value in expected.items()})
 
 
 if __name__ == "__main__":
