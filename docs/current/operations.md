@@ -223,6 +223,10 @@ Artifact maintenance 由 Kind 单独组合配置，复用该环境的 Artifact p
 
 Kind 验证要求 Docker 启用 containerd image store，并支持按平台保存镜像（API 1.48 或以上）。CI 在构建前配置、检查该存储模式；本地 bootstrap 在创建资源前检查。镜像仍按原始 OCI manifest 与 config 摘要核验，再从停止的容器读取字节。
 
+浏览器资格启动使用独占私有 profile 中由 Chrome 分配的调试端口，全部就绪读取共用 20 秒启动期限。进程提前退出会立即给出安全分类诊断；清理确认拥有的子进程和独立进程组均退出后才删除 profile，组长退出不会跳过后代清理，清理失败不会形成通过证据。
+
+单镜像 OCI 归档的本地 descriptor 可以省略 `platform`；此时仍从已验证的 config 确认目标平台。显式平台冲突继续拒绝，归档字节与签名镜像身份不变。
+
 [开发资源输入](../../deploy/kind/workload-resources.json)单独降低 Rust 服务的 CPU 预留，并进入本地部署身份。内存、limits、双副本与安全配置仍来自各 owning chart。完整渲染检查开发调度预算，实际运行是否存在 CPU 饱和、内存压力或恢复问题仍以动态验收为准。
 
 开发初始化在同一事务内建立租户与真实 Scheduling Policy 绑定，初始任务可以直接进入正常领取流程。重复启动只核验当前绑定，保留调度额度与进度；合法的后续策略改绑可继续使用。绑定缺失或漂移会拒绝启动，需要通过拥有域诊断，不能依赖 worker 或启动工具自动修补。

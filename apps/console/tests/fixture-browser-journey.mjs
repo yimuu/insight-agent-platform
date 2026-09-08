@@ -39,5 +39,5 @@ async function configureSyntheticBrowser({ client, consoleOrigin, gatewayOrigin 
 
 runGatewayJourney({ configureSyntheticBrowser }).catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
-  process.exit(1)
+  process.exit(process.exitCode ?? 1)
 })
