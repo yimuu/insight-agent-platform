@@ -57,6 +57,11 @@ image digest、containerd节点、Direct/Disabled NetworkPolicy和不存在publi
 content bytes/time、稳定 5 分钟后的 RSS/CPU、project/volume disk 与 source compilation count。预算为 cold ≤300 秒、warm
 ≤60 秒、RSS ≤6 GiB、CPU ≤10% 单核等效、disk ≤8 GiB、source compilation=0；只有真实测量通过才能标 Passed。
 
+开发 profile 的 Native Capability 与 Registry 按秒领取和恢复工作，空闲后到达的任务或验证会等待下一次扫描。
+Artifact 扫描在本批完成后等待一秒，后置 finalizer 也按秒轮询，上传完成的可见延迟会累加两个阶段的等待。
+Orchestration 每五秒推进恢复、到期 Timer、重试、收敛、Task 过期和子任务取消；业务 Job 领取仍独立按半秒扫描。
+这些周期降低空扫描和未使用标识的生成开销，同时增加开发环境中的后台推进延迟；恢复页容量、租约与生产部署输入保持原约束。
+
 Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用容器或 volume 名称；固定宿主端口仍限制完整 profile 的并行启动。
 验证脚本创建的临时项目属于单次运行，结束时使用 CLI 的 `stop/reset` 清理进程、Compose 容器与 volume，
 随后删除该次项目目录。`run-productization-journey.sh --logs-directory <new-path>` 在删除前导出有界日志；CI 自动上传日志及独立的验证报告。
