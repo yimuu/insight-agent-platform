@@ -1,12 +1,10 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import { startGatewayConsoleServer } from './gateway-server.mjs'
+import { BrowserProcessError, qualificationSignals, startHeadlessBrowser, withinSignal } from './browser-process.mjs'
 
 const required = (name) => {
   const value = process.env[name]
@@ -16,53 +14,10 @@ const required = (name) => {
 
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
-function waitForChild(child, timeoutMilliseconds) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
-  return new Promise((resolveExit) => {
-    const finish = () => {
-      clearTimeout(timer)
-      child.removeListener('exit', finish)
-      resolveExit()
-    }
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish()
-    }, timeoutMilliseconds)
-    child.once('exit', finish)
-  })
-}
-
-async function unusedPort() {
-  const server = createServer()
-  await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    server.listen(0, '127.0.0.1', resolveListen)
-  })
-  const address = server.address()
-  if (!address || typeof address === 'string') throw new Error('could not reserve a browser debug port')
-  const { port } = address
-  await new Promise((resolveClose) => server.close(resolveClose))
-  return port
-}
-
-async function jsonEventually(url, deadline) {
-  let lastError
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url)
-      if (response.ok) return await response.json()
-      lastError = new Error(`HTTP ${response.status}`)
-    } catch (error) {
-      lastError = error
-    }
-    await delay(50)
-  }
-  throw new Error(`browser debugging endpoint did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`)
-}
-
-function cdp(webSocketUrl) {
+function cdp(webSocketUrl, signal) {
   const socket = new WebSocket(webSocketUrl)
   let sequence = 0
+  let rejectOpening
   const pending = new Map()
   const handlers = new Map()
   socket.addEventListener('message', (event) => {
@@ -76,20 +31,35 @@ function cdp(webSocketUrl) {
     if (message.error) waiter.reject(new Error(message.error.message))
     else waiter.resolve(message.result)
   })
-  const opened = new Promise((resolveOpen, rejectOpen) => {
+  const opened = withinSignal(new Promise((resolveOpen, rejectOpen) => {
+    rejectOpening = rejectOpen
     socket.addEventListener('open', resolveOpen, { once: true })
-    socket.addEventListener('error', rejectOpen, { once: true })
-  })
+    socket.addEventListener('error', () => rejectOpen(new BrowserProcessError('debug_connection_failed')), { once: true })
+  }), signal)
+  const close = () => {
+    rejectOpening(new BrowserProcessError('debug_connection_closed'))
+    for (const waiter of pending.values()) waiter.reject(new BrowserProcessError('debug_connection_closed'))
+    pending.clear()
+    signal.removeEventListener('abort', close)
+    socket.close()
+  }
+  socket.addEventListener('close', close, { once: true })
+  signal.addEventListener('abort', close, { once: true })
   return {
     async call(method, params = {}) {
       await opened
+      if (signal.aborted) throw new BrowserProcessError('interrupted')
+      if (socket.readyState !== WebSocket.OPEN) throw new BrowserProcessError('debug_connection_closed')
       const id = ++sequence
       const result = new Promise((resolveResult, rejectResult) => pending.set(id, { resolve: resolveResult, reject: rejectResult }))
-      socket.send(JSON.stringify({ id, method, params }))
+      try { socket.send(JSON.stringify({ id, method, params })) } catch {
+        pending.get(id).reject(new BrowserProcessError('debug_connection_closed'))
+        pending.delete(id)
+      }
       return result
     },
     on(method, handler) { handlers.set(method, handler) },
-    close() { socket.close() },
+    close,
   }
 }
 
@@ -238,29 +208,13 @@ export async function runGatewayJourney({ configureSyntheticBrowser } = {}) {
     .map((candidate) => resolve(candidate))
     .find((candidate) => existsSync(candidate))
   if (!browser) throw new Error('an executable Chromium or Chrome browser is required')
-  const consoleServer = await startGatewayConsoleServer({ gatewayOrigin, managementGatewayOrigin, bundleRoot })
-  const browserProfile = mkdtempSync(join(tmpdir(), 'insight-console-browser-'))
-  const debugPort = await unusedPort()
-  const browserProcess = spawn(browser, [
-    '--headless=new',
-    '--disable-background-networking',
-    '--disable-component-update',
-    '--disable-default-apps',
-    '--disable-extensions',
-    '--disable-gpu',
-    '--disable-sync',
-    '--metrics-recording-only',
-    '--no-first-run',
-    '--no-sandbox',
-    `--remote-debugging-port=${debugPort}`,
-    `--user-data-dir=${browserProfile}`,
-    consoleServer.origin,
-  ], { stdio: ['ignore', 'ignore', 'pipe'] })
-  let browserErrors = ''
-  browserProcess.stderr.on('data', (chunk) => { browserErrors = `${browserErrors}${chunk}`.slice(-8192) })
-
+  const signals = qualificationSignals()
+  let consoleServer
+  let browserOwner
   let client
   let observer
+  let evidence
+  let failure
   const consoleMessages = []
   const authoringNetwork = []
   const requestKinds = new Map()
@@ -268,10 +222,9 @@ export async function runGatewayJourney({ configureSyntheticBrowser } = {}) {
   const uploadRequests = new Map()
   const extraHeaders = new Map()
   try {
-    const targets = await jsonEventually(`http://127.0.0.1:${debugPort}/json`, Date.now() + 20_000)
-    const page = targets.find((target) => target.type === 'page' && target.url.startsWith(consoleServer.origin))
-    if (!page) throw new Error('headless browser did not expose the Console page')
-    client = cdp(page.webSocketDebuggerUrl)
+    consoleServer = await startGatewayConsoleServer({ gatewayOrigin, managementGatewayOrigin, bundleRoot })
+    browserOwner = await startHeadlessBrowser({ executable: browser, origin: consoleServer.origin, signal: signals.signal })
+    client = cdp(browserOwner.pageWebSocketUrl, signals.signal)
     await client.call('Runtime.enable')
     await client.call('Page.enable')
     await client.call('Log.enable')
@@ -300,11 +253,11 @@ export async function runGatewayJourney({ configureSyntheticBrowser } = {}) {
     if (configureSyntheticBrowser) await configureSyntheticBrowser({ client, consoleOrigin: consoleServer.origin, gatewayOrigin })
     // Runtime console events are not request/response messages, so collect them through a second
     // small protocol connection dedicated to passive observation.
-    observer = new WebSocket(page.webSocketDebuggerUrl)
-    await new Promise((resolveOpen, rejectOpen) => {
+    observer = new WebSocket(browserOwner.pageWebSocketUrl)
+    await withinSignal(new Promise((resolveOpen, rejectOpen) => {
       observer.addEventListener('open', resolveOpen, { once: true })
-      observer.addEventListener('error', rejectOpen, { once: true })
-    })
+      observer.addEventListener('error', () => rejectOpen(new BrowserProcessError('debug_connection_failed')), { once: true })
+    }), signals.signal)
     observer.addEventListener('message', (event) => {
       const message = JSON.parse(event.data)
       if (message.method === 'Runtime.consoleAPICalled' || message.method === 'Log.entryAdded') consoleMessages.push(JSON.stringify(message.params))
@@ -625,7 +578,9 @@ export async function runGatewayJourney({ configureSyntheticBrowser } = {}) {
     await waitFor(client, terminalEvidence, 'authority Run and safe result re-read after reload')
     if (consoleMessages.some((message) => message.includes(token))) throw new Error('access token appeared in browser console output')
     observer.close()
-    process.stdout.write(`${JSON.stringify({
+    browserOwner.assertRunning()
+    if (signals.signal.aborted) throw new BrowserProcessError('interrupted')
+    evidence = {
       kind: configureSyntheticBrowser ? 'insight.console.synthetic-gateway-journey/v1' : 'insight.console.real-gateway-journey/v1',
       status: 'passed',
       gateway_origin: gatewayOrigin,
@@ -664,21 +619,23 @@ export async function runGatewayJourney({ configureSyntheticBrowser } = {}) {
         'dom_canary_redaction',
         'mobile_aria_layout',
       ],
-    })}\n`)
+    }
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.stack ?? error.message : String(error)}\nSafe transport failures: ${JSON.stringify(transportFailures)}`)
-} finally {
-    observer?.close()
-    client?.close()
-    browserProcess.kill('SIGTERM')
-    await waitForChild(browserProcess, 5_000)
-    await consoleServer.close()
-    rmSync(browserProfile, { recursive: true, force: true })
+    failure = new Error(`${error instanceof Error ? error.stack ?? error.message : String(error)}\nSafe transport failures: ${JSON.stringify(transportFailures)}\nSafe browser process: ${JSON.stringify(browserOwner?.diagnostics() ?? null)}`)
+  } finally {
+    const cleanupFailures = []
+    try { observer?.close(); client?.close() } catch { cleanupFailures.push('debug_connection_cleanup_failed') }
+    try { await browserOwner?.close() } catch (error) { cleanupFailures.push(error instanceof BrowserProcessError ? error.reason : 'browser_cleanup_failed') }
+    try { if (consoleServer) await withinSignal(consoleServer.close(), AbortSignal.timeout(2000)) } catch { cleanupFailures.push('console_server_cleanup_failed') }
+    signals.dispose()
+    if (cleanupFailures.length) failure = new Error(`${failure?.message ?? 'browser qualification cleanup failed'}\nSafe cleanup failures: ${JSON.stringify(cleanupFailures)}`)
   }
-  if (browserProcess.exitCode && browserProcess.exitCode !== 0) throw new Error(`browser exited ${browserProcess.exitCode}: ${browserErrors}`)
+  if (signals.signal.aborted && !failure) failure = new BrowserProcessError('interrupted')
+  if (failure) throw failure
+  process.stdout.write(`${JSON.stringify(evidence)}\n`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) runGatewayJourney().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
-  process.exit(1)
+  process.exit(process.exitCode ?? 1)
 })
