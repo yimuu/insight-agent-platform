@@ -6385,7 +6385,13 @@ fn read_linux_process_argv0(
                 })?;
                 break Ok(Some(argv0.to_owned()));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break Ok(None),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                // A proc file opened before exit can report ESRCH when read afterwards.
+                break Ok(None);
+            }
             Err(error) => {
                 break Err(CliError::RuntimeUnavailable(format!(
                     "inspect process {pid} generation: {error}"
@@ -11574,6 +11580,74 @@ mod tests {
         .unwrap();
         assert_eq!(observed.as_deref(), Some("foreign-process"));
         assert_eq!(mismatch_reads, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_argv0_observes_exit_through_an_already_open_proc_file() {
+        let generation = format!("{RUNTIME_PROCESS_GENERATION_PREFIX}{}", Uuid::now_v7());
+        let mut child = ReadyIdentityProcess::spawn(&generation);
+        let pid = child.0.id();
+        assert_eq!(
+            process_argv0(pid).unwrap().as_deref(),
+            Some(generation.as_str())
+        );
+        let mut cmdline = fs::File::open(format!("/proc/{pid}/cmdline")).unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+
+        // Keep the original descriptor: reopening the path would only prove ENOENT.
+        let error = cmdline.read_to_end(&mut Vec::new()).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
+        let observed = read_linux_process_argv0(pid, || {
+            let mut bytes = Vec::new();
+            cmdline.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        });
+        assert_eq!(observed.unwrap(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_argv0_preserves_errors_except_observed_exit() {
+        for errno in [libc::ENOENT, libc::ESRCH] {
+            let mut reads = 0;
+            let observed = read_linux_process_argv0(7, || {
+                reads += 1;
+                Err(std::io::Error::from_raw_os_error(errno))
+            });
+            assert_eq!(observed.unwrap(), None, "errno {errno}");
+            assert_eq!(reads, 1);
+        }
+        for errno in [libc::EPERM, libc::EACCES, libc::EIO, libc::EINVAL] {
+            let mut reads = 0;
+            let observed = read_linux_process_argv0(7, || {
+                reads += 1;
+                Err(std::io::Error::from_raw_os_error(errno))
+            });
+            assert!(
+                matches!(observed, Err(CliError::RuntimeUnavailable(_))),
+                "errno {errno}"
+            );
+            assert_eq!(reads, 1);
+        }
+        assert!(read_linux_process_argv0(7, || Ok(vec![0xff, 0])).is_err());
+
+        let mut reads = 0;
+        let observed = read_linux_process_argv0(7, || {
+            reads += 1;
+            if reads == 1 {
+                Ok(Vec::new())
+            } else {
+                Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+            }
+        });
+        assert_eq!(observed.unwrap(), None);
+        assert_eq!(reads, 2);
+
+        // A process with a stable empty argv0 is still an identity mismatch.
+        let observed = read_linux_process_argv0(7, || Ok(Vec::new())).unwrap();
+        assert_eq!(observed.as_deref(), Some(""));
     }
 
     #[cfg(unix)]

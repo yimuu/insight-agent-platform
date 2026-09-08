@@ -22,7 +22,7 @@ feature 都运行相同 public `/v1` 合同和独立 role；loopback、local OID
   closure，`stopped` 必须为空。失败会停止所有已记录进程，只有完整清理后才写 `stopped`；
 - process state 绑定 tenant、profile、release 与 source；`dev`/`status`/`stop`/`reset` 在使用已记录 PID 前核对每个进程的唯一
   generation。mismatch PID 永不接收信号，只在同一 exact journal 的其余 owned role 已收口后作为 stale record 丢弃。generation 是误杀防护而不是同 UID 安全边界；macOS 的 POSIX PID
-  signal 在检查与发送之间仍有极窄的同 UID PID-reuse residual；
+  signal 在检查与发送之间仍有极窄的同 UID PID-reuse residual。Linux 身份读取期间进程已退出时视为停止；权限及其他读取错误仍阻止清理完成；
 - 同一 project 的 `dev/start/stop/reset --confirm` 全流程由私有、single-link lock file 上的内核 exclusive lock 串行化；进程崩溃会由内核
   释放锁，不依据锁文件中的 PID 猜测或删除 stale owner。`status/logs` 可继续读取原子 journal 并显示 `starting`；
 - 同一 release/source 下增加 feature 保留本地身份，在停机后通过有界 journal 重建所选角色的完整配置。
