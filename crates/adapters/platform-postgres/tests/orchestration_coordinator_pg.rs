@@ -2481,6 +2481,12 @@ fn q1_fifty_runs_use_multiple_processes_and_preserve_database_fairness() {
 
         let total_runs = i64::try_from(PHASE2_TENANT_COUNT * PHASE2_RUNS_PER_TENANT).unwrap();
         let tenant_ids = tenants.iter().cloned().collect::<Vec<_>>();
+        // Exercise the real small-table plan before the synchronized workers start;
+        // waiting for autovacuum must not hide cross-partition predicate conflicts.
+        sqlx::query("ANALYZE insight_platform.scheduler_tenant_state")
+            .execute(bulkheads.business_pool())
+            .await
+            .unwrap();
         let ready_before: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM insight_platform.jobs WHERE work_class = 'orchestration' AND state = 'ready' AND tenant_id = ANY($1)",
         )
