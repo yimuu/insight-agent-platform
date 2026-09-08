@@ -32,7 +32,7 @@ fail closed。同一 release/source 才能追加 feature；切换 exact release/
 
 ## 安装、更新与诊断
 
-每个 release 提供四个平台 CLI archive、checksum、SBOM、provenance、签名以及 digest-pinned runtime、Sandbox runner
+通过当前发行门禁的版本提供四个平台 CLI archive、checksum、SBOM、provenance、签名以及 digest-pinned runtime、Sandbox runner
 和 Console image。CLI 只接受与当前平台、版本、profile/schema 和自身 binary digest 完全匹配的签名 ReleaseBundle。
 
 ```bash

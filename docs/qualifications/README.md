@@ -2,11 +2,15 @@
 
 当前项目处于开发阶段，生产级 L4～L6 不属于当前里程碑，也不阻塞功能开发。
 
-2026-09-07 架构重整在当前工作树完成开发验收：工作区检查、Rust 与 Console 回归、真实 PostgreSQL、
-物理进程恢复和消息重启场景通过。全新本地环境中的公共 CLI、真实 Chrome 用户流程及并发读取检查通过，
-其执行入口为 [productization journey](../../tools/qualification/run-productization-journey.sh)。
-后续[源码验收 34160479562](https://github.com/yimuu/insight-agent-platform/actions/runs/34160479562) 在提交 `8ff2647d` 完成全新 Kind 启动、OpenSandbox L3、Console 构建及公开 CLI 全角色启动，
-旅程随后因 CORS 夹具仍断言旧短 Compose 名称停止，项目和 Kind 均完成清理。该结果尚不构成完整 `all` 产品旅程或签名候选资格；身份断言修复仍须重新验收。
+架构重整的本地开发验收属于当时修订的历史证据，不表示当前工作树已经通过。当前提交应运行自己的 CI 与
+[productization journey](../../tools/qualification/run-productization-journey.sh)，源码旅程和签名发行候选分别验收。
+
+提交 `62deeec6` 的 [starter+model 源码旅程](https://github.com/yimuu/insight-agent-platform/actions/runs/34170055780)
+通过六个场景，公共 CLI、真实 Gateway 和 Console 及退出清理均完成；报告独立校验为 partial，不能替代完整 `all` 资格。
+模型响应和审批输入来自验收夹具，不是外部真实模型调用或人工确认的证据。
+同一修订的[完整源码旅程](https://github.com/yimuu/insight-agent-platform/actions/runs/34169971017)完成真实 OpenSandbox L3、公共 CLI／Gateway／Console 十个场景与严格 10/10 汇总，下载后的报告也通过独立重算。
+该工作流最终在 `stop` 读取已退出进程身份时清理失败；功能报告通过不等于整个工作流通过，退出清理仍需修复并重新验证。
+`0.2.0` 尚未发布；源码验收通过也不能替代签名候选、性能、匿名镜像读取与实际发行资产核验。
 
 - 仓库合同、单元测试、真实 PostgreSQL 与进程恢复验证按当前提交重新运行，具体证据来自对应的 CI 或 owning qualification harness；
 - 2026-09-04 的 OpenSandbox/Kubernetes L1～L3 与单台 macOS 宿主三节点 Kind L4 mechanics 属于当时 revision 的历史开发证据，不转授后续架构或 exact release 资格；
