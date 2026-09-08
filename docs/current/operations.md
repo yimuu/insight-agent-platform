@@ -152,6 +152,8 @@ Receipt 的承诺窗口取持久化到期时间、完成后的最低保留期，
 
 ## 恢复验证
 
+CI 对标签、新建引用和手动或定时运行执行完整验证；已有分支与 PR 按明确的前后提交差异选择验证范围，空差异不会被当作验证通过。
+
 普通 PostgreSQL 集成测试由 [CI runner](../../tools/ci/run-rust-integration-tests.py) 逐目标运行。依赖实际工作进程、HTTPS
 对象存储或 Kubernetes 的测试使用显式资格入口；缺失环境或实际 executable 会失败，不能记为通过。
 安装初始化测试使用 `PLATFORM_TEST_INSTALLATION_DATABASE_URL` 指定的独立 current-schema 库，执行前不得有 Principal
