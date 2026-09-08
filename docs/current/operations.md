@@ -227,6 +227,8 @@ Kind 验证要求 Docker 启用 containerd image store，并支持按平台保�
 
 单镜像 OCI 归档的本地 descriptor 可以省略 `platform`；此时仍从已验证的 config 确认目标平台。显式平台冲突继续拒绝，归档字节与签名镜像身份不变。
 
+Kind 的产品镜像 repository 必须包含显式 registry，Docker Hub 名称还必须包含 namespace。导入按该 repository 命名附带的 layout index，避免 CRI 补全临时名称后查不到镜像；工作负载仍使用原始 platform manifest digest。失败诊断保留容器镜像查询失败的固定分类，便于区分容器创建与应用启动故障。
+
 [开发资源输入](../../deploy/kind/workload-resources.json)单独降低 Rust 服务的 CPU 预留，并进入本地部署身份。内存、limits、双副本与安全配置仍来自各 owning chart。完整渲染检查开发调度预算，实际运行是否存在 CPU 饱和、内存压力或恢复问题仍以动态验收为准。
 
 开发初始化在同一事务内建立租户与真实 Scheduling Policy 绑定，初始任务可以直接进入正常领取流程。重复启动只核验当前绑定，保留调度额度与进度；合法的后续策略改绑可继续使用。绑定缺失或漂移会拒绝启动，需要通过拥有域诊断，不能依赖 worker 或启动工具自动修补。

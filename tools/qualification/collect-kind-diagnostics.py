@@ -27,6 +27,15 @@ def scheduling_signals(message):
     }.items() if pattern in text]
 
 
+def runtime_signals(message):
+    if not isinstance(message, str):
+        return []
+    text = message.lower()
+    if 'failed to get image from containerd' in text and 'not found' in text:
+        return ['containerd_image_not_found']
+    return []
+
+
 def fields(value, names):
     output = {name: (str(value[name])[:1024] if isinstance(value[name], str) else value[name])
             for name in names if isinstance(value.get(name), (str, int, bool))}
@@ -64,13 +73,15 @@ def summarize(kind, document):
             for container in (status.get('containerStatuses', []) + status.get('initContainerStatuses', []))[:16]:
                 current = fields(container, ('name', 'ready', 'restartCount'))
                 for category in ('state', 'lastState'):
-                    current[category] = {state: fields(details, ('reason', 'exitCode', 'signal'))
+                    current[category] = {state: dict(fields(details, ('reason', 'exitCode', 'signal')),
+                        runtime_signals=runtime_signals(details.get('message', '')))
                         for state, details in container.get(category, {}).items()
                         if state in ('waiting', 'running', 'terminated')}
                 record['container_statuses'].append(current)
         else:
             record.update(fields(item, ('type', 'reason', 'count', 'lastTimestamp')))
             record['scheduling_signals'] = scheduling_signals(item.get('message', ''))
+            record['runtime_signals'] = runtime_signals(item.get('message', ''))
             record['object'] = fields(item.get('involvedObject', {}), ('kind', 'namespace', 'name'))
         result.append(record)
     return {'items': result, 'omitted_items': max(0, len(items) - len(selected))}
