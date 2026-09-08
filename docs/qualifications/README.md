@@ -5,14 +5,28 @@
 架构重整的本地开发验收属于当时修订的历史证据，不表示当前工作树已经通过。当前提交应运行自己的 CI 与
 [productization journey](../../tools/qualification/run-productization-journey.sh)，源码旅程和签名发行候选分别验收。
 
+[`v0.2.3`](https://github.com/yimuu/insight-agent-platform/releases/tag/v0.2.3) 已作为开发预览发布，对应提交
+`26eeea4460f121d527d6a4d8870f5cbcb4c022e9`。[发布工作流](https://github.com/yimuu/insight-agent-platform/actions/runs/34247796183)
+通过构建与签名、Linux x86_64 预构建 starter 性能、同一签名候选的 Kind／真实 OpenSandbox L3、`all` 配置下
+公共 CLI／Gateway／Console 十场景及严格 10/10 汇总，seed、旅程退出和 Kind 清理均成功。
+公开发行资产已完成受信 Ed25519 签名、全部校验和及三个镜像索引的匿名读取核验；下载后的原始报告经独立重算，
+完整 ReleaseBundle 和校验和文件与发行原件逐字节一致。macOS ARM CLI 下载包也已实际执行版本检查；
+这不是 macOS 或 ARM 的完整运行时资格。稳定版 latest 仍为 `v0.1.0`。
+
+本次 starter 冷启动为 57.90 秒、热启动为 6.42 秒，空闲稳定 300 秒后按既定方法测得 CPU 为单核的 8.47%，均通过既定开发门禁。
+十场景来自同一次 `all` 配置运行，不表示每种最小 feature closure 都已分别实跑；其中模型响应和审批提交来自验收夹具，
+不能作为外部真实模型调用或人工确认的证据。[标签 CI](https://github.com/yimuu/insight-agent-platform/actions/runs/34247795880)
+首次运行的 Console 在 20 秒内未取得浏览器 endpoint 文件，清理成功但根因未确认；同一提交、参数和预算的单次重跑
+通过 Console、编译器资源验证和最终 CI 汇总。该通过记录不应表述为首次超时原因已修复。
+
 提交 `62deeec6` 的 [starter+model 源码旅程](https://github.com/yimuu/insight-agent-platform/actions/runs/34170055780)
 通过六个场景，公共 CLI、真实 Gateway 和 Console 及退出清理均完成；报告独立校验为 partial，不能替代完整 `all` 资格。
 模型响应和审批输入来自验收夹具，不是外部真实模型调用或人工确认的证据。
 同一修订的[完整源码旅程](https://github.com/yimuu/insight-agent-platform/actions/runs/34169971017)完成真实 OpenSandbox L3、公共 CLI／Gateway／Console 十个场景与严格 10/10 汇总，下载后的报告也通过独立重算。
-该工作流最终在 `stop` 读取已退出进程身份时清理失败；功能报告通过不等于整个工作流通过。Linux 退出身份读取已修复并通过真实进程回归，完整签名候选仍需重新验证退出清理。
+该工作流最终在 `stop` 读取已退出进程身份时清理失败；功能报告通过不等于整个工作流通过。Linux 退出身份读取已修复并通过真实进程回归，后续完整签名候选的退出清理结果见上面的 `v0.2.3` 记录。
 [首次 `0.2.0` 候选](https://github.com/yimuu/insight-agent-platform/actions/runs/34175910582)完成四平台 CLI 构建，但 runtime 镜像构建超过既有预算后取消；签名候选与发行均未生成。
 [`0.2.1` 候选](https://github.com/yimuu/insight-agent-platform/actions/runs/34189643497)完成构建与签名，但 Kind 的 OCI descriptor 读取和开发环境空闲 CPU 门禁失败，未发布。
-[`0.2.2` 候选](https://github.com/yimuu/insight-agent-platform/actions/runs/34232707897)通过构建、签名和预构建开发环境性能验证，Kind 在 Outbox 容器创建时失败，完整产品旅程与发布未执行。已用该候选的真实镜像复现 containerd 临时引用规范化后的查询失败，并在新隔离集群验证导入命名修复；该机制验证不替代下一版本的完整签名候选资格。
+[`0.2.2` 候选](https://github.com/yimuu/insight-agent-platform/actions/runs/34232707897)通过构建、签名和预构建开发环境性能验证，Kind 在 Outbox 容器创建时失败，完整产品旅程与发布未执行。已用该候选的真实镜像复现 containerd 临时引用规范化后的查询失败，并在新隔离集群验证导入命名修复；`v0.2.3` 随后完成了完整签名候选资格验证。
 源码验收不能替代签名候选、性能、匿名镜像读取与实际发行资产核验。
 
 - 仓库合同、单元测试、真实 PostgreSQL 与进程恢复验证按当前提交重新运行，具体证据来自对应的 CI 或 owning qualification harness；
