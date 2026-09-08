@@ -19,6 +19,7 @@ OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
 OCI_LAYER = "application/vnd.oci.image.layer.v1.tar+gzip"
+DEFAULT_DESCRIPTOR_PLATFORM = object()
 
 
 def encoded_json(value: Any) -> bytes:
@@ -43,7 +44,11 @@ def write_layout(
     architecture: str = "amd64",
     config_architecture: Optional[str] = None,
     config_os: str = "linux",
-    descriptor_platform: Optional[Mapping[str, str]] = None,
+    descriptor_platform: Any = DEFAULT_DESCRIPTOR_PLATFORM,
+    omit_descriptor_platform: bool = False,
+    omit_config_architecture: bool = False,
+    omit_config_os: bool = False,
+    omit_config_blob: bool = False,
     layout_marker: Optional[Mapping[str, Any]] = None,
     index_descriptor_media_type: str = OCI_MANIFEST,
     manifest_media_type: str = OCI_MANIFEST,
@@ -58,6 +63,7 @@ def write_layout(
     corrupt_layer_blob: bool = False,
     manifest_size_delta: int = 0,
     config_size_delta: int = 0,
+    layer_size_delta: int = 0,
     add_symlink_member: bool = False,
 ) -> Tuple[str, str]:
     config_value = {
@@ -66,6 +72,10 @@ def write_layout(
         "os": config_os,
         "rootfs": {"diff_ids": [], "type": "layers"},
     }
+    if omit_config_architecture:
+        del config_value["architecture"]
+    if omit_config_os:
+        del config_value["os"]
     if duplicate_config_key:
         config_payload = (
             b'{"architecture":"'
@@ -83,6 +93,7 @@ def write_layout(
     config_descriptor = descriptor(config_payload, config_descriptor_media_type)
     config_descriptor["size"] += config_size_delta
     layer_descriptor = descriptor(layer_payload, OCI_LAYER)
+    layer_descriptor["size"] += layer_size_delta
     manifest_value = {
         "config": config_descriptor,
         "layers": [layer_descriptor],
@@ -95,13 +106,12 @@ def write_layout(
     manifest_descriptor["annotations"] = {
         "org.opencontainers.image.ref.name": "qualification"
     }
-    manifest_descriptor["platform"] = dict(
-        descriptor_platform
-        or {
-            "architecture": architecture,
-            "os": "linux",
-        }
-    )
+    if not omit_descriptor_platform:
+        manifest_descriptor["platform"] = (
+            {"architecture": architecture, "os": "linux"}
+            if descriptor_platform is DEFAULT_DESCRIPTOR_PLATFORM
+            else descriptor_platform
+        )
 
     manifests = [manifest_descriptor]
     if extra_index_descriptor:
@@ -147,6 +157,8 @@ def write_layout(
             else {"imageLayoutVersion": "1.0.0"}
         ),
     }
+    if omit_config_blob:
+        del files["blobs/sha256/" + digest(config_payload).split(":", 1)[1]]
     with tarfile.open(path, mode="w", format=tarfile.USTAR_FORMAT) as archive:
         for directory in ("blobs", "blobs/sha256"):
             member = tarfile.TarInfo(directory)
@@ -210,10 +222,12 @@ class InspectPlatformOciImageTests(unittest.TestCase):
             archive = root / "image.oci.tar"
             output = root / "identity.json"
             write_layout(archive, **layout_options)
+            original_archive = archive.read_bytes()
             result = self.run_inspector(archive, output, platform=platform)
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn(message, result.stderr)
             self.assertFalse(output.exists())
+            self.assertEqual(archive.read_bytes(), original_archive)
 
     def test_outputs_exact_canonical_identity_and_binds_expected_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -262,6 +276,130 @@ class InspectPlatformOciImageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(output.read_bytes())["platform"], "linux/arm64")
+
+    def test_optional_descriptor_platform_preserves_exact_identity_and_archive(self) -> None:
+        for architecture in ("amd64", "arm64"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                identities = []
+                for omitted in (False, True):
+                    archive = root / f"image-{omitted}.oci.tar"
+                    output = root / f"identity-{omitted}.json"
+                    manifest_digest, config_digest = write_layout(
+                        archive,
+                        architecture=architecture,
+                        omit_descriptor_platform=omitted,
+                    )
+                    original_archive = archive.read_bytes()
+                    with tarfile.open(archive) as layout:
+                        index = json.load(layout.extractfile("index.json"))
+                    self.assertEqual("platform" not in index["manifests"][0], omitted)
+                    result = self.run_inspector(
+                        archive,
+                        output,
+                        platform=f"linux/{architecture}",
+                        expected_manifest_digest=manifest_digest,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(archive.read_bytes(), original_archive)
+                    identity = output.read_bytes()
+                    self.assertEqual(
+                        identity,
+                        encoded_json(
+                            {
+                                "manifest_digest": manifest_digest,
+                                "config_digest": config_digest,
+                                "platform": f"linux/{architecture}",
+                            }
+                        ),
+                    )
+                    identities.append(identity)
+
+                    wrong_output = root / f"wrong-{omitted}.json"
+                    result = self.run_inspector(
+                        archive,
+                        wrong_output,
+                        platform=f"linux/{architecture}",
+                        expected_manifest_digest="sha256:" + "0" * 64,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("platform manifest digest", result.stderr)
+                    self.assertFalse(wrong_output.exists())
+                    self.assertEqual(archive.read_bytes(), original_archive)
+                self.assertEqual(identities[0], identities[1])
+
+    def test_rejects_explicit_invalid_descriptor_platform(self) -> None:
+        cases = (
+            None,
+            {},
+            [],
+            "linux/amd64",
+            True,
+            1,
+            1.0,
+            {"architecture": "amd64"},
+            {"os": "linux"},
+            {"architecture": "amd64", "os": "windows"},
+            {"architecture": "arm64", "os": "linux"},
+            {"architecture": False, "os": "linux"},
+            {"architecture": "amd64", "os": ["linux"]},
+            {"architecture": "amd64", "os": "linux", "variant": "v1"},
+        )
+        for value in cases:
+            with self.subTest(platform=value):
+                self.assert_rejected(
+                    {"descriptor_platform": value},
+                    "index manifest descriptor platform",
+                )
+
+    def test_missing_descriptor_platform_still_requires_verified_config_and_blobs(self) -> None:
+        cases = (
+            ({"omit_config_architecture": True}, "image config architecture"),
+            ({"omit_config_os": True}, "image config os"),
+            ({"config_architecture": "arm64"}, "image config architecture"),
+            ({"config_os": "windows"}, "image config os"),
+            ({"config_os": None}, "image config os"),
+            ({"config_os": ["linux"]}, "image config os"),
+            ({"omit_config_blob": True}, "missing blob"),
+            ({"duplicate_config_key": True}, "duplicate object key 'architecture'"),
+            ({"manifest_size_delta": 1}, "descriptor size"),
+            ({"config_size_delta": 1}, "descriptor size"),
+            ({"layer_size_delta": 1}, "descriptor size"),
+            ({"corrupt_manifest_blob": True}, "content digest"),
+            ({"corrupt_config_blob": True}, "content digest"),
+            ({"corrupt_layer_blob": True}, "content digest"),
+        )
+        for options, message in cases:
+            with self.subTest(options=options):
+                self.assert_rejected(
+                    {"omit_descriptor_platform": True, **options},
+                    message,
+                )
+
+    def test_missing_descriptor_platform_keeps_layout_and_archive_guards(self) -> None:
+        cases = (
+            (
+                {"extra_index_descriptor": True},
+                "tags and additional descriptors are ambiguous",
+            ),
+            (
+                {"index_descriptor_media_type": OCI_INDEX},
+                "expected 'application/vnd.oci.image.manifest.v1+json'",
+            ),
+            (
+                {"index_descriptor_media_type": "application/vnd.in-toto+json"},
+                "expected 'application/vnd.oci.image.manifest.v1+json'",
+            ),
+            ({"duplicate_index_key": True}, "duplicate object key 'schemaVersion'"),
+            ({"add_symlink_member": True}, "is not a regular file or directory"),
+        )
+        for options, message in cases:
+            with self.subTest(options=options):
+                self.assert_rejected(
+                    {"omit_descriptor_platform": True, **options},
+                    message,
+                )
 
     def test_rejects_duplicate_json_keys(self) -> None:
         cases = (

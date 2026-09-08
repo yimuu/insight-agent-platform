@@ -110,13 +110,13 @@ def descriptor_fields(
     label: str,
     *,
     expected_media_type: Optional[str] = None,
-    require_platform: bool = False,
+    allow_platform: bool = False,
 ) -> Tuple[str, str, int]:
     if not isinstance(value, dict):
         fail(f"{label} must be an OCI descriptor object")
 
     allowed_keys = {"mediaType", "digest", "size", "annotations"}
-    if require_platform:
+    if allow_platform:
         allowed_keys.add("platform")
     unknown_keys = set(value) - allowed_keys
     if unknown_keys:
@@ -282,14 +282,14 @@ class OciArchive:
         label: str,
         *,
         expected_media_type: Optional[str] = None,
-        require_platform: bool = False,
+        allow_platform: bool = False,
         maximum: Optional[int] = None,
     ) -> bytes:
         _, digest, expected_size = descriptor_fields(
             descriptor,
             label,
             expected_media_type=expected_media_type,
-            require_platform=require_platform,
+            allow_platform=allow_platform,
         )
         if maximum is not None and expected_size > maximum:
             fail(f"{label} exceeds {maximum} bytes")
@@ -371,13 +371,18 @@ class OciArchive:
             manifest_descriptor,
             "index manifest descriptor",
             expected_media_type=OCI_MANIFEST_MEDIA_TYPE,
-            require_platform=True,
+            allow_platform=True,
         )
         expected_platform = {
             "architecture": expected_architecture,
             "os": expected_os,
         }
-        if manifest_descriptor.get("platform") != expected_platform:
+        # OCI Layout descriptors may omit platform. The verified image config
+        # below must still match the requested platform; a present hint must agree.
+        if (
+            "platform" in manifest_descriptor
+            and manifest_descriptor["platform"] != expected_platform
+        ):
             fail(
                 "index manifest descriptor platform is "
                 f"{manifest_descriptor.get('platform')!r}, expected "
@@ -396,7 +401,7 @@ class OciArchive:
             manifest_descriptor,
             "platform manifest",
             expected_media_type=OCI_MANIFEST_MEDIA_TYPE,
-            require_platform=True,
+            allow_platform=True,
             maximum=MAX_JSON_BYTES,
         )
         manifest = parse_json(manifest_payload, "platform manifest")
