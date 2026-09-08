@@ -574,7 +574,7 @@ if (!existsSync(join(root, 'index.html'))) {
 }
 
 server.listen(port, host, () => {
-  process.stdout.write(`console fixture ready http://${host}:${port} run=${runId} task=${taskId}\n`)
+  process.stdout.write(`console fixture ready http://${host}:${server.address().port} run=${runId} task=${taskId}\n`)
 })
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

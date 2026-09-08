@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process'
-import { createServer } from 'node:net'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
+import { BrowserProcessError, qualificationSignals, spawnFixtureChild, waitForFixtureChild, withinSignal } from './browser-process.mjs'
 
 const runId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b90'
 const emptyRunId = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b95'
@@ -9,49 +10,28 @@ const token = 'fixture-token-not-a-credential'
 const directory = fileURLToPath(new URL('.', import.meta.url))
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
-function waitForChild(child, timeoutMilliseconds) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({ code: child.exitCode, signal: child.signalCode })
+export function fixtureReadyOrigin(output) {
+  const lines = output.split('\n').slice(0, -1).filter(line => line.startsWith('console fixture ready '))
+  if (lines.length === 0) return null
+  if (lines.length !== 1) throw new BrowserProcessError('invalid_fixture_endpoint')
+  const match = /^console fixture ready http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4}) run=([^ ]+) task=([^ ]+)$/.exec(lines[0])
+  if (!match || Number(match[1]) > 65535 || match[2] !== runId || match[3] !== taskId) throw new BrowserProcessError('invalid_fixture_endpoint')
+  return `http://127.0.0.1:${match[1]}`
+}
+
+export async function waitForFixture(output, owner, timeoutMs, signal) {
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline) {
+    owner.assertRunning()
+    const origin = fixtureReadyOrigin(output())
+    if (origin) return origin
+    await withinSignal(delay(Math.min(50, deadline - performance.now())), AbortSignal.any([signal, owner.stopped]))
   }
-  return new Promise((resolveExit) => {
-    const finish = (status) => {
-      clearTimeout(timer)
-      child.removeListener('exit', onExit)
-      resolveExit(status)
-    }
-    const onExit = (code, signal) => finish({ code, signal })
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish({ code: null, signal: 'TIMEOUT' })
-    }, timeoutMilliseconds)
-    child.once('exit', onExit)
-  })
+  throw new BrowserProcessError('fixture_startup_timeout', owner.diagnostics())
 }
 
-async function unusedPort() {
-  const server = createServer()
-  await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    server.listen(0, '127.0.0.1', resolveListen)
-  })
-  const address = server.address()
-  if (!address || typeof address === 'string') throw new Error('could not reserve a fixture port')
-  const { port } = address
-  await new Promise((resolveClose) => server.close(resolveClose))
-  return port
-}
-
-async function waitForFixture(output, process, deadline) {
-  while (Date.now() < deadline) {
-    if (output().includes('console fixture ready ')) return
-    if (process.exitCode !== null) throw new Error(`Console fixture exited before readiness (${process.exitCode})`)
-    await delay(50)
-  }
-  throw new Error('Console fixture did not become ready')
-}
-
-async function runJourney(origin) {
-  const child = spawn(process.execPath, [`${directory}fixture-browser-journey.mjs`], {
+async function runJourney(origin, signal) {
+  const owner = spawnFixtureChild(process.execPath, [`${directory}fixture-browser-journey.mjs`], {
     env: {
       ...process.env,
       INSIGHT_CONSOLE_ACCESS_TOKEN: token,
@@ -72,16 +52,25 @@ async function runJourney(origin) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  const child = owner.child
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-64 * 1024) })
   child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-64 * 1024) })
-  const status = await waitForChild(child, 90_000)
-  if (status.code !== 0) throw new Error(`browser journey failed (${JSON.stringify(status)})\n${stderr}\n${stdout}`)
-  const evidence = JSON.parse(stdout)
-  if (evidence.kind !== 'insight.console.synthetic-gateway-journey/v1' || evidence.status !== 'passed') {
-    throw new Error('browser journey did not return closed Passed evidence')
+  let evidence
+  let failure
+  try {
+    const status = await waitForFixtureChild(owner, 90_000, signal)
+    if (status.code !== 0) throw new Error(`browser journey failed (${JSON.stringify(status)})\n${stderr}\n${stdout}`)
+    evidence = JSON.parse(stdout)
+    if (evidence.kind !== 'insight.console.synthetic-gateway-journey/v1' || evidence.status !== 'passed') throw new Error('browser journey did not return closed Passed evidence')
+  } catch (error) { failure = error } finally {
+    // Give the journey its own bounded browser + server cleanup interval before escalation.
+    try { await owner.terminate({ graceMs: 10_000 }) } catch (error) {
+      failure = new Error(`${failure?.message ?? 'browser journey cleanup failed'}\nSafe cleanup failure: ${error instanceof BrowserProcessError ? error.reason : 'journey_cleanup_failed'}`)
+    }
   }
+  if (failure) throw failure
   return evidence
 }
 
@@ -129,42 +118,50 @@ function verifyRequestLog(output) {
 }
 
 async function main() {
-  const port = await unusedPort()
-  const origin = `http://127.0.0.1:${port}`
-  const fixture = spawn(process.execPath, [`${directory}fixture-server.mjs`], {
+  const signals = qualificationSignals()
+  const fixtureOwner = spawnFixtureChild(process.execPath, [`${directory}fixture-server.mjs`], {
     env: {
       ...process.env,
-      INSIGHT_CONSOLE_FIXTURE_PORT: String(port),
+      INSIGHT_CONSOLE_FIXTURE_PORT: '0',
       INSIGHT_CONSOLE_FIXTURE_SLOW_RESPONSE_MS: '750',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  const fixture = fixtureOwner.child
   let fixtureOutput = ''
   let fixtureError = ''
   fixture.stdout.on('data', (chunk) => { fixtureOutput = `${fixtureOutput}${chunk}`.slice(-256 * 1024) })
   fixture.stderr.on('data', (chunk) => { fixtureError = `${fixtureError}${chunk}`.slice(-64 * 1024) })
+  let evidence
+  let failure
   try {
-    await waitForFixture(() => fixtureOutput, fixture, Date.now() + 10_000)
-    const journey = await runJourney(origin)
+    const origin = await waitForFixture(() => fixtureOutput, fixtureOwner, 10_000, signals.signal)
+    const journey = await runJourney(origin, signals.signal)
     // stdout is asynchronous relative to the fixture socket close. Let the
     // final request-log chunk reach this process before closing the evidence.
     await delay(100)
     const requestCount = verifyRequestLog(fixtureOutput)
-    process.stdout.write(`${JSON.stringify({
+    if (signals.signal.aborted) throw new BrowserProcessError('interrupted')
+    evidence = {
       kind: 'insight.console.browser-fixture-qualification/v1',
       status: 'passed',
       request_count: requestCount,
       journey_checks: journey.checks,
       authoring: journey.authoring,
-    })}\n`)
-  } finally {
-    fixture.kill('SIGTERM')
-    await waitForChild(fixture, 5_000)
+    }
+  } catch (error) { failure = error } finally {
+    try { await fixtureOwner.terminate() } catch (error) {
+      failure = new Error(`${failure?.message ?? 'fixture cleanup failed'}\nSafe cleanup failure: ${error instanceof BrowserProcessError ? error.reason : 'fixture_cleanup_failed'}`)
+    }
+    signals.dispose()
   }
-  if (fixtureError) process.stderr.write(fixtureError)
+  if (signals.signal.aborted && !failure) failure = new BrowserProcessError('interrupted')
+  if (failure) throw failure
+  if (fixtureError.includes(token)) throw new BrowserProcessError('fixture_diagnostic_contains_token')
+  process.stdout.write(`${JSON.stringify(evidence)}\n`)
 }
 
-main().catch((error) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
-  process.exit(1)
+  process.exit(process.exitCode ?? 1)
 })
