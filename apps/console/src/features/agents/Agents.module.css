@@ -1,0 +1,173 @@
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.toolbar h2 {
+  margin-bottom: 0;
+}
+
+.toolbar .actions {
+  margin-top: 0;
+}
+
+.agent-list {
+  display: grid;
+  margin-bottom: 16px;
+  border-top: 1px solid #e0e1da;
+}
+
+.agent-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) auto minmax(110px, 0.7fr) minmax(150px, 0.8fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 4px;
+  border-bottom: 1px solid #e0e1da;
+  color: #526057;
+  font-size: 12px;
+}
+
+.agent-row strong,
+.agent-row span {
+  display: block;
+}
+
+.agent-row strong {
+  color: #1d2b22;
+  font-size: 14px;
+}
+
+.agent-row > div:first-child span {
+  margin-top: 4px;
+  color: #7b857e;
+  font: 500 12px/1.3 var(--sans);
+}
+
+.agent-row .actions {
+  margin: 0;
+  flex-wrap: nowrap;
+}
+
+.publish-progress {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 0;
+  margin: 24px 0 0;
+}
+
+.publish-progress li {
+  padding: 12px;
+  border: 1px solid #d6d9d2;
+  color: #7a827c;
+  font: 650 12px/1.2 var(--sans);
+}
+
+.publish-progress li span {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: #e5e7e1;
+}
+
+.publish-progress li.complete {
+  color: #244b35;
+  border-color: #9ed5b7;
+  background: #f3fbdc;
+}
+
+.publish-progress li.complete span {
+  color: #101713;
+  background: #c7f2da;
+}
+
+@media (max-width: 900px) {
+  .agent-row {
+    grid-template-columns: minmax(160px, 1fr) auto;
+  }
+
+  .agent-row > span:not([data-status]) {
+    display: none;
+  }
+
+  .publish-progress {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-row,
+  .run-row {
+    grid-template-columns: 1fr;
+  }
+
+  .publish-progress {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wizard-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 28px;
+  gap: 8px;
+}
+.wizard-steps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 2px solid var(--border);
+  color: var(--muted);
+  font-size: 14px;
+}
+.wizard-steps li[aria-current='step'] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.wizard-steps li > span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.wizard-step {
+  padding: 0 0 20px;
+}
+.wizard-step h3 {
+  margin: 0 0 24px;
+  font-size: 19px;
+}
+@media (max-width: 620px) {
+  .wizard-steps {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .editor > .panel__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

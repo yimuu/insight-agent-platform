@@ -1,0 +1,4 @@
+dist
+server-dist
+src/shared/compiler/generated
+pnpm-lock.yaml

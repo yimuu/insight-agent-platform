@@ -477,7 +477,7 @@ fn run_real_gateway_console_journey(
         .expect("qualification crate is inside the workspace");
     let node = env::var("PLATFORM_PRODUCTIZATION_NODE_BIN").unwrap_or_else(|_| "node".to_owned());
     let output = Command::new(node)
-        .arg(workspace.join("apps/console/tests/real-gateway-journey.mjs"))
+        .arg(workspace.join("apps/console/tests/real-gateway-journey.ts"))
         .env("INSIGHT_CONSOLE_GATEWAY_ORIGIN", gateway_origin)
         .env(
             "INSIGHT_CONSOLE_MANAGEMENT_GATEWAY_ORIGIN",

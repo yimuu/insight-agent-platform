@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "strict": true,
+    "rootDir": "server",
+    "outDir": "server-dist",
+    "rewriteRelativeImportExtensions": true,
+    "noEmitOnError": true
+  },
+  "include": ["server/main.ts", "server/config.ts", "server/gateway-server.ts", "server/process.ts"]
+}

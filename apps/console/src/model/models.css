@@ -1,9 +1,0 @@
-.model-settings table { width: 100%; border-collapse: collapse; text-align: left; }
-.model-settings th, .model-settings td { padding: 12px 10px; border-bottom: 1px solid var(--line, #e3e5e8); vertical-align: middle; overflow-wrap: anywhere; }
-.model-settings th { font-size: .8rem; font-weight: 600; }
-.model-settings td:last-child .button { margin: 3px 6px 3px 0; white-space: nowrap; }
-.model-settings > .panel > .button { margin-top: 10px; }
-.model-settings form label { display: grid; gap: 8px; }
-.model-settings form input, .model-settings form select { width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--line, #d5d9df); border-radius: 7px; background: var(--surface, white); color: inherit; }
-.model-settings .actions { display: flex; flex-wrap: wrap; gap: 10px; }
-@media (max-width: 680px) { .model-settings table { font-size: .8rem; } .model-settings th, .model-settings td { padding: 8px 4px; } }

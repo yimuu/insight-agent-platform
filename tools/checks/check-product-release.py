@@ -137,9 +137,9 @@ console_dockerfile = (ROOT / "deploy/images/console.Dockerfile").read_text()
 if (re.findall(r"^([A-Z]+)\b", console_dockerfile, re.MULTILINE) != ["FROM", "COPY", "COPY", "USER", "WORKDIR", "ENTRYPOINT", "CMD", "LABEL", "LABEL"]
         or not re.match(r"^FROM node:24\.11\.1-bookworm-slim@sha256:[0-9a-f]{64}\n", console_dockerfile)
         or "\nCOPY dist/ /console/dist/\n" not in console_dockerfile
-        or "\nCOPY server/config.mjs server/gateway-server.mjs server/main.mjs server/process.mjs /console/server/\n" not in console_dockerfile
+        or "\nCOPY server-dist/config.js server-dist/gateway-server.js server-dist/main.js server-dist/process.js /console/server-dist/\n" not in console_dockerfile
         or "\nUSER 1000:1000\nWORKDIR /console\n" not in console_dockerfile
-        or '\nENTRYPOINT ["/usr/local/bin/node", "/console/server/main.mjs"]\nCMD ["--config", "/config/console.json"]\n' not in console_dockerfile
+        or '\nENTRYPOINT ["/usr/local/bin/node", "/console/server-dist/main.js"]\nCMD ["--config", "/config/console.json"]\n' not in console_dockerfile
         or "# syntax" in console_dockerfile or "#syntax" in console_dockerfile):
     failures.append("Console must use a pinned Node runtime, exact transport files, unprivileged fixed entrypoint and no target-architecture build execution")
 expected_budgets = {"cli_build": 1200, "console_build": 300, "runtime_build_push": 3600,
@@ -152,7 +152,7 @@ if "tools/tests/test_native_release_images.py" not in (ROOT / ".github/workflows
 for phase, prefix in (("runtime_build_push", "runtime"), ("sandbox_runner_build_push", "runner")):
     if f'{{"name": "{phase}", "duration_seconds": elapsed("{prefix}")}}' not in images_job:
         failures.append("native performance must consume complete verified start-to-ready intervals")
-if "['build', '--locked', '-p', 'insight-platform-agent-compiler-wasm'" not in (ROOT / "apps/console/scripts/build-agent-compiler.mjs").read_text():
+if not re.search(r"run\('cargo',\s*\[\s*'build',\s*'--locked',\s*'-p',\s*'insight-platform-agent-compiler-wasm'", (ROOT / "apps/console/scripts/build-agent-compiler.ts").read_text()):
     failures.append("Console release WASM build must preserve the exact Cargo.lock dependency closure")
 wasm_binding = re.findall(r'^wasm-bindgen\s*=\s*"=([0-9]+\.[0-9]+\.[0-9]+)"$', (ROOT / "crates/authoring/platform-agent-compiler-wasm/Cargo.toml").read_text(), re.MULTILINE)
 if len(wasm_binding) != 1:

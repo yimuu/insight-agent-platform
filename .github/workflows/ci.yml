@@ -496,11 +496,21 @@ jobs:
           corepack pnpm --dir apps/console test
           corepack pnpm --dir apps/console build
           corepack pnpm --dir apps/console lint
+          corepack pnpm --dir apps/console format:check
           corepack pnpm --dir apps/console browser:fixture:qualify
+      - name: Verify Console browser interactions
+        env:
+          INSIGHT_CONSOLE_BUNDLE_ROOT: ${{ github.workspace }}/apps/console/dist
+          INSIGHT_CONSOLE_BROWSER_BIN: /usr/bin/google-chrome
+          INSIGHT_TASK_FORM_BROWSER: "1"
+        run: |
+          test -x "$INSIGHT_CONSOLE_BROWSER_BIN"
+          test -f "$INSIGHT_CONSOLE_BUNDLE_ROOT/index.html"
+          corepack pnpm --dir apps/console test:browser
       - name: Measure actual native and WASM compiler resource use
         run: |
           cargo build --locked -p insight-platform-contract-tooling --bin agent_compiler_resources
-          node apps/console/tests/compiler-resources.mjs target/debug/agent_compiler_resources "$RUNNER_TEMP/compiler-resources.json"
+          node apps/console/tests/compiler-resources.ts target/debug/agent_compiler_resources "$RUNNER_TEMP/compiler-resources.json"
       - name: Retain compiler resource observations
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

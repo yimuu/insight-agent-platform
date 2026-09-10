@@ -30,7 +30,7 @@ point:
   Artifact, Security Authority, Outbox and History grants are already separate. New serving
   composition must use non-owner credentials for the remaining roles before claiming no DDL access.
 - The Console image is currently a `scratch` bundle artifact. The usable same-origin server is a
-  loopback-only qualification helper in `apps/console/tests/gateway-server.mjs`, not a deployable
+  loopback-only qualification helper in `apps/console/tests/gateway-server.ts`, not a deployable
   service. The role Helm charts already consume externally generated config digests and selected
   Secrets, and directly execute role binaries; they should keep that ownership.
 

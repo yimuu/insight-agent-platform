@@ -141,7 +141,7 @@ class RemoteContextInstallationTests(unittest.TestCase):
         path.write_text(json.dumps(document))
         binaries, console = self.root/'bin', self.root/'console'
         binaries.mkdir()
-        (console/'server').mkdir(parents=True)
+        (console/'server-dist').mkdir(parents=True)
         (console/'dist').mkdir()
         header = bytearray(64)
         if platform.system() == 'Darwin':
@@ -158,8 +158,8 @@ class RemoteContextInstallationTests(unittest.TestCase):
         for name in names:
             (binaries/name).write_bytes(header)
             (binaries/name).chmod(0o755)
-        for name in ['main.mjs', 'config.mjs', 'gateway-server.mjs', 'process.mjs']:
-            (console/'server'/name).write_text('// bounded handoff fixture\n')
+        for name in ['main.js', 'config.js', 'gateway-server.js', 'process.js']:
+            (console/'server-dist'/name).write_text('// bounded handoff fixture\n')
         (console/'dist/index.html').write_text('<!doctype html><title>Fixture</title>')
         (console/'dist/compiler.wasm').write_bytes(b'\0asm\x01\0\0\0')
         (console/'dist/compiler.worker-fixture.js').write_text('// handoff fixture; never executed\n')

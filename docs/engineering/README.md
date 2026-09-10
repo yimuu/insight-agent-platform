@@ -51,7 +51,7 @@ Console 构建需要 `wasm32-unknown-unknown` target 和 owning WASM crate 固�
 
 ```bash
 cargo build --locked -p insight-platform-contract-tooling --bin agent_compiler_resources
-node apps/console/tests/compiler-resources.mjs target/debug/agent_compiler_resources /tmp/compiler-resources.json
+node apps/console/tests/compiler-resources.ts target/debug/agent_compiler_resources /tmp/compiler-resources.json
 ```
 
 报告校验真实 native/WASM 的编译与源码预检响应一致性，并记录输入、编译器与执行文件摘要，以及两个阶段各自的耗时和 WASM 线性内存高水位。

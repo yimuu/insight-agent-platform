@@ -288,13 +288,8 @@ pub fn native_plan(
     }
     let node = artifact(node_file, true)?;
     artifacts.insert(node.path.clone(), node);
-    let server = console_directory.join("server");
-    for name in [
-        "main.mjs",
-        "config.mjs",
-        "gateway-server.mjs",
-        "process.mjs",
-    ] {
+    let server = console_directory.join("server-dist");
+    for name in ["main.js", "config.js", "gateway-server.js", "process.js"] {
         let item = artifact(&server.join(name), false)?;
         artifacts.insert(item.path.clone(), item);
     }
@@ -340,7 +335,7 @@ pub fn native_plan(
         processes,
         console: NativeConsoleLaunchV1 {
             node_file: path(node_file)?,
-            entrypoint_file: path(&server.join("main.mjs"))?,
+            entrypoint_file: path(&server.join("main.js"))?,
             configuration_file: path(&output.join("roles/console/config.json"))?,
             bundle_directory: path(&bundle)?,
             minimum_node_version: NATIVE_MIN_NODE_VERSION,
@@ -404,7 +399,7 @@ mod tests {
         let binaries = root.join("bin");
         let console = root.join("console");
         fs::create_dir(&binaries).unwrap();
-        fs::create_dir_all(console.join("server")).unwrap();
+        fs::create_dir_all(console.join("server-dist")).unwrap();
         fs::create_dir_all(console.join("dist/assets")).unwrap();
         let input = native_input(
             "native-artifacts",
@@ -451,13 +446,8 @@ mod tests {
             fs::write(binaries.join(name), header).unwrap();
             fs::set_permissions(binaries.join(name), fs::Permissions::from_mode(0o700)).unwrap();
         }
-        for name in [
-            "main.mjs",
-            "config.mjs",
-            "gateway-server.mjs",
-            "process.mjs",
-        ] {
-            fs::write(console.join("server").join(name), b"export {}\n").unwrap();
+        for name in ["main.js", "config.js", "gateway-server.js", "process.js"] {
+            fs::write(console.join("server-dist").join(name), b"export {}\n").unwrap();
         }
         fs::write(console.join("dist/index.html"), b"<html></html>").unwrap();
         fs::write(
@@ -495,7 +485,7 @@ mod tests {
                 }
                 "entrypoint" => {
                     changed.console.entrypoint_file =
-                        console.join("server/config.mjs").display().to_string()
+                        console.join("server-dist/config.js").display().to_string()
                 }
                 "bundle" => {
                     changed.console.bundle_directory = root.join("foreign").display().to_string()
@@ -505,7 +495,7 @@ mod tests {
                         "wasm" => "compiler.wasm",
                         "worker" => "compiler.worker-test.js",
                         "index" => "index.html",
-                        _ => "process.mjs",
+                        _ => "process.js",
                     })
                 }),
             }

@@ -1,0 +1,15 @@
+.connection-page {
+  max-width: 600px;
+  margin: 6vh auto;
+  padding: 24px;
+}
+.connection-intro {
+  margin-bottom: 28px;
+}
+.connection-intro h1 {
+  margin: 18px 0 8px;
+  font-size: 30px;
+}
+.connection-intro > span {
+  margin-bottom: 24px;
+}

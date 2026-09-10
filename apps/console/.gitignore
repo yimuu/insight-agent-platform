@@ -24,4 +24,6 @@ dist-ssr
 *.sw?
 
 # Rebuilt from the sole Rust authoring core.
-src/agent/generated/
+src/shared/compiler/generated/
+
+server-dist/
