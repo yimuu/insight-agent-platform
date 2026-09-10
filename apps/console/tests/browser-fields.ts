@@ -7,7 +7,7 @@ export function fieldValue(label: string): string {
   // not just the visible lines, without touching private editor state or the OS clipboard.
   return `(() => {
     const node = ${fieldElement(label)};
-    if (!node?.isContentEditable) return node?.value;
+    if (!node?.classList.contains('cm-content')) return node?.value;
     const previous = document.activeElement;
     node.focus();
     node.dispatchEvent(new KeyboardEvent('keydown', {
@@ -26,7 +26,15 @@ export function setField(label: string, value: string): string {
     const node = ${fieldElement(label)};
     if (!node || node.disabled) throw new Error('Field unavailable: ' + ${JSON.stringify(label)});
     if (node.isContentEditable) {
-      node.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, ${JSON.stringify(value)}); return;
+      node.focus();
+      node.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'a', code: 'KeyA', keyCode: 65, bubbles: true, cancelable: true,
+        metaKey: /Mac/.test(navigator.platform), ctrlKey: !/Mac/.test(navigator.platform),
+      }));
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/plain', ${JSON.stringify(value)});
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles: true, cancelable: true}));
+      return;
     }
     const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : node instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(node, ${JSON.stringify(value)});

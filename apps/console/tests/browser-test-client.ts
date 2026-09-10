@@ -1,3 +1,4 @@
+import { setField } from './browser-fields.ts'
 import type { CdpResult } from './fixtures/types.ts'
 import { tcpPort } from './fixtures/types.ts'
 import { spawn } from 'node:child_process'
@@ -152,15 +153,7 @@ export async function withConsoleBrowser(
         )
         const editorSelector = `[data-code-editor=${JSON.stringify(label)}] .cm-content`
         if (await evaluate(`!!document.querySelector(${JSON.stringify(editorSelector)})`)) {
-          await evaluate(`document.querySelector(${JSON.stringify(editorSelector)}).focus()`)
-          await call('Input.dispatchKeyEvent', {
-            type: 'keyDown',
-            key: 'a',
-            code: 'KeyA',
-            modifiers: process.platform === 'darwin' ? 4 : 2,
-            commands: ['selectAll'],
-          })
-          await call('Input.insertText', { text: value })
+          await evaluate(setField(label, value))
           return
         }
         await evaluate(`(() => {

@@ -1,3 +1,4 @@
+import { fieldValue } from './browser-fields.ts'
 import './wasm-worker-fixture.ts'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -25,11 +26,6 @@ const canonical = (value) =>
           .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
           .join(',')}}`
       : JSON.stringify(value)
-const fieldValue = (label) => `(() => {
-    const editor = [...document.querySelectorAll('[data-code-editor]')].find(node => node.dataset.codeEditor === ${JSON.stringify(label)});
-    if (editor) return [...editor.querySelectorAll('.cm-line')].map(node => node.textContent).join('\\n');
-    return [...document.querySelectorAll('label')].find(node => node.querySelector('span')?.textContent === ${JSON.stringify(label)})?.querySelector('input,textarea,select')?.value;
-  })()`
 
 test(
   'Agent editor validates Full Plan and framework graphs in actual browser WASM, preserves sources and refuses missing packages',
@@ -219,6 +215,17 @@ test(
           'explicit conversion of a Rust-compiled Plan',
         )
         assert.equal(JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).plan_version, 6)
+        // Exercise replacement beyond CodeMirror's rendered viewport. Native DOM
+        // select-all can leave unrendered source behind when inserting new text.
+        const longPlan = JSON.stringify(
+          { rows: Array.from({ length: 500 }, (_, index) => index) },
+          null,
+          2,
+        )
+        await browser.field('Plan JSON', longPlan)
+        assert.equal(await browser.evaluate(fieldValue('Plan JSON')), longPlan)
+        await browser.field('Plan JSON', '{}')
+        assert.equal(await browser.evaluate(fieldValue('Plan JSON')), '{}')
         await browser.field('任务类型', 'full_plan')
         await browser.wait(
           `typeof (${fieldValue('Plan JSON')}) === 'string' && ${fieldValue('精确依赖绑定 JSON')} === '[]'`,

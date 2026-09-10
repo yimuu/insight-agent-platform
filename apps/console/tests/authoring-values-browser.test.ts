@@ -1,3 +1,4 @@
+import { fieldValue } from './browser-fields.ts'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import test from 'node:test'
@@ -58,11 +59,6 @@ const value = {
   content_digest: digest('e'),
   storage_kind: 'inline',
 }
-const fieldValue = (label) => `(() => {
-    const editor = [...document.querySelectorAll('[data-code-editor]')].find(node => node.dataset.codeEditor === ${JSON.stringify(label)});
-    if (editor) return [...editor.querySelectorAll('.cm-line')].map(node => node.textContent).join('\\n');
-    return [...document.querySelectorAll('label')].find(node => node.querySelector('span')?.textContent === ${JSON.stringify(label)})?.querySelector('input,textarea,select')?.value;
-  })()`
 
 test(
   'authoring lookup and Run values use current read authority, empty continuations, explicit content and scope clearing',
