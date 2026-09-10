@@ -211,7 +211,11 @@ test(
         )
         await browser.click('编辑已校验 Plan')
         await browser.wait(
-          `${fieldValue('任务类型')} === 'full_plan'`,
+          `(() => {
+            if (${fieldValue('任务类型')} !== 'full_plan') return false;
+            try { return JSON.parse(${fieldValue('Plan JSON')}).plan_version === 6; }
+            catch { return false; }
+          })()`,
           'explicit conversion of a Rust-compiled Plan',
         )
         assert.equal(JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).plan_version, 6)

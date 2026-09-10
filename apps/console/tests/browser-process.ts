@@ -356,7 +356,7 @@ function pageSocket(targets, endpoint, origin) {
 export async function startHeadlessBrowser({
   executable,
   origin,
-  timeoutMs = 20_000,
+  timeoutMs = 60_000,
   signal: externalSignal,
   graceMs = 5000,
   killMs = 2000,
@@ -425,6 +425,7 @@ export async function startHeadlessBrowser({
         '--disable-default-apps',
         '--disable-extensions',
         '--disable-gpu',
+        '--disable-dev-shm-usage',
         '--disable-sync',
         '--metrics-recording-only',
         '--no-first-run',
