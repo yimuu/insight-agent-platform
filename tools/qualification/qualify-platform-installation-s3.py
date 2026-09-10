@@ -38,6 +38,7 @@ SAFE_SDK_CODES = frozenset({
     "wrong_credential_not_denied", "unsigned_transport", "unsigned_not_denied", "cors_transport", "cors_boundary",
     "versions_read", "versions_incomplete", "unexpected_generation_count", "restart_version_drift",
     "readonly_inventory_drift", "sdk_tls_not_rejected", "signed_readiness_timeout", "fixture_input_invalid",
+    "head_unavailable", "get_unavailable", "exact_readiness_timeout",
 })
 
 

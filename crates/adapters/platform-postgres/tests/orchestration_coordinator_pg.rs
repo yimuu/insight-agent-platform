@@ -459,14 +459,13 @@ async fn insert_ready_artifact(
     .execute(pool)
     .await
     .unwrap();
-    let metadata = TypedPayload::new(
-        1,
-        &json!({
-            "display_name": artifact.display_name(),
-            "fixture": "orchestration-capacity"
-        }),
+    let metadata = insight_platform_artifacts::ArtifactMetadataSnapshot::new_installation(
+        artifact.display_name().map(str::to_owned),
+        fresh_id(ResourceKind::ServerRequest),
     )
     .unwrap();
+    let metadata =
+        TypedPayload::from_versioned(metadata.schema_version as i32, &metadata, 65_536).unwrap();
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifacts (

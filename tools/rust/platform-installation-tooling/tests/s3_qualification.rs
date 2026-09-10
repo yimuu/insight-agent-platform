@@ -202,7 +202,13 @@ async fn exact_bytes(
         .version_id(generation)
         .send()
         .await
-        .map_err(|_| "head_exact")?;
+        .map_err(|error| {
+            if temporarily_unavailable(&error) {
+                "head_unavailable"
+            } else {
+                "head_exact"
+            }
+        })?;
     if head.version_id() != Some(generation) || head.content_length() != Some(expected.len() as i64)
     {
         return Err("head_evidence");
@@ -214,7 +220,13 @@ async fn exact_bytes(
         .version_id(generation)
         .send()
         .await
-        .map_err(|_| "get_exact")?;
+        .map_err(|error| {
+            if temporarily_unavailable(&error) {
+                "get_unavailable"
+            } else {
+                "get_exact"
+            }
+        })?;
     if output.version_id() != Some(generation)
         || output.content_length() != Some(expected.len() as i64)
     {
@@ -232,6 +244,37 @@ async fn exact_bytes(
         return Err("body_drift");
     }
     Ok(())
+}
+
+fn temporarily_unavailable<E>(error: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    use aws_sdk_s3::error::SdkError;
+    matches!(error, SdkError::TimeoutError(_))
+        || matches!(error, SdkError::DispatchFailure(failure) if failure.is_timeout())
+        || error
+            .raw_response()
+            .is_some_and(|response| response.status().as_u16() >= 500)
+}
+
+// Bucket metadata can become readable before restarted volume servers can serve bytes.
+// Only read-only transport timeouts and 5xx responses are startup conditions. Missing
+// versions, denied reads, wrong metadata and corrupt bytes remain immediate failures.
+async fn wait_for_object_reads<F, Fut>(budget: Duration, mut read: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    tokio::time::timeout(budget, async {
+        loop {
+            match read().await {
+                Err("head_unavailable" | "get_unavailable") => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
+    .map_err(|_| "exact_readiness_timeout")?
 }
 
 async fn absent(client: &Client, input: &Input, key: &str, generation: &str) -> Result<()> {
@@ -519,16 +562,20 @@ async fn verify(client: &Client, input: &Input, evidence: &Evidence) -> Result<(
     if inventory(client, input).await? != evidence.versions {
         return Err("restart_version_drift");
     }
-    for (key, version, _) in &evidence.versions {
-        exact_bytes(
-            client,
-            input,
-            key,
-            version,
-            if key == "versioned" { SECOND } else { FIRST },
-        )
-        .await?;
-    }
+    wait_for_object_reads(Duration::from_secs(60), || async {
+        for (key, version, _) in &evidence.versions {
+            exact_bytes(
+                client,
+                input,
+                key,
+                version,
+                if key == "versioned" { SECOND } else { FIRST },
+            )
+            .await?;
+        }
+        Ok(())
+    })
+    .await?;
     absent(client, input, "versioned", &evidence.deleted_version).await?;
     if inventory(client, input).await? != evidence.versions {
         return Err("readonly_inventory_drift");
@@ -641,6 +688,54 @@ async fn actual_s3_versioned_contract() {
     run()
         .await
         .expect("S3 physical qualification failed with safe code");
+}
+
+#[tokio::test]
+async fn object_readiness_retries_unavailable_reads_but_never_repairs_integrity_failures() {
+    let mut reads = 0;
+    wait_for_object_reads(Duration::from_secs(2), || {
+        reads += 1;
+        std::future::ready(if reads == 1 {
+            Err("get_unavailable")
+        } else {
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(reads, 2);
+    for failure in [
+        "head_exact",
+        "get_exact",
+        "get_evidence",
+        "body_drift",
+        "body_read",
+    ] {
+        let mut reads = 0;
+        assert_eq!(
+            wait_for_object_reads(Duration::from_secs(2), || {
+                reads += 1;
+                std::future::ready(Err(failure))
+            })
+            .await,
+            Err(failure)
+        );
+        assert_eq!(reads, 1);
+    }
+    assert_eq!(
+        wait_for_object_reads(Duration::from_millis(10), || {
+            std::future::pending::<Result<()>>()
+        })
+        .await,
+        Err("exact_readiness_timeout")
+    );
+    assert_eq!(
+        wait_for_object_reads(Duration::from_millis(10), || {
+            std::future::ready(Err("get_unavailable"))
+        })
+        .await,
+        Err("exact_readiness_timeout")
+    );
 }
 
 #[test]
