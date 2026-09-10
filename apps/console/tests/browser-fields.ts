@@ -22,10 +22,15 @@ export function fieldValue(label: string): string {
   })()`
 }
 export function setField(label: string, value: string): string {
-  return `(() => {
+  return `(async () => {
     const node = ${fieldElement(label)};
     if (!node || node.disabled) throw new Error('Field unavailable: ' + ${JSON.stringify(label)});
-    if (node.isContentEditable) {
+    if (node.classList.contains('cm-content')) {
+      const deadline = performance.now() + 8000;
+      while (!node.isContentEditable) {
+        if (!node.isConnected || performance.now() >= deadline) throw new Error('Editor is not editable: ' + ${JSON.stringify(label)});
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
       node.focus();
       node.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'a', code: 'KeyA', keyCode: 65, bubbles: true, cancelable: true,

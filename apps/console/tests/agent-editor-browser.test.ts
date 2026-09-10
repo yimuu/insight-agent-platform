@@ -224,6 +224,11 @@ test(
         )
         await browser.field('Plan JSON', longPlan)
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), longPlan)
+        await browser.evaluate(`(() => {
+          const node = document.querySelector('[data-code-editor="Plan JSON"] .cm-content');
+          node.contentEditable = 'false';
+          setTimeout(() => { node.contentEditable = 'true'; }, 100);
+        })()`)
         await browser.field('Plan JSON', '{}')
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), '{}')
         await browser.field('任务类型', 'full_plan')
