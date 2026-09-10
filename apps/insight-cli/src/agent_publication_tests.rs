@@ -98,6 +98,7 @@ fn lost_update_response_reuses_original_attempt_body_and_base_etag_over_http() {
         draft_generation: 4,
         version: 8,
         draft: ResourceDraftPayload {
+            alias: None,
             display_name: compilation.compiled.resource_intent.display_name.clone(),
             document: document.clone(),
             validation: None,
@@ -236,61 +237,24 @@ fn lost_update_response_reuses_original_attempt_body_and_base_etag_over_http() {
 }
 
 #[test]
-fn actual_policy_deployment_dto_uses_local_bootstrap_environment_and_exact_identity() {
-    use insight_platform_api::resource::{deployment_etag, DeploymentViewV1};
+fn current_authoring_profile_controls_environment_and_exact_execution_binding() {
+    let corpus = workspace_fixture_profile();
+    let profile = insight_platform_api::product::AgentAuthoringProfileV1::build_for_installation(
+        "staging".to_owned(),
+        corpus.execution_profile.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(compiler_profile(&profile).default_environment, "staging");
+    assert_eq!(
+        compiler_profile(&profile).execution_profile,
+        corpus.execution_profile
+    );
+    let mut bad = profile;
+    bad.default_environment = "production".to_owned();
+    assert!(bad.validate().is_err());
+}
+fn workspace_fixture_profile() -> AgentCompilerProfile {
     let directory = crate::agent_entry_tests::project();
-    let bootstrap = load_bootstrap_profile(directory.path()).unwrap();
-    let compilation = compilation(directory.path());
-    let digest = compilation.compiled.typed_plan_digest.clone();
-    let closure = DeploymentClosure::Policy(insight_platform_contracts::PolicyDeploymentClosure {
-        policy_revision: ExactVersionRef::new(
-            bootstrap.scheduling_policy_revision_id.clone(),
-            digest.clone(),
-        )
-        .unwrap(),
-        applicability_digest: digest,
-        qualification_evidence: authority(&compilation.compiled.resource_intent.authoring_artifact)
-            .artifact,
-    });
-    let closure_digest =
-        insight_platform_api::resource::deployment_closure_digest(&closure).unwrap();
-    let view = DeploymentViewV1 {
-        schema_version: 1,
-        deployment_id: bootstrap.scheduling_policy_deployment_id.clone(),
-        resource_id: bootstrap.scheduling_policy_id.clone(),
-        resource_kind: RegistryResourceKind::Policy,
-        resource_version_id: bootstrap.scheduling_policy_revision_id.clone(),
-        environment: "local".into(),
-        etag: deployment_etag(&bootstrap.scheduling_policy_deployment_id, &closure_digest),
-        closure_digest,
-        closure,
-        created_at: UtcTimestamp::from_datetime(Utc::now()),
-    };
-    view.validate().unwrap();
-    let decoded: DeploymentViewV1 =
-        serde_json::from_slice(&serde_json::to_vec(&view).unwrap()).unwrap();
-    assert!(bootstrap_policy_deployment_matches(
-        &decoded,
-        &decoded.etag,
-        &bootstrap
-    ));
-    let mut wrong = decoded.clone();
-    wrong.environment = "development".into();
-    assert!(!bootstrap_policy_deployment_matches(
-        &wrong,
-        &wrong.etag,
-        &bootstrap
-    ));
-    wrong = decoded.clone();
-    wrong.deployment_id = id(ResourceKind::PolicyDeployment);
-    assert!(!bootstrap_policy_deployment_matches(
-        &wrong,
-        &wrong.etag,
-        &bootstrap
-    ));
-    assert!(!bootstrap_policy_deployment_matches(
-        &decoded,
-        "\"wrong\"",
-        &bootstrap
-    ));
+    offline_compiler_profile(directory.path()).unwrap()
 }

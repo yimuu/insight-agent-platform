@@ -17,16 +17,15 @@ use insight_platform_context::{
     ContextSubscriptionExecutionError, ContextSubscriptionRefreshBackend,
     ContextSubscriptionRefreshClaimSlot, ContextSubscriptionRefreshFailureClass,
     ContextSubscriptionRefreshResponse, ContextWorkerAudit, NormalizedContextScore,
-    RemoteContextFailureClass, RemoteContextSearchConnector, RemoteContextSearchRequest,
-    RemoteContextSearchResponse, CONTEXT_QUOTA_LINES, CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH,
-    REMOTE_CONTEXT_PROTOCOL_VERSION,
+    RemoteContextFailure, RemoteContextFailureClass, RemoteContextSearchConnector,
+    RemoteContextSearchRequest, RemoteContextSearchResponse, CONTEXT_QUOTA_LINES,
+    CONTEXT_SUBSCRIPTION_REFRESH_MAX_BATCH,
 };
 use insight_platform_contracts::{
-    canonical_digest, ClosedJsonValue, ContextBackendBinding, ContextBackendContract,
-    ContextCitationStrength, DataClassification, ExternalLeafFailureMutationIds,
-    ExternalLeafResumeMutationIds, Failure, FailureClass, FailureCode, FailureSource,
-    HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError, ResourceKind, Retryability,
-    Sha256Digest, TraceFlags, UtcTimestamp, ValueRef, WorkClass,
+    canonical_digest, ClosedJsonValue, ContextCitationStrength, DataClassification,
+    ExternalLeafFailureMutationIds, ExternalLeafResumeMutationIds, Failure, FailureClass,
+    FailureCode, FailureSource, HardLimitProfile, PlatformFailureCode, ResourceId, ResourceIdError,
+    ResourceKind, Retryability, Sha256Digest, TraceFlags, UtcTimestamp, ValueRef, WorkClass,
 };
 use insight_platform_jobs::{JobFence, LeasePolicy};
 use insight_platform_postgres::{
@@ -911,6 +910,14 @@ async fn execute_remote_claim(
         token_digest: token.clone(),
     };
     let request = remote_request(&claim, &fence)?;
+    let request_evidence = digest_value(
+        &serde_json::to_value(
+            request
+                .dispatch_authorization()
+                .map_err(|_| ContextWorkerError::CorruptClaim)?,
+        )
+        .map_err(|_| ContextWorkerError::CorruptClaim)?,
+    )?;
     let trace = ExecutionTraceContext::start(claim.job.trace, TraceFlags::NotSampled)
         .map_err(|_| ContextWorkerError::CorruptClaim)?;
     let query = scope_trace(trace, connector.query(request));
@@ -944,64 +951,41 @@ async fn execute_remote_claim(
             }
         }
     };
+    // Receiving a response is a physical attempt even when the local observation cannot fit.
+    // This local rejection follows the same fenced failure settlement as a terminal Egress result.
+    let remote = match remote {
+        Ok(response) => {
+            let evidence = remote_output_evidence(&request_evidence, &response)?;
+            match build_remote_output(response, &claim, config.limits) {
+                Ok(output) => Ok(output),
+                Err(_) => Err(RemoteContextFailure {
+                    code: "context_worker_output_rejected".to_owned(),
+                    class: RemoteContextFailureClass::PermanentAfterDispatch,
+                    safe_message: "Remote Context output was rejected".to_owned(),
+                    dispatch_evidence_digest: Some(evidence),
+                }),
+            }
+        }
+        Err(failure) => Err(failure),
+    };
     let (outcome, resume_mutations, failure_mutations) = match remote {
-        Ok(response) => (
-            ContextBackendOutcome::Completed(Box::new(build_remote_output(
-                response,
-                &claim,
-                config.limits,
-            )?)),
+        Ok(output) => (
+            ContextBackendOutcome::Completed(Box::new(output)),
             Some(claim.resume_mutations.clone()),
             None,
         ),
         Err(failure) => {
-            failure
-                .validate()
-                .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
-            let retryable = matches!(
-                failure.class,
-                RemoteContextFailureClass::RetryableBeforeDispatch
-                    | RemoteContextFailureClass::RetryableAfterDispatch
-            );
-            let retry_at = Utc::now().checked_add_signed(
-                ChronoDuration::from_std(config.timing.failure_backoff)
-                    .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
-            );
-            let may_retry = retryable
-                && claim.job.attempt_no < claim.job.attempt_limit
-                && retry_at.is_some_and(|retry_at| retry_at < claim.query.deadline);
-            let domain_failure = Failure {
-                code: FailureCode::Platform {
-                    code: PlatformFailureCode::ContextQueryFailed,
-                },
-                class: FailureClass::External,
-                retryability: if may_retry {
-                    Retryability::SafeWithinPolicy
-                } else {
-                    Retryability::Never
-                },
-                safe_message: Some(failure.safe_message),
-                details_ref: None,
-                source: FailureSource::Context,
-            };
-            if may_retry {
-                (
-                    ContextBackendOutcome::RetryableFailure {
-                        failure: domain_failure,
-                        retry_at: retry_at.expect("checked retry time"),
-                    },
-                    None,
-                    None,
-                )
-            } else {
-                (
-                    ContextBackendOutcome::PermanentFailure {
-                        failure: domain_failure,
-                    },
-                    None,
-                    Some(claim.failure_mutations.clone()),
-                )
-            }
+            let outcome = remote_failure_outcome(
+                failure,
+                claim.job.attempt_no,
+                claim.job.attempt_limit,
+                claim.query.deadline,
+                config.timing.failure_backoff,
+                Utc::now(),
+            )?;
+            let mutations = matches!(outcome, ContextBackendOutcome::PermanentFailure { .. })
+                .then(|| claim.failure_mutations.clone());
+            (outcome, None, mutations)
         }
     };
     commit_worker_outcome(
@@ -1017,6 +1001,94 @@ async fn execute_remote_claim(
         config,
     )
     .await
+}
+
+fn remote_output_evidence(
+    request: &Sha256Digest,
+    response: &RemoteContextSearchResponse,
+) -> Result<Sha256Digest, ContextWorkerError> {
+    digest_value(&serde_json::json!({
+        "schema_version":1, "stage":"worker_output_validation",
+        "request_digest":request, "response":response,
+    }))
+}
+
+fn remote_failure_outcome(
+    failure: RemoteContextFailure,
+    attempt: i32,
+    attempt_limit: i32,
+    deadline: chrono::DateTime<Utc>,
+    backoff: Duration,
+    now: chrono::DateTime<Utc>,
+) -> Result<ContextBackendOutcome, ContextWorkerError> {
+    failure
+        .validate()
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    let retry_at = now.checked_add_signed(
+        ChronoDuration::from_std(backoff)
+            .map_err(|_| ContextWorkerError::InvalidGeneratedCommand)?,
+    );
+    let may_retry = matches!(
+        failure.class,
+        RemoteContextFailureClass::RetryableBeforeDispatch
+            | RemoteContextFailureClass::RetryableAfterDispatch
+    ) && attempt < attempt_limit
+        && retry_at.is_some_and(|at| at < deadline);
+    let domain_failure = Failure {
+        code: FailureCode::Platform {
+            code: PlatformFailureCode::ContextQueryFailed,
+        },
+        class: FailureClass::External,
+        retryability: if may_retry {
+            Retryability::SafeWithinPolicy
+        } else {
+            Retryability::Never
+        },
+        safe_message: Some(remote_failure_diagnostic(&failure)),
+        details_ref: None,
+        source: FailureSource::Context,
+    };
+    Ok(if may_retry {
+        ContextBackendOutcome::RetryableFailure {
+            failure: domain_failure,
+            retry_at: retry_at.expect("checked retry time"),
+        }
+    } else {
+        ContextBackendOutcome::PermanentFailure {
+            failure: domain_failure,
+        }
+    })
+}
+
+// A diagnostic projection, never parsed back into authorization, accounting or retry state.
+fn remote_failure_diagnostic(failure: &RemoteContextFailure) -> String {
+    let class = match failure.class {
+        RemoteContextFailureClass::RejectedBeforeDispatch => "rejected_before_dispatch",
+        RemoteContextFailureClass::RetryableBeforeDispatch => "retryable_before_dispatch",
+        RemoteContextFailureClass::RetryableAfterDispatch => "retryable_after_dispatch",
+        RemoteContextFailureClass::PermanentAfterDispatch => "permanent_after_dispatch",
+        RemoteContextFailureClass::UncertainDispatch => "uncertain_dispatch",
+    };
+    let reason = match failure.code.as_str() {
+        "context_egress_rpc_result_too_large" => "rpc_result_too_large",
+        "context_worker_output_rejected" => "output_rejected",
+        _ => "failure",
+    };
+    match &failure.dispatch_evidence_digest {
+        Some(evidence) => format!("Remote Context {class}; {reason}; evidence {evidence}"),
+        None => format!("Remote Context {class}; {reason}"),
+    }
+}
+
+fn remote_inline_value(
+    value: Value,
+    limits: ContextQueryLimits,
+) -> Result<ValueRef, ContextWorkerError> {
+    let value = ValueRef::Inline { value };
+    value
+        .validate(limits.inline_value_limits())
+        .map_err(|_| ContextWorkerError::AdapterOutputRejected)?;
+    Ok(value)
 }
 
 async fn execute_subscription_claim(
@@ -1163,67 +1235,15 @@ fn remote_request(
     claim: &ClaimedContextExecution,
     fence: &JobFence,
 ) -> Result<RemoteContextSearchRequest, ContextWorkerError> {
-    let admission = &claim.query.payload.admission;
-    let ContextBackendContract::RemoteSearch {
-        protocol_contract_digest,
-        result_mapping_digest,
-    } = &admission.implementation.contract.backend
-    else {
-        return Err(ContextWorkerError::CorruptClaim);
-    };
-    let ContextBackendBinding::RemoteSearch {
-        endpoint,
-        endpoint_identity_digest,
-        region,
-    } = &admission.context_closure.backend
-    else {
-        return Err(ContextWorkerError::CorruptClaim);
-    };
-    let request = RemoteContextSearchRequest {
-        schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
-        tenant_id: claim.query.tenant_id.clone(),
-        context_query_id: claim.query.context_query_id.clone(),
-        job_id: parse_required_id(&claim.job.job_id, ResourceKind::Job)?,
-        physical_attempt: u32::try_from(claim.job.attempt_no)
-            .map_err(|_| ContextWorkerError::CorruptClaim)?,
-        lease_generation: fence.lease_generation,
-        context_deployment: admission.binding.context_deployment.clone(),
-        implementation_revision: admission.implementation_revision.clone(),
-        protocol_contract_digest: protocol_contract_digest.clone(),
-        result_mapping_digest: result_mapping_digest.clone(),
-        endpoint: endpoint.clone(),
-        endpoint_identity_digest: endpoint_identity_digest.clone(),
-        region: region.clone(),
-        secret_bindings: admission.context_closure.secret_bindings.clone(),
-        network_policy: admission
-            .context_closure
-            .network_policy
-            .clone()
-            .ok_or(ContextWorkerError::CorruptClaim)?,
-        tls_policy: admission
-            .context_closure
-            .tls_policy
-            .clone()
-            .ok_or(ContextWorkerError::CorruptClaim)?,
-        trust_policy: admission
-            .context_closure
-            .trust_policy
-            .clone()
-            .ok_or(ContextWorkerError::CorruptClaim)?,
-        query_input: claim.query_input.clone(),
-        normalized_query_digest: admission.request.normalized_query_digest.clone(),
-        normalized_filter_digest: admission.request.normalized_filter_digest.clone(),
-        requested_projection: admission.request.requested_projection.clone(),
-        maximum_classification: admission.grant.maximum_classification,
-        page_size: admission.request.page_size,
-        cursor_digest: admission.request.cursor_digest.clone(),
-        maximum_response_bytes: admission
-            .implementation
-            .contract
-            .limits
-            .maximum_response_bytes,
-        deadline: claim.query.deadline,
-    };
+    let request = RemoteContextSearchRequest::from_admission(
+        claim.query.tenant_id.clone(),
+        parse_required_id(&claim.job.job_id, ResourceKind::Job)?,
+        u32::try_from(claim.job.attempt_no).map_err(|_| ContextWorkerError::CorruptClaim)?,
+        fence,
+        &claim.query.payload.admission,
+        claim.query_input.clone(),
+    )
+    .map_err(|_| ContextWorkerError::CorruptClaim)?;
     request
         .validate_at(Utc::now())
         .map_err(|_| ContextWorkerError::CorruptClaim)?;
@@ -1448,7 +1468,7 @@ fn build_remote_output(
         value_id: new_id(ResourceKind::RunValue)?,
         value_kind: "context_observation".to_owned(),
         classification,
-        value: ValueRef::Inline { value: unsigned },
+        value: remote_inline_value(unsigned, limits)?,
         artifact_link_id: None,
         observation,
         validation_evidence_digest: digest_value(&serde_json::json!({
@@ -1773,6 +1793,175 @@ mod tests {
             subscription_failure_digest(ContextSubscriptionExecutionError::Unavailable).unwrap(),
             subscription_failure_digest(ContextSubscriptionExecutionError::CompletionUncertain)
                 .unwrap()
+        );
+    }
+    #[test]
+    fn remote_result_checks_complete_inline_value_and_never_truncates() {
+        let limits = ContextQueryLimits::from_profile(
+            &insight_platform_contracts::checked_in_hard_limit_profile(),
+        )
+        .unwrap();
+        let small = serde_json::json!({"items":[{"content":"actual"}],"evidence":{"count":1}});
+        assert_eq!(
+            remote_inline_value(small.clone(), limits).unwrap(),
+            ValueRef::Inline { value: small }
+        );
+        // Each item is small, but the complete observation exceeds the existing Inline owner.
+        let large = serde_json::json!({"items": (0..(limits.inline_value_limits().max_bytes / 1024 + 2)).map(|_| serde_json::json!({"content":"x".repeat(1024)})).collect::<Vec<_>>()});
+        assert!(ValueRef::Inline {
+            value: large.clone()
+        }
+        .validate(limits.inline_value_limits())
+        .is_err());
+        assert!(matches!(
+            remote_inline_value(large, limits),
+            Err(ContextWorkerError::AdapterOutputRejected)
+        ));
+    }
+
+    #[test]
+    fn remote_failure_keeps_closed_evidence_without_unknown_provider_text() {
+        let now = Utc::now();
+        let evidence = digest("actual-rpc-attempt");
+        let failure = RemoteContextFailure {
+            code: "untrusted_code_canary".to_owned(),
+            class: RemoteContextFailureClass::UncertainDispatch,
+            safe_message: "secret-body-url-canary".to_owned(),
+            dispatch_evidence_digest: Some(evidence.clone()),
+        };
+        let outcome = remote_failure_outcome(
+            failure,
+            1,
+            9,
+            now + ChronoDuration::minutes(1),
+            Duration::from_millis(1),
+            now,
+        )
+        .unwrap();
+        let ContextBackendOutcome::PermanentFailure { failure } = outcome else {
+            panic!("uncertain dispatch must not retry")
+        };
+        assert_eq!(failure.retryability, Retryability::Never);
+        let text = failure.safe_message.as_ref().unwrap();
+        assert!(!text.contains("canary"));
+        assert!(text.contains("uncertain_dispatch"));
+        assert!(text.contains(evidence.as_str()));
+        assert!(failure.details_ref.is_none());
+        failure.validate(1024).unwrap();
+    }
+    #[test]
+    fn remote_failure_retryability_keeps_only_the_existing_explicit_retry_classes() {
+        let now = Utc::now();
+        for class in [
+            RemoteContextFailureClass::RejectedBeforeDispatch,
+            RemoteContextFailureClass::RetryableBeforeDispatch,
+            RemoteContextFailureClass::RetryableAfterDispatch,
+            RemoteContextFailureClass::PermanentAfterDispatch,
+            RemoteContextFailureClass::UncertainDispatch,
+        ] {
+            let has_evidence = matches!(
+                class,
+                RemoteContextFailureClass::RetryableAfterDispatch
+                    | RemoteContextFailureClass::PermanentAfterDispatch
+                    | RemoteContextFailureClass::UncertainDispatch
+            );
+            let failure = RemoteContextFailure {
+                code: "context_egress_rpc_result_too_large".to_owned(),
+                class,
+                safe_message: "unknown-url-body-canary".to_owned(),
+                dispatch_evidence_digest: has_evidence.then(|| digest("physical-stage")),
+            };
+            let retry = matches!(
+                class,
+                RemoteContextFailureClass::RetryableBeforeDispatch
+                    | RemoteContextFailureClass::RetryableAfterDispatch
+            );
+            let outcome = remote_failure_outcome(
+                failure.clone(),
+                1,
+                3,
+                now + ChronoDuration::seconds(1),
+                Duration::from_millis(1),
+                now,
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(outcome, ContextBackendOutcome::RetryableFailure { .. }),
+                retry
+            );
+            let terminal = remote_failure_outcome(
+                failure,
+                3,
+                3,
+                now + ChronoDuration::seconds(1),
+                Duration::from_millis(1),
+                now,
+            )
+            .unwrap();
+            let ContextBackendOutcome::PermanentFailure { failure } = terminal else {
+                panic!("attempt limit must remain terminal")
+            };
+            assert_eq!(failure.retryability, Retryability::Never);
+            let text = failure.safe_message.unwrap();
+            assert!(text.contains("rpc_result_too_large"));
+            assert!(!text.contains("canary"));
+            assert_eq!(text.contains("evidence sha256:"), has_evidence);
+        }
+    }
+
+    #[test]
+    fn remote_complete_inline_value_preserves_the_exact_owner_byte_boundary() {
+        let limits = ContextQueryLimits::from_profile(
+            &insight_platform_contracts::checked_in_hard_limit_profile(),
+        )
+        .unwrap();
+        let maximum = limits.inline_value_limits().max_bytes;
+        let exact = serde_json::json!("x".repeat(maximum - 2));
+        assert_eq!(serde_json::to_vec(&exact).unwrap().len(), maximum);
+        assert!(remote_inline_value(exact, limits).is_ok());
+        let oversized = serde_json::json!("x".repeat(maximum - 1));
+        assert!(matches!(
+            remote_inline_value(oversized, limits),
+            Err(ContextWorkerError::AdapterOutputRejected)
+        ));
+    }
+    #[test]
+    fn remote_output_rejection_evidence_binds_the_actual_complete_response() {
+        let request = digest("actual-admitted-request");
+        let mut response = RemoteContextSearchResponse {
+            schema_version: 1,
+            items: vec![],
+            next_cursor_digest: None,
+            backend_request_digest: digest("normalized-query"),
+            backend_response_digest: digest("backend-response"),
+            ranking_evidence_digest: digest("ranking"),
+            remote_revision_digest: None,
+            observed_at: Utc::now(),
+        };
+        let first = remote_output_evidence(&request, &response).unwrap();
+        assert_eq!(first, remote_output_evidence(&request, &response).unwrap());
+        assert_ne!(
+            first,
+            remote_output_evidence(&digest("different-attempt"), &response).unwrap()
+        );
+        response
+            .items
+            .push(insight_platform_context::RemoteContextItem {
+                source_item_identity_digest: digest("source"),
+                content: serde_json::json!({"text":"body-not-logged"}),
+                structured_fields: serde_json::json!({}),
+                score_millionths: None,
+                locator_digest: digest("locator"),
+                authorization_evidence_digest: digest("auth"),
+                display_label: "result".to_owned(),
+                classification: DataClassification::Public,
+            });
+        assert_ne!(first, remote_output_evidence(&request, &response).unwrap());
+        let with_body = remote_output_evidence(&request, &response).unwrap();
+        response.items[0].content = serde_json::json!({"text":"different-body"});
+        assert_ne!(
+            with_body,
+            remote_output_evidence(&request, &response).unwrap()
         );
     }
 }

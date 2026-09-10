@@ -14,8 +14,11 @@ pub struct ModelProviderSseDecoder {
     maximum_response_bytes: usize,
     observed_response_bytes: usize,
     buffer: Vec<u8>,
+    stream_start: bool,
+    pending_cr: bool,
     event_name: Option<String>,
     data: Vec<u8>,
+    data_field_seen: bool,
     done_marker: bool,
 }
 
@@ -30,8 +33,11 @@ impl ModelProviderSseDecoder {
             maximum_response_bytes,
             observed_response_bytes: 0,
             buffer: Vec::new(),
+            stream_start: true,
+            pending_cr: false,
             event_name: None,
             data: Vec::new(),
+            data_field_seen: false,
             done_marker: false,
         })
     }
@@ -40,9 +46,6 @@ impl ModelProviderSseDecoder {
         &mut self,
         chunk: &[u8],
     ) -> Result<Vec<ModelProviderWireEvent>, ModelAdapterFailure> {
-        if self.done_marker && !chunk.is_empty() {
-            return Err(permanent("model_sse_bytes_after_done"));
-        }
         self.observed_response_bytes = self
             .observed_response_bytes
             .checked_add(chunk.len())
@@ -61,21 +64,11 @@ impl ModelProviderSseDecoder {
     }
 
     pub fn finish(&mut self) -> Result<Vec<ModelProviderWireEvent>, ModelAdapterFailure> {
-        if self.done_marker {
-            if self.buffer.is_empty() && self.event_name.is_none() && self.data.is_empty() {
-                return Ok(Vec::new());
-            }
-            return Err(permanent("model_sse_invalid_done"));
-        }
-        let mut events = self.consume_complete_lines()?;
-        if !self.buffer.is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            self.consume_line(&line, &mut events)?;
-        }
-        if self.event_name.is_some() || !self.data.is_empty() {
-            if let Some(event) = self.dispatch_event()? {
-                events.push(event);
-            }
+        let events = self.consume_complete_lines()?;
+        // EOF is not a line or event delimiter. A CR has already ended its line; an optional
+        // following LF is the only pending framing byte that may be absent at EOF.
+        if !self.buffer.is_empty() || self.event_name.is_some() || self.data_field_seen {
+            return Err(permanent("model_sse_incomplete_event"));
         }
         Ok(events)
     }
@@ -88,16 +81,43 @@ impl ModelProviderSseDecoder {
         &mut self,
     ) -> Result<Vec<ModelProviderWireEvent>, ModelAdapterFailure> {
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+        if self.stream_start {
+            const BOM: &[u8] = b"\xef\xbb\xbf";
+            if self.buffer.len() < BOM.len() && BOM.starts_with(&self.buffer) {
+                return Ok(events);
+            }
+            if self.buffer.starts_with(BOM) {
+                self.buffer.drain(..BOM.len());
+            }
+            self.stream_start = false;
+        }
+        loop {
+            if self.pending_cr {
+                let Some(first) = self.buffer.first() else {
+                    break;
+                };
+                if *first == b'\n' {
+                    self.buffer.remove(0);
+                }
+                self.pending_cr = false;
+            }
+            if self.done_marker && !self.buffer.is_empty() {
+                return Err(permanent("model_sse_bytes_after_done"));
+            }
+            let Some(newline) = self
+                .buffer
+                .iter()
+                .position(|byte| matches!(byte, b'\r' | b'\n'))
+            else {
+                break;
+            };
             if newline > self.maximum_response_bytes {
                 return Err(permanent("model_sse_line_too_large"));
             }
+            self.pending_cr = self.buffer[newline] == b'\r';
             let mut remaining = self.buffer.split_off(newline + 1);
             std::mem::swap(&mut remaining, &mut self.buffer);
             remaining.truncate(newline);
-            if remaining.last() == Some(&b'\r') {
-                remaining.pop();
-            }
             self.consume_line(&remaining, &mut events)?;
         }
         Ok(events)
@@ -108,12 +128,10 @@ impl ModelProviderSseDecoder {
         line: &[u8],
         events: &mut Vec<ModelProviderWireEvent>,
     ) -> Result<(), ModelAdapterFailure> {
-        if self.done_marker && !line.is_empty() {
-            return Err(permanent("model_sse_bytes_after_done"));
-        }
         if line.len() > self.maximum_response_bytes {
             return Err(permanent("model_sse_line_too_large"));
         }
+        std::str::from_utf8(line).map_err(|_| permanent("model_sse_invalid_field"))?;
         if line.is_empty() {
             if let Some(event) = self.dispatch_event()? {
                 events.push(event);
@@ -123,16 +141,16 @@ impl ModelProviderSseDecoder {
         if line.starts_with(b":") {
             return Ok(());
         }
-        let separator = line
-            .iter()
-            .position(|byte| *byte == b':')
-            .ok_or_else(|| permanent("model_sse_invalid_field"))?;
-        let field = &line[..separator];
-        let mut value = &line[separator + 1..];
+        let (field, mut value) = match line.iter().position(|byte| *byte == b':') {
+            Some(separator) => (&line[..separator], &line[separator + 1..]),
+            None => (line, &b""[..]),
+        };
         if value.first() == Some(&b' ') {
             value = &value[1..];
         }
         match field {
+            // Transport-only metadata: never an identity, timer, evidence or reconnect input.
+            b"id" | b"retry" => {}
             b"event" => {
                 if self.event_name.is_some() {
                     return Err(permanent("model_sse_duplicate_event_field"));
@@ -144,7 +162,7 @@ impl ModelProviderSseDecoder {
                 self.event_name = Some(name.to_owned());
             }
             b"data" => {
-                let separator = usize::from(!self.data.is_empty());
+                let separator = usize::from(self.data_field_seen);
                 if self
                     .data
                     .len()
@@ -158,6 +176,7 @@ impl ModelProviderSseDecoder {
                     self.data.push(b'\n');
                 }
                 self.data.extend_from_slice(value);
+                self.data_field_seen = true;
             }
             _ => return Err(permanent("model_sse_unknown_field")),
         }
@@ -165,9 +184,10 @@ impl ModelProviderSseDecoder {
     }
 
     fn dispatch_event(&mut self) -> Result<Option<ModelProviderWireEvent>, ModelAdapterFailure> {
-        if self.event_name.is_none() && self.data.is_empty() {
+        if self.event_name.is_none() && !self.data_field_seen {
             return Ok(None);
         }
+        self.data_field_seen = false;
         let data = std::mem::take(&mut self.data);
         let declared_name = self.event_name.take();
         if data == b"[DONE]" {
@@ -274,6 +294,163 @@ fn valid_event_name(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn decode_chunks(chunks: &[&[u8]]) -> Vec<ModelProviderWireEvent> {
+        let total = chunks.iter().map(|chunk| chunk.len()).sum::<usize>();
+        let mut decoder = ModelProviderSseDecoder::new(u32::try_from(total).unwrap()).unwrap();
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(decoder.push(chunk).unwrap());
+        }
+        events.extend(decoder.finish().unwrap());
+        assert_eq!(decoder.observed_response_bytes(), total);
+        events
+    }
+
+    #[test]
+    fn standard_transport_metadata_is_discarded() {
+        let input = b"id: transport-canary\nid\nid: nul\0id\nretry: 42\nretry: not-a-duration\nretry\ndata: {\"type\":\"ping\"}\n\n";
+        let events = decode_chunks(&[input]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_name, "ping");
+        assert_eq!(events[0].data, serde_json::json!({"type": "ping"}));
+        assert!(!format!("{events:?}").contains("transport-canary"));
+    }
+
+    #[test]
+    fn standard_bom_and_newlines_are_invariant_at_every_chunk_boundary() {
+        for newline in ["\n", "\r", "\r\n"] {
+            let input = format!(
+                "\u{feff}: comment{newline}id: canary{newline}event: ping{newline}data: {{\"type\":\"ping\",\"text\":\"你好\"}}{newline}{newline}retry: 999999999999999999999999999999999999999999{newline}data: [DONE]{newline}{newline}"
+            );
+            let bytes = input.as_bytes();
+            let expected = decode_chunks(&[bytes]);
+            assert_eq!(expected.len(), 1);
+            for split in 0..=bytes.len() {
+                let actual = decode_chunks(&[&bytes[..split], &bytes[split..]]);
+                assert_eq!(actual, expected, "split={split}, newline={newline:?}");
+            }
+            assert_eq!(
+                decode_chunks(&bytes.chunks(1).collect::<Vec<_>>()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eof_never_invents_a_data_event_delimiter() {
+        for bytes in [
+            b"data: {\"type\":\"ping\"}".as_slice(),
+            b"data: {\"type\":\"ping\"}\n",
+            b"event: ping\n",
+            b"data:\n",
+            b"id: unfinished",
+            b"\xef\xbb",
+        ] {
+            let mut decoder = ModelProviderSseDecoder::new(4_096).unwrap();
+            assert!(decoder.push(bytes).unwrap().is_empty());
+            assert_eq!(
+                decoder.finish().unwrap_err().safe_code,
+                "model_sse_incomplete_event"
+            );
+        }
+        assert!(decode_chunks(&[b": complete comment\rid\rretry\r"]).is_empty());
+        assert!(decode_chunks(&[b"\xef\xbb\xbf"]).is_empty());
+        assert!(decode_chunks(&[b"data: [DONE]\r\r"]).is_empty());
+    }
+
+    #[test]
+    fn discarded_metadata_remains_utf8_and_byte_bounded() {
+        for bytes in [
+            b"id: \xff\n".as_slice(),
+            b"retry: \xff\n",
+            b": \xff\n",
+            b"\xef\xbb\xbf\xef\xbb\xbfdata: {\"type\":\"ping\"}\n\n",
+            b": comment\n\xef\xbb\xbfdata: {\"type\":\"ping\"}\n\n",
+        ] {
+            let mut decoder = ModelProviderSseDecoder::new(4_096).unwrap();
+            let failure = decoder.push(bytes).unwrap_err();
+            assert!(matches!(
+                failure.safe_code.as_str(),
+                "model_sse_invalid_field" | "model_sse_unknown_field"
+            ));
+        }
+        let input = b"id: discarded\r\nretry: 999999999999999999999999\r\n";
+        let mut decoder =
+            ModelProviderSseDecoder::new(u32::try_from(input.len() - 1).unwrap()).unwrap();
+        let failure = decoder.push(input).unwrap_err();
+        assert_eq!(failure.safe_code, "model_sse_response_too_large");
+
+        let events =
+            decode_chunks(&["data: {\"type\":\"ping\",\"text\":\"\u{feff}\"}\n\n".as_bytes()]);
+        assert_eq!(events[0].data["text"], "\u{feff}");
+    }
+
+    #[test]
+    fn malformed_fields_and_post_done_bytes_fail_at_every_split() {
+        for (input, expected) in [
+            (
+                b"id: canary\nunknown: value\n".as_slice(),
+                "model_sse_unknown_field",
+            ),
+            (
+                b"id: canary\nevent: ping\nevent: ping\n",
+                "model_sse_duplicate_event_field",
+            ),
+            (
+                b"retry: 1\ndata: {\"type\":\"ping\",\"type\":\"error\"}\n\n",
+                "model_sse_invalid_json",
+            ),
+            (
+                b"event: error\ndata: {\"type\":\"ping\"}\n\n",
+                "model_sse_event_type_mismatch",
+            ),
+            (b"data: [DONE]\r\n\r\n\n", "model_sse_bytes_after_done"),
+            (
+                b"data: [DONE]\r\rdata: {\"type\":\"ping\"}\n\n",
+                "model_sse_bytes_after_done",
+            ),
+            (b"data: [DONE]\n\n: comment\n", "model_sse_bytes_after_done"),
+            (b"id: canary\xff\n", "model_sse_invalid_field"),
+        ] {
+            for split in 0..=input.len() {
+                let mut decoder = ModelProviderSseDecoder::new(4_096).unwrap();
+                let failure = decoder
+                    .push(&input[..split])
+                    .and_then(|_| decoder.push(&input[split..]))
+                    .and_then(|_| decoder.finish())
+                    .unwrap_err();
+                assert_eq!(failure.safe_code, expected, "split={split}");
+                assert!(!format!("{failure:?}").contains("canary"));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_delimiters_and_empty_data_lines_preserve_actual_json() {
+        let input = b"id:\rretry\nevent: ping\r\ndata:\rdata: {\"type\":\"ping\"}\ndata:\r\n\r";
+        let expected = decode_chunks(&[input]);
+        assert_eq!(expected[0].data, serde_json::json!({"type":"ping"}));
+        assert_eq!(
+            decode_chunks(&input.chunks(1).collect::<Vec<_>>()),
+            expected
+        );
+        let mut decoder = ModelProviderSseDecoder::new(128).unwrap();
+        assert_eq!(
+            decoder.push(b"data:\n\n").unwrap_err().safe_code,
+            "model_sse_missing_data"
+        );
+        // Empty data lines are retained in the SSE data buffer; they cannot turn a malformed
+        // transport marker into a legal marker by being silently removed.
+        let mut decoder = ModelProviderSseDecoder::new(128).unwrap();
+        assert_eq!(
+            decoder
+                .push(b"data:\ndata: [DONE]\n\n")
+                .unwrap_err()
+                .safe_code,
+            "model_sse_invalid_json"
+        );
+    }
+
     #[test]
     fn split_chunks_decode_named_and_inferred_events() {
         let mut decoder = ModelProviderSseDecoder::new(4_096).unwrap();
@@ -306,7 +483,7 @@ mod tests {
 
         let mut unknown_field = ModelProviderSseDecoder::new(4_096).unwrap();
         let failure = unknown_field
-            .push(b"id: secret-handle\ndata: {\"type\":\"ping\"}\n\n")
+            .push(b"future-field: transport-canary\ndata: {\"type\":\"ping\"}\n\n")
             .unwrap_err();
         assert_eq!(failure.safe_code, "model_sse_unknown_field");
     }

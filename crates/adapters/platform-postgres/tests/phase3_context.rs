@@ -5,6 +5,8 @@ use fixture_directory::FixtureDirectory;
 mod adapter_claims;
 #[path = "support/context_convergence_isolation.rs"]
 mod context_convergence_isolation;
+#[path = "support/context_dispatch_authorization.rs"]
+mod context_dispatch_authorization;
 #[path = "support/context_process_completion.rs"]
 mod context_process_completion;
 #[path = "support/leaf_convergence_isolation.rs"]
@@ -12,6 +14,8 @@ mod leaf_convergence_isolation;
 #[path = "support/recovery_scanner_isolation.rs"]
 mod recovery_scanner_isolation;
 use adapter_claims::AdapterClaimRounds;
+#[path = "support/artifact_roles.rs"]
+mod artifact_roles;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 mod support;
@@ -260,7 +264,7 @@ impl ArtifactBlobBackend for UnusedContextDatasetBlobBackend {
 #[allow(clippy::too_many_arguments)]
 async fn stage_context_dataset_artifact(
     pool: &PgPool,
-    repository: &PgRepository,
+    _repository: &PgRepository,
     tenant_id: &ResourceId,
     producer_job_id: &ResourceId,
     producer_fence: &JobFence,
@@ -281,46 +285,66 @@ async fn stage_context_dataset_artifact(
         descriptor_bytes,
         media_type: media_type.to_owned(),
     };
-    let WorkloadArtifactStagePreflight::Authorized(authority) = repository
-        .authorize_workload_artifact_stage(&request)
-        .await
-        .unwrap()
-    else {
-        panic!("first Context Dataset Artifact stage must require storage evidence");
-    };
-    assert_eq!(authority.caller, ArtifactWorkloadAudience::ContextWorker);
-    let staged_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    assert!(matches!(
-        repository
-            .stage_workload_artifact(StageWorkloadArtifact {
-                schema_version: 1,
-                tenant_id: tenant_id.clone(),
-                caller: ArtifactWorkloadAudience::ContextWorker,
-                producer_job_id: producer_job_id.clone(),
-                producer_fence: producer_fence.clone(),
-                verification_job_id: request.verification_job_id.clone(),
-                artifact_id: request.artifact_id.clone(),
-                blob_id: request.blob_id.clone(),
-                content_digest: request.descriptor_digest.clone(),
-                size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
-                media_type: request.media_type.clone(),
-                storage_backend: "s3".to_owned(),
-                storage_binding_digest: authority.write_storage_binding_digest,
-                object_reference_ciphertext: vec![0x6b; 48],
-                object_generation: format!("context-dataset-generation-{suffix}"),
-                key_id: "context-dataset-key".to_owned(),
-                encryption_domain_id: authority.encryption_domain_id,
-                backend_evidence_digest: named_digest(&format!("context-dataset-stage-{suffix}")),
-                staged_at,
-            })
+    let roles = artifact_roles::ArtifactRoles::create(pool).await;
+    let repository = PgRepository::new(roles.pools[2].clone());
+    let pool = pool.clone();
+    let tenant_id = tenant_id.clone();
+    let producer_job_id = producer_job_id.clone();
+    let producer_fence = producer_fence.clone();
+    let task = tokio::spawn(async move {
+        let WorkloadArtifactStagePreflight::Authorized(authority) = repository
+            .authorize_workload_artifact_stage(&request)
             .await
-            .unwrap(),
-        CommandOutcome::Applied(_)
-    ));
-    request
+            .unwrap()
+        else {
+            panic!("first Context Dataset Artifact stage must require storage evidence");
+        };
+        assert_eq!(authority.caller, ArtifactWorkloadAudience::ContextWorker);
+        let staged_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repository
+                .stage_workload_artifact(StageWorkloadArtifact {
+                    schema_version: 1,
+                    tenant_id: tenant_id.clone(),
+                    caller: ArtifactWorkloadAudience::ContextWorker,
+                    producer_job_id: producer_job_id.clone(),
+                    producer_fence: producer_fence.clone(),
+                    verification_job_id: request.verification_job_id.clone(),
+                    artifact_id: request.artifact_id.clone(),
+                    blob_id: request.blob_id.clone(),
+                    content_digest: request.descriptor_digest.clone(),
+                    size_bytes: u64::try_from(request.descriptor_bytes.len()).unwrap(),
+                    media_type: request.media_type.clone(),
+                    storage_backend: "s3".to_owned(),
+                    storage_binding_digest: authority.write_storage_binding_digest,
+                    object_reference_ciphertext: vec![0x6b; 48],
+                    object_generation: format!("context-dataset-generation-{suffix}"),
+                    key_id: "context-dataset-key".to_owned(),
+                    encryption_domain_id: authority.encryption_domain_id,
+                    backend_evidence_digest: named_digest(&format!(
+                        "context-dataset-stage-{suffix}"
+                    )),
+                    staged_at,
+                })
+                .await
+                .unwrap(),
+            CommandOutcome::Applied(_)
+        ));
+        assert!(matches!(
+            repository
+                .authorize_workload_artifact_stage(&request)
+                .await
+                .unwrap(),
+            WorkloadArtifactStagePreflight::Replayed(_)
+        ));
+        request
+    })
+    .await;
+    roles.close().await;
+    task.unwrap()
 }
 
 async fn scan_context_dataset_artifacts(
@@ -1494,6 +1518,7 @@ async fn seed_fixture_with_backend(
     )
     .unwrap();
     let tenant_config = TenantConfig {
+        default_model: None,
         scheduling_policy: Some(scheduling_deployment),
         artifact_retention_policy: Some(retention_deployment),
         artifact_io_policy: Some(artifact_io_deployment),
@@ -4507,16 +4532,8 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
         0x830,
     )
     .await;
-    let terminal_failure = Failure {
-        code: FailureCode::Platform {
-            code: PlatformFailureCode::ContextQueryFailed,
-        },
-        class: FailureClass::External,
-        retryability: Retryability::Never,
-        safe_message: Some("context source rejected the query".to_owned()),
-        details_ref: None,
-        source: FailureSource::Context,
-    };
+    let terminal_failure = context_dispatch_authorization::staged_failure(&owner_claim);
+    let failure_quota_before = context_dispatch_authorization::quota_snapshot(&pool, &owner_claim).await;
     let failure_command = CommitContextOutcome {
         audit: worker_audit(
             &fixture.tenant_id,
@@ -4548,10 +4565,18 @@ fn context_query_is_atomic_quota_accounted_deferred_and_tenant_scoped() {
     };
     assert_eq!(failed.query.state, ContextQueryState::Failed);
     assert_eq!(failed.job.state, JobState::Failed.as_str());
+    let failure_quota_after = context_dispatch_authorization::quota_snapshot(&pool, &owner_claim).await;
+    context_dispatch_authorization::assert_failed_evidence(&failed, &terminal_failure, &failure_quota_before, &failure_quota_after);
+    let failure_counts_before_replay = support::fixture_durable_counts(&pool, &fixture.tenant_id).await;
     assert!(matches!(
-        execute_outcome(&repository, failure_command).await.unwrap(),
+        execute_outcome(&repository, failure_command.clone()).await.unwrap(),
         CommandOutcome::Replayed(record) if record == failed
     ));
+    assert_eq!(support::fixture_durable_counts(&pool, &fixture.tenant_id).await, failure_counts_before_replay);
+    assert_eq!(context_dispatch_authorization::quota_snapshot(&pool, &owner_claim).await, failure_quota_after);
+    let failure_unique_counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM insight_platform.quota_ledger WHERE tenant_id=$1 AND quota_entry_id IN ($2,$3,$4)),(SELECT count(*) FROM insight_platform.receipts WHERE tenant_id=$1 AND receipt_id=$5 AND state='succeeded'),(SELECT count(*) FROM insight_platform.events WHERE tenant_id=$1 AND event_id=$6)")
+        .bind(fixture.tenant_id.to_string()).bind(failure_command.quota_entry_ids[0].to_string()).bind(failure_command.quota_entry_ids[1].to_string()).bind(failure_command.quota_entry_ids[2].to_string()).bind(failure_command.audit.receipt_id.to_string()).bind(failure_command.audit.event_id.to_string()).fetch_one(&pool).await.unwrap();
+    assert_eq!(failure_unique_counts,(3,1,1));
     let failure_handoff: (String, String, i32, serde_json::Value) = sqlx::query_as(
         r#"
         SELECT node.state, job.state, run.active_work_count, job.payload

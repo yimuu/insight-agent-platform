@@ -12,3 +12,7 @@
 - [ADR-0009：持久执行底座、Agent 领域与执行版本](0009-durable-kernel-and-agent-domain-boundaries.md)
 
 被替代和废弃的决策通过 Git 历史查阅，不恢复旧实现或兼容路径。接受提案前必须将架构与对应机器合同、当前 schema 和证据要求共同审查。
+
+## Proposed
+
+- [ADR-0010：统一安装与多来源模型配置](0010-unified-installation-and-model-configuration.md)

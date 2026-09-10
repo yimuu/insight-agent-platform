@@ -1,0 +1,22 @@
+{{- if not (has .Values.phase (list "prepare" "provider-start" "dependencies" "provider-observe" "provision" "serving" "verify")) -}}{{ fail "unknown installation phase" }}{{- end -}}
+{{- if or (ne (int .Values.plan.schema_version) 1) (ne .Values.plan.namespace .Release.Namespace) (ne .Values.plan.input.name .Release.Namespace) (ne .Values.plan.input.network.topology "kubernetes_local") -}}{{ fail "the shared Kubernetes installation plan is required" }}{{- end -}}
+{{- if or (not (kindIs "map" .Values.plan.dependency_stop_grace_seconds)) (ne (len .Values.plan.dependency_stop_grace_seconds) 1) (ne (mustToJson .Values.plan.dependency_stop_grace_seconds.s3) "45") -}}{{ fail "the shared S3 shutdown grace is required" }}{{- end -}}
+{{- if or (not (regexMatch "^[a-f0-9]{32}$" .Values.owner)) (not (regexMatch "^[a-f0-9]{16}$" .Values.operation)) (not .Values.namespaceUID) (not .Values.node) -}}{{ fail "explicit namespace ownership, operation and node are required" }}{{- end -}}
+{{- range list .Values.plan.runtime_image .Values.plan.console_image .Values.plan.dependencies.postgres .Values.plan.dependencies.nats .Values.plan.dependencies.s3 .Values.plan.dependencies.openbao -}}
+{{- if not (regexMatch "^[A-Za-z0-9._/:-]+@sha256:[a-f0-9]{64}$" .) -}}{{ fail "repository image digests are required" }}{{- end -}}
+{{- end -}}
+{{- if ne .Values.phase "prepare" -}}
+{{- include "installation.proof" (dict "root" . "proof" .Values.prepared "phase" "prepared") -}}
+{{- end -}}
+{{- if has .Values.phase (list "dependencies" "provider-observe" "provision" "serving" "verify") -}}
+{{- include "installation.proof" (dict "root" . "proof" .Values.providerStarted "phase" "provider_started") -}}
+{{- if ne .Values.providerStarted.identity_digest .Values.prepared.identity_digest -}}{{ fail "provider start identity differs from prepare" }}{{- end -}}
+{{- end -}}
+{{- if or (has .Values.phase (list "provision" "serving" "verify")) (and (eq .Values.phase "dependencies") .Values.providerReady) -}}
+{{- include "installation.proof" (dict "root" . "proof" .Values.providerReady "phase" "provider_ready") -}}
+{{- if ne .Values.providerReady.identity_digest .Values.prepared.identity_digest -}}{{ fail "provider ready identity differs from prepare" }}{{- end -}}
+{{- end -}}
+{{- if has .Values.phase (list "serving" "verify") -}}
+{{- include "installation.proof" (dict "root" . "proof" .Values.ready "phase" "ready") -}}
+{{- if ne .Values.ready.identity_digest .Values.prepared.identity_digest -}}{{ fail "installation identity changed after prepare" }}{{- end -}}
+{{- end -}}

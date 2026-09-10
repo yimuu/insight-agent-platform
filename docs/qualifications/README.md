@@ -39,7 +39,11 @@
 Kind 环境执行本机检查。只有进入生产准备里程碑时，才恢复完整 L4～L6 资格运行。
 
 产品化 10/10 是独立的精确版本发布门禁，不等同于生产级 L4～L6 声明。普通 push 和 pull request 只运行
-Productization 静态合同、脚本测试和资格 harness 编译，不重复构建完整 Kind 产品环境。每周定时或手动触发的
+Productization 静态合同、脚本测试和资格 harness 编译，不重复构建完整 Kind 产品旅程环境。
+统一安装另有独立门禁：涉及运行时或 Console 的变更会构建实际镜像，运行共享证书生产器的 TLS 检查、
+完整 Compose 安装及本地 Kind/Helm 的启动、验证和恢复检查。安装门禁不调用外部模型，也不代替
+OpenSandbox、十场景产品旅程或人工审批证据；当前工作树新增的 CI 配置仍需由提交后的实际工作流验证。
+每周定时或手动触发的
 `source` workflow 在 `all` closure 下创建一次性 Kind，并从目标提交构建 Platform、Sandbox runner 和资格测试
 Package；tag release 则必须在 `signed-release-candidate` 模式下载 `assemble-release` 产生的同一签名候选，验证 bundle、
 commit-scoped OCI index、当前宿主 child manifest 与镜像签名，并用候选 CLI 的离线 release cache 启动候选 runtime。

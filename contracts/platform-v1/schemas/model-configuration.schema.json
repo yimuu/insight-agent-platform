@@ -1,0 +1,928 @@
+{
+  "$defs": {
+    "CompileModelConfigurationRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "nominal/artifact-ref.schema.json"
+        },
+        "input": {
+          "$ref": "#/$defs/ModelConfigurationInputV1"
+        },
+        "installation_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "artifact",
+        "input",
+        "installation_digest",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "CompiledModelConfigurationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "declaration": {
+          "$ref": "#/$defs/ModelConfigurationDeclarationV1"
+        },
+        "deployment": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "bindings": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "admission_evidence": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "artifact": {
+                          "$ref": "nominal/artifact-ref.schema.json"
+                        },
+                        "basis": {
+                          "enum": [
+                            "operator_declaration",
+                            "protocol_observation",
+                            "qualification"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "basis",
+                        "artifact"
+                      ],
+                      "type": "object"
+                    },
+                    "data_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "endpoint_identity_digest": {
+                      "$ref": "nominal/digest.schema.json"
+                    },
+                    "network_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "protocol_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "region": {
+                      "maxLength": 32,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "secret_bindings": {
+                      "items": {
+                        "$ref": "#/$defs/ExactSecretBindingRef"
+                      },
+                      "maxItems": 64,
+                      "type": "array"
+                    },
+                    "tls_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "trust_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    }
+                  },
+                  "required": [
+                    "admission_evidence",
+                    "data_policy",
+                    "endpoint_identity_digest",
+                    "network_policy",
+                    "protocol_policy",
+                    "region",
+                    "secret_bindings",
+                    "tls_policy",
+                    "trust_policy"
+                  ],
+                  "type": "object"
+                },
+                "resource_kind": {
+                  "const": "model_provider"
+                }
+              },
+              "required": [
+                "resource_kind",
+                "bindings"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "bindings": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "budget_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "data_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "generation_defaults": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "canonical_digest": {
+                          "$ref": "nominal/digest.schema.json"
+                        },
+                        "schema_digest": {
+                          "$ref": "nominal/digest.schema.json"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "schema_digest",
+                        "value",
+                        "canonical_digest"
+                      ],
+                      "type": "object"
+                    },
+                    "provider_deployment": {
+                      "$ref": "#/$defs/ExactDeploymentRef"
+                    },
+                    "public_projection_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    },
+                    "safety_policy": {
+                      "$ref": "#/$defs/ExactVersionRef"
+                    }
+                  },
+                  "required": [
+                    "budget_policy",
+                    "data_policy",
+                    "generation_defaults",
+                    "provider_deployment",
+                    "public_projection_policy",
+                    "safety_policy"
+                  ],
+                  "type": "object"
+                },
+                "resource_kind": {
+                  "const": "model_profile"
+                }
+              },
+              "required": [
+                "resource_kind",
+                "bindings"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "draft": {
+          "$ref": "../openapi.yaml#/components/schemas/ResourceDraftPayload"
+        },
+        "environment": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_-]{1,64}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "declaration",
+        "deployment",
+        "draft",
+        "environment",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "DeclareModelConfigurationRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/ModelConfigurationInputV1"
+        },
+        "installation_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "input",
+        "installation_digest",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "ExactDeploymentRef": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "deployment_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "resource_kind": {
+          "enum": [
+            "agent_deployment",
+            "skill_deployment",
+            "capability_deployment",
+            "context_deployment",
+            "mcp_deployment",
+            "model_provider_deployment",
+            "model_deployment",
+            "policy_deployment",
+            "sandbox_profile_deployment"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "deployment_id",
+        "resource_kind",
+        "deployment_digest"
+      ],
+      "type": "object"
+    },
+    "ExactSecretBindingRef": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_id": {
+          "allOf": [
+            {
+              "$ref": "resource-id.schema.json"
+            },
+            {
+              "pattern": "^spr_"
+            }
+          ]
+        },
+        "purpose": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:]{0,127}$",
+          "type": "string"
+        },
+        "resolution_policy": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "pinned"
+                },
+                "opaque_version_identity_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                }
+              },
+              "required": [
+                "kind",
+                "opaque_version_identity_digest"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "follow_provider_rotation"
+                },
+                "rotation_policy_revision_id": {
+                  "allOf": [
+                    {
+                      "$ref": "resource-id.schema.json"
+                    },
+                    {
+                      "pattern": "^prev_"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "rotation_policy_revision_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "resolution_policy_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "secret_binding_id": {
+          "allOf": [
+            {
+              "$ref": "resource-id.schema.json"
+            },
+            {
+              "pattern": "^sbd_"
+            }
+          ]
+        }
+      },
+      "required": [
+        "secret_binding_id",
+        "binding_generation",
+        "provider_id",
+        "purpose",
+        "resolution_policy",
+        "resolution_policy_digest"
+      ],
+      "type": "object"
+    },
+    "ExactVersionRef": {
+      "additionalProperties": false,
+      "properties": {
+        "resource_kind": {
+          "enum": [
+            "agent_interface_revision",
+            "agent_plan_revision",
+            "skill_revision",
+            "capability_interface_revision",
+            "capability_implementation_revision",
+            "context_source_interface_revision",
+            "context_source_implementation_revision",
+            "dataset_generation",
+            "mcp_server_revision",
+            "model_provider_revision",
+            "model_profile_revision",
+            "policy_revision",
+            "sandbox_runtime_revision",
+            "sandbox_package_revision",
+            "sandbox_profile_revision"
+          ],
+          "type": "string"
+        },
+        "revision_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "semantic_digest": {
+          "$ref": "nominal/digest.schema.json"
+        }
+      },
+      "required": [
+        "revision_id",
+        "resource_kind",
+        "semantic_digest"
+      ],
+      "type": "object"
+    },
+    "ModelConfigurationCatalogViewV1": {
+      "additionalProperties": false,
+      "properties": {
+        "destinations": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "base_url": {
+                "maxLength": 8448,
+                "minLength": 1,
+                "type": "string"
+              },
+              "destination_digest": {
+                "$ref": "nominal/digest.schema.json"
+              },
+              "endpoint_identity_digest": {
+                "$ref": "nominal/digest.schema.json"
+              },
+              "protocol": {
+                "enum": [
+                  "open_ai_responses",
+                  "anthropic_messages"
+                ]
+              },
+              "region": {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "base_url",
+              "destination_digest",
+              "endpoint_identity_digest",
+              "protocol",
+              "region"
+            ],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "environment": {
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_-]{1,64}$",
+          "type": "string"
+        },
+        "installation_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "maximum_classification": {
+          "const": "internal"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "secret_provider_id": {
+          "pattern": "^spr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "destinations",
+        "environment",
+        "installation_digest",
+        "maximum_classification",
+        "schema_version",
+        "secret_provider_id"
+      ],
+      "type": "object"
+    },
+    "ModelConfigurationDeclarationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {},
+        "content_digest": {
+          "$ref": "nominal/digest.schema.json"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "size_bytes": {
+          "maximum": 65536,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "content",
+        "content_digest",
+        "schema_version",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "ModelConfigurationInputV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "configuration": {
+              "additionalProperties": false,
+              "properties": {
+                "alias": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9._-]{0,63}$",
+                  "type": "string"
+                },
+                "credential": {
+                  "$ref": "#/$defs/ExactSecretBindingRef"
+                },
+                "destination_digest": {
+                  "$ref": "nominal/digest.schema.json"
+                },
+                "display_name": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-insight-max-utf8-bytes": 255
+                },
+                "schema_version": {
+                  "const": 1
+                }
+              },
+              "required": [
+                "alias",
+                "credential",
+                "destination_digest",
+                "display_name",
+                "schema_version"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "source"
+            }
+          },
+          "required": [
+            "configuration",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "configuration": {
+              "additionalProperties": false,
+              "properties": {
+                "alias": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9._-]{0,63}$",
+                  "type": "string"
+                },
+                "declared_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "display_name": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-insight-max-utf8-bytes": 255
+                },
+                "maximum_input_tokens": {
+                  "maximum": 8192,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maximum_output_tokens": {
+                  "maximum": 2048,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "model": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string",
+                  "x-insight-max-utf8-bytes": 512
+                },
+                "schema_version": {
+                  "const": 1
+                },
+                "source": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "$ref": "nominal/digest.schema.json"
+                    },
+                    "deployment_id": {
+                      "pattern": "^mpdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "model_provider_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_digest",
+                    "deployment_id",
+                    "resource_kind"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "alias",
+                "declared_at",
+                "display_name",
+                "maximum_input_tokens",
+                "maximum_output_tokens",
+                "model",
+                "schema_version",
+                "source"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "model"
+            }
+          },
+          "required": [
+            "configuration",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModelConfigurationResourcePageV1": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ModelConfigurationResourceSummaryV1"
+          },
+          "maxItems": 25,
+          "type": "array"
+        },
+        "next_after": {
+          "oneOf": [
+            {
+              "$ref": "resource-id.schema.json"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "items",
+        "next_after",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "ModelConfigurationResourceSummaryV1": {
+      "additionalProperties": false,
+      "properties": {
+        "active_deployment": {
+          "oneOf": [
+            {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "$ref": "nominal/digest.schema.json"
+                    },
+                    "deployment_id": {
+                      "pattern": "^mpdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "model_provider_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_digest",
+                    "deployment_id",
+                    "resource_kind"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "deployment_digest": {
+                      "$ref": "nominal/digest.schema.json"
+                    },
+                    "deployment_id": {
+                      "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                      "type": "string"
+                    },
+                    "resource_kind": {
+                      "const": "model_deployment"
+                    }
+                  },
+                  "required": [
+                    "deployment_digest",
+                    "deployment_id",
+                    "resource_kind"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alias": {
+          "oneOf": [
+            {
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9._-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string",
+          "x-insight-max-utf8-bytes": 255
+        },
+        "etag": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "gate_state": {
+          "enum": [
+            "enabled",
+            "suspended"
+          ]
+        },
+        "lifecycle_state": {
+          "enum": [
+            "active",
+            "archived",
+            "retired"
+          ]
+        },
+        "resource_id": {
+          "$ref": "resource-id.schema.json"
+        },
+        "resource_kind": {
+          "enum": [
+            "model_provider",
+            "model_profile"
+          ]
+        },
+        "version": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active_deployment",
+        "alias",
+        "display_name",
+        "etag",
+        "gate_state",
+        "lifecycle_state",
+        "resource_id",
+        "resource_kind",
+        "version"
+      ],
+      "type": "object"
+    },
+    "ModelQuotaDeploymentId": {
+      "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "ModelQuotaLimitsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_microunits": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cost_microunits",
+        "requests",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "ModelQuotaViewV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allocation": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "limits": {
+                  "$ref": "#/$defs/ModelQuotaLimitsV1"
+                },
+                "reserved": {
+                  "$ref": "#/$defs/ModelQuotaLimitsV1"
+                },
+                "used": {
+                  "$ref": "#/$defs/ModelQuotaLimitsV1"
+                }
+              },
+              "required": [
+                "limits",
+                "reserved",
+                "used"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "etag": {
+          "pattern": "^\"model-quota-[0-9a-f]{64}\"$",
+          "type": "string"
+        },
+        "model_deployment": {
+          "additionalProperties": false,
+          "properties": {
+            "deployment_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "deployment_id": {
+              "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "resource_kind": {
+              "const": "model_deployment"
+            }
+          },
+          "required": [
+            "deployment_digest",
+            "deployment_id",
+            "resource_kind"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "tenant_concurrency": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reserved": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "used": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "limit",
+            "reserved",
+            "used"
+          ],
+          "type": "object"
+        },
+        "tenant_id": {
+          "pattern": "^ten_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "allocation",
+        "etag",
+        "model_deployment",
+        "schema_version",
+        "tenant_concurrency",
+        "tenant_id"
+      ],
+      "type": "object"
+    },
+    "SetModelQuotaRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/ModelQuotaLimitsV1"
+        },
+        "model_deployment": {
+          "additionalProperties": false,
+          "properties": {
+            "deployment_digest": {
+              "$ref": "nominal/digest.schema.json"
+            },
+            "deployment_id": {
+              "pattern": "^mdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+              "type": "string"
+            },
+            "resource_kind": {
+              "const": "model_deployment"
+            }
+          },
+          "required": [
+            "deployment_digest",
+            "deployment_id",
+            "resource_kind"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "limits",
+        "model_deployment",
+        "schema_version"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:insight:platform:v1:model-configuration",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

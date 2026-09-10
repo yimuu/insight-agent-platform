@@ -26,6 +26,7 @@ pub const CONTEXT_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-worker";
 pub const CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/context-dataset-worker";
+pub const GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/gateway";
 pub const EGRESS_BROKER_WORKLOAD_IDENTITY: &str =
     "spiffe://insight.platform/workload/egress-broker";
 

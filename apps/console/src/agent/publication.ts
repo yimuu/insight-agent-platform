@@ -1,3 +1,5 @@
+import { uploadArtifact, validateArtifactUploadRecovery } from '../artifact/upload.ts'
+import type { ArtifactUploadRecovery } from '../artifact/upload.ts'
 import type { CompiledAgent } from './compiler.ts'
 import { digestJson } from './compiler.ts'
 import { PlatformClient } from '../api/client.ts'
@@ -19,7 +21,7 @@ export interface PublicationResult {
 }
 
 interface PublicationHandle {
-  schema_version: 3
+  schema_version: 4
   attempt_id: string
   gateway_origin: string
   source_bundle_digest: string
@@ -27,6 +29,8 @@ interface PublicationHandle {
   agent_name: string
   existing_agent_id: string | null
   existing_agent_etag: string | null
+  authoring_upload: ArtifactUploadRecovery | null
+  plan_upload: ArtifactUploadRecovery | null
   authoring_artifact: ArtifactRef | null
   plan_artifact: ArtifactRef | null
   resource_id: string | null
@@ -95,12 +99,12 @@ function validateArtifact(value: unknown): void {
 function validateHandle(value: unknown): asserts value is PublicationHandle {
   const item = closed(value, [
     'schema_version', 'attempt_id', 'gateway_origin', 'source_bundle_digest', 'manifest_digest', 'agent_name',
-    'existing_agent_id', 'existing_agent_etag', 'authoring_artifact', 'plan_artifact', 'resource_id', 'resource_etag',
+    'existing_agent_id', 'existing_agent_etag', 'authoring_upload', 'plan_upload', 'authoring_artifact', 'plan_artifact', 'resource_id', 'resource_etag',
     'resource_version', 'resource_draft_generation',
     'validation_operation_id', 'validated_resource_etag', 'draft_generation', 'published_versions',
     'published_resource_etag', 'published_resource_version', 'deployment_id', 'activation_etag',
   ])
-  if (item.schema_version !== 3 || typeof item.attempt_id !== 'string'
+  if (item.schema_version !== 4 || typeof item.attempt_id !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(item.attempt_id)
     || !bounded(item.gateway_origin, 2048) || !digest(item.source_bundle_digest) || !digest(item.manifest_digest)
     || !bounded(item.agent_name)) invalidHandle()
@@ -116,6 +120,7 @@ function validateHandle(value: unknown): asserts value is PublicationHandle {
   for (const key of ['authoring_artifact', 'plan_artifact']) {
     if (item[key] !== null) validateArtifact(item[key])
   }
+  for (const key of ['authoring_upload', 'plan_upload']) if (item[key] !== null) validateArtifactUploadRecovery(item[key] as ArtifactUploadRecovery)
   if (item.published_versions !== null) {
     if (!Array.isArray(item.published_versions) || item.published_versions.length !== 2) invalidHandle()
     for (const entry of item.published_versions) {
@@ -133,6 +138,9 @@ function validateHandle(value: unknown): asserts value is PublicationHandle {
     || present('validated_resource_etag') !== present('draft_generation')
     || present('published_versions') !== present('published_resource_etag')
     || present('published_versions') !== present('published_resource_version')
+    || (present('authoring_artifact') && !present('authoring_upload'))
+    || (present('plan_artifact') && !present('plan_upload'))
+    || (present('plan_upload') && !present('authoring_artifact'))
     || (present('plan_artifact') && !present('authoring_artifact'))
     || (present('resource_id') && !present('plan_artifact'))
     || (present('validation_operation_id') && !present('resource_id'))
@@ -164,7 +172,7 @@ function loadHandle(client: PlatformClient, compiled: CompiledAgent, existing: R
     return value
   }
   const handle: PublicationHandle = {
-    schema_version: 3,
+    schema_version: 4,
     attempt_id: crypto.randomUUID(),
     gateway_origin: client.origin,
     source_bundle_digest: compiled.sourceBundleDigest,
@@ -172,6 +180,8 @@ function loadHandle(client: PlatformClient, compiled: CompiledAgent, existing: R
     agent_name: compiled.name,
     existing_agent_id: existingAgentId,
     existing_agent_etag: existing?.etag ?? null,
+    authoring_upload: null,
+    plan_upload: null,
     authoring_artifact: null,
     plan_artifact: null,
     resource_id: null,
@@ -191,37 +201,6 @@ function loadHandle(client: PlatformClient, compiled: CompiledAgent, existing: R
   return handle
 }
 
-async function upload(
-  client: PlatformClient,
-  bytes: Uint8Array,
-  intent: JsonObject,
-  attemptId: string,
-  phase: string,
-): Promise<ArtifactRef> {
-  const prepared = await client.prepareArtifactUpload({
-    schema_version: 1,
-    purpose: intent.purpose,
-    classification: intent.classification,
-    expected_size_bytes: bytes.byteLength,
-    expected_digest: intent.content_digest,
-    declared_media_type: intent.media_type,
-    display_name: intent.display_name ?? null,
-  }, receipt(attemptId, `${phase}-prepare`))
-  await client.putArtifactObject(prepared.data.upload_target.url, bytes, String(intent.media_type))
-  await client.completeArtifactUpload(prepared.data.artifact_id, {
-    schema_version: 1,
-    completion_proof: prepared.data.upload_target.completion_proof,
-  }, prepared.data.artifact_etag, receipt(attemptId, `${phase}-complete`))
-  const operation = await client.waitOperation(prepared.data.operation_id)
-  if (operation.data.state !== 'succeeded') {
-    throw new Error(`artifact_verification_failed: ${operation.data.error?.code ?? operation.data.state}`)
-  }
-  const artifact = await client.getArtifact(prepared.data.artifact_id)
-  if (artifact.data.state !== 'ready' || artifact.data.content === null) {
-    throw new Error('artifact_not_ready: Verification completed without Ready content authority')
-  }
-  return artifact.data.content
-}
 
 function object(value: unknown, label: string): JsonObject {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -307,26 +286,14 @@ export async function publishCompiledAgent(
   const intent = object(compiled.resourceIntent, 'resource intent')
   onStage('validating')
 
-  if (!handle.authoring_artifact) {
-    handle.authoring_artifact = await upload(
-      client,
-      encoder.encode(compiled.sourceBundle),
-      object(intent.authoring_artifact, 'authoring artifact intent'),
-      handle.attempt_id,
-      'authoring',
-    )
-    saveHandle(handle)
-  }
-  if (!handle.plan_artifact) {
-    handle.plan_artifact = await upload(
-      client,
-      encoder.encode(compiled.typedPlan),
-      object(intent.typed_plan_artifact, 'Typed Plan artifact intent'),
-      handle.attempt_id,
-      'plan',
-    )
-    saveHandle(handle)
-  }
+  handle.authoring_artifact = await uploadArtifact(client, encoder.encode(compiled.sourceBundle),
+    object(intent.authoring_artifact, 'authoring artifact intent'), receipt(handle.attempt_id, 'authoring-prepare'), receipt(handle.attempt_id, 'authoring-complete'),
+    handle.authoring_upload, state => { handle.authoring_upload = state; saveHandle(handle) })
+  saveHandle(handle)
+  handle.plan_artifact = await uploadArtifact(client, encoder.encode(compiled.typedPlan),
+    object(intent.typed_plan_artifact, 'Typed Plan artifact intent'), receipt(handle.attempt_id, 'plan-prepare'), receipt(handle.attempt_id, 'plan-complete'),
+    handle.plan_upload, state => { handle.plan_upload = state; saveHandle(handle) })
+  saveHandle(handle)
   const draft = {
     display_name: intent.display_name,
     document: materializeDocument(compiled, handle.authoring_artifact, handle.plan_artifact),

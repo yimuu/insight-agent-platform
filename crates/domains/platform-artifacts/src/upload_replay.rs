@@ -120,7 +120,7 @@ pub fn validate_artifact_prepare_replay(
         || operation.snapshot.expected_size_bytes != artifact.expected_size_bytes
         || operation.snapshot.expected_digest != artifact.expected_digest
         || operation.snapshot.retention_policy_revision_id != artifact.retention_policy_revision_id
-        || artifact.metadata.operation_id != operation.operation_id
+        || artifact.metadata.upload_operation_id()? != &operation.operation_id
         || grant.snapshot.operation_id != operation.operation_id
         || grant.snapshot.subject_principal_id != identity.principal_id
         || grant.snapshot.subject_principal_kind != identity.principal_kind

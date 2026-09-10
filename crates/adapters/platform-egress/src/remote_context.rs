@@ -1,5 +1,12 @@
+#[path = "remote_context_wire.rs"]
+mod wire;
+
+#[cfg(test)]
+#[path = "remote_context_document_qualification.rs"]
+mod document_qualification;
+
 use super::{
-    capability_http::{capability_url, insert_credential, InstalledHttpCredentialInjection},
+    capability_http::{capability_url, insert_credential},
     is_public_destination_ip, parse_endpoint_host, DnsResolutionError, EgressCapacitySnapshot,
     EgressConfigurationError, EgressDnsResolver, ParsedEndpointHost, SecretMaterialResolutionError,
     SecretMaterialResolver, MAX_DNS_ANSWERS_HARD, MAX_EGRESS_IN_FLIGHT_HARD,
@@ -13,25 +20,13 @@ use insight_platform_context::{
     RemoteContextSearchConnector, RemoteContextSearchRequest, RemoteContextSearchResponse,
     REMOTE_CONTEXT_PROTOCOL_VERSION,
 };
-use insight_platform_contracts::{
-    canonical_digest, canonical_json, parse_strict_json, CapabilityEndpointScheme,
-    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, JsonLimits, ResourceKind,
-    Sha256Digest,
-};
+use insight_platform_contracts::{canonical_digest, Sha256Digest};
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-
-pub const MAX_INSTALLED_REMOTE_CONTEXT_ENDPOINTS: usize = 4_096;
-pub const MAX_REMOTE_CONTEXT_TRUST_BUNDLE_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,155 +70,86 @@ impl Default for RemoteContextEgressLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InstalledRemoteContextEndpoint {
-    pub schema_version: u32,
-    pub context_deployment: ExactDeploymentRef,
-    pub implementation_revision: ExactVersionRef,
-    pub protocol_contract_digest: Sha256Digest,
-    pub result_mapping_digest: Sha256Digest,
-    pub endpoint: insight_platform_contracts::CanonicalHttpEndpoint,
-    pub endpoint_identity_digest: Sha256Digest,
-    pub region: insight_platform_contracts::DataRegion,
-    pub network_policy: ExactVersionRef,
-    pub tls_policy: ExactVersionRef,
-    pub trust_policy: ExactVersionRef,
-    pub secret_bindings: Vec<ExactSecretBindingRef>,
-    pub credential_injections: Vec<InstalledHttpCredentialInjection>,
-    pub trusted_root_pem: String,
-    pub maximum_request_bytes: u32,
-    pub maximum_response_bytes: u32,
-}
-
-impl InstalledRemoteContextEndpoint {
-    pub fn validate(&self) -> Result<(), EgressConfigurationError> {
-        self.context_deployment
-            .validate()
-            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
-        self.implementation_revision
-            .validate()
-            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
-        self.endpoint
-            .validate()
-            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
-        if self.schema_version != REMOTE_CONTEXT_PROTOCOL_VERSION
-            || self.protocol_contract_digest
-                != insight_platform_context::remote_context_protocol_contract_digest()
-            || self.result_mapping_digest
-                != insight_platform_context::remote_context_result_mapping_digest()
-            || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
-            || self.implementation_revision.resource_kind
-                != ResourceKind::ContextSourceImplementationRevision
-            || self.endpoint.scheme != CapabilityEndpointScheme::Https
-            || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
-            || parse_endpoint_host(&self.endpoint.host).is_err()
-            || self.maximum_request_bytes == 0
-            || self.maximum_response_bytes == 0
-            || self.trusted_root_pem.is_empty()
-            || self.trusted_root_pem.len() > MAX_REMOTE_CONTEXT_TRUST_BUNDLE_BYTES
-            || reqwest::Certificate::from_pem(self.trusted_root_pem.as_bytes()).is_err()
-        {
-            return Err(EgressConfigurationError::InvalidEndpoint);
-        }
-        let policies = [&self.network_policy, &self.tls_policy, &self.trust_policy];
-        let mut policy_ids = BTreeSet::new();
-        if policies.iter().any(|policy| {
-            policy.validate().is_err()
-                || policy.resource_kind != ResourceKind::PolicyRevision
-                || !policy_ids.insert(policy.revision_id.clone())
-        }) {
-            return Err(EgressConfigurationError::InvalidEndpoint);
-        }
-        let mut purposes = BTreeSet::new();
-        for binding in &self.secret_bindings {
-            binding
-                .validate()
-                .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
-            if !purposes.insert(binding.purpose.clone()) {
-                return Err(EgressConfigurationError::InvalidEndpoint);
-            }
-        }
-        if self.secret_bindings.len() != self.credential_injections.len()
-            || self.credential_injections.iter().any(|injection| {
-                injection.validate().is_err()
-                    || self
-                        .secret_bindings
-                        .iter()
-                        .filter(|binding| binding.purpose == *injection.purpose())
-                        .count()
-                        != 1
-            })
-        {
-            return Err(EgressConfigurationError::InvalidEndpoint);
-        }
-        capability_url(&self.endpoint)?;
-        Ok(())
-    }
-
-    fn matches(&self, request: &RemoteContextSearchRequest) -> bool {
-        request.context_deployment == self.context_deployment
-            && request.implementation_revision == self.implementation_revision
-            && request.protocol_contract_digest == self.protocol_contract_digest
-            && request.result_mapping_digest == self.result_mapping_digest
-            && request.endpoint == self.endpoint
-            && request.endpoint_identity_digest == self.endpoint_identity_digest
-            && request.region == self.region
-            && request.network_policy == self.network_policy
-            && request.tls_policy == self.tls_policy
-            && request.trust_policy == self.trust_policy
-            && request.secret_bindings == self.secret_bindings
-            && request.maximum_response_bytes <= self.maximum_response_bytes
-    }
-}
+pub use insight_platform_contracts::InstalledRemoteContextDestinationV1;
 
 #[derive(Debug, Clone)]
-pub struct InstalledRemoteContextEndpointCatalog {
-    entries: BTreeMap<
-        (insight_platform_contracts::ResourceId, Sha256Digest),
-        InstalledRemoteContextEndpoint,
-    >,
+pub struct InstalledRemoteContextDestinationCatalog {
+    entries: Vec<InstalledRemoteContextDestinationV1>,
 }
 
-impl InstalledRemoteContextEndpointCatalog {
+fn validate_remote_context_roots(pem: &str) -> Result<(), EgressConfigurationError> {
+    // With rustls, Certificate::from_pem only stores bytes; build the real trust store here.
+    // Client construction performs no network request and installs no system trust.
+    let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+        .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
+    if roots.is_empty() {
+        return Err(EgressConfigurationError::InvalidEndpoint);
+    }
+    reqwest::Client::builder()
+        .no_proxy()
+        .https_only(true)
+        .tls_certs_only(roots)
+        .build()
+        .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
+    Ok(())
+}
+
+impl InstalledRemoteContextDestinationCatalog {
     pub fn new(
-        entries: Vec<InstalledRemoteContextEndpoint>,
+        entries: Vec<InstalledRemoteContextDestinationV1>,
     ) -> Result<Self, EgressConfigurationError> {
-        // Empty is the closed deny-all catalog; requests still fail before dispatch.
-        if entries.len() > MAX_INSTALLED_REMOTE_CONTEXT_ENDPOINTS {
+        if entries.len() > insight_platform_contracts::MAX_REMOTE_CONTEXT_INSTALLATION_DESTINATIONS
+        {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
-        let mut catalog = BTreeMap::new();
-        for entry in entries {
-            entry.validate()?;
-            let key = (
-                entry.context_deployment.deployment_id.clone(),
-                entry.context_deployment.deployment_digest.clone(),
-            );
-            if catalog.insert(key, entry).is_some() {
+        for (index, entry) in entries.iter().enumerate() {
+            if !entry.validate_shape()
+                || parse_endpoint_host(&entry.endpoint.host).is_err()
+                || validate_remote_context_roots(&entry.trusted_root_pem).is_err()
+            {
+                return Err(EgressConfigurationError::InvalidEndpoint);
+            }
+            capability_url(&entry.endpoint)?;
+            if entries[..index]
+                .iter()
+                .any(|other| entry.same_selector(other))
+            {
                 return Err(EgressConfigurationError::DuplicateEndpoint);
             }
         }
-        Ok(Self { entries: catalog })
+        Ok(Self { entries })
     }
-
     fn resolve(
         &self,
         request: &RemoteContextSearchRequest,
-    ) -> Result<InstalledRemoteContextEndpoint, RemoteContextFailure> {
+    ) -> Result<InstalledRemoteContextDestinationV1, RemoteContextFailure> {
         self.entries
-            .get(&(
-                request.context_deployment.deployment_id.clone(),
-                request.context_deployment.deployment_digest.clone(),
-            ))
-            .filter(|entry| entry.matches(request))
+            .iter()
+            .find(|entry| {
+                request.protocol_contract_digest == entry.protocol_contract_digest
+                    && request.result_mapping_digest == entry.result_mapping_digest
+                    && request.endpoint == entry.endpoint
+                    && request.endpoint_identity_digest == entry.endpoint_identity_digest
+                    && request.region == entry.region
+                    && request.maximum_response_bytes <= entry.maximum_response_bytes
+                    && request.secret_bindings.len() == entry.credential_injections.len()
+                    && entry.credential_injections.iter().all(|injection| {
+                        request
+                            .secret_bindings
+                            .iter()
+                            .filter(|binding| binding.purpose == *injection.purpose())
+                            .count()
+                            == 1
+                    })
+            })
             .cloned()
-            .ok_or_else(|| before_dispatch("context_egress_endpoint_not_installed", false))
+            .ok_or_else(|| before_dispatch("context_egress_destination_not_installed", false))
     }
 }
 
 pub struct ReqwestRemoteContextSearchConnector {
-    catalog: InstalledRemoteContextEndpointCatalog,
+    catalog: InstalledRemoteContextDestinationCatalog,
+    authority: Arc<dyn insight_platform_security::ContextDispatchAuthority>,
     secrets: Arc<dyn SecretMaterialResolver>,
     dns: Arc<dyn EgressDnsResolver>,
     limits: RemoteContextEgressLimits,
@@ -234,7 +160,8 @@ pub struct ReqwestRemoteContextSearchConnector {
 
 impl ReqwestRemoteContextSearchConnector {
     pub fn new(
-        catalog: InstalledRemoteContextEndpointCatalog,
+        catalog: InstalledRemoteContextDestinationCatalog,
+        authority: Arc<dyn insight_platform_security::ContextDispatchAuthority>,
         secrets: Arc<dyn SecretMaterialResolver>,
         dns: Arc<dyn EgressDnsResolver>,
         limits: RemoteContextEgressLimits,
@@ -242,6 +169,7 @@ impl ReqwestRemoteContextSearchConnector {
         limits.validate()?;
         Ok(Self {
             catalog,
+            authority,
             secrets,
             dns,
             limits,
@@ -277,7 +205,7 @@ impl ReqwestRemoteContextSearchConnector {
 
     async fn addresses(
         &self,
-        entry: &InstalledRemoteContextEndpoint,
+        entry: &InstalledRemoteContextDestinationV1,
     ) -> Result<(String, Vec<SocketAddr>), RemoteContextFailure> {
         let host = parse_endpoint_host(&entry.endpoint.host)
             .map_err(|_| before_dispatch("context_egress_invalid_endpoint", false))?;
@@ -319,7 +247,7 @@ impl ReqwestRemoteContextSearchConnector {
     async fn headers(
         &self,
         request: &RemoteContextSearchRequest,
-        entry: &InstalledRemoteContextEndpoint,
+        entry: &InstalledRemoteContextDestinationV1,
     ) -> Result<HeaderMap, RemoteContextFailure> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -354,39 +282,6 @@ impl ReqwestRemoteContextSearchConnector {
     }
 }
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteSearchWireRequest<'a> {
-    schema_version: u32,
-    query: &'a serde_json::Value,
-    normalized_query_digest: &'a Sha256Digest,
-    normalized_filter_digest: &'a Sha256Digest,
-    requested_projection: &'a [String],
-    page_size: u32,
-    cursor_digest: &'a Option<Sha256Digest>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteSearchWireResponse {
-    schema_version: u32,
-    items: Vec<RemoteSearchWireItem>,
-    next_cursor_digest: Option<Sha256Digest>,
-    remote_revision_digest: Option<Sha256Digest>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteSearchWireItem {
-    source_identity: String,
-    content: serde_json::Value,
-    structured_fields: serde_json::Value,
-    score_millionths: Option<i32>,
-    locator: String,
-    display_label: String,
-    classification: insight_platform_contracts::DataClassification,
-}
-
 fn encode_remote_search_body(
     request: &RemoteContextSearchRequest,
     maximum_request_bytes: u32,
@@ -400,23 +295,21 @@ fn encode_remote_search_body(
             ));
         }
     };
-    let body = canonical_json(
-        &serde_json::to_value(RemoteSearchWireRequest {
-            schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
-            query,
-            normalized_query_digest: &request.normalized_query_digest,
-            normalized_filter_digest: &request.normalized_filter_digest,
-            requested_projection: &request.requested_projection,
-            page_size: request.page_size,
-            cursor_digest: &request.cursor_digest,
-        })
-        .map_err(|_| before_dispatch("context_egress_request_invalid", false))?,
+    wire::encode_wire(
+        query,
+        &request.normalized_query_digest,
+        &request.normalized_filter_digest,
+        &request.requested_projection,
+        request.page_size,
+        &request.cursor_digest,
+        maximum_request_bytes,
     )
-    .map_err(|_| before_dispatch("context_egress_request_invalid", false))?;
-    if body.len() > maximum_request_bytes as usize {
-        return Err(before_dispatch("context_egress_request_too_large", false));
-    }
-    Ok(body)
+    .map_err(|error| match error {
+        wire::RemoteSearchWireError::RequestTooLarge => {
+            before_dispatch("context_egress_request_too_large", false)
+        }
+        _ => before_dispatch("context_egress_request_invalid", false),
+    })
 }
 
 fn normalize_remote_search_response(
@@ -424,37 +317,15 @@ fn normalize_remote_search_response(
     bytes: &[u8],
     evidence: Sha256Digest,
 ) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
-    let response_digest: Sha256Digest = canonical_digest(
-        &parse_strict_json(
-            bytes,
-            JsonLimits {
-                max_bytes: request.maximum_response_bytes as usize,
-                max_depth: 32,
-                max_items_per_array: usize::try_from(request.page_size).unwrap_or(0),
-                max_properties_per_object: 16,
-                max_string_bytes: request.maximum_response_bytes as usize,
-            },
-        )
-        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?,
+    let decoded = wire::decode_wire(
+        bytes,
+        request.page_size,
+        request.maximum_classification,
+        request.maximum_response_bytes,
     )
-    .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?
-    .parse()
     .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?;
-    let wire: RemoteSearchWireResponse = serde_json::from_slice(bytes)
-        .map_err(|_| after_dispatch("context_egress_response_invalid", false, evidence.clone()))?;
-    if wire.schema_version != REMOTE_CONTEXT_PROTOCOL_VERSION
-        || wire.items.len() > request.page_size as usize
-        || wire
-            .items
-            .iter()
-            .any(|item| item.classification.rank() > request.maximum_classification.rank())
-    {
-        return Err(after_dispatch(
-            "context_egress_response_invalid",
-            false,
-            evidence,
-        ));
-    }
+    let wire = decoded.response;
+    let response_digest = decoded.canonical_response_digest;
     let authorization_evidence_digest = closed_digest(&serde_json::json!({
         "context_deployment": request.context_deployment,
         "network_policy": request.network_policy,
@@ -511,9 +382,50 @@ impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
             .try_acquire_owned()
             .map_err(|_| before_dispatch("context_egress_capacity", true))?;
         let entry = self.catalog.resolve(&request)?;
-        let body = encode_remote_search_body(&request, entry.maximum_request_bytes)?;
-        let headers = self.headers(&request, &entry).await?;
-        let (dns_host, addresses) = self.addresses(&entry).await?;
+        let authorization = request
+            .dispatch_authorization()
+            .map_err(|_| before_dispatch("context_egress_request_invalid", false))?;
+        let predispatch_deadline = tokio::time::Instant::now()
+            .checked_add(
+                (request.deadline - Utc::now())
+                    .to_std()
+                    .map_err(|_| before_dispatch("context_egress_deadline_elapsed", false))?,
+            )
+            .ok_or_else(|| before_dispatch("context_egress_deadline_elapsed", false))?;
+        let authorization_permit = tokio::time::timeout_at(
+            predispatch_deadline,
+            self.authority.authorize_context_dispatch(&authorization),
+        )
+        .await
+        .map_err(|_| before_dispatch("context_egress_authorization_unavailable", true))?
+        .map_err(|error| match error {
+            insight_platform_contracts::ContextDispatchAuthorizationError::Rejected => {
+                before_dispatch("context_egress_authorization_rejected", false)
+            }
+            insight_platform_contracts::ContextDispatchAuthorizationError::Unavailable => {
+                before_dispatch("context_egress_authorization_unavailable", true)
+            }
+        })?;
+        if !authorization_permit.validate_for(&authorization, Utc::now()) {
+            return Err(before_dispatch(
+                "context_egress_authorization_rejected",
+                false,
+            ));
+        }
+        let body = encode_remote_search_body(
+            &request,
+            entry
+                .maximum_request_bytes
+                .min(request.maximum_request_bytes),
+        )?;
+        let (headers, (dns_host, addresses)) =
+            tokio::time::timeout_at(predispatch_deadline, async {
+                let headers = self.headers(&request, &entry).await?;
+                let addresses = self.addresses(&entry).await?;
+                Ok::<_, RemoteContextFailure>((headers, addresses))
+            })
+            .await
+            .map_err(|_| before_dispatch("context_egress_deadline_elapsed", false))??;
         let root = reqwest::Certificate::from_pem(entry.trusted_root_pem.as_bytes())
             .map_err(|_| before_dispatch("context_egress_trust_invalid", false))?;
         let remaining = (request.deadline - Utc::now())
@@ -542,6 +454,12 @@ impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
             .body(body)
             .build()
             .map_err(|_| before_dispatch("context_egress_request_build_failed", false))?;
+        if !authorization_permit.validate_for(&authorization, Utc::now()) {
+            return Err(before_dispatch(
+                "context_egress_authorization_expired",
+                false,
+            ));
+        }
         let evidence = transport_evidence(&request, &entry, &addresses);
         let response = tokio::time::timeout(
             Duration::from_millis(self.limits.first_byte_timeout_milliseconds).min(remaining),
@@ -593,7 +511,7 @@ impl RemoteContextSearchConnector for ReqwestRemoteContextSearchConnector {
 
 fn transport_evidence(
     request: &RemoteContextSearchRequest,
-    entry: &InstalledRemoteContextEndpoint,
+    entry: &InstalledRemoteContextDestinationV1,
     addresses: &[SocketAddr],
 ) -> Sha256Digest {
     closed_digest(&serde_json::json!({
@@ -603,8 +521,8 @@ fn transport_evidence(
         "physical_attempt": request.physical_attempt,
         "lease_generation": request.lease_generation,
         "endpoint_identity_digest": entry.endpoint_identity_digest,
-        "tls_policy": entry.tls_policy,
-        "trust_policy": entry.trust_policy,
+        "tls_policy": request.tls_policy,
+        "trust_policy": request.trust_policy,
         "pinned_addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
     }))
 }
@@ -648,7 +566,9 @@ mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
     use insight_platform_contracts::{
-        CapabilityEndpointScheme, DataClassification, DataRegion, ResourceId, ValueRef,
+        canonical_json, parse_strict_json, CapabilityEndpointScheme, DataClassification,
+        DataRegion, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, JsonLimits,
+        ResourceId, ResourceKind, ValueRef,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
@@ -685,7 +605,10 @@ mod tests {
             .pem()
     }
 
-    fn fixture() -> (InstalledRemoteContextEndpoint, RemoteContextSearchRequest) {
+    fn fixture() -> (
+        InstalledRemoteContextDestinationV1,
+        RemoteContextSearchRequest,
+    ) {
         let endpoint = insight_platform_contracts::CanonicalHttpEndpoint {
             scheme: CapabilityEndpointScheme::Https,
             host: "search.example.test".to_owned(),
@@ -698,32 +621,29 @@ mod tests {
         let network = exact(ResourceKind::PolicyRevision, 3, '3');
         let tls = exact(ResourceKind::PolicyRevision, 4, '4');
         let trust = exact(ResourceKind::PolicyRevision, 5, '5');
-        let installed = InstalledRemoteContextEndpoint {
+        let installed = InstalledRemoteContextDestinationV1 {
             schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
-            context_deployment: deployment.clone(),
-            implementation_revision: implementation.clone(),
             protocol_contract_digest:
                 insight_platform_context::remote_context_protocol_contract_digest(),
             result_mapping_digest: insight_platform_context::remote_context_result_mapping_digest(),
             endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
             endpoint: endpoint.clone(),
             region: "cn-east-1".parse::<DataRegion>().unwrap(),
-            network_policy: network.clone(),
-            tls_policy: tls.clone(),
-            trust_policy: trust.clone(),
-            secret_bindings: vec![],
             credential_injections: vec![],
             trusted_root_pem: root_pem(),
             maximum_request_bytes: 65_536,
             maximum_response_bytes: 1_048_576,
         };
         let request = RemoteContextSearchRequest {
-            schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
+            schema_version: insight_platform_contracts::REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION,
             tenant_id: id(ResourceKind::Tenant, 6),
             context_query_id: id(ResourceKind::ContextQuery, 7),
             job_id: id(ResourceKind::Job, 8),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 15),
             physical_attempt: 1,
             lease_generation: 1,
+            lease_token_digest: digest('d'),
+            admission_digest: digest('e'),
             context_deployment: deployment,
             implementation_revision: implementation,
             protocol_contract_digest:
@@ -745,12 +665,35 @@ mod tests {
             maximum_classification: DataClassification::Confidential,
             page_size: 10,
             cursor_digest: None,
+            maximum_request_bytes: 65_536,
             maximum_response_bytes: 1_048_576,
             deadline: Utc::now() + ChronoDuration::minutes(1),
         };
         (installed, request)
     }
 
+    struct ExactAuthority(insight_platform_contracts::ContextDispatchAuthorizationV1);
+    #[async_trait]
+    impl insight_platform_security::ContextDispatchAuthority for ExactAuthority {
+        async fn authorize_context_dispatch(
+            &self,
+            request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ContextDispatchPermitV1,
+            insight_platform_contracts::ContextDispatchAuthorizationError,
+        > {
+            if request != &self.0 {
+                return Err(
+                    insight_platform_contracts::ContextDispatchAuthorizationError::Rejected,
+                );
+            }
+            Ok(insight_platform_contracts::ContextDispatchPermitV1 {
+                schema_version: 1,
+                request_digest: closed_digest(request),
+                valid_until: request.deadline,
+            })
+        }
+    }
     struct EmptySecrets;
 
     #[async_trait]
@@ -881,14 +824,14 @@ mod tests {
     }
 
     #[test]
-    fn installed_remote_context_catalog_matches_the_complete_frozen_closure() {
+    fn installed_remote_context_catalog_matches_only_the_physical_destination() {
         let (installed, request) = fixture();
-        installed.validate().unwrap();
-        let catalog = InstalledRemoteContextEndpointCatalog::new(vec![installed]).unwrap();
+        assert!(installed.validate_shape());
+        let catalog = InstalledRemoteContextDestinationCatalog::new(vec![installed]).unwrap();
         catalog.resolve(&request).unwrap();
 
         let mut drifted = request;
-        drifted.trust_policy = exact(ResourceKind::PolicyRevision, 9, 'a');
+        drifted.region = "cn-west-1".parse().unwrap();
         assert!(matches!(
             catalog.resolve(&drifted),
             Err(RemoteContextFailure {
@@ -970,15 +913,17 @@ mod tests {
 
     #[tokio::test]
     async fn remote_search_https_last_hop_pins_dns_and_explicit_trust() {
-        let (address, root_pem, server) = start_remote_search_https_fixture().await;
+        let (address, serving_root_pem, server) = start_remote_search_https_fixture().await;
         let (mut installed, mut request) = fixture();
         installed.endpoint.port = address.port();
         installed.endpoint_identity_digest = installed.endpoint.canonical_digest().unwrap();
-        installed.trusted_root_pem = root_pem;
+        // The serving root is second: this proves the complete bundle is trusted.
+        installed.trusted_root_pem = format!("{}{}", root_pem(), serving_root_pem);
         request.endpoint = installed.endpoint.clone();
         request.endpoint_identity_digest = installed.endpoint_identity_digest.clone();
         let connector = ReqwestRemoteContextSearchConnector::new(
-            InstalledRemoteContextEndpointCatalog::new(vec![installed]).unwrap(),
+            InstalledRemoteContextDestinationCatalog::new(vec![installed]).unwrap(),
+            Arc::new(ExactAuthority(request.dispatch_authorization().unwrap())),
             Arc::new(EmptySecrets),
             Arc::new(FixtureDns(address)),
             RemoteContextEgressLimits::default(),
@@ -993,6 +938,20 @@ mod tests {
             request.normalized_query_digest
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn installed_roots_require_nonempty_real_der_before_any_dispatch() {
+        let (installed, _) = fixture();
+        assert!(InstalledRemoteContextDestinationCatalog::new(vec![installed.clone()]).is_ok());
+        for pem in [
+            "not a certificate",
+            "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n",
+        ] {
+            let mut wrong = installed.clone();
+            wrong.trusted_root_pem = pem.into();
+            assert!(InstalledRemoteContextDestinationCatalog::new(vec![wrong]).is_err());
+        }
     }
 
     #[test]
@@ -1094,5 +1053,153 @@ mod tests {
                 assert_eq!(item.classification, DataClassification::Public);
             }
         }
+    }
+
+    struct CountingDns {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        delay: bool,
+    }
+    #[async_trait]
+    impl EgressDnsResolver for CountingDns {
+        async fn resolve(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>, DnsResolutionError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.delay {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+            Ok(vec![SocketAddr::new("8.8.8.8".parse().unwrap(), port)])
+        }
+    }
+    struct RecordingDispatchAuthority {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        mode: u8,
+    }
+    #[async_trait]
+    impl insight_platform_security::ContextDispatchAuthority for RecordingDispatchAuthority {
+        async fn authorize_context_dispatch(
+            &self,
+            request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ContextDispatchPermitV1,
+            insight_platform_contracts::ContextDispatchAuthorizationError,
+        > {
+            use insight_platform_contracts::ContextDispatchAuthorizationError as Failure;
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.mode {
+                0 => return Err(Failure::Rejected),
+                1 => return Err(Failure::Unavailable),
+                5 => {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+                _ => {}
+            }
+            Ok(insight_platform_contracts::ContextDispatchPermitV1 {
+                schema_version: 1,
+                request_digest: if self.mode == 3 {
+                    digest('0')
+                } else {
+                    closed_digest(request)
+                },
+                valid_until: match self.mode {
+                    2 => Utc::now() - ChronoDuration::seconds(1),
+                    4 => Utc::now() + ChronoDuration::milliseconds(40),
+                    _ => request.deadline,
+                },
+            })
+        }
+    }
+    #[tokio::test]
+    async fn current_authorization_failure_or_expiry_never_opens_http_or_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for mode in 0..=5 {
+            let (installed, mut request) = fixture();
+            if mode == 5 {
+                request.deadline = Utc::now() + ChronoDuration::milliseconds(40);
+            }
+            let authorizations = Arc::new(AtomicUsize::new(0));
+            let dns = Arc::new(AtomicUsize::new(0));
+            let connector = ReqwestRemoteContextSearchConnector::new(
+                InstalledRemoteContextDestinationCatalog::new(vec![installed]).unwrap(),
+                Arc::new(RecordingDispatchAuthority {
+                    calls: authorizations.clone(),
+                    mode,
+                }),
+                Arc::new(EmptySecrets),
+                Arc::new(CountingDns {
+                    calls: dns.clone(),
+                    delay: mode == 4,
+                }),
+                RemoteContextEgressLimits::default(),
+            )
+            .unwrap();
+            let failure = connector.query(request).await.unwrap_err();
+            assert!(matches!(
+                failure.class,
+                RemoteContextFailureClass::RejectedBeforeDispatch
+                    | RemoteContextFailureClass::RetryableBeforeDispatch
+            ));
+            assert!(failure.dispatch_evidence_digest.is_none());
+            assert_eq!(authorizations.load(Ordering::SeqCst), 1);
+            assert_eq!(dns.load(Ordering::SeqCst), usize::from(mode == 4));
+            assert!(failure.code.starts_with("context_egress_authorization_"));
+            assert_eq!(
+                connector.capacity_snapshot().available,
+                RemoteContextEgressLimits::default().maximum_in_flight
+            );
+        }
+    }
+    #[tokio::test]
+    async fn changed_inline_body_or_business_metadata_is_rejected_before_dns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for body_change in [true, false] {
+            let (installed, mut request) = fixture();
+            let expected = request.dispatch_authorization().unwrap();
+            if body_change {
+                request.query_input = ValueRef::Inline {
+                    value: serde_json::json!({"query":"body-canary"}),
+                };
+            } else {
+                request.trust_policy = exact(ResourceKind::PolicyRevision, 19, 'a');
+            }
+            let dns = Arc::new(AtomicUsize::new(0));
+            let connector = ReqwestRemoteContextSearchConnector::new(
+                InstalledRemoteContextDestinationCatalog::new(vec![installed]).unwrap(),
+                Arc::new(ExactAuthority(expected)),
+                Arc::new(EmptySecrets),
+                Arc::new(CountingDns {
+                    calls: dns.clone(),
+                    delay: false,
+                }),
+                RemoteContextEgressLimits::default(),
+            )
+            .unwrap();
+            let failure = connector.query(request).await.unwrap_err();
+            assert_eq!(failure.code, "context_egress_authorization_rejected");
+            assert_eq!(dns.load(Ordering::SeqCst), 0);
+            assert!(failure.dispatch_evidence_digest.is_none());
+            assert!(!format!("{failure:?}").contains("body-canary"));
+        }
+    }
+    #[tokio::test]
+    async fn authorized_request_still_obeys_its_frozen_body_limit_before_dns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (installed, mut request) = fixture();
+        request.maximum_request_bytes = 8;
+        let dns = Arc::new(AtomicUsize::new(0));
+        let connector = ReqwestRemoteContextSearchConnector::new(
+            InstalledRemoteContextDestinationCatalog::new(vec![installed]).unwrap(),
+            Arc::new(ExactAuthority(request.dispatch_authorization().unwrap())),
+            Arc::new(EmptySecrets),
+            Arc::new(CountingDns {
+                calls: dns.clone(),
+                delay: false,
+            }),
+            RemoteContextEgressLimits::default(),
+        )
+        .unwrap();
+        let failure = connector.query(request).await.unwrap_err();
+        assert_eq!(failure.code, "context_egress_request_too_large");
+        assert_eq!(dns.load(Ordering::SeqCst), 0);
+        assert!(failure.dispatch_evidence_digest.is_none());
     }
 }

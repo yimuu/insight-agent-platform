@@ -200,7 +200,7 @@ fn fixture() -> Fixture {
         context: ContextWindowContract {
             maximum_context_tokens: 4_096,
             maximum_output_tokens: 512,
-            tokenizer_contract_digest: sha('e'),
+            tokenizer_contract_digest: Some(sha('e')),
             estimator_contract_digest: sha('f'),
         },
         tools: ModelToolContract {
@@ -229,9 +229,9 @@ fn fixture() -> Fixture {
         data_handling: ProviderDataHandlingContract {
             maximum_classification: DataClassification::Confidential,
             allowed_regions: vec![region.clone()],
-            maximum_retention_milliseconds: 86_400_000,
+            maximum_retention_milliseconds: Some(86_400_000),
             training: ProviderTrainingPolicy::Prohibited,
-            subprocessor_set_digest: sha('1'),
+            subprocessor_set_digest: Some(sha('1')),
         },
         limits: ModelLimits {
             maximum_messages: 16,
@@ -244,6 +244,7 @@ fn fixture() -> Fixture {
             maximum_output_tokens: 512,
         },
         catalog_evidence: ModelCatalogEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
             artifact: artifact(42, '2', "catalog"),
             source_digest: sha('3'),
             adapter_contract_digest: sha('a'),
@@ -261,7 +262,10 @@ fn fixture() -> Fixture {
         trust_policy: policy(34, '7'),
         data_policy: policy(35, '8'),
         region,
-        conformance_evidence: artifact(44, '9', "conformance"),
+        admission_evidence: insight_platform_contracts::ModelAdmissionEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
+            artifact: artifact(44, '9', "conformance"),
+        },
     };
     let model_closure = ModelDeploymentClosure {
         profile_revision: profile_revision.clone(),
@@ -572,6 +576,28 @@ fn claimed_model_input_binds_exact_inline_bytes() {
 }
 
 #[test]
+fn structured_response_schema_must_match_its_declared_digest() {
+    let fixture = fixture();
+    let mut request = fixture.request.clone();
+    let validate = |request: &CanonicalModelRequest| {
+        request.validate_for(
+            &fixture.request.model_turn_id,
+            &fixture.facts.provider,
+            &fixture.facts.profile,
+            &fixture.facts.provider_closure.region,
+            fixture.now,
+            fixture.limits,
+        )
+    };
+    assert!(validate(&request).is_ok());
+    request.response_contract.output_schema_digest = sha('b');
+    assert_eq!(
+        validate(&request),
+        Err(ModelTurnError::InvalidResponseContract)
+    );
+}
+
+#[test]
 fn model_request_rejects_artifact_backed_storage() {
     let fixture = fixture();
     let value = serde_json::to_value(&fixture.request).unwrap();
@@ -627,6 +653,95 @@ fn admission_dispatch_tool_intent_and_usage_are_closed() {
     assert_eq!(decision.settlement.tokens_used, 70);
     assert_eq!(decision.settlement.cost_microunits_used, 123);
     assert_eq!(decision.turn.payload.result.unwrap().tool_intent_count, 1);
+}
+
+#[test]
+fn provider_reported_usage_requires_both_counts_without_a_reporting_declaration() {
+    let mut profile = fixture().facts.profile;
+    profile.usage.reports_cost = false;
+    profile.usage.cost_currency = None;
+    for declared in [false, true] {
+        profile.usage.provider_reports_usage = declared;
+        let complete = ModelUsage {
+            input_tokens: Some(50),
+            output_tokens: Some(20),
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+            provider_reported_cost: None,
+            accounting_quality: AccountingQuality::ProviderReported,
+        };
+        assert_eq!(complete.validate_for(&profile).unwrap().tokens, 70);
+        let mut zero = complete.clone();
+        zero.input_tokens = Some(0);
+        zero.output_tokens = Some(0);
+        assert_eq!(zero.validate_for(&profile).unwrap().tokens, 0);
+        for (input, output) in [(None, None), (Some(0), None), (None, Some(0))] {
+            let mut missing = complete.clone();
+            missing.input_tokens = input;
+            missing.output_tokens = output;
+            assert_eq!(
+                missing.validate_for(&profile),
+                Err(ModelTurnError::InvalidUsage)
+            );
+        }
+        let mut overflow = complete;
+        overflow.input_tokens = Some(u64::MAX);
+        overflow.output_tokens = Some(1);
+        assert_eq!(
+            overflow.validate_for(&profile),
+            Err(ModelTurnError::InvalidUsage)
+        );
+    }
+}
+
+#[test]
+fn actual_usage_settles_without_claiming_provider_reporting_capability() {
+    let mut fixture = fixture();
+    fixture.facts.profile.usage.provider_reports_usage = false;
+    fixture.facts.profile.usage.reports_cost = false;
+    fixture.facts.profile.usage.cost_currency = None;
+    let (fixture, started, reservation, fence) = started(fixture);
+    let mut response = tool_response(&fixture);
+    response.usage.provider_reported_cost = None;
+    let decide = |response| {
+        decide_model_outcome(
+            &started.turn,
+            &started.job,
+            &started.job_payload,
+            &fence,
+            &reservation,
+            &fixture.request,
+            &ModelDispatchOutcome::Succeeded(Box::new(output(&fixture, response))),
+            fixture.now + Duration::seconds(1),
+            fixture.limits,
+        )
+    };
+    let decision = decide(response.clone()).unwrap();
+    assert_eq!(decision.settlement.requests_used, 1);
+    assert_eq!(decision.settlement.tokens_used, 70);
+    assert_eq!(decision.settlement.cost_microunits_used, 0);
+    assert!(
+        !decision
+            .turn
+            .payload
+            .admission
+            .profile
+            .usage
+            .provider_reports_usage
+    );
+    assert_eq!(
+        decision.turn.payload.attempts[0].accounting_quality,
+        Some(AccountingQuality::ProviderReported)
+    );
+    let mut missing = response.clone();
+    missing.usage.output_tokens = None;
+    assert_eq!(decide(missing).unwrap_err(), ModelTurnError::InvalidUsage);
+    response.usage.input_tokens = Some(180);
+    response.usage.output_tokens = Some(40);
+    assert_eq!(
+        decide(response).unwrap_err(),
+        ModelTurnError::UsageCeilingExceeded
+    );
 }
 
 #[test]

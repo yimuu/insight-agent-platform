@@ -727,12 +727,16 @@ mod tests {
                 InstalledModelAdapter {
                     qualified_name: ANTHROPIC_MESSAGES_ADAPTER_NAME.to_owned(),
                     worker_manifest_digest: manifest_digest.clone(),
-                    adapter_contract_digest: digest('b'),
+                    adapter_contract_digest:
+                        insight_platform_contracts::ModelProviderWireProtocol::AnthropicMessages
+                            .adapter_contract_digest(),
                 },
                 InstalledModelAdapter {
                     qualified_name: OPENAI_RESPONSES_ADAPTER_NAME.to_owned(),
                     worker_manifest_digest: manifest_digest,
-                    adapter_contract_digest: digest('c'),
+                    adapter_contract_digest:
+                        insight_platform_contracts::ModelProviderWireProtocol::OpenAiResponses
+                            .adapter_contract_digest(),
                 },
             ],
             database_max_connections: 16,

@@ -115,7 +115,7 @@ fi
 for image in "${images[@]}"; do
   docker image rm "$image" >/dev/null 2>&1 || true
 done
-"$insight_bin" init --path "$project" --name "$project_name"
+"$insight_bin" qualification-aws init --path "$project" --name "$project_name"
 if [[ -n "$release_assets" ]]; then
   release_cache="$project/.insight/cache/releases/$version"
   mkdir -p "$release_cache"
@@ -129,12 +129,12 @@ for image in "${images[@]}"; do
 done
 download_finished="$(date +%s%N)"
 if [[ -n "$release_assets" ]]; then
-  "$insight_bin" dev --path "$project" --offline
+  "$insight_bin" qualification-aws dev --path "$project" --offline
 else
-  INSIGHT_UPDATE_BASE_URL="${release_root%/}" "$insight_bin" dev --path "$project"
+  INSIGHT_UPDATE_BASE_URL="${release_root%/}" "$insight_bin" qualification-aws dev --path "$project"
 fi
 cold_finished="$(date +%s%N)"
-"$insight_bin" status --path "$project"
+"$insight_bin" qualification-aws status --path "$project"
 
 profile_json="$project/.insight/runtime/profile.json"
 profile_digest="$(python3 - "$profile_json" <<'PY'
@@ -150,9 +150,9 @@ if [[ -e "$project/.insight/runtime/build.json" ]]; then
   source_compilations=1
 fi
 
-"$insight_bin" stop --path "$project"
+"$insight_bin" qualification-aws stop --path "$project"
 warm_started="$(date +%s%N)"
-"$insight_bin" start --path "$project"
+"$insight_bin" qualification-aws start --path "$project"
 warm_finished="$(date +%s%N)"
 sleep "$stabilization_seconds"
 

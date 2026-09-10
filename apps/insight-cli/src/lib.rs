@@ -4,6 +4,20 @@
 //! host prerequisites and create project-local development state, but all future business
 //! mutations must use the public Gateway `/v1` contract.
 
+use insight_platform_deployment_tooling::tls::{
+    native_identity_specs as expected_local_tls_leaf_identities, LocalTlsIdentitySpec,
+    LocalTlsUsage, PUBLIC_GATEWAY_WORKLOAD_IDENTITY, RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
+    RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE, RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
+    RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE, RUNTIME_CA_CERTIFICATE_FILE,
+    RUNTIME_CA_PRIVATE_KEY_FILE, RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
+    RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE, RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+    RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE, RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
+    RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE, RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
+    RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
+    RUNTIME_REGISTRY_VALIDATION_CLIENT_CERTIFICATE_FILE,
+    RUNTIME_REGISTRY_VALIDATION_CLIENT_PRIVATE_KEY_FILE, SCHEDULER_WORKLOAD_IDENTITY,
+};
+
 mod agent_restore;
 mod agent_signal;
 mod agent_sources;
@@ -16,12 +30,10 @@ mod apply;
 mod apply_journal;
 mod artifact;
 mod artifact_journal;
-mod dev_profile;
-mod full_profile;
 mod history_profile;
 mod local_artifact_cors;
 mod outbox_profile;
-mod private_state;
+use insight_platform_deployment_tooling::private_state;
 mod public_client;
 mod release;
 mod run;
@@ -29,26 +41,30 @@ mod run_journal;
 mod runtime_config_transition;
 mod task;
 mod task_journal;
-mod worker_profile;
 #[cfg(test)]
 mod workspace_assets;
 
-pub use dev_profile::DevProfile;
+use insight_platform_deployment_tooling::base_profile::local_digest;
+use insight_platform_deployment_tooling::{
+    base_runtime_binary_paths, dev_profile, full_profile, runtime_binary_paths, worker_profile,
+    DevProfile,
+};
 
+mod connection;
+mod model;
 mod recovery;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, ArtifactPurpose, ArtifactRetentionPolicy,
-    DataClassification, JsonLimits, PublicJobState, ResourceDocument, ResourceId, ResourceKind,
-    RunState, SandboxArtifactIoPolicyDocument, SchedulingPolicyDocument, UtcTimestamp, ValueRef,
+    canonical_digest, parse_strict_json, ArtifactPurpose, DataClassification, JsonLimits,
+    PublicJobState, ResourceDocument, ResourceId, ResourceKind, RunState, UtcTimestamp, ValueRef,
 };
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PublicKeyData, SanType, PKCS_RSA_SHA256,
+    CertificateParams, ExtendedKeyUsagePurpose, Issuer, KeyPair, PublicKeyData, PKCS_RSA_SHA256,
 };
+#[cfg(test)]
+use rcgen::{KeyUsagePurpose, SanType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 #[cfg(unix)]
@@ -70,10 +86,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
-use x509_parser::{
-    extensions::GeneralName, pem::parse_x509_pem, prelude::FromDer as _, public_key::PublicKey,
-    x509::SubjectPublicKeyInfo,
-};
+use x509_parser::{extensions::GeneralName, pem::parse_x509_pem};
 
 const PROJECT_DIRECTORY: &str = ".insight";
 const PROJECT_STATE_FILE: &str = "project.json";
@@ -86,23 +99,7 @@ const IDENTITY_BOOTSTRAP_CONFIG_FILE: &str = "development-bootstrap.json";
 const IDENTITY_ACCESS_TOKEN_FILE: &str = "developer-access-token.jwt";
 const RUNTIME_DIRECTORY: &str = "runtime";
 const RUNTIME_TLS_DIRECTORY: &str = "tls";
-const RUNTIME_CA_CERTIFICATE_FILE: &str = "ca.pem";
-const RUNTIME_CA_PRIVATE_KEY_FILE: &str = "ca-key.pem";
-const RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE: &str = "artifact-gateway.pem";
-const RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE: &str = "artifact-gateway-key.pem";
-const RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE: &str = "artifact-data.pem";
-const RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE: &str = "artifact-data-key.pem";
-const RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE: &str = "gateway-client.pem";
-const RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE: &str = "gateway-client-key.pem";
-const RUNTIME_REGISTRY_VALIDATION_CLIENT_CERTIFICATE_FILE: &str = "registry-validation-client.pem";
-const RUNTIME_REGISTRY_VALIDATION_CLIENT_PRIVATE_KEY_FILE: &str =
-    "registry-validation-client-key.pem";
-const RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE: &str = "orchestration-client.pem";
-const RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE: &str = "orchestration-client-key.pem";
-const RUNTIME_NATS_SERVER_CERTIFICATE_FILE: &str = "nats-server.pem";
-const RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE: &str = "nats-server-key.pem";
-const RUNTIME_NATS_CLIENT_CERTIFICATE_FILE: &str = "nats-client.pem";
-const RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE: &str = "nats-client-key.pem";
+
 const RUNTIME_CONFIGURATION_DIRECTORY: &str = "config";
 const RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE: &str = "gateway-management.json";
 const RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE: &str = "gateway-runtime.json";
@@ -133,14 +130,14 @@ const DEV_COMPOSE_BYTES: &[u8] = include_bytes!("../../../deploy/dev/compose.yam
 const LOCAL_ARTIFACT_BUCKET: &str = "insight-platform-artifacts";
 const LOCAL_AWS_ENDPOINT: &str = "https://localhost.localstack.cloud:4566";
 const LOCAL_SECRET_READINESS_NAME: &str = "insight/platform/readiness";
-const LOCAL_SECRET_NAME_PREFIX: &str = "insight/platform/prepared";
 #[cfg(test)]
 const LOCAL_TEST_SECRET_READINESS_ARN: &str =
     "arn:aws:secretsmanager:us-east-1:000000000000:secret:insight/platform/readiness-local0";
-const PUBLIC_GATEWAY_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/public-gateway";
-const SCHEDULER_WORKLOAD_IDENTITY: &str = "spiffe://insight.platform/workload/scheduler";
+
 const LOCAL_OIDC_AUDIENCE: &str = "insight.platform/v1";
-const LOCAL_ACCESS_TOKEN_TTL_SECONDS: i64 = 900;
+#[cfg(test)]
+const LOCAL_ACCESS_TOKEN_TTL_SECONDS: i64 =
+    insight_platform_deployment_contracts::installation::INSTALLATION_SESSION_SECONDS as i64;
 const EXPECTED_RUSTC_PREFIX: &str = "rustc 1.94.1";
 const MINIMUM_DEVELOPMENT_CPUS: u64 = 4;
 const MINIMUM_DEVELOPMENT_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -158,6 +155,9 @@ const OPENSANDBOX_EXECD_IMAGE_DIGEST: &str =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Model(model::Command),
+    Connect(connection::Command),
+    InstallationHelp,
     Recovery {
         root: PathBuf,
         file: PathBuf,
@@ -366,6 +366,7 @@ pub enum CliTaskAction {
 
 #[derive(Debug)]
 pub enum CliError {
+    ModelConfiguration(String),
     Usage,
     UnknownCommand(String),
     MissingValue(&'static str),
@@ -430,6 +431,7 @@ pub enum CliError {
 impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ModelConfiguration(detail) => write!(formatter, "model configuration: {detail}"),
             Self::Usage => write!(
                 formatter,
                 "usage: insight <doctor [--json] | init [--path <directory>] [--name <name>]>"
@@ -547,6 +549,7 @@ impl std::error::Error for CliError {
 impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
+            Self::ModelConfiguration(_) => 1,
             Self::Usage
             | Self::UnknownCommand(_)
             | Self::MissingValue(_)
@@ -593,20 +596,16 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
         return Err(CliError::Usage);
     };
     match command {
+        "model" => model::parse(&arguments[1..]).map(CliCommand::Model),
+        "connect" => connection::parse(&arguments[1..]).map(CliCommand::Connect),
+        "qualification-aws" => parse_aws_qualification(&arguments[1..]),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         "doctor" => parse_doctor(&arguments[1..]),
         "version" => parse_version(&arguments[1..]),
         "update" => parse_update(&arguments[1..]),
-        "init" => parse_init(&arguments[1..]),
-        "token" => parse_token(&arguments[1..]),
-        "dev" => parse_dev(&arguments[1..]),
-        "start" => Ok(CliCommand::Start {
-            root: parse_path_only(&arguments[1..])?,
-        }),
-        "status" => parse_status(&arguments[1..]),
-        "logs" => parse_logs(&arguments[1..]),
-        "stop" => parse_stop(&arguments[1..]),
-        "reset" => parse_reset(&arguments[1..]),
+        "init" | "token" | "dev" | "start" | "status" | "logs" | "stop" | "reset" => {
+            Ok(CliCommand::InstallationHelp)
+        }
         "apply" => parse_apply(&arguments[1..]),
         "operation" => parse_operation(&arguments[1..]),
         "recovery" => recovery::parse(&arguments[1..]),
@@ -623,6 +622,25 @@ pub fn parse_command(arguments: &[OsString]) -> Result<CliCommand, CliError> {
                 Err(CliError::Usage)
             }
         }
+        value => Err(CliError::UnknownCommand(value.to_owned())),
+    }
+}
+
+fn parse_aws_qualification(arguments: &[OsString]) -> Result<CliCommand, CliError> {
+    let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(CliError::Usage);
+    };
+    match command {
+        "init" => parse_init(&arguments[1..]),
+        "token" => parse_token(&arguments[1..]),
+        "dev" => parse_dev(&arguments[1..]),
+        "start" => Ok(CliCommand::Start {
+            root: parse_path_only(&arguments[1..])?,
+        }),
+        "status" => parse_status(&arguments[1..]),
+        "logs" => parse_logs(&arguments[1..]),
+        "stop" => parse_stop(&arguments[1..]),
+        "reset" => parse_reset(&arguments[1..]),
         value => Err(CliError::UnknownCommand(value.to_owned())),
     }
 }
@@ -2060,7 +2078,29 @@ impl RuntimePortBindings {
             orchestration_observability: 19092,
             capability_native_observability: 19093,
             registry_validation_observability: 19094,
-            full: full_profile::PortBindings::static_test_ports(),
+            full: full_profile::PortBindings {
+                context_native_observability: 19_095,
+                artifact_maintenance_observability: 19_096,
+                security_authority: 19_097,
+                security_authority_observability: 19_098,
+                egress_broker: 19_099,
+                egress_broker_observability: 19_100,
+                model_worker_observability: 19_101,
+                remote_context_worker_observability: 19_102,
+                mcp_host: 19_103,
+                mcp_host_observability: 19_104,
+                mcp_resource_host: 19_105,
+                mcp_resource_host_observability: 19_106,
+                capability_remote_observability: 19_107,
+                mcp_discovery_observability: 19_108,
+                mcp_subscription_observability: 19_109,
+                mcp_cleanup_observability: 19_110,
+                context_subscription_observability: 19_111,
+                callback_api: 19_112,
+                context_dataset_observability: 19_113,
+                outbox_observability: 19114,
+                history_observability: 19115,
+            },
         }
     }
 }
@@ -2133,37 +2173,9 @@ struct RuntimeRestartIdentity {
     source_fingerprint: String,
 }
 
-#[derive(Clone, Copy)]
-enum LocalTlsUsage {
-    Server,
-    Client,
-}
-
-#[derive(Clone, Copy)]
-struct LocalTlsIdentitySpec {
-    certificate: &'static str,
-    private_key: &'static str,
-    dns_names: &'static [&'static str],
-    workload_identity: Option<&'static str>,
-    usage: LocalTlsUsage,
-}
-
 struct ExpectedRuntimeClosure {
     config_files: BTreeMap<String, &'static str>,
     processes: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct LocalAccessTokenClaims<'a> {
-    iss: &'a str,
-    aud: &'a str,
-    sub: &'a str,
-    jti: String,
-    iat: i64,
-    exp: i64,
-    tenant_id: &'a str,
-    principal_kind: &'static str,
-    authn_strength: &'static str,
 }
 
 pub fn initialize_project(
@@ -2320,7 +2332,10 @@ fn initialize_local_identity(
             path: identity_directory.display().to_string(),
             source: std::io::Error::other("cannot generate local RS256 issuer key"),
         })?;
-    let jwks = build_local_jwks(&key_pair, &key_id, &identity_directory)?;
+    let jwks = insight_platform_deployment_tooling::identity::jwks_for_key_pair(&key_pair, &key_id)
+        .map_err(|_| {
+            invalid_local_identity(&identity_directory, "cannot derive issuer public key")
+        })?;
     let jwks_digest = canonical_digest(&jwks).map_err(|_| {
         invalid_local_identity(&identity_directory, "cannot canonicalize local JWKS")
     })?;
@@ -2401,12 +2416,16 @@ fn initialize_local_identity(
         &bootstrap_bytes,
     )?;
     let private_key_der = key_pair.serialize_der();
-    let private_key_der = pkcs1_private_key_from_pkcs8(&private_key_der).ok_or_else(|| {
-        invalid_local_identity(
-            &identity_directory,
-            "cannot convert local issuer key to RSA private-key form",
+    let private_key_der =
+        insight_platform_deployment_tooling::identity::pkcs1_private_key_from_pkcs8(
+            &private_key_der,
         )
-    })?;
+        .ok_or_else(|| {
+            invalid_local_identity(
+                &identity_directory,
+                "cannot convert local issuer key to RSA private-key form",
+            )
+        })?;
     issue_initial_local_access_token(
         &identity_directory,
         &identity,
@@ -2447,6 +2466,15 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
         ca_certificate.pem().as_bytes(),
     )?;
     let issuer = Issuer::new(ca_params, ca_key);
+    write_local_leaf_certificate(
+        &tls_directory,
+        full_profile::GATEWAY_EGRESS_CLIENT_CERTIFICATE_FILE,
+        full_profile::GATEWAY_EGRESS_CLIENT_PRIVATE_KEY_FILE,
+        &[],
+        Some(insight_platform_contracts::GATEWAY_WORKLOAD_IDENTITY),
+        ExtendedKeyUsagePurpose::ClientAuth,
+        &issuer,
+    )?;
 
     write_local_leaf_certificate(
         &tls_directory,
@@ -2502,7 +2530,7 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
         ExtendedKeyUsagePurpose::ClientAuth,
         &issuer,
     )?;
-    for spec in outbox_profile::identity_specs() {
+    for spec in insight_platform_deployment_tooling::tls::outbox_identity_specs() {
         write_local_leaf_certificate(
             &tls_directory,
             spec.certificate,
@@ -2526,19 +2554,12 @@ fn initialize_local_runtime_identity(state_directory: &Path) -> Result<(), CliEr
 }
 
 fn local_runtime_ca_parameters(tls_directory: &Path) -> Result<CertificateParams, CliError> {
-    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|_| {
+    insight_platform_deployment_tooling::tls::authority_parameters().map_err(|_| {
         invalid_local_identity(
             tls_directory,
             "cannot construct local development certificate CA",
         )
-    })?;
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
-    Ok(params)
+    })
 }
 
 fn read_local_tls_file(path: &Path, sensitive: bool) -> Result<Vec<u8>, String> {
@@ -2773,36 +2794,20 @@ fn write_local_leaf_certificate(
     usage: ExtendedKeyUsagePurpose,
     issuer: &Issuer<'_, KeyPair>,
 ) -> Result<(), CliError> {
-    let mut params = CertificateParams::new(
-        dns_names
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>(),
+    let material = insight_platform_deployment_tooling::tls::create_leaf(
+        dns_names,
+        workload_identity,
+        usage,
+        issuer,
     )
-    .map_err(|_| invalid_local_identity(tls_directory, "cannot construct local TLS certificate"))?;
-    if let Some(workload_identity) = workload_identity {
-        params
-            .subject_alt_names
-            .push(SanType::URI(workload_identity.try_into().map_err(
-                |_| invalid_local_identity(tls_directory, "local workload identity is invalid"),
-            )?));
-    }
-    params.use_authority_key_identifier_extension = true;
-    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params.extended_key_usages = vec![usage];
-    let key = KeyPair::generate().map_err(|_| {
-        invalid_local_identity(tls_directory, "cannot generate local TLS certificate key")
-    })?;
-    let certificate = params
-        .signed_by(&key, issuer)
-        .map_err(|_| invalid_local_identity(tls_directory, "cannot sign local TLS certificate"))?;
+    .map_err(|_| invalid_local_identity(tls_directory, "cannot prepare local TLS certificate"))?;
     write_sensitive_new(
         &tls_directory.join(private_key_name),
-        key.serialize_pem().as_bytes(),
+        material.private_key_pem.as_bytes(),
     )?;
     write_new(
         &tls_directory.join(certificate_name),
-        certificate.pem().as_bytes(),
+        material.certificate_pem.as_bytes(),
     )
 }
 
@@ -2916,240 +2921,6 @@ fn ensure_sensitive_random_file(path: &Path, value: &[u8]) -> Result<(), CliErro
         source,
     })?;
     write_sensitive_new(path, value)
-}
-
-fn expected_local_tls_leaf_identities(
-    selected_profile: DevProfile,
-) -> BTreeMap<&'static str, LocalTlsIdentitySpec> {
-    let mut identities = BTreeMap::from([
-        (
-            RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE,
-                private_key: RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-        ),
-        (
-            RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE,
-                private_key: RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-        ),
-        (
-            RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE,
-                private_key: RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(PUBLIC_GATEWAY_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-        ),
-        (
-            RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE,
-                private_key: RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(SCHEDULER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-        ),
-        (
-            RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_NATS_SERVER_CERTIFICATE_FILE,
-                private_key: RUNTIME_NATS_SERVER_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-        ),
-        (
-            RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
-            LocalTlsIdentitySpec {
-                certificate: RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
-                private_key: RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some("spiffe://insight.platform/workload/local-nats-client"),
-                usage: LocalTlsUsage::Client,
-            },
-        ),
-    ]);
-    for spec in outbox_profile::identity_specs() {
-        identities.insert(spec.certificate, spec);
-    }
-    identities.insert(
-        RUNTIME_REGISTRY_VALIDATION_CLIENT_CERTIFICATE_FILE,
-        LocalTlsIdentitySpec {
-            certificate: RUNTIME_REGISTRY_VALIDATION_CLIENT_CERTIFICATE_FILE,
-            private_key: RUNTIME_REGISTRY_VALIDATION_CLIENT_PRIVATE_KEY_FILE,
-            dns_names: &[],
-            workload_identity: Some(
-                "spiffe://insight.platform/workload/registry-validation-worker",
-            ),
-            usage: LocalTlsUsage::Client,
-        },
-    );
-    let mut insert = |spec: LocalTlsIdentitySpec| {
-        identities.insert(spec.certificate, spec);
-    };
-    if selected_profile.needs_egress() {
-        for spec in [
-            LocalTlsIdentitySpec {
-                certificate: full_profile::SECURITY_AUTHORITY_CERTIFICATE_FILE,
-                private_key: full_profile::SECURITY_AUTHORITY_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::EGRESS_BROKER_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::EGRESS_BROKER_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::EGRESS_BROKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::EGRESS_BROKER_CERTIFICATE_FILE,
-                private_key: full_profile::EGRESS_BROKER_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-        ] {
-            insert(spec);
-        }
-    }
-    if selected_profile.has_model() {
-        insert(LocalTlsIdentitySpec {
-            certificate: full_profile::MODEL_WORKER_CLIENT_CERTIFICATE_FILE,
-            private_key: full_profile::MODEL_WORKER_CLIENT_PRIVATE_KEY_FILE,
-            dns_names: &[],
-            workload_identity: Some(full_profile::MODEL_WORKER_WORKLOAD_IDENTITY),
-            usage: LocalTlsUsage::Client,
-        });
-    }
-    if selected_profile.has_context() {
-        for spec in [
-            LocalTlsIdentitySpec {
-                certificate: full_profile::CONTEXT_WORKER_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::CONTEXT_WORKER_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::CONTEXT_DATASET_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::CONTEXT_DATASET_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::CONTEXT_DATASET_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::CONTEXT_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::CONTEXT_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::CONTEXT_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-        ] {
-            insert(spec);
-        }
-    }
-    if selected_profile.has_remote_capability() {
-        insert(LocalTlsIdentitySpec {
-            certificate: full_profile::CAPABILITY_REMOTE_CLIENT_CERTIFICATE_FILE,
-            private_key: full_profile::CAPABILITY_REMOTE_CLIENT_PRIVATE_KEY_FILE,
-            dns_names: &[],
-            workload_identity: Some(full_profile::CAPABILITY_WORKER_WORKLOAD_IDENTITY),
-            usage: LocalTlsUsage::Client,
-        });
-    }
-    if selected_profile.has_mcp() {
-        for spec in [
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_HOST_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_HOST_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_RESOURCE_HOST_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_RESOURCE_HOST_PRIVATE_KEY_FILE,
-                dns_names: &["localhost"],
-                workload_identity: None,
-                usage: LocalTlsUsage::Server,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_HOST_EGRESS_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_HOST_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_RESOURCE_EGRESS_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_RESOURCE_EGRESS_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_HOST_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_DISCOVERY_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_DISCOVERY_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_SUBSCRIPTION_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_SUBSCRIPTION_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::MCP_CLEANUP_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::MCP_CLEANUP_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-            LocalTlsIdentitySpec {
-                certificate: full_profile::CALLBACK_CLIENT_CERTIFICATE_FILE,
-                private_key: full_profile::CALLBACK_CLIENT_PRIVATE_KEY_FILE,
-                dns_names: &[],
-                workload_identity: Some(full_profile::MCP_CALLBACK_WORKLOAD_IDENTITY),
-                usage: LocalTlsUsage::Client,
-            },
-        ] {
-            insert(spec);
-        }
-    }
-    identities
 }
 
 fn ensure_selected_feature_identity(
@@ -3351,313 +3122,36 @@ fn prepare_runtime_profile_inner(
         .unwrap_or_else(|| fresh_resource_id(ResourceKind::PolicyRevision));
     let secret_provider_catalog =
         local_secret_provider_catalog(kms_key_arn, secret_readiness_arn, &secret_provider_id)?;
-    let scanner_contract_digest =
-        insight_platform_artifacts::execution::integrity_scanner_contract_digest().to_string();
     let write_storage_binding_digest = catalog["write_storage_binding_digest"]
         .as_str()
-        .ok_or_else(|| CliError::InvalidLocalIdentity {
-            path: "local artifact provider configuration".to_owned(),
-        })?
+        .ok_or_else(|| CliError::RuntimeState("Artifact write binding missing".into()))?
         .parse()
-        .map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local artifact provider configuration".to_owned(),
-        })?;
-    let artifact_io_policy = SandboxArtifactIoPolicyDocument {
-        schema_version: 3,
-        allowed_input_media_types: vec![
-            "application/json".to_owned(),
-            "application/octet-stream".to_owned(),
-            "application/wasm".to_owned(),
-            "text/plain".to_owned(),
-        ],
-        allowed_output_media_types: vec![
-            "application/json".to_owned(),
-            "application/octet-stream".to_owned(),
-            "application/wasm".to_owned(),
-            "text/plain".to_owned(),
-        ],
-        maximum_input_artifacts: 64,
-        maximum_output_artifacts: 64,
-        scanner_contract_digest: scanner_contract_digest.parse().map_err(|_| {
-            CliError::InvalidLocalIdentity {
-                path: "local Artifact I/O policy".to_owned(),
-            }
-        })?,
-        verification_evidence_ttl_milliseconds: 3_600_000,
-        verification_retry_backoff_milliseconds: 250,
-        write_storage_binding_digest,
-        encryption_domain_id: identity
-            .artifact_encryption_domain_id
-            .parse()
-            .map_err(|_| CliError::InvalidLocalIdentity {
-                path: "local Artifact I/O policy".to_owned(),
-            })?,
-        deny_symlink: true,
-        deny_hardlink: true,
-        deny_device: true,
-        deny_fifo: true,
-        deny_socket: true,
-        deny_sparse_file: true,
-        archive_expansion_disabled: true,
-    };
-    artifact_io_policy
-        .validate()
-        .map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local Artifact I/O policy".to_owned(),
-        })?;
-    let scanner_ruleset_digest = artifact_io_policy
-        .canonical_digest()
-        .map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local Artifact I/O policy".to_owned(),
-        })?
-        .to_string();
-    let retention_policy = ArtifactRetentionPolicy {
-        version: 1,
-        minimum_retention_seconds: 3_600,
-        gc_grace_seconds: 86_400,
-        tombstone_retention_seconds: 2_592_000,
-        retain_provenance_sources: true,
-        delete_requires_approval: false,
-    };
-    let scheduling_policy = SchedulingPolicyDocument {
-        version: 1,
-        weight: 1,
-        burst: 2,
-        aging_rounds: 2,
-    };
-    let artifact_bootstrap = if let Some(snapshot) = preserved {
-        let expected = serde_json::json!({"retention_policy": retention_policy, "artifact_io_policy": artifact_io_policy, "scheduling_policy": scheduling_policy, "staging_quota_bytes": 67_108_864_i64, "orchestration_concurrent_jobs": 4_i64});
-        let seed = &snapshot.artifact_bootstrap;
-        let observed = serde_json::json!({"retention_policy": seed.retention_policy, "artifact_io_policy": seed.artifact_io_policy, "scheduling_policy": seed.scheduling_policy, "staging_quota_bytes": seed.staging_quota_bytes, "orchestration_concurrent_jobs": seed.orchestration_concurrent_jobs});
-        if expected != observed {
-            return Err(CliError::RuntimeState("the preserved development bootstrap policy differs from current provider and policy semantics; initialize a fresh local identity".to_owned()));
-        }
-        snapshot.artifact_bootstrap_value.clone()
-    } else {
-        serde_json::json!({
-            "schema_version": 1,
-            "environment_class": "development",
-            "authoring_artifact_id": fresh_resource_id(ResourceKind::Artifact),
-            "authoring_blob_id": fresh_resource_id(ResourceKind::InternalBlob),
-            "retention_policy_id": fresh_resource_id(ResourceKind::Policy),
-            "retention_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
-            "retention_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
-            "artifact_io_policy_id": fresh_resource_id(ResourceKind::Policy),
-            "artifact_io_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
-            "artifact_io_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
-            "scheduling_policy_id": fresh_resource_id(ResourceKind::Policy),
-            "scheduling_policy_revision_id": fresh_resource_id(ResourceKind::PolicyRevision),
-            "scheduling_policy_deployment_id": fresh_resource_id(ResourceKind::PolicyDeployment),
-            "staging_quota_account_id": fresh_resource_id(ResourceKind::QuotaAccount),
-            "orchestration_quota_account_id": fresh_resource_id(ResourceKind::QuotaAccount),
-            "retention_policy": retention_policy,
-            "artifact_io_policy": artifact_io_policy,
-            "scheduling_policy": scheduling_policy,
-            "staging_quota_bytes": 67_108_864,
-            "orchestration_concurrent_jobs": 4,
-        })
-    };
-    let bootstrap: insight_platform_deployment_contracts::development::DevelopmentArtifactAuthorityConfigV1 = serde_json::from_value(artifact_bootstrap.clone()).map_err(|_| CliError::RuntimeState("development bootstrap configuration is invalid".to_owned()))?;
-    bootstrap.validate().map_err(|_| {
-        CliError::RuntimeState("development bootstrap configuration is invalid".to_owned())
-    })?;
-    let orchestration_adapter_digest = local_digest("orchestration-worker")?;
-    let registry_validator_digest = local_digest("registry-validator")?;
-    let registry_validation_profile_digest = local_digest("registry-validation-profile")?;
+        .map_err(|_| CliError::RuntimeState("Artifact write binding invalid".into()))?;
+    let bootstrap=insight_platform_deployment_tooling::bootstrap::artifact_authority(write_storage_binding_digest,identity.artifact_encryption_domain_id.parse().map_err(|_|CliError::RuntimeState("Artifact encryption domain invalid".into()))?,preserved.map(|snapshot|&snapshot.artifact_bootstrap)).map_err(|_|CliError::RuntimeState("preserved development bootstrap policy differs from current provider and policy semantics".into()))?;
     let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    let mut configs = BTreeMap::from([
-        (
-            "outbox".to_owned(),
-            (
-                outbox_profile::CONFIG_FILE,
-                outbox_profile::config(ports.full.outbox_observability),
-            ),
-        ),
-        (
-            "history-maintenance".to_owned(),
-            (
-                history_profile::CONFIG_FILE,
-                history_profile::config(ports.full.history_observability, worker_builds)?,
-            ),
-        ),
-        (
-            "artifact-bootstrap".to_owned(),
-            (RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE, artifact_bootstrap),
-        ),
-        (
-            "gateway-management".to_owned(),
-            (
-                RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "role": "management_api",
-                    "listen_address": loopback_address(ports.gateway_management),
-                    "database_max_connections": 4,
-                    "database_acquire_timeout_milliseconds": 5000,
-                    "shutdown_grace_milliseconds": 30000,
-                    "registry_validator_digest": registry_validator_digest,
-                    "registry_validation_profile_digest": registry_validation_profile_digest,
-                    "oidc": local_oidc_config(identity, jwks.clone()),
-                    "artifact_gateway": {"endpoint": https_endpoint(ports.artifact_gateway)},
-                }),
-            ),
-        ),
-        (
-            "gateway-runtime".to_owned(),
-            (
-                RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "role": "runtime_api",
-                    "listen_address": loopback_address(ports.gateway_runtime),
-                    "database_max_connections": 4,
-                    "database_acquire_timeout_milliseconds": 5000,
-                    "shutdown_grace_milliseconds": 30000,
-                    "registry_validator_digest": registry_validator_digest,
-                    "registry_validation_profile_digest": registry_validation_profile_digest,
-                    "oidc": local_oidc_config(identity, jwks.clone()),
-                    "artifact_gateway": {"endpoint": https_endpoint(ports.artifact_gateway)},
-                }),
-            ),
-        ),
-        (
-            "artifact-gateway".to_owned(),
-            (
-                RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "listen_address": loopback_address(ports.artifact_gateway),
-                    "observability_listen_address": loopback_address(ports.artifact_gateway_observability),
-                    "database_max_connections": 4,
-                    "database_acquire_timeout_milliseconds": 5000,
-                    "artifact_provider_catalog": catalog,
-                    "write_encryption_domain_id": identity.artifact_encryption_domain_id,
-                    "scanner_contract_digest": scanner_contract_digest,
-                    "scan_evidence_ttl_milliseconds": 3600000,
-                    "scan_retry_backoff_milliseconds": 250,
-                    "finalize_batch_size": 32,
-                    "finalize_poll_milliseconds": 1000,
-                    "maximum_upload_target_seconds": 300,
-                    "maximum_download_bytes": 16777216,
-                    "maximum_download_in_flight": 16,
-                    "download_timeout_milliseconds": 5000,
-                    "shutdown_grace_milliseconds": 30000,
-                }),
-            ),
-        ),
-        (
-            "artifact-data".to_owned(),
-            (
-                RUNTIME_ARTIFACT_DATA_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "audience": "data_worker",
-                    "controller_listen_address": loopback_address(ports.artifact_data_controller),
-                    "observability_listen_address": loopback_address(ports.artifact_data_observability),
-                    "read_database_max_connections": 4,
-                    "work_database_max_connections": 4,
-                    "database_acquire_timeout_milliseconds": 5000,
-                    "artifact_provider_catalog": catalog,
-                    "broker": {
-                        "maximum_in_flight": 16,
-                        "maximum_read_bytes": 67108864,
-                        "operation_timeout_milliseconds": 5000,
-                    },
-                    "rpc": {
-                        "maximum_request_bytes": 1048576,
-                        "maximum_write_request_bytes": 16777216,
-                        "maximum_chunk_bytes": 262144,
-                    },
-                    "scan_worker": {
-                        "worker_manifest": worker_builds.manifest("platform-artifact-data-worker", "artifact-data-worker", insight_platform_contracts::WorkClass::Artifact, &local_digest("artifact-data-runtime")?, (4, 1), insight_platform_artifacts::execution::data_worker_execution_capabilities(&scanner_contract_digest.parse().map_err(|_| CliError::RuntimeState("Artifact scanner digest invalid".to_owned()))?)),
-                        "scanner_contract_digest": scanner_contract_digest,
-                        "ruleset_digest": scanner_ruleset_digest,
-                        "claim_batch": 4,
-                        "lease_milliseconds": 120000,
-                        "receipt_ttl_milliseconds": 3600000,
-                        "poll_milliseconds": 1000,
-                    },
-                    "tls_handshake_timeout_milliseconds": 5000,
-                    "shutdown_grace_milliseconds": 30000,
-                }),
-            ),
-        ),
-        (
-            "orchestration".to_owned(),
-            (
-                RUNTIME_ORCHESTRATION_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "observability_listen_address": loopback_address(ports.orchestration_observability),
-                    "worker_manifest": worker_builds.manifest("platform-orchestration-worker", "orchestration-worker", insight_platform_contracts::WorkClass::Orchestration, &orchestration_adapter_digest, (4, 1), worker_profile::programs()),
-                    "database": {
-                        "business_max_connections": 4,
-                        "critical_control_reserved_connections": 2,
-                        "process_connection_budget": 6,
-                        "acquire_timeout_milliseconds": 5000,
-                        "statement_timeout_milliseconds": 30000,
-                        "idle_timeout_milliseconds": 60000,
-                        "max_lifetime_milliseconds": 600000,
-                    },
-                    "artifact": {
-                        "endpoint": https_endpoint(ports.artifact_data_controller),
-                        "tls_server_name": "localhost",
-                        "connect_timeout_milliseconds": 5000,
-                        "request_timeout_milliseconds": 5000,
-                        "maximum_request_bytes": 1048576,
-                        "maximum_chunk_bytes": 262144,
-                    },
-                    "timing": {
-                        "coordinator_coalesce_milliseconds": 5,
-                        "coordinator_scan_milliseconds": 500,
-                        "coordinator_scan_jitter_milliseconds": 50,
-                        "claim_failure_backoff_milliseconds": 100,
-                        "drain_grace_milliseconds": 30000,
-                        "heartbeat_jitter_milliseconds": 100,
-                        "store_retry_backoff_milliseconds": 100,
-                        "safety_scan_milliseconds": 5000,
-                        "safety_scan_jitter_milliseconds": 50,
-                        "safety_failure_backoff_milliseconds": 100,
-                        "handoff_retry_milliseconds": 100,
-                    },
-                    "plan_maximum_bytes": 1048576,
-                    "safety_shard": {"index": 0, "count": 1},
-                }),
-            ),
-        ),
-        (
-            "capability-native".to_owned(),
-            (
-                RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE,
-                local_capability_native_config(
-                    ports.capability_native_observability,
-                    worker_builds,
-                )?,
-            ),
-        ),
-        (
-            "registry-validation".to_owned(),
-            (
-                RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE,
-                serde_json::json!({
-                    "schema_version": 1,
-                    "observability_listen_address": loopback_address(ports.registry_validation_observability),
-                    "worker_manifest": worker_builds.manifest("platform-registry-validation-worker", "registry-validation-worker", insight_platform_contracts::WorkClass::RegistryValidation, &registry_validator_digest, (2, 1), worker_profile::registry()),
-                    "validator_principal_id": identity.registry_validator_principal_id,
-                    "validator_digest": registry_validator_digest,
-                    "validation_profile_digest": registry_validation_profile_digest,
-                    "database_max_connections": 4,
-                    "database_acquire_timeout_milliseconds": 5000,
-                    "claim_batch": 2,
-                    "lease_milliseconds": 30000,
-                    "receipt_ttl_seconds": 300,
-                    "scan_interval_milliseconds": 1000,
-                    "failure_backoff_milliseconds": 50,
-                    "drain_grace_milliseconds": 5000,
-                }),
-            ),
-        ),
-    ]);
+    let network = native_runtime_network(ports)?;
+    let encryption_domain_id = identity
+        .artifact_encryption_domain_id
+        .parse()
+        .map_err(|_| CliError::RuntimeState("Artifact encryption domain ID invalid".into()))?;
+    let validator_principal_id = identity
+        .registry_validator_principal_id
+        .parse()
+        .map_err(|_| CliError::RuntimeState("Registry validator principal ID invalid".into()))?;
+    let mut configs = insight_platform_deployment_tooling::base_profile::configurations(
+        insight_platform_deployment_tooling::base_profile::BaseConfigInputs {
+            network: &network,
+            worker_builds,
+            identity: insight_platform_deployment_tooling::base_profile::BaseIdentity {
+                encryption_domain_id: &encryption_domain_id,
+                registry_validator_principal_id: &validator_principal_id,
+            },
+            oidc: &local_oidc_config(identity, jwks.clone()),
+            artifact_provider_catalog: &catalog,
+            artifact_bootstrap: &bootstrap,
+            model_installation: None,
+        },
+    )?;
     let feature_configs = selected_feature_configs(
         &runtime,
         ports,
@@ -3778,17 +3272,20 @@ fn selected_feature_configs(
         };
     let mut configs = full_profile::initial_configs(
         worker_builds,
-        &ports.full,
+        &full_profile::aws_qualification_network(
+            &ports.full,
+            ports.artifact_data_controller,
+            ports.artifact_data_observability,
+        ),
         artifact_provider_catalog,
-        capability_protocol_profile_revision_id,
+        Some(capability_protocol_profile_revision_id),
         full_profile::WorkerDigests {
             context_adapter: &local_digest("context-native-adapter")?,
             context_contract: &local_digest("context-native-contract")?,
-            model_adapter: &local_digest("model-worker-adapter")?,
-            anthropic_contract: &local_digest("model-anthropic-contract")?,
-            openai_contract: &local_digest("model-openai-contract")?,
         },
         full_profile::EgressConfigInputs {
+            model_installation: None,
+            remote_context_destinations: &[],
             service_principal_id: &identity.egress_broker_principal_id,
             secret_provider_catalog,
             mcp_state_key_root: &mcp_state_key_root,
@@ -3797,9 +3294,9 @@ fn selected_feature_configs(
             mcp_oauth_state_key_root: &mcp_oauth_state_key_root,
             mcp_oauth_state_key_path: &mcp_oauth_state_key_path,
             mcp_oauth_state_key_reference_digest: &mcp_oauth_state_key_reference_digest,
-            artifact_data_worker_port: ports.artifact_data_controller,
         },
-    );
+    )
+    .map_err(|error| CliError::RuntimeState(error.to_string()))?;
     configs.retain(|role, _| selected_profile.includes_role(role));
     if !selected_profile.has_mcp() {
         if let Some((_, config)) = configs.get_mut("capability-remote") {
@@ -3927,60 +3424,20 @@ fn local_oidc_config(identity: &LocalIdentityState, jwks: serde_json::Value) -> 
 }
 
 fn local_artifact_provider_catalog(kms_key_arn: &str) -> Result<serde_json::Value, CliError> {
-    let kms_binding = serde_json::json!({
-        "connect_timeout_milliseconds": 5000,
-        "endpoint": LOCAL_AWS_ENDPOINT,
-        "key_id": kms_key_arn,
-        "operation_timeout_milliseconds": 30000,
-        "provider": "aws_kms",
-        "region": "us-east-1",
-        "schema_version": 1,
-    });
-    let kms_binding_digest =
-        canonical_digest(&kms_binding).map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local artifact provider configuration".to_owned(),
-        })?;
-    let storage_binding = serde_json::json!({
-        "backend": "s3",
-        "bucket": LOCAL_ARTIFACT_BUCKET,
-        "connect_timeout_milliseconds": 5000,
-        "endpoint": LOCAL_AWS_ENDPOINT,
-        "force_path_style": true,
-        "kms_binding_digest": kms_binding_digest,
-        "maximum_object_bytes": 67108864,
-        "operation_timeout_milliseconds": 30000,
-        "region": "us-east-1",
-        "schema_version": 1,
-    });
-    let storage_binding_digest =
-        canonical_digest(&storage_binding).map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local artifact provider configuration".to_owned(),
-        })?;
-    Ok(serde_json::json!({
-        "schema_version": 1,
-        "write_storage_binding_digest": storage_binding_digest,
-        "s3_storage_bindings": [{
-            "schema_version": 1,
-            "storage_binding_digest": storage_binding_digest,
-            "endpoint": LOCAL_AWS_ENDPOINT,
-            "region": "us-east-1",
-            "bucket": LOCAL_ARTIFACT_BUCKET,
-            "force_path_style": true,
-            "kms_binding_digest": kms_binding_digest,
-            "connect_timeout_milliseconds": 5000,
-            "operation_timeout_milliseconds": 30000,
-            "maximum_object_bytes": 67108864,
-        }],
-        "kms_key_bindings": [{
-            "schema_version": 1,
-            "kms_binding_digest": kms_binding_digest,
-            "endpoint": LOCAL_AWS_ENDPOINT,
-            "region": "us-east-1",
-            "key_id": kms_key_arn,
-            "connect_timeout_milliseconds": 5000,
-            "operation_timeout_milliseconds": 30000,
-        }],
-    }))
+    let origin = insight_platform_deployment_contracts::installation::ServiceOrigin::parse(
+        LOCAL_AWS_ENDPOINT,
+    )
+    .map_err(|_| CliError::RuntimeState("local provider endpoint invalid".into()))?;
+    insight_platform_deployment_tooling::provider_config::artifact_provider_catalog(
+        insight_platform_deployment_tooling::provider_config::ProviderEndpoints {
+            artifact: &origin,
+            kms: &origin,
+            secrets: &origin,
+        },
+        insight_platform_deployment_tooling::provider_config::ARTIFACT_BUCKET,
+        kms_key_arn,
+    )
+    .map_err(|_| CliError::RuntimeState("local Artifact provider configuration invalid".into()))
 }
 
 fn validate_local_secret_readiness_arn(root: &Path, value: &str) -> Result<(), CliError> {
@@ -4006,95 +3463,25 @@ fn local_secret_provider_catalog(
     readiness_secret_arn: &str,
     provider_id: &ResourceId,
 ) -> Result<serde_json::Value, CliError> {
-    if provider_id.kind() != ResourceKind::SecretProvider {
-        return Err(CliError::InvalidLocalIdentity {
-            path: "local Secret provider configuration".to_owned(),
-        });
-    }
-    let (authority, _) = readiness_secret_arn.split_once(":secret:").ok_or_else(|| {
-        CliError::InvalidLocalIdentity {
-            path: "local Secret provider configuration".to_owned(),
-        }
-    })?;
-    let mut provider = serde_json::json!({
-        "schema_version": 1,
-        "provider_id": provider_id,
-        "region": "us-east-1",
-        "secrets_endpoint": LOCAL_AWS_ENDPOINT,
-        "kms_endpoint": LOCAL_AWS_ENDPOINT,
-        "kms_key_arn": kms_key_arn,
-        "secret_arn_prefix": format!("{authority}:secret:insight/platform/"),
-        "secret_name_prefix": LOCAL_SECRET_NAME_PREFIX,
-        "readiness_secret_id": readiness_secret_arn,
-        "connect_timeout_milliseconds": 5000,
-        "operation_timeout_milliseconds": 30000,
-    });
-    let digest = canonical_digest(&provider).map_err(|_| CliError::InvalidLocalIdentity {
-        path: "local Secret provider configuration".to_owned(),
-    })?;
-    provider
-        .as_object_mut()
-        .expect("local provider configuration is an object")
-        .insert(
-            "provider_config_digest".to_owned(),
-            serde_json::Value::String(digest),
-        );
-    Ok(serde_json::json!({
-        "schema_version": 1,
-        "providers": [provider],
-    }))
+    let origin = insight_platform_deployment_contracts::installation::ServiceOrigin::parse(
+        LOCAL_AWS_ENDPOINT,
+    )
+    .map_err(|_| CliError::RuntimeState("local provider endpoint invalid".into()))?;
+    insight_platform_deployment_tooling::provider_config::secret_provider_catalog(
+        insight_platform_deployment_tooling::provider_config::ProviderEndpoints {
+            artifact: &origin,
+            kms: &origin,
+            secrets: &origin,
+        },
+        kms_key_arn,
+        readiness_secret_arn,
+        provider_id,
+    )
+    .map_err(|_| CliError::RuntimeState("local Secret provider configuration invalid".into()))
 }
 
 fn loopback_address(port: u16) -> String {
     format!("127.0.0.1:{port}")
-}
-
-fn https_endpoint(port: u16) -> String {
-    format!("https://localhost:{port}/")
-}
-
-fn local_capability_native_config(
-    observability_port: u16,
-    worker_builds: &worker_profile::WorkerBuilds,
-) -> Result<serde_json::Value, CliError> {
-    let module_digest = insight_platform_contracts::builtin_echo_module_digest().to_string();
-    let adapters = serde_json::json!([{
-        "adapter_id": insight_platform_contracts::BUILTIN_ECHO_ADAPTER_ID,
-        "adapter_version": insight_platform_contracts::BUILTIN_ECHO_ADAPTER_VERSION,
-        "module_digest": module_digest,
-        "entrypoint_id": insight_platform_contracts::BUILTIN_ECHO_ENTRYPOINT_ID,
-    }]);
-    let adapter_runtime_digest =
-        canonical_digest(&adapters).map_err(|_| CliError::InvalidLocalIdentity {
-            path: "local native capability configuration".to_owned(),
-        })?;
-    Ok(serde_json::json!({
-        "schema_version": 1,
-        "observability_listen_address": loopback_address(observability_port),
-        "worker_manifest": worker_builds.manifest("platform-capability-native-worker", "capability.native", insight_platform_contracts::WorkClass::CapabilityNative, &adapter_runtime_digest, (4, 1), worker_profile::native_capability(&module_digest)),
-        "installed_adapters": adapters,
-        "database": {
-            "business_max_connections": 4,
-            "critical_control_max_connections": 2,
-            "process_connection_budget": 6,
-            "acquire_timeout_milliseconds": 5000,
-        },
-        "timing": {
-            "initial_scan_delay_milliseconds": 0,
-            "receipt_ttl_milliseconds": 60000,
-            "safety_scan_milliseconds": 1000,
-            "claim_failure_backoff_milliseconds": 50,
-            "drain_grace_milliseconds": 5000,
-        },
-    }))
-}
-
-fn local_digest(kind: &str) -> Result<String, CliError> {
-    canonical_digest(&serde_json::json!({"schema_version": 1, "kind": kind})).map_err(|_| {
-        CliError::InvalidLocalIdentity {
-            path: "local development configuration".to_owned(),
-        }
-    })
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
@@ -4445,6 +3832,11 @@ fn run_development_profile_locked(
     project.profiles = runtime_project_profile_summary(&profile_state, "ready");
     if let Err(error) =
         write_runtime_json_replace(&state_directory.join(PROJECT_STATE_FILE), &project)
+    {
+        return Err(abort_runtime_start(&runtime, &mut state, error));
+    }
+    if let Err(error) = rotate_local_access_token(root, SystemTime::now())
+        .and_then(|_| connection::export_qualification(root))
     {
         return Err(abort_runtime_start(&runtime, &mut state, error));
     }
@@ -5423,102 +4815,6 @@ fn ensure_prebuilt_runtime_binaries(
     Ok(binary_directory)
 }
 
-fn base_runtime_binary_paths(release: &Path) -> BTreeMap<&'static str, PathBuf> {
-    let suffix = std::env::consts::EXE_SUFFIX;
-    BTreeMap::from([
-        (
-            "platform-outbox-worker",
-            release.join(format!("platform-outbox-worker{suffix}")),
-        ),
-        (
-            "platform-jetstream-provision",
-            release.join(format!("platform-jetstream-provision{suffix}")),
-        ),
-        (
-            "platform-database-role",
-            release.join(format!("platform-database-role{suffix}")),
-        ),
-        (
-            "platform-history-maintenance",
-            release.join(format!("platform-history-maintenance{suffix}")),
-        ),
-        (
-            "platform-schema",
-            release.join(format!("platform-schema{suffix}")),
-        ),
-        (
-            "platform-dev-bootstrap",
-            release.join(format!("platform-dev-bootstrap{suffix}")),
-        ),
-        (
-            "platform-registry-validation-worker",
-            release.join(format!("platform-registry-validation-worker{suffix}")),
-        ),
-        (
-            "platform-gateway",
-            release.join(format!("platform-gateway{suffix}")),
-        ),
-        (
-            "platform-artifact-gateway",
-            release.join(format!("platform-artifact-gateway{suffix}")),
-        ),
-        (
-            "platform-artifact-data-worker",
-            release.join(format!("platform-artifact-data-worker{suffix}")),
-        ),
-        (
-            "platform-orchestration-worker",
-            release.join(format!("platform-orchestration-worker{suffix}")),
-        ),
-        (
-            "platform-capability-native-worker",
-            release.join(format!("platform-capability-native-worker{suffix}")),
-        ),
-    ])
-}
-
-fn runtime_binary_paths(release: &Path, profile: DevProfile) -> BTreeMap<&'static str, PathBuf> {
-    let mut binaries = base_runtime_binary_paths(release);
-    let suffix = std::env::consts::EXE_SUFFIX;
-    let mut include = |name: &'static str| {
-        binaries.insert(name, release.join(format!("{name}{suffix}")));
-    };
-    if profile.has_context() {
-        for name in [
-            "platform-context-worker",
-            "platform-context-dataset-worker",
-            "platform-remote-context-worker",
-            "platform-subscription-context-worker",
-            "platform-mcp-resource-host",
-        ] {
-            include(name);
-        }
-    }
-    if profile.needs_egress() {
-        include("platform-security-authority");
-        include("platform-egress-broker");
-    }
-    if profile.has_model() {
-        include("platform-model-worker");
-    }
-    if profile.has_mcp() {
-        for name in [
-            "platform-mcp-host",
-            "platform-mcp-resource-host",
-            "platform-mcp-discovery-worker",
-            "platform-mcp-subscription-worker",
-            "platform-mcp-cleanup-worker",
-            "platform-callback-api",
-        ] {
-            include(name);
-        }
-    }
-    if profile.has_remote_capability() {
-        include("platform-capability-remote-worker");
-    }
-    binaries
-}
-
 fn provision_and_bootstrap_authority(
     binary_directory: &Path,
     runtime: &Path,
@@ -5584,6 +4880,87 @@ fn provision_and_bootstrap_authority(
     Ok(())
 }
 
+fn native_runtime_network(
+    ports: &RuntimePortBindings,
+) -> Result<insight_platform_deployment_contracts::installation::NetworkTopologyV1, CliError> {
+    let mut network = full_profile::aws_qualification_network(
+        &ports.full,
+        ports.artifact_data_controller,
+        ports.artifact_data_observability,
+    );
+    use insight_platform_deployment_contracts::installation::{
+        InstallationProcess as Process, ProcessNetworkV1, ServiceOrigin,
+    };
+    let loopback = |port| std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    for (process, listener, observability, tls) in [
+        (
+            Process::GatewayManagement,
+            Some(ports.gateway_management),
+            ports.gateway_management,
+            false,
+        ),
+        (
+            Process::GatewayRuntime,
+            Some(ports.gateway_runtime),
+            ports.gateway_runtime,
+            false,
+        ),
+        (
+            Process::ArtifactGateway,
+            Some(ports.artifact_gateway),
+            ports.artifact_gateway_observability,
+            true,
+        ),
+        (
+            Process::Orchestration,
+            None,
+            ports.orchestration_observability,
+            false,
+        ),
+        (
+            Process::CapabilityNative,
+            None,
+            ports.capability_native_observability,
+            false,
+        ),
+        (
+            Process::RegistryValidation,
+            None,
+            ports.registry_validation_observability,
+            false,
+        ),
+        (
+            Process::Outbox,
+            None,
+            ports.full.outbox_observability,
+            false,
+        ),
+        (
+            Process::HistoryMaintenance,
+            None,
+            ports.full.history_observability,
+            false,
+        ),
+    ] {
+        let origin = listener
+            .map(|port| {
+                ServiceOrigin::parse(&format!(
+                    "{}://localhost:{port}",
+                    if tls { "https" } else { "http" }
+                ))
+            })
+            .transpose()
+            .map_err(|error| CliError::RuntimeState(error.to_string()))?;
+        network.processes.push(ProcessNetworkV1 {
+            process,
+            listen_address: listener.map(loopback),
+            observability_address: loopback(observability),
+            service_origin: origin,
+        });
+    }
+    Ok(network)
+}
+
 fn start_profile_processes(
     binary_directory: &Path,
     runtime: &Path,
@@ -5592,7 +4969,6 @@ fn start_profile_processes(
     binding: &RuntimeProcessBinding,
     state: &mut RuntimeProcessState,
 ) -> Result<(), CliError> {
-    let binaries = runtime_binary_paths(binary_directory, selected_profile);
     let logs = runtime.join(RUNTIME_LOG_DIRECTORY);
     fs::create_dir_all(&logs).map_err(|source| CliError::InitializeProject {
         path: logs.display().to_string(),
@@ -5601,279 +4977,70 @@ fn start_profile_processes(
     let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
     let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
     let database_url = "postgres://insight:insight@127.0.0.1:5432/insight_platform";
-    let common_aws = [
-        ("AWS_ACCESS_KEY_ID", "test"),
-        ("AWS_SECRET_ACCESS_KEY", "test"),
-        ("AWS_EC2_METADATA_DISABLED", "true"),
-    ];
-    let mut specs = vec![
-        RuntimeLaunchSpec::new(
-            "artifact-data",
-            binaries["platform-artifact-data-worker"].clone(),
-            &loopback_address(profile.ports.artifact_data_observability),
-            vec![
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG",
-                    config_path(&configuration, RUNTIME_ARTIFACT_DATA_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_CONFIG_DIGEST",
-                    profile.config_digests["artifact-data"].clone(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_AUDIENCE",
-                    "data_worker".to_owned(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_READ_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_WORK_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_CLIENT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_CERT_PATH",
-                    tls.join(RUNTIME_ARTIFACT_DATA_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_DATA_WORKER_KEY_PATH",
-                    tls.join(RUNTIME_ARTIFACT_DATA_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            common_aws
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        ),
-        RuntimeLaunchSpec::new(
-            "artifact-gateway",
-            binaries["platform-artifact-gateway"].clone(),
-            &loopback_address(profile.ports.artifact_gateway_observability),
-            vec![
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_CONFIG",
-                    config_path(&configuration, RUNTIME_ARTIFACT_GATEWAY_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_CONFIG_DIGEST",
-                    profile.config_digests["artifact-gateway"].clone(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_CLIENT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_CERT_PATH",
-                    tls.join(RUNTIME_ARTIFACT_GATEWAY_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_ARTIFACT_GATEWAY_KEY_PATH",
-                    tls.join(RUNTIME_ARTIFACT_GATEWAY_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            common_aws
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect(),
-        ),
-        RuntimeLaunchSpec::new(
-            "orchestration",
-            binaries["platform-orchestration-worker"].clone(),
-            &loopback_address(profile.ports.orchestration_observability),
-            vec![
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_CONFIG",
-                    config_path(&configuration, RUNTIME_ORCHESTRATION_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_CONFIG_DIGEST",
-                    profile.config_digests["orchestration"].clone(),
-                ),
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_CERT_PATH",
-                    tls.join(RUNTIME_ORCHESTRATION_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_ORCHESTRATION_WORKER_ARTIFACT_KEY_PATH",
-                    tls.join(RUNTIME_ORCHESTRATION_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            Vec::new(),
-        ),
-        RuntimeLaunchSpec::new(
-            "capability-native",
-            binaries["platform-capability-native-worker"].clone(),
-            &loopback_address(profile.ports.capability_native_observability),
-            vec![
-                (
-                    "PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG",
-                    config_path(&configuration, RUNTIME_CAPABILITY_NATIVE_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_CAPABILITY_NATIVE_WORKER_CONFIG_DIGEST",
-                    profile.config_digests["capability-native"].clone(),
-                ),
-                (
-                    "PLATFORM_CAPABILITY_NATIVE_WORKER_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-            ],
-            Vec::new(),
-        ),
-        RuntimeLaunchSpec::new(
-            "registry-validation",
-            binaries["platform-registry-validation-worker"].clone(),
-            &loopback_address(profile.ports.registry_validation_observability),
-            vec![
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_WORKER_CONFIG",
-                    config_path(&configuration, RUNTIME_REGISTRY_VALIDATION_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_WORKER_CONFIG_DIGEST",
-                    profile.config_digests["registry-validation"].clone(),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_WORKER_DATABASE_URL",
-                    database_url.to_owned(),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_ARTIFACT_ENDPOINT",
-                    https_endpoint(profile.ports.artifact_gateway),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_ARTIFACT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_ARTIFACT_CERT_PATH",
-                    tls.join(RUNTIME_REGISTRY_VALIDATION_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_REGISTRY_VALIDATION_ARTIFACT_KEY_PATH",
-                    tls.join(RUNTIME_REGISTRY_VALIDATION_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            Vec::new(),
-        ),
-        RuntimeLaunchSpec::new(
-            "gateway-management",
-            binaries["platform-gateway"].clone(),
-            &loopback_address(profile.ports.gateway_management),
-            vec![
-                (
-                    "PLATFORM_GATEWAY_CONFIG",
-                    config_path(&configuration, RUNTIME_GATEWAY_MANAGEMENT_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_GATEWAY_CONFIG_DIGEST",
-                    profile.config_digests["gateway-management"].clone(),
-                ),
-                ("PLATFORM_GATEWAY_DATABASE_URL", database_url.to_owned()),
-                (
-                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
-                    runtime.join(RUNTIME_CURSOR_KEY_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST",
-                    cursor_key_digest(&runtime.join(RUNTIME_CURSOR_KEY_FILE))?,
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH",
-                    tls.join(RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH",
-                    tls.join(RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            Vec::new(),
-        ),
-        RuntimeLaunchSpec::new(
-            "gateway-runtime",
-            binaries["platform-gateway"].clone(),
-            &loopback_address(profile.ports.gateway_runtime),
-            vec![
-                (
-                    "PLATFORM_GATEWAY_CONFIG",
-                    config_path(&configuration, RUNTIME_GATEWAY_RUNTIME_CONFIG_FILE),
-                ),
-                (
-                    "PLATFORM_GATEWAY_CONFIG_DIGEST",
-                    profile.config_digests["gateway-runtime"].clone(),
-                ),
-                ("PLATFORM_GATEWAY_DATABASE_URL", database_url.to_owned()),
-                (
-                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_PATH",
-                    runtime.join(RUNTIME_CURSOR_KEY_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_RUN_EVENT_CURSOR_KEY_DIGEST",
-                    cursor_key_digest(&runtime.join(RUNTIME_CURSOR_KEY_FILE))?,
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_CA_PATH",
-                    tls.join(RUNTIME_CA_CERTIFICATE_FILE).display().to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_CERT_PATH",
-                    tls.join(RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE)
-                        .display()
-                        .to_string(),
-                ),
-                (
-                    "PLATFORM_GATEWAY_ARTIFACT_KEY_PATH",
-                    tls.join(RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE)
-                        .display()
-                        .to_string(),
-                ),
-            ],
-            Vec::new(),
-        ),
-    ];
-    specs.push(outbox_profile::launch(binary_directory, runtime, profile)?);
-    specs.push(history_profile::launch(binary_directory, runtime, profile)?);
+    let outbox_database_url = format!(
+        "postgres://insight_outbox_dev:{}@127.0.0.1:5432/insight_platform",
+        outbox_profile::read_password(runtime)?
+    );
+    let history_database_url = format!(
+        "postgres://insight_history_dev:{}@127.0.0.1:5432/insight_platform",
+        history_profile::password(runtime)?
+    );
+    let network = native_runtime_network(&profile.ports)?;
+    let cursor_path = runtime.join(RUNTIME_CURSOR_KEY_FILE);
+    let cursor_digest = cursor_key_digest(&cursor_path)?;
+    let mut specs = Vec::new();
+    use insight_platform_deployment_contracts::installation::InstallationProcess as Process;
+    for process in [
+        Process::ArtifactData,
+        Process::ArtifactGateway,
+        Process::Orchestration,
+        Process::CapabilityNative,
+        Process::RegistryValidation,
+        Process::GatewayManagement,
+        Process::GatewayRuntime,
+        Process::Outbox,
+        Process::HistoryMaintenance,
+    ] {
+        let primary = match process {
+            Process::Outbox => outbox_database_url.as_str(),
+            Process::HistoryMaintenance => history_database_url.as_str(),
+            _ => database_url,
+        };
+        let launch = insight_platform_deployment_tooling::process_environment::process_launch(
+            insight_platform_deployment_tooling::process_environment::ProcessEnvironmentInputs {
+                process,
+                paths: full_profile::ProcessPaths {
+                    release: binary_directory,
+                    configuration: &configuration,
+                    tls: &tls,
+                    ca_certificate_file: RUNTIME_CA_CERTIFICATE_FILE,
+                    nats_client_certificate_file: RUNTIME_NATS_CLIENT_CERTIFICATE_FILE,
+                    nats_client_private_key_file: RUNTIME_NATS_CLIENT_PRIVATE_KEY_FILE,
+                },
+                network: &network,
+                configuration_digest: profile.config_digests.get(process.name()).ok_or_else(
+                    || CliError::RuntimeState("selected process configuration missing".into()),
+                )?,
+                database:
+                    insight_platform_deployment_tooling::process_environment::ProcessDatabaseUrls {
+                        primary,
+                        read: Some(database_url),
+                        work: Some(database_url),
+                    },
+                cursor_key_path: Some(&cursor_path),
+                cursor_key_digest: Some(&cursor_digest),
+                aws_credentials_path: None,
+            },
+        )
+        .map_err(|error| CliError::RuntimeState(error.to_string()))?;
+        specs.push(RuntimeLaunchSpec {
+            role: launch.role,
+            binary: launch.binary,
+            ready_address: launch.ready_address,
+            environment: launch.environment,
+            extra_environment: launch.extra_environment,
+        });
+    }
     if selected_profile.has_features() {
         specs.extend(full_profile_launch_specs(
             binary_directory,
@@ -5881,7 +5048,6 @@ fn start_profile_processes(
             profile,
             selected_profile,
             database_url,
-            &common_aws,
         )?);
     }
     let observed_specs = specs
@@ -5954,7 +5120,6 @@ fn full_profile_launch_specs(
     profile: &RuntimeProfileState,
     selected_profile: DevProfile,
     database_url: &str,
-    common_aws: &[(&str, &str)],
 ) -> Result<Vec<RuntimeLaunchSpec>, CliError> {
     let configuration = runtime.join(RUNTIME_CONFIGURATION_DIRECTORY);
     let tls = runtime.join(RUNTIME_TLS_DIRECTORY);
@@ -5971,7 +5136,6 @@ fn full_profile_launch_specs(
         &profile.config_digests,
         selected_profile,
         database_url,
-        common_aws,
     )
     .map_err(CliError::RuntimeState)?
     .into_iter()
@@ -5992,28 +5156,6 @@ struct RuntimeLaunchSpec {
     ready_address: String,
     environment: Vec<(&'static str, String)>,
     extra_environment: Vec<(String, String)>,
-}
-
-impl RuntimeLaunchSpec {
-    fn new(
-        role: &'static str,
-        binary: PathBuf,
-        ready_address: &str,
-        environment: Vec<(&'static str, String)>,
-        extra_environment: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            role,
-            binary,
-            ready_address: ready_address.to_owned(),
-            environment,
-            extra_environment,
-        }
-    }
-}
-
-fn config_path(configuration: &Path, name: &str) -> String {
-    configuration.join(name).display().to_string()
 }
 
 fn cursor_key_digest(path: &Path) -> Result<String, CliError> {
@@ -7425,81 +6567,6 @@ fn tagged_digest(tag: &str, value: &str, identity_directory: &Path) -> Result<St
     })
 }
 
-fn build_local_jwks(
-    key_pair: &KeyPair,
-    key_id: &str,
-    identity_directory: &Path,
-) -> Result<serde_json::Value, CliError> {
-    let public_key_info = key_pair.subject_public_key_info();
-    let (_, public_key_info) = SubjectPublicKeyInfo::from_der(&public_key_info).map_err(|_| {
-        invalid_local_identity(identity_directory, "cannot parse local issuer public key")
-    })?;
-    let PublicKey::RSA(public_key) = public_key_info.parsed().map_err(|_| {
-        invalid_local_identity(identity_directory, "cannot parse local issuer RSA key")
-    })?
-    else {
-        return Err(invalid_local_identity(
-            identity_directory,
-            "local issuer key is not RSA",
-        ));
-    };
-    let modulus = positive_integer(public_key.modulus).ok_or_else(|| {
-        invalid_local_identity(identity_directory, "local issuer RSA modulus is invalid")
-    })?;
-    let exponent = positive_integer(public_key.exponent).ok_or_else(|| {
-        invalid_local_identity(identity_directory, "local issuer RSA exponent is invalid")
-    })?;
-    Ok(serde_json::json!({
-        "keys": [{
-            "alg": "RS256",
-            "e": URL_SAFE_NO_PAD.encode(exponent),
-            "kid": key_id,
-            "kty": "RSA",
-            "n": URL_SAFE_NO_PAD.encode(modulus),
-            "use": "sig",
-        }],
-    }))
-}
-
-fn positive_integer(value: &[u8]) -> Option<&[u8]> {
-    let value = value.strip_prefix(&[0]).unwrap_or(value);
-    (!value.is_empty()).then_some(value)
-}
-
-fn pkcs1_private_key_from_pkcs8(value: &[u8]) -> Option<&[u8]> {
-    let (outer, remainder) = der_tlv(value, 0x30)?;
-    if !remainder.is_empty() {
-        return None;
-    }
-    let (_, outer) = der_tlv(outer, 0x02)?;
-    let (_, outer) = der_tlv(outer, 0x30)?;
-    let (private_key, _) = der_tlv(outer, 0x04)?;
-    Some(private_key)
-}
-
-fn der_tlv(value: &[u8], expected_tag: u8) -> Option<(&[u8], &[u8])> {
-    let (&tag, remaining) = value.split_first()?;
-    if tag != expected_tag {
-        return None;
-    }
-    let (&first_length, remaining) = remaining.split_first()?;
-    let (length, remaining) = if first_length & 0x80 == 0 {
-        (usize::from(first_length), remaining)
-    } else {
-        let length_bytes = usize::from(first_length & 0x7f);
-        if length_bytes == 0 || length_bytes > std::mem::size_of::<usize>() {
-            return None;
-        }
-        let (encoded_length, remaining) = remaining.split_at_checked(length_bytes)?;
-        let length = encoded_length.iter().try_fold(0usize, |length, byte| {
-            length.checked_mul(256)?.checked_add(usize::from(*byte))
-        })?;
-        (length, remaining)
-    };
-    let (content, remaining) = remaining.split_at_checked(length)?;
-    Some((content, remaining))
-}
-
 fn issue_initial_local_access_token(
     identity_directory: &Path,
     identity: &LocalIdentityState,
@@ -7524,29 +6591,21 @@ fn sign_local_access_token(
     private_key_der: &[u8],
     issued_at_unix_seconds: u64,
 ) -> Result<String, ()> {
-    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-    let issued_at = i64::try_from(issued_at_unix_seconds).map_err(|_| ())?;
-    let expires_at = issued_at
-        .checked_add(LOCAL_ACCESS_TOKEN_TTL_SECONDS)
-        .ok_or(())?;
-    let claims = LocalAccessTokenClaims {
-        iss: &identity.issuer,
-        aud: &identity.audience,
-        sub: &identity.developer_subject,
-        jti: format!("local-token-{}", Uuid::now_v7()),
-        iat: issued_at,
-        exp: expires_at,
-        tenant_id: &identity.tenant_id,
-        principal_kind: "agent_author",
-        authn_strength: "single_factor",
+    use insight_platform_deployment_contracts::installation::{
+        LocalSessionIdentityV1, LocalSessionKind,
     };
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(identity.key_id.clone());
-    header.typ = Some("JWT".to_owned());
-    encode(
-        &header,
-        &claims,
-        &EncodingKey::from_rsa_der(private_key_der),
+    insight_platform_deployment_tooling::identity::sign_session(
+        &LocalSessionIdentityV1 {
+            schema_version: 1,
+            issuer: identity.issuer.clone(),
+            audience: identity.audience.clone(),
+            key_id: identity.key_id.clone(),
+            tenant_id: identity.tenant_id.parse().map_err(|_| ())?,
+            subject: identity.developer_subject.clone(),
+            principal_kind: LocalSessionKind::AgentAuthor,
+        },
+        private_key_der,
+        issued_at_unix_seconds,
     )
     .map_err(|_| ())
 }
@@ -7572,12 +6631,13 @@ fn rotate_local_access_token(root: &Path, issued_at: SystemTime) -> Result<Strin
             path: state_directory.display().to_string(),
         });
     }
-    let jwks =
-        build_local_jwks(&key_pair, &state.identity.key_id, &state_directory).map_err(|_| {
-            CliError::InvalidLocalIdentity {
-                path: state_directory.display().to_string(),
-            }
-        })?;
+    let jwks = insight_platform_deployment_tooling::identity::jwks_for_key_pair(
+        &key_pair,
+        &state.identity.key_id,
+    )
+    .map_err(|_| CliError::InvalidLocalIdentity {
+        path: state_directory.display().to_string(),
+    })?;
     let jwks_digest = canonical_digest(&jwks).map_err(|_| CliError::InvalidLocalIdentity {
         path: state_directory.display().to_string(),
     })?;
@@ -7587,11 +6647,13 @@ fn rotate_local_access_token(root: &Path, issued_at: SystemTime) -> Result<Strin
         });
     }
     let private_key_der = key_pair.serialize_der();
-    let private_key_der = pkcs1_private_key_from_pkcs8(&private_key_der).ok_or_else(|| {
-        CliError::InvalidLocalIdentity {
+    let private_key_der =
+        insight_platform_deployment_tooling::identity::pkcs1_private_key_from_pkcs8(
+            &private_key_der,
+        )
+        .ok_or_else(|| CliError::InvalidLocalIdentity {
             path: state_directory.display().to_string(),
-        }
-    })?;
+        })?;
     let issued_at = issued_at
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CliError::InvalidClock)?
@@ -8370,6 +7432,9 @@ pub fn execute(
 ) -> Result<String, CliError> {
     match command {
         CliCommand::Help => Ok(usage().to_owned()),
+        CliCommand::Connect(command) => connection::execute(command, current_directory),
+        CliCommand::InstallationHelp => Ok(installation_usage().to_owned()),
+        CliCommand::Model(command) => model::execute(command, current_directory),
         CliCommand::AdvancedHelp => Ok(advanced_usage().to_owned()),
         CliCommand::Version { json } => Ok(release::version_output(json)),
         CliCommand::UpdateCheck => release::check_for_update().map_err(CliError::Release),
@@ -8607,12 +7672,14 @@ pub fn execute(
             let root = resolve_root(current_directory, root);
             let file = resolve_root(current_directory, file);
             let output = resolve_root(&root, output);
-            let _upload_lock = acquire_runtime_lifecycle_lock(&root)?;
+            let _upload_lock = connection::acquire_mutation_lock(&root)?;
             let (client, tenant) = local_runtime_http_client(&root)?;
             let mut result =
                 evaluation::report(&client, &file, &run_id, &output).map_err(CliError::Agent)?;
-            let uploader =
-                artifact::HttpsArtifactObjectUploader::new().map_err(CliError::Artifact)?;
+            let uploader = artifact::HttpsArtifactObjectUploader::with_additional_roots(
+                client.additional_roots(),
+            )
+            .map_err(CliError::Artifact)?;
             let uploaded = artifact::upload_artifact(
                 &client,
                 &uploader,
@@ -8784,11 +7851,17 @@ fn resolve_root(current_directory: &Path, root: PathBuf) -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Insight Platform\n\nStart:\n  insight init [--path <directory>] [--name <name>]\n  insight dev [--path <directory>] [--features model,remote-capability,context,mcp,sandbox|all] [--offline|--from-source]\n\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n  insight agent signal <run-id> <signal-key> [--file <typed-signal-request.json>]\n  insight agent dependencies <model|capability|context|child_agent|skill> [--environment <name>] [--cursor <cursor>]\n  insight agent restore-source --agent <agt_...> --version <arev_...> --output <new-directory>\n  insight agent evaluation-init --file <evaluation-request.json> --output <new-directory>\n  insight agent evaluation-input --file <evaluation-request.json> --output <input.json>\n  insight agent evaluation-report --file <evaluation-request.json> --run <run_...> --output <report.json>\n\nInstall and update:\n  insight version [--json]\n  insight update check\n  insight update apply --version <exact-version>\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n"
+    concat!("Insight Platform\n\nInstallation:\n  python3 tools/install/platform_compose.py --help\n  python3 tools/install/platform_native.py --help\n  python3 tools/install/platform_helm.py --help\n\nConnect this workspace to an installation:\n  insight connect --path <directory> --endpoint <Console-or-Management-origin> --tenant <ten_...> --token-file <private-file> [--runtime-endpoint <origin>] [--ca-file <public-PEM>]\n",
+        "\nModels (all require --endpoint <origin> --tenant <ten_...> --token-file <private-file>; optional --ca-file <public-PEM>):\n  insight model configure --file <models.json> [--state-dir <private-directory>] [--new-attempt]\n  insight model sources\n  insight model source --source <alias-or-ID>\n  insight model list\n  insight model get --model <alias-or-ID>\n  insight model default [--model <alias-or-ID>|--clear] [--new-attempt]\n  insight model quota --model <alias-or-ID-or-deployment> [--file <limits.json>] [--state-dir <private-directory>] [--new-attempt]\n  insight model probe --model <alias-or-ID>\n  insight model credential --binding <sbd_...>\n  insight model revoke --binding <sbd_...> [--state-dir <private-directory>]\n",
+        "\nAgent journey:\n  insight agent validate --file <agent.yaml>\n  insight agent publish --file <agent.yaml> [--output text|json]\n  insight agent list [--output text|json]\n  insight agent get <name-or-agent-id> [--output text|json]\n  insight agent adopt <name> --agent-id <agt_...>\n  insight agent run <name-or-agent-id> (--input <json>|--file <input.json>) [--detach]\n  insight agent logs <name-or-run-id> [--follow]\n  insight agent result <run-id> [--output text|json]\n  insight agent signal <run-id> <signal-key> [--file <typed-signal-request.json>]\n  insight agent dependencies <model|capability|context|child_agent|skill> [--environment <name>] [--cursor <cursor>]\n  insight agent restore-source --agent <agt_...> --version <arev_...> --output <new-directory>\n  insight agent evaluation-init --file <evaluation-request.json> --output <new-directory>\n  insight agent evaluation-input --file <evaluation-request.json> --output <input.json>\n  insight agent evaluation-report --file <evaluation-request.json> --run <run_...> --output <report.json>\n\nInstall and update:\n  insight version [--json]\n  insight update check\n  insight update apply --version <exact-version>\n\nUse `insight advanced` for Platform automation, diagnostics, and lifecycle commands.\n")
+}
+
+fn installation_usage() -> &'static str {
+    "Service startup is owned by the unified installation tools.\n\nCompose: python3 tools/install/platform_compose.py --help\nNative foreground services: python3 tools/install/platform_native.py --help\nKubernetes: python3 tools/install/platform_helm.py --help\n\nUse the installation tool's session command, then `insight connect` with its endpoint, tenant and private token-file. Native Ctrl-C stops the current foreground services and retains dependency data.\n\nThe explicit `insight qualification-aws` namespace is reserved for the separate AWS physical qualification fixture. It is not the default service installation.\n"
 }
 
 fn advanced_usage() -> &'static str {
-    "Insight Platform automation and diagnostics\n\nUsage:\n  insight doctor [--json]\n  insight token [--path <directory>]\n  insight start [--path <directory>]\n  insight status [--path <directory>]\n  insight logs [--path <directory>] [--role <role>]\n  insight stop [--path <directory>]\n  insight reset [--path <directory>] [--confirm <project-name>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight recovery hold-place|hold-release|pkce-recover --file <request.json> [--path <directory>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get|result|watch <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight task list [--purpose respondable|viewable] [--state <state>] [--kind <kind>] [--run-id <run_id>] [--page-size <1..50>] [--cursor <cursor>] [--path <directory>]\n  insight task get <task_id> [--purpose respondable|viewable] [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [options]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\n`reset` first prints its exact destructive scope; deletion requires the displayed project name. All mutations use the public `/v1` authority. Receipt, ETag, Operation, and cursor details remain managed by the client unless an Agent command explicitly enables `--debug-authority`.\n"
+    "Insight Platform automation and diagnostics\n\nUsage:\n  insight doctor [--json]\n  insight qualification-aws token [--path <directory>]\n  insight qualification-aws start [--path <directory>]\n  insight qualification-aws status [--path <directory>]\n  insight qualification-aws logs [--path <directory>] [--role <role>]\n  insight qualification-aws stop [--path <directory>]\n  insight qualification-aws reset [--path <directory>] [--confirm <project-name>]\n  insight apply --file <manifest.json> [--path <directory>] [--timeout-seconds <1..3600>]\n  insight recovery hold-place|hold-release|pkce-recover --file <request.json> [--path <directory>]\n  insight run create --file <request.json> [--path <directory>]\n  insight run get|result|watch <run_id> [--path <directory>]\n  insight run pause|resume|cancel <run_id> [--path <directory>]\n  insight task list [--purpose respondable|viewable] [--state <state>] [--kind <kind>] [--run-id <run_id>] [--page-size <1..50>] [--cursor <cursor>] [--path <directory>]\n  insight task get <task_id> [--purpose respondable|viewable] [--path <directory>]\n  insight task approve|reject|cancel <task_id> [--path <directory>]\n  insight task submit-input <task_id> --file <input.json> [--path <directory>]\n  insight artifact upload --file <file> --purpose <purpose> --classification <classification> [options]\n  insight artifact get <artifact_id> [--path <directory>]\n  insight artifact read <artifact_id> --output <file> [--path <directory>]\n  insight operation wait <job_id> [--path <directory>] [--timeout-seconds <1..3600>]\n\nThe explicitly selected AWS qualification `reset` first prints its exact destructive scope; deletion requires the displayed project name. All mutations use the public `/v1` authority. Receipt, ETag, Operation, and cursor details remain managed by the client unless an Agent command explicitly enables `--debug-authority`.\n"
 }
 
 fn resolve_agent_manifest_path(
@@ -8872,7 +7945,7 @@ fn publish_local_agent(
         });
     }
     let captured = agent::capture_project_sources(root, file).map_err(CliError::Agent)?;
-    let _publication_lock = acquire_runtime_lifecycle_lock(root)?;
+    let _publication_lock = connection::acquire_mutation_lock(root)?;
     let (management_client, tenant_id) = local_public_http_client(root)?;
     let (runtime_client, runtime_tenant_id) = local_runtime_http_client(root)?;
     if tenant_id != runtime_tenant_id {
@@ -8884,7 +7957,6 @@ fn publish_local_agent(
         agent::online_compiler_profile(&management_client, root).map_err(CliError::Agent)?;
     let compiled = agent::compile_project_online(root, captured, profile, &management_client)
         .map_err(CliError::Agent)?;
-    ensure_agent_features_enabled(root, &compiled)?;
     let report = agent::publish_agent(
         root,
         &management_client,
@@ -8939,41 +8011,6 @@ fn publish_local_agent(
             Ok(text)
         }
     }
-}
-
-fn ensure_agent_features_enabled(
-    root: &Path,
-    compiled: &insight_platform_agent_compiler::AgentCompilationV1,
-) -> Result<(), CliError> {
-    let state_directory = root.join(PROJECT_DIRECTORY);
-    let project = load_local_project_state(&state_directory)?;
-    validate_loaded_local_identity(&state_directory, &project.identity)?;
-    let runtime = root.join(PROJECT_DIRECTORY).join(RUNTIME_DIRECTORY);
-    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
-        CliError::RuntimeState(
-            "no selected development feature closure exists; run `insight dev` first".to_owned(),
-        )
-    })?;
-    let missing = compiled
-        .compiled
-        .required_features
-        .iter()
-        .filter_map(|feature| {
-            (!profile
-                .features
-                .iter()
-                .any(|value| value == feature.as_str()))
-            .then_some(feature.as_str())
-        })
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(CliError::RuntimeUnavailable(format!(
-        "feature_not_enabled\nThis agent requires: {}\nRestart with: insight dev --features {}",
-        missing.join(","),
-        missing.join(",")
-    )))
 }
 
 fn list_local_agents(root: &Path, output: agent::AgentOutputOptions) -> Result<String, CliError> {
@@ -9391,55 +8428,9 @@ fn local_public_http_client_for(
     root: &Path,
     surface: LocalGatewaySurface,
 ) -> Result<(public_client::PublicHttpClient, ResourceId), CliError> {
-    let root = fs::canonicalize(root).map_err(|source| CliError::InitializeProject {
-        path: root.display().to_string(),
-        source,
-    })?;
-    let state_directory = root.join(PROJECT_DIRECTORY);
-    let project = load_local_project_state(&state_directory)?;
-    validate_loaded_local_identity(&state_directory, &project.identity)?;
-    let expected_tenant_id =
-        ResourceId::parse_expected(&project.identity.tenant_id, ResourceKind::Tenant).map_err(
-            |_| CliError::InvalidLocalIdentity {
-                path: state_directory.display().to_string(),
-            },
-        )?;
-    let runtime = state_directory.join(RUNTIME_DIRECTORY);
-    let profile = read_runtime_profile_state(&runtime, &project.identity)?.ok_or_else(|| {
-        CliError::RuntimeState(
-            "no local runtime profile exists; run `insight dev` first".to_owned(),
-        )
-    })?;
-    let token_path = state_directory
-        .join(IDENTITY_DIRECTORY)
-        .join(IDENTITY_ACCESS_TOKEN_FILE);
-    let token = String::from_utf8(read_bounded_identity_file(&token_path)?).map_err(|_| {
-        CliError::InvalidLocalIdentity {
-            path: state_directory.display().to_string(),
-        }
-    })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CliError::InvalidClock)?
-        .as_secs();
-    if cached_token_expiry(token.as_bytes())
-        .is_none_or(|expires_at| expires_at <= i64::try_from(now).unwrap_or(i64::MAX))
-    {
-        return Err(CliError::RuntimeUnavailable(
-            "the cached local token has expired; run `insight token` and retry".to_owned(),
-        ));
-    }
-    let port = match surface {
-        LocalGatewaySurface::Management => profile.ports.gateway_management,
-        LocalGatewaySurface::Runtime => profile.ports.gateway_runtime,
-    };
-    let client = public_client::PublicHttpClient::new(
-        format!("http://127.0.0.1:{port}"),
-        token,
-        Duration::from_secs(5),
-    )
-    .map_err(CliError::PublicClient)?;
-    Ok((client, expected_tenant_id))
+    let connection = connection::load(root)?;
+    let client = connection.client(matches!(surface, LocalGatewaySurface::Runtime))?;
+    Ok((client, connection.tenant_id))
 }
 
 fn create_local_run(root: &Path, file: &Path) -> Result<String, CliError> {
@@ -9587,9 +8578,11 @@ fn upload_local_artifact(
                 option: "--classification",
                 value: classification.to_owned(),
             })?;
-    let _upload_lock = acquire_runtime_lifecycle_lock(root)?;
+    let _upload_lock = connection::acquire_mutation_lock(root)?;
     let (client, tenant_id) = local_runtime_http_client(root)?;
-    let uploader = artifact::HttpsArtifactObjectUploader::new().map_err(CliError::Artifact)?;
+    let uploader =
+        artifact::HttpsArtifactObjectUploader::with_additional_roots(client.additional_roots())
+            .map_err(CliError::Artifact)?;
     let report = artifact::upload_artifact(
         &client,
         &uploader,
@@ -9773,6 +8766,12 @@ fn render_doctor_report(report: &DoctorReport) -> String {
         "required development prerequisites are unavailable\n"
     });
     output
+}
+
+impl From<insight_platform_deployment_tooling::DeploymentError> for CliError {
+    fn from(error: insight_platform_deployment_tooling::DeploymentError) -> Self {
+        Self::RuntimeState(error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -10236,16 +9235,16 @@ mod tests {
     #[test]
     fn tls_identity_registry_has_the_closed_profile_counts() {
         for (profile, expected) in [
-            (DevProfile::starter(), 10),
-            (DevProfile::parse(Some("sandbox"), false, true).unwrap(), 10),
-            (DevProfile::parse(Some("model"), false, true).unwrap(), 14),
+            (DevProfile::starter(), 11),
+            (DevProfile::parse(Some("sandbox"), false, true).unwrap(), 11),
+            (DevProfile::parse(Some("model"), false, true).unwrap(), 15),
             (
                 DevProfile::parse(Some("remote-capability"), false, true).unwrap(),
-                14,
+                15,
             ),
-            (DevProfile::parse(Some("context"), false, true).unwrap(), 18),
-            (DevProfile::parse(Some("mcp"), false, true).unwrap(), 21),
-            (DevProfile::parse(Some("all"), false, true).unwrap(), 26),
+            (DevProfile::parse(Some("context"), false, true).unwrap(), 19),
+            (DevProfile::parse(Some("mcp"), false, true).unwrap(), 22),
+            (DevProfile::parse(Some("all"), false, true).unwrap(), 27),
         ] {
             assert_eq!(
                 expected_local_tls_leaf_identities(profile).len() + 1,
@@ -10401,7 +9400,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
@@ -10592,7 +9591,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         assert_eq!(digests.len(), 10);
@@ -10681,7 +9680,7 @@ mod tests {
                 directory.path(),
                 "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                &worker_profile::fixture_binaries(directory.path()),
+                &workspace_assets::worker_binary_fixtures(directory.path()),
             ),
             Err(CliError::ProjectAlreadyInitialized(_))
         ));
@@ -10696,7 +9695,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -10927,7 +9926,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -10978,7 +9977,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -11233,7 +10232,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             original_fingerprint,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -11283,7 +10282,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -11375,7 +10374,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let runtime = directory
@@ -11409,7 +10408,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
@@ -11424,7 +10423,7 @@ mod tests {
             &project.identity,
             &mut state,
             model,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         state.features = model
@@ -11535,13 +10534,13 @@ mod tests {
         fs::set_permissions(&executable, permissions).unwrap();
         let logs = directory.path().join(RUNTIME_LOG_DIRECTORY);
         fs::create_dir(&logs).unwrap();
-        let spec = RuntimeLaunchSpec::new(
-            "gateway-runtime",
-            executable,
-            "127.0.0.1:1",
-            Vec::new(),
-            Vec::new(),
-        );
+        let spec = RuntimeLaunchSpec {
+            role: "gateway-runtime",
+            binary: executable,
+            ready_address: "127.0.0.1:1".to_owned(),
+            environment: Vec::new(),
+            extra_environment: Vec::new(),
+        };
         let error = spawn_runtime_process(&logs, &spec, |_| {
             assert!(!marker.exists());
             Err(CliError::RuntimeState(
@@ -11847,7 +10846,7 @@ mod tests {
             directory.path(),
             kms,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
@@ -11864,7 +10863,7 @@ mod tests {
             &project.identity,
             &mut state,
             model,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         assert_eq!(state.secret_provider_id, previous.secret_provider_id);
@@ -11895,7 +10894,7 @@ mod tests {
             &project.identity,
             &mut state,
             all,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         assert_eq!(state.config_digests.len(), 25);
@@ -11942,7 +10941,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
@@ -11970,7 +10969,7 @@ mod tests {
             &state.capability_protocol_profile_revision_id,
             selected,
             &worker_profile::WorkerBuilds::read(
-                &worker_profile::fixture_binaries(directory.path()),
+                &workspace_assets::worker_binary_fixtures(directory.path()),
                 DevProfile::parse(Some("all"), false, true).unwrap(),
             )
             .unwrap(),
@@ -11988,7 +10987,7 @@ mod tests {
             &project.identity,
             &mut state,
             selected,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         assert!(state.config_digests.contains_key("egress-broker"));
@@ -12001,7 +11000,7 @@ mod tests {
             &project.identity,
             &mut state,
             selected,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap_err();
         assert!(matches!(
@@ -12019,7 +11018,7 @@ mod tests {
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         let state_directory = directory.path().join(PROJECT_DIRECTORY);
@@ -12047,7 +11046,7 @@ mod tests {
             &state.capability_protocol_profile_revision_id,
             selected,
             &worker_profile::WorkerBuilds::read(
-                &worker_profile::fixture_binaries(directory.path()),
+                &workspace_assets::worker_binary_fixtures(directory.path()),
                 DevProfile::parse(Some("all"), false, true).unwrap(),
             )
             .unwrap(),
@@ -12077,7 +11076,7 @@ mod tests {
             &state.capability_protocol_profile_revision_id,
             DevProfile::parse(Some("remote-capability,mcp"), false, true).unwrap(),
             &worker_profile::WorkerBuilds::read(
-                &worker_profile::fixture_binaries(directory.path()),
+                &workspace_assets::worker_binary_fixtures(directory.path()),
                 DevProfile::parse(Some("all"), false, true).unwrap(),
             )
             .unwrap(),
@@ -12105,7 +11104,7 @@ mod tests {
             &state.capability_protocol_profile_revision_id,
             selected,
             &worker_profile::WorkerBuilds::read(
-                &worker_profile::fixture_binaries(directory.path()),
+                &workspace_assets::worker_binary_fixtures(directory.path()),
                 DevProfile::parse(Some("all"), false, true).unwrap(),
             )
             .unwrap(),
@@ -12120,7 +11119,7 @@ mod tests {
             &project.identity,
             &mut state,
             selected,
-            &worker_profile::fixture_binaries(directory.path()),
+            &workspace_assets::worker_binary_fixtures(directory.path()),
         )
         .unwrap();
         assert!(state.config_digests.contains_key("capability-remote"));
@@ -12137,7 +11136,11 @@ mod tests {
 
     #[test]
     fn command_parser_rejects_unclosed_options() {
-        let arguments = vec![OsString::from("init"), OsString::from("--path")];
+        let arguments = vec![
+            OsString::from("qualification-aws"),
+            OsString::from("init"),
+            OsString::from("--path"),
+        ];
         assert!(matches!(
             parse_command(&arguments),
             Err(CliError::MissingValue("--path"))
@@ -12145,8 +11148,23 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_lifecycle_only_explains_the_shared_installation_entrypoints() {
+        for name in [
+            "init", "dev", "start", "status", "logs", "stop", "reset", "token",
+        ] {
+            assert_eq!(
+                parse_command(&[OsString::from(name)]).unwrap(),
+                CliCommand::InstallationHelp
+            );
+        }
+        let help = installation_usage();
+        assert!(help.contains("platform_native.py") && help.contains("insight connect"));
+    }
+
+    #[test]
     fn command_parser_accepts_token_path() {
         let arguments = vec![
+            OsString::from("qualification-aws"),
             OsString::from("token"),
             OsString::from("--path"),
             OsString::from("demo"),
@@ -12163,7 +11181,7 @@ mod tests {
     fn command_parser_accepts_starter_feature_lifecycle_commands() {
         assert!(matches!(
             parse_command(&[
-                OsString::from("dev"),
+                OsString::from("qualification-aws"), OsString::from("dev"),
                 OsString::from("--path"),
                 OsString::from("demo"),
                 OsString::from("--features"),
@@ -12179,7 +11197,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("start"),
+                OsString::from("qualification-aws"), OsString::from("start"),
                 OsString::from("--path"),
                 OsString::from("demo"),
             ]),
@@ -12187,7 +11205,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("status"),
+                OsString::from("qualification-aws"), OsString::from("status"),
                 OsString::from("--path"),
                 OsString::from("demo"),
             ]),
@@ -12195,7 +11213,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("logs"),
+                OsString::from("qualification-aws"), OsString::from("logs"),
                 OsString::from("--path"),
                 OsString::from("demo"),
                 OsString::from("--role"),
@@ -12208,7 +11226,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("stop"),
+                OsString::from("qualification-aws"), OsString::from("stop"),
                 OsString::from("--path"),
                 OsString::from("demo"),
             ]),
@@ -12216,7 +11234,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("reset"),
+                OsString::from("qualification-aws"), OsString::from("reset"),
                 OsString::from("--path"),
                 OsString::from("demo"),
                 OsString::from("--confirm"),
@@ -12227,7 +11245,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(&[
-                OsString::from("logs"),
+                OsString::from("qualification-aws"), OsString::from("logs"),
                 OsString::from("--role"),
                 OsString::from("registry-validation"),
             ]),

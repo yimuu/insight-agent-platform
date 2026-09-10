@@ -17,9 +17,9 @@ use insight_platform_api::artifact::{
     SecretBearingUploadTargetV1,
 };
 use insight_platform_artifact_broker::{
-    ArtifactBrokerLimits, ArtifactBrokerReadPermit, AwsArtifactProviderCatalog,
-    AwsArtifactProviderCatalogConfig, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
-    BrokeredGatewayArtifactReader, GatewayArtifactReadError, PreparedAwsArtifactUpload,
+    ArtifactBrokerLimits, ArtifactBrokerReadPermit, ArtifactProviderCatalog,
+    ArtifactProviderCatalogConfigV2, BrokeredGatewayArtifactReader, GatewayArtifactReadError,
+    PreparedArtifactUpload, S3ArtifactUploadProvider, S3ArtifactUploadRequest,
 };
 use insight_platform_artifacts::{
     validate_artifact_prepare_replay, ArtifactCommandError, ArtifactStore, ArtifactTransaction,
@@ -182,7 +182,7 @@ struct GatewayConfig {
     observability_listen_address: String,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
-    artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
+    artifact_provider_catalog: ArtifactProviderCatalogConfigV2,
     write_encryption_domain_id: ResourceId,
     scanner_contract_digest: Sha256Digest,
     scan_evidence_ttl_milliseconds: u64,
@@ -264,7 +264,7 @@ impl GatewayConfig {
 #[derive(Clone)]
 struct GatewayState {
     repository: Arc<PgRepository>,
-    uploads: AwsArtifactUploadProvider,
+    uploads: S3ArtifactUploadProvider,
     reader: Arc<BrokeredGatewayArtifactReader>,
     maximum_upload_target_seconds: u64,
     write_encryption_domain_id: ResourceId,
@@ -320,7 +320,7 @@ async fn run() -> Result<(), GatewayError> {
     let database_health_pool = pool.clone();
     let dependency_metrics =
         install_artifact_dependency_metrics().map_err(|_| GatewayError::InvalidConfiguration)?;
-    let providers = AwsArtifactProviderCatalog::install_with_observer(
+    let providers = ArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog,
         dependency_metrics.artifact,
     )
@@ -769,7 +769,7 @@ async fn prepare_upload_inner(
     let candidate_proof = completion_proof(&principal, &artifact_id, &upload_grant_id)?;
     let upload = state
         .uploads
-        .prepare_upload(AwsArtifactUploadRequest {
+        .prepare_upload(S3ArtifactUploadRequest {
             tenant_id: &principal.tenant_id,
             artifact_id: &artifact_id,
             blob_id: &blob_id,
@@ -858,7 +858,7 @@ async fn prepare_upload_response(
     principal: &PrincipalHeaders,
     identity: &ArtifactUploadReplayIdentity,
     prepared: PreparedArtifact,
-    candidate_upload: Option<PreparedAwsArtifactUpload>,
+    candidate_upload: Option<PreparedArtifactUpload>,
 ) -> Result<PrepareArtifactUploadResponseV1, HttpError> {
     validate_artifact_prepare_replay(&prepared, identity, Utc::now())
         .map_err(map_upload_authority_error)?;
@@ -880,7 +880,7 @@ async fn prepare_upload_response(
         Some(upload) => upload,
         None => state
             .uploads
-            .prepare_upload(AwsArtifactUploadRequest {
+            .prepare_upload(S3ArtifactUploadRequest {
                 tenant_id: &principal.tenant_id,
                 artifact_id: &prepared.artifact.artifact_id,
                 blob_id: &prepared.blob.blob_id,

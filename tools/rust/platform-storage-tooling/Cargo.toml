@@ -30,6 +30,8 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+url.workspace = true
+libc.workspace = true
 
 [[bin]]
 name = "platform-database-role"

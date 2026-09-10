@@ -104,7 +104,6 @@ pub(super) struct PreservedRuntimeInputs<'a> {
     pub(super) profile: &'a RuntimeProfileState,
     pub(super) artifact_bootstrap:
         insight_platform_deployment_contracts::development::DevelopmentArtifactAuthorityConfigV1,
-    pub(super) artifact_bootstrap_value: serde_json::Value,
 }
 fn bootstrap_config(
     path: &Path,
@@ -137,7 +136,7 @@ impl<'a> PreservedRuntimeInputs<'a> {
             .config_digests
             .get("artifact-bootstrap")
             .ok_or_else(|| invalid("preserved bootstrap digest missing"))?;
-        let (artifact_bootstrap, artifact_bootstrap_value, _) = bootstrap_config(
+        let (artifact_bootstrap, _, _) = bootstrap_config(
             &runtime
                 .join(RUNTIME_CONFIGURATION_DIRECTORY)
                 .join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE),
@@ -146,7 +145,6 @@ impl<'a> PreservedRuntimeInputs<'a> {
         Ok(Self {
             profile: previous,
             artifact_bootstrap,
-            artifact_bootstrap_value,
         })
     }
 }
@@ -446,7 +444,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let project =
             initialize_project(directory.path(), Some("transition"), SystemTime::now()).unwrap();
-        let binaries = worker_profile::fixture_binaries(directory.path());
+        let binaries = workspace_assets::worker_binary_fixtures(directory.path());
         prepare_runtime_profile(
             directory.path(),
             "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",

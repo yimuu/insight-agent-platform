@@ -1825,6 +1825,7 @@ dependencies = [
  "insight-platform-context",
  "insight-platform-contracts",
  "insight-platform-deployment-contracts",
+ "insight-platform-deployment-tooling",
  "insight-platform-mcp-host",
  "insight-platform-plan",
  "insight-platform-registry",
@@ -1882,6 +1883,7 @@ dependencies = [
  "insight-platform-orchestrator",
  "insight-platform-plan",
  "insight-platform-registry",
+ "insight-platform-security",
  "insight-platform-tasks",
  "jsonwebtoken",
  "ring",
@@ -1908,6 +1910,7 @@ dependencies = [
  "insight-platform-artifacts",
  "insight-platform-contracts",
  "insight-platform-jobs",
+ "insight-platform-openbao",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -2154,6 +2157,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "url",
  "uuid",
 ]
 
@@ -2166,6 +2170,34 @@ dependencies = [
  "insight-platform-orchestrator",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "url",
+]
+
+[[package]]
+name = "insight-platform-deployment-tooling"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.4.3",
+ "insight-platform-agent-compiler",
+ "insight-platform-artifacts",
+ "insight-platform-context",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-mcp-host",
+ "insight-platform-plan",
+ "insight-platform-registry",
+ "jsonwebtoken",
+ "libc",
+ "rcgen",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "uuid",
+ "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -2189,7 +2221,9 @@ dependencies = [
  "insight-platform-mcp-host",
  "insight-platform-model-adapters",
  "insight-platform-sandbox",
+ "insight-platform-security",
  "jsonwebtoken",
+ "libc",
  "rcgen",
  "reqwest",
  "ring",
@@ -2240,6 +2274,7 @@ dependencies = [
  "insight-platform-model-adapters",
  "insight-platform-rpc-trace",
  "insight-platform-sandbox",
+ "insight-platform-security",
  "prost",
  "protoc-bin-vendored",
  "rcgen",
@@ -2279,6 +2314,8 @@ dependencies = [
  "insight-platform-artifacts",
  "insight-platform-context",
  "insight-platform-contracts",
+ "insight-platform-egress-rpc",
+ "insight-platform-execution-context",
  "insight-platform-invocations",
  "insight-platform-jobs",
  "insight-platform-mcp-host",
@@ -2288,18 +2325,47 @@ dependencies = [
  "insight-platform-plan",
  "insight-platform-postgres",
  "insight-platform-registry",
+ "insight-platform-security",
  "insight-platform-tasks",
+ "rcgen",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
  "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "insight-platform-installation-tooling"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-kms",
+ "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
+ "chrono",
+ "insight-platform-artifact-broker",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "insight-platform-deployment-tooling",
+ "insight-platform-openbao",
+ "insight-platform-registry",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2524,6 +2590,7 @@ dependencies = [
  "insight-platform-observability-http",
  "insight-platform-plan",
  "insight-platform-postgres",
+ "insight-platform-registry",
  "insight-platform-rpc-trace",
  "insight-platform-worker",
  "serde",
@@ -2566,6 +2633,25 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+]
+
+[[package]]
+name = "insight-platform-openbao"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "insight-platform-contracts",
+ "insight-platform-deployment-contracts",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -2771,6 +2857,7 @@ dependencies = [
  "insight-platform-plan",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2915,6 +3002,7 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-egress",
  "insight-platform-mcp-host",
+ "insight-platform-openbao",
  "insight-platform-security",
  "serde",
  "serde_jcs",
@@ -2988,10 +3076,12 @@ dependencies = [
  "insight-platform-contracts",
  "insight-platform-deployment-contracts",
  "insight-platform-postgres",
+ "libc",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
+ "url",
 ]
 
 [[package]]

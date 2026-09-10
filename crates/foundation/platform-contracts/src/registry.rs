@@ -1013,6 +1013,7 @@ string_enum! {
         OperationNotTerminal => "operation_not_terminal",
         DeadlineExceeded => "deadline_exceeded",
         TemporarilyUnavailable => "temporarily_unavailable",
+        CredentialImportOutcomeUnknown => "credential_import_outcome_unknown",
         InternalError => "internal_error"
     }
 }

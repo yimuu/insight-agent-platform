@@ -1,6 +1,6 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use insight_platform_artifact_broker::{
-    ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
+    ArtifactBrokerLimits, ArtifactProviderCatalog, ArtifactProviderCatalogConfigV2,
     BrokeredArtifactDeletionBackend,
 };
 use insight_platform_artifacts::{
@@ -64,7 +64,7 @@ struct MaintenanceConfig {
     listen_address: String,
     database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
-    artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
+    artifact_provider_catalog: ArtifactProviderCatalogConfigV2,
     broker: BrokerConfig,
     worker: WorkerConfig,
     shutdown_grace_milliseconds: u64,
@@ -178,7 +178,7 @@ async fn run() -> Result<(), MaintenanceError> {
     let broker_limits = config.broker_limits()?;
     let dependency_metrics = install_artifact_dependency_metrics()
         .map_err(|_| MaintenanceError::InvalidConfiguration)?;
-    let providers = AwsArtifactProviderCatalog::install_with_observer(
+    let providers = ArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog,
         dependency_metrics.artifact,
     )

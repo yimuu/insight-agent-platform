@@ -185,6 +185,37 @@ mod tests {
     }
 
     #[test]
+    fn nominated_ca_is_shared_by_clients_without_disabling_tls_identity() {
+        for outcome in ["trusted", "wrong_root", "wrong_name"] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (server_config, root) = local_tls_server_config();
+            let extra = if outcome == "wrong_root" { local_tls_server_config().1 } else { root };
+            let trusted = outcome == "trusted";
+            let server = thread::spawn(move || {
+                let (tcp, _) = listener.accept().unwrap();
+                tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut stream = StreamOwned::new(ServerConnection::new(server_config).unwrap(), tcp);
+                let mut first = [0u8; 1];
+                if !trusted { assert!(stream.read(&mut first).is_err()); return; }
+                let (head, _) = read_request(&mut stream);
+                assert!(head.starts_with("GET /v1/model-configuration HTTP/1.1"));
+                assert_eq!(header_value(&head, "authorization"), Some("Bearer test-token"));
+                stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: 11111111111111111111111111111111\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").unwrap();
+                stream.flush().unwrap();
+            });
+            let host = if outcome == "wrong_name" { "localhost" } else { "127.0.0.1" };
+            let client = PublicHttpClient::with_additional_roots(format!("https://{host}:{port}"), "test-token".to_owned(), Duration::from_secs(3), vec![extra]).unwrap();
+            assert_eq!(client.additional_roots().len(), 1);
+            // Object upload receives the same frozen roots, without the API client's bearer token.
+            HttpsArtifactObjectUploader::with_additional_roots(client.additional_roots()).unwrap();
+            let result = client.get_body_json::<serde_json::Value>("/v1/model-configuration", StatusCode::OK);
+            assert_eq!(result.is_ok(), trusted, "{outcome}");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     fn metadata_and_content_download_are_authority_and_digest_bound() {
         let bytes = b"verified artifact body".to_vec();
         let content_digest = digest(&bytes);

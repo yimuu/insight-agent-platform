@@ -376,4 +376,16 @@ pub(super) async fn assert_structured_completion_proof(
     assert_eq!(done.run.state, "succeeded");
     assert_eq!(done.run.active_work_count, 0);
     assert_eq!(done.run.current.output_value_id, Some(structured_id));
+    model_public_events::assert_projection(
+        pool,
+        repository,
+        &fixture,
+        &[
+            "model.started",
+            "model.completed",
+            "run.completed",
+            "node.completed",
+        ],
+    )
+    .await;
 }

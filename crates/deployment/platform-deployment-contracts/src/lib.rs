@@ -13,3 +13,8 @@ pub mod history;
 pub mod recovery;
 
 pub mod development;
+pub mod installation;
+pub mod installation_provider;
+pub mod native_installation;
+pub mod openbao;
+pub mod public_trust;

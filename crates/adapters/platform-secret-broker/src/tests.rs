@@ -668,7 +668,10 @@ impl InstalledSecretProvider for PreparedTokenFixtureProvider {
     }
 }
 
-fn token_preparation(now: DateTime<Utc>, provider_id: ResourceId) -> McpOAuthTokenPreparation {
+pub(crate) fn token_preparation(
+    now: DateTime<Utc>,
+    provider_id: ResourceId,
+) -> McpOAuthTokenPreparation {
     let tenant_id = id("ten", 0x940);
     let task_id = id("int", 0x941);
     let authorization_binding_id = id("mab", 0x942);
@@ -822,7 +825,7 @@ impl InstalledSecretProvider for PreparedFixtureProvider {
     }
 }
 
-fn prepared_candidate(
+pub(crate) fn prepared_candidate(
     now: DateTime<Utc>,
     provider_id: ResourceId,
 ) -> NewMcpOAuthTransientSecretBundle {
@@ -868,7 +871,7 @@ async fn prepared_external_winner_replays_and_repairs_database_registration() {
         winner: Mutex::new(None),
         drift_provider: false,
     });
-    let store = BrokeredMcpOAuthSecretStore::new(
+    let store = BrokeredPreparedSecretStore::new(
         authority,
         Arc::new(PreparedFixtureSealer {
             calls: sealer_calls.clone(),
@@ -914,7 +917,7 @@ async fn prepared_provider_drift_is_rejected_before_seal_or_database_registratio
         winner: Mutex::new(None),
         drift_provider: true,
     });
-    let store = BrokeredMcpOAuthSecretStore::new(
+    let store = BrokeredPreparedSecretStore::new(
         Arc::new(PreparedFixtureAuthority {
             calls: registration_calls.clone(),
             failures_remaining: Arc::new(AtomicUsize::new(0)),
@@ -957,7 +960,7 @@ async fn prepared_token_winner_load_repairs_database_without_reusing_authorizati
         store_calls: store_calls.clone(),
         winner: Mutex::new(None),
     });
-    let store = BrokeredMcpOAuthSecretStore::new(
+    let store = BrokeredPreparedSecretStore::new(
         Arc::new(PreparedFixtureAuthority {
             calls: registration_calls.clone(),
             failures_remaining: Arc::new(AtomicUsize::new(1)),
@@ -1012,3 +1015,6 @@ async fn prepared_token_winner_load_repairs_database_without_reusing_authorizati
     assert_eq!(registration_calls.load(Ordering::SeqCst), 2);
     assert!(!format!("{tokens:?}").contains("access-token-canary"));
 }
+
+#[path = "model_credential_tests.rs"]
+mod model_credential_tests;

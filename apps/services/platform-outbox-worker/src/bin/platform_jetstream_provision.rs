@@ -1,8 +1,8 @@
 //! Explicit provisioning utility. Never invoked by the Outbox worker and uses separate credentials.
 use insight_platform_contracts::{parse_strict_json, JsonLimits};
 use insight_platform_deployment_contracts::outbox::OutboxJetStreamContractV1;
-use insight_platform_outbox_worker::stream_configuration;
-use std::{io::Read as _, path::PathBuf};
+use insight_platform_outbox_worker::{stream_configuration, JetStreamCommittedEventPublisher};
+use std::{io::Read as _, path::PathBuf, time::Duration};
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -13,10 +13,10 @@ async fn main() {
 async fn run() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [command, config_path] = args.as_slice() else {
-        return Err("usage: platform-jetstream-provision create <stream-contract.json>");
+        return Err("usage: platform-jetstream-provision <create|verify> <stream-contract.json>");
     };
-    if command != "create" {
-        return Err("only explicit create is supported; stream retention and upgrades require deployment review");
+    if !matches!(command.as_str(), "create" | "verify") {
+        return Err("only create or read-only verify is supported; stream upgrades require deployment review");
     }
     let mut bytes = Vec::new();
     std::fs::File::open(config_path)
@@ -48,7 +48,7 @@ async fn run() -> Result<(), &'static str> {
     if !server.starts_with("tls://") || server.contains('@') {
         return Err("provisioning requires a credential-free TLS endpoint");
     }
-    let client = async_nats::ConnectOptions::new()
+    let connect = async_nats::ConnectOptions::new()
         .require_tls(true)
         .add_root_certificates(PathBuf::from(required(
             "PLATFORM_OUTBOX_PROVISION_CA_PATH",
@@ -57,13 +57,23 @@ async fn run() -> Result<(), &'static str> {
             PathBuf::from(required("PLATFORM_OUTBOX_PROVISION_CERT_PATH")?),
             PathBuf::from(required("PLATFORM_OUTBOX_PROVISION_KEY_PATH")?),
         )
-        .connect(server)
+        .connect(server);
+    let client = tokio::time::timeout(Duration::from_secs(10), connect)
         .await
+        .map_err(|_| "NATS unavailable")?
         .map_err(|_| "NATS unavailable")?;
-    async_nats::jetstream::new(client)
-        .create_stream(config)
+    if command == "create" {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            async_nats::jetstream::new(client.clone()).create_stream(config),
+        )
         .await
+        .map_err(|_| "stream creation outcome unknown")?
         .map_err(|_| "stream creation rejected")?;
-    println!("Committed-event stream created from the deployment contract");
+    }
+    JetStreamCommittedEventPublisher::from_client(client, &contract, Duration::from_secs(10))
+        .await
+        .map_err(|_| "installed stream contract verification failed")?;
+    println!("Committed-event stream matches the deployment contract");
     Ok(())
 }

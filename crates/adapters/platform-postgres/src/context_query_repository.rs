@@ -1,3 +1,4 @@
+mod dispatch_authorization;
 use crate::{
     invocation_repository::load_enabled_exact_published_version,
     repository::{

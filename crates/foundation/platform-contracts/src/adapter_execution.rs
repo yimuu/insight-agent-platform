@@ -153,7 +153,7 @@ pub fn remote_context_adapter_execution_capability(
 ) -> Result<WorkerExecutionCapability, ExecutionCompatibilityError> {
     capability(
         "context.query.execute",
-        json!({"kind":"remote_search","protocol_contract_digest":protocol,"result_mapping_digest":mapping}),
+        json!({"kind":"remote_search","protocol_contract_digest":protocol,"result_mapping_digest":mapping,"execution_schema_version":crate::REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION,"current_dispatch_authorization":1,"outcome_semantics":2}),
     )
 }
 pub fn context_adapter_execution_capability(
@@ -283,5 +283,37 @@ mod tests {
         assert!(adapter_execution_requirement(&program, sha('2')).is_err());
         let adapter = native_context_adapter_execution_capability(&sha('2'), &sha('3')).unwrap();
         assert!(!program.supports(&adapter_execution_requirement(&adapter, sha('4')).unwrap()));
+    }
+
+    #[test]
+    fn remote_context_requires_current_authorization_without_changing_http_or_native_identity() {
+        let protocol = crate::remote_context_protocol_contract_digest();
+        let mapping = crate::remote_context_result_mapping_digest();
+        let old_remote = capability(
+            "context.query.execute",
+            json!({"kind":"remote_search","protocol_contract_digest":protocol,"result_mapping_digest":mapping}),
+        )
+        .unwrap();
+        let current = remote_context_adapter_execution_capability(&protocol, &mapping).unwrap();
+        let requirement = adapter_execution_requirement(&current, sha('1')).unwrap();
+        assert!(current.supports(&requirement));
+        assert!(!old_remote.supports(&requirement));
+        let authorization_only = capability(
+            "context.query.execute",
+            json!({"kind":"remote_search","protocol_contract_digest":protocol,"result_mapping_digest":mapping,"execution_schema_version":2,"current_dispatch_authorization":1}),
+        )
+        .unwrap();
+        assert!(!authorization_only.supports(&requirement));
+        assert!(!current.supports(&adapter_execution_requirement(&old_remote, sha('1')).unwrap()));
+        assert_eq!(crate::REMOTE_CONTEXT_PROTOCOL_VERSION, 1);
+        assert_eq!(crate::REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION, 2);
+        assert_eq!(
+            native_context_adapter_execution_capability(&protocol, &mapping).unwrap(),
+            capability(
+                "context.query.execute",
+                json!({"kind":"native_catalog","adapter_contract_digest":protocol,"installed_adapter_digest":mapping}),
+            )
+            .unwrap()
+        );
     }
 }

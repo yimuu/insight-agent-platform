@@ -12,6 +12,7 @@ insight-platform-contracts.workspace = true
 insight-platform-agent-compiler.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 insight-platform-plan.workspace = true

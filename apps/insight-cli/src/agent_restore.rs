@@ -1113,6 +1113,7 @@ mod tests {
             draft_generation: 2,
             version: 2,
             draft: ResourceDraftPayload {
+                alias: None,
                 display_name: "edited draft".into(),
                 document: draft,
                 validation: None,

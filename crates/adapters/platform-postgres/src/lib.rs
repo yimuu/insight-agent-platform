@@ -4,6 +4,11 @@
 //! running platform services never executes DDL. The baseline is installed only by the external
 //! provisioning workflow, after which runtime processes use [`verify_schema`] read-only.
 
+/// Administrative provisioning for the explicit non-production shared DML role.
+pub fn development_runtime_role_grants_sql() -> &'static str {
+    include_str!("../development-runtime-role-grants.sql")
+}
+
 /// Provisioning-only SQL for the independently deployed Security Authority role.
 pub fn security_authority_role_grants_sql() -> &'static str {
     include_str!("../security-authority-grants.sql")
@@ -47,7 +52,7 @@ use sqlx::{PgPool, Row};
 use std::{collections::BTreeSet, error::Error, fmt};
 
 pub const AUTHORITY_SCHEMA: &str = "insight_platform";
-pub const SCHEMA_CONTRACT_VERSION: u32 = 14;
+pub const SCHEMA_CONTRACT_VERSION: u32 = 15;
 pub const POSTGRES_MAJOR_VERSION: i32 = 16;
 pub const BASELINE_TABLE_COUNT: usize = 23;
 
@@ -83,6 +88,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
 ];
 
 pub const EXPECTED_FUNCTIONS: &[&str] = &[
+    "artifact_lock_scan_policy(text, text)",
     "history_delete_event(text, text, text)",
     "history_delete_prefix(text, text, bigint, bigint)",
     "history_delete_published_outbox(text, text, timestamp with time zone)",

@@ -102,7 +102,9 @@ def classify(paths: list[str], force_all: bool = False) -> dict[str, bool]:
         "LICENSE",
         "README.md",
     }
-    runtime = policy or any(
+    # The installation renderer consumes this release-owned dependency image inventory directly.
+    runtime = policy or any(path.as_posix() == "deploy/release/development-profile-v1.json"
+                            for path in normalized) or any(
         not (
             path.as_posix() in non_runtime_root_files
             or any(is_under(path, prefix) for prefix in non_runtime_prefixes)

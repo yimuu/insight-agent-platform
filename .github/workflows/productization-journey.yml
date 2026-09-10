@@ -326,10 +326,10 @@ jobs:
             echo "PRODUCTIZATION_SEED_IDENTITY=$seed_identity"
             echo "PRODUCTIZATION_SEED_BINARY=target/debug/insight"
           } >> "$GITHUB_ENV"
-          target/debug/insight init --path "$seed" --name productization-kind-seed
-          target/debug/insight dev --path "$seed" \
+          target/debug/insight qualification-aws init --path "$seed" --name productization-kind-seed
+          target/debug/insight qualification-aws dev --path "$seed" \
             --features context,mcp,model,remote-capability --from-source
-          target/debug/insight stop --path "$seed"
+          target/debug/insight qualification-aws stop --path "$seed"
 
           {
             echo "INSIGHT_KIND_CLUSTER_NAME=productization-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -420,15 +420,15 @@ jobs:
             echo "PRODUCTIZATION_SEED_IDENTITY=$seed_identity"
             echo "PRODUCTIZATION_SEED_BINARY=$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY"
           } >> "$GITHUB_ENV"
-          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" init --path "$seed" --name productization-kind-seed
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" qualification-aws init --path "$seed" --name productization-kind-seed
           candidate_version="$(jq -r '.version' "$closure")"
           release_cache="$seed/.insight/cache/releases/$candidate_version"
           mkdir -p "$release_cache"
           cp "$PRODUCTIZATION_RELEASE_CANDIDATE/release-bundle.json" "$release_cache/release-bundle.json"
           cp "$PRODUCTIZATION_RELEASE_CANDIDATE/release-bundle.signature.json" "$release_cache/release-bundle.signature.json"
-          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" dev --path "$seed" \
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" qualification-aws dev --path "$seed" \
             --features context,mcp,model,remote-capability --offline
-          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" stop --path "$seed"
+          "$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY" qualification-aws stop --path "$seed"
           bundle_digest="$(jq -r '.release_bundle_digest' "$closure")"
           schema_bin="$seed/.insight/runtime/releases/${bundle_digest#sha256:}/bin/platform-schema"
           [[ -x "$schema_bin" ]]

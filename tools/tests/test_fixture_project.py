@@ -38,7 +38,7 @@ class FixtureProjectTests(unittest.TestCase):
         other.mkdir()
         (self.project / "outside-link").symlink_to(other, target_is_directory=True)
         self.assertEqual(self.clean(status=0, keep_failed=True), 0)
-        self.assertEqual([call.args[0][1] for call in run.call_args_list], ["stop", "reset"])
+        self.assertEqual([call.args[0][1:3] for call in run.call_args_list], [["qualification-aws", "stop"], ["qualification-aws", "reset"]])
         self.assertEqual(run.call_args_list[1].args[0][-2:], ["--confirm", "fixture"])
         self.assertFalse(self.project.exists())
         self.assertTrue(other.is_dir())
@@ -47,7 +47,7 @@ class FixtureProjectTests(unittest.TestCase):
     def test_partial_startup_resets_without_process_journal(self, run):
         self.initialize(journal=False)
         self.assertEqual(self.clean(status=17), 17)
-        self.assertEqual(run.call_args.args[0][1], "reset")
+        self.assertEqual(run.call_args.args[0][1:3], ["qualification-aws", "reset"])
         self.assertFalse(self.project.exists())
 
     def test_failure_is_retained_only_with_explicit_flag(self):
@@ -68,7 +68,7 @@ class FixtureProjectTests(unittest.TestCase):
     @patch("tools.qualification.fixture_project.subprocess.run")
     def test_failed_teardown_retains_ownership_for_retry(self, run):
         self.initialize()
-        run.side_effect = subprocess.CalledProcessError(1, ["insight", "stop"])
+        run.side_effect = subprocess.CalledProcessError(1, ["insight", "qualification-aws", "stop"])
         with self.assertRaises(subprocess.CalledProcessError):
             self.clean(status=0)
         self.assertTrue(self.project.exists())
@@ -125,7 +125,7 @@ class FixtureProjectTests(unittest.TestCase):
         logs.mkdir()
         def stop_then_fail(*args, **kwargs):
             (logs / "gateway.log").write_text("last drain diagnostic")
-            raise subprocess.CalledProcessError(1, ["insight", "stop"])
+            raise subprocess.CalledProcessError(1, ["insight", "qualification-aws", "stop"])
         run.side_effect = stop_then_fail
         destination = self.root / "diagnostics"
         with self.assertRaises(subprocess.CalledProcessError):

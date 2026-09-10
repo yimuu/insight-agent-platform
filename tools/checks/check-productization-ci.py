@@ -29,6 +29,35 @@ development_profile = json.loads(
 )
 failures: list[str] = []
 
+# These are explicit AWS physical fixtures. Ordinary lifecycle commands only display the
+# unified installation entry points; silently using those commands would not run a gate.
+for path in (
+    ".github/workflows/productization-journey.yml",
+    "tools/qualification/run-productization-journey.sh",
+    "tools/qualification/qualify-development-profile.sh",
+    "tools/qualification/bootstrap-platform-kind-local.sh",
+):
+    source = (ROOT / path).read_text(encoding="utf-8").replace("\\\n", "")
+    if re.search(r'(?:"\$insight_bin"|target/debug/insight|"\$PRODUCTIZATION_RELEASE_CANDIDATE_BINARY")\s+(?:init|dev|token|start|stop|status|logs|reset)\b', source):
+        failures.append(f"AWS qualification invokes an ordinary lifecycle entry in {path}")
+    if "qualification-aws" not in source:
+        failures.append(f"AWS qualification namespace is absent in {path}")
+for path, actions in (
+    ("tools/qualification/fixture_project.py", ("stop", "reset")),
+    ("tools/qualification/qualify-fixture-cleanup.py", ("init",)),
+):
+    source = (ROOT / path).read_text(encoding="utf-8")
+    for action in actions:
+        if f'[insight, "qualification-aws", "{action}",' not in source:
+            failures.append(f"AWS fixture {action} namespace is absent in {path}")
+for path in (
+    "tests/qualification/tests/productization/deterministic_first_run.rs",
+    "tests/qualification/tests/productization/native_artifact_cors.rs",
+):
+    source = (ROOT / path).read_text(encoding="utf-8")
+    if '"qualification-aws"' not in source or re.search(r'\.args\(\[\s*(?:"(?:stop|start)"|action)\s*,\s*"--path"', source):
+        failures.append(f"Rust AWS lifecycle fixture lost its explicit namespace in {path}")
+
 for marker in (
     "Classify changed paths",
     "Quick contracts",
@@ -215,6 +244,7 @@ for marker in (
     '--test-result "$TEST_RESULT"',
     '--cli-result "$CLI_RESULT"',
     '--console-result "$CONSOLE_RESULT"',
+    '--installation-result "$INSTALLATION_RESULT"',
     '--policy-result "$POLICY_RESULT"',
 ):
     if marker not in ci:
@@ -414,7 +444,7 @@ for marker in (
     'ctr --namespace=k8s.io content get "$expected_config_digest"',
     'kind:(if $platform_index_digest == "" then "source_oci_manifest"',
     "signed candidate seed runtime config is missing; refusing source fallback",
-    '"$insight_bin" dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source',
+    '"$insight_bin" qualification-aws dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source',
 ):
     if marker not in kind_bootstrap:
         failures.append(f"Kind candidate import contract misses {marker!r}")
@@ -434,7 +464,7 @@ seed_fallback = kind_bootstrap.split(
     'if [[ ! -d "$seed_project/.insight/runtime/config" ]]; then', 1
 )[-1].split("seed_runtime=", 1)[0]
 candidate_seed_guard = 'if [[ -n "$platform_index_digest" ]]; then'
-source_seed_build = '"$insight_bin" dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source'
+source_seed_build = '"$insight_bin" qualification-aws dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source'
 if candidate_seed_guard not in seed_fallback or source_seed_build not in seed_fallback:
     failures.append("Kind seed handling does not retain source mode and guard candidate mode")
 elif seed_fallback.index(candidate_seed_guard) > seed_fallback.index(source_seed_build):
@@ -498,8 +528,8 @@ if "uses: ./.github/workflows/productization-journey.yml" in ci:
 required_ci = ci.split("\n  required:", 1)[-1]
 if "productization" in required_ci.lower():
     failures.append("ordinary required CI summary still depends on Productization evidence")
-if "needs: [changes, quick, lint, test, cli, console, policy]" not in required_ci:
-    failures.append("required CI summary does not close the lightweight lane set")
+if "needs: [changes, quick, lint, test, cli, console, installation, policy]" not in required_ci:
+    failures.append("required CI summary does not close the selected lane set")
 
 if failures:
     raise SystemExit("\n".join(failures))

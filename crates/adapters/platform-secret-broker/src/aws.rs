@@ -3,6 +3,11 @@
 //! No static credential is accepted by this module. SDK clients use the default workload-identity
 //! chain, while every provider endpoint, KMS key and namespace is frozen by the CandidateManifest.
 
+use super::prepared::{
+    check_import_permit, decode_prepared, deterministic_binding_id, encode_prepared, exact_binding,
+    reference_encryption_context as kms_context, validate_seal_identity, PreparedMcpOAuthPkce,
+    PreparedMcpOAuthToken, PreparedModelCredential, PreparedSecretEnvelope, SecretBytes,
+};
 use super::{
     InstalledSecretProvider, InstalledSecretProviderCatalog, NoopSecretExternalDependencyObserver,
     OpaqueSecretReference, ProviderPreparedSecretVersion, ProviderSecretMaterial,
@@ -19,11 +24,10 @@ use aws_sdk_kms::{
     primitives::Blob as KmsBlob, types::EncryptionAlgorithmSpec, Client as KmsClient,
 };
 use aws_sdk_secretsmanager::{primitives::Blob as SecretBlob, Client as SecretsClient};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use insight_platform_contracts::{
-    canonical_digest, parse_strict_json, ExactDeploymentRef, ExactSecretBindingRef, JsonLimits,
-    ResourceId, ResourceKind, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
+    canonical_digest, parse_strict_json, JsonLimits, ResourceId, ResourceKind,
+    SecretResolutionPolicy, Sha256Digest,
 };
 use insight_platform_egress::{
     McpOAuthTokenPreparation, McpOAuthTokenSet, NewMcpOAuthTransientSecretBundle,
@@ -45,7 +49,6 @@ const MAX_PROVIDER_ENDPOINT_BYTES: usize = 2_048;
 const MAX_SECRET_ID_BYTES: usize = 2_048;
 const MAX_SECRET_VERSION_ID_BYTES: usize = 64;
 const MAX_SECRET_NAME_PREFIX_BYTES: usize = 128;
-const MAX_PREPARED_SECRET_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_TIMEOUT_MILLISECONDS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +282,20 @@ impl AwsSecretProviderCatalog {
         (self.sealer, self.unsealer, self.providers)
     }
 
+    pub(super) fn cloned_components(
+        &self,
+    ) -> (
+        Arc<dyn SecretReferenceSealer>,
+        Arc<dyn SecretReferenceUnsealer>,
+        InstalledSecretProviderCatalog,
+    ) {
+        (
+            Arc::clone(&self.sealer),
+            Arc::clone(&self.unsealer),
+            self.providers.clone(),
+        )
+    }
+
     pub async fn check_readiness(&self) -> Result<(), AwsSecretProviderReadinessError> {
         for provider in &self.readiness {
             provider.check().await?;
@@ -489,6 +506,7 @@ impl SecretReferenceUnsealer for AwsSecretReferenceKms {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AwsSecretMaterialKind {
+    ModelCredential,
     Raw,
     McpOAuthPkce,
     McpOAuthToken,
@@ -606,12 +624,31 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
         let mut bytes = exact_secret_bytes(output)?;
         let material = match reference.material_kind {
             AwsSecretMaterialKind::Raw => std::mem::take(&mut bytes),
+            AwsSecretMaterialKind::ModelCredential => {
+                let envelope = decode_prepared(&bytes);
+                bytes.fill(0);
+                let PreparedSecretEnvelope::ModelCredential(value) = envelope? else {
+                    return Err(SecretProviderResolveError::InvalidEvidence);
+                };
+                if value.schema_version != 1
+                    || !value.identity.validate()
+                    || value.identity.tenant_id != *tenant_id
+                    || value.identity.provider_id != self.provider_id
+                {
+                    return Err(SecretProviderResolveError::InvalidEvidence);
+                }
+                let key =
+                    insight_platform_contracts::SensitiveModelApiKey::new(value.api_key.decode()?)
+                        .map_err(|_| SecretProviderResolveError::InvalidEvidence)?;
+                key.expose().to_vec()
+            }
             AwsSecretMaterialKind::McpOAuthPkce => {
                 let envelope: PreparedSecretEnvelope = decode_prepared(&bytes)?;
                 bytes.fill(0);
                 match envelope {
                     PreparedSecretEnvelope::McpOAuthPkce(value) => value.pkce_verifier.decode()?,
-                    PreparedSecretEnvelope::McpOAuthToken(_) => {
+                    PreparedSecretEnvelope::McpOAuthToken(_)
+                    | PreparedSecretEnvelope::ModelCredential(_) => {
                         return Err(SecretProviderResolveError::InvalidEvidence)
                     }
                 }
@@ -621,7 +658,8 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
                 bytes.fill(0);
                 match envelope {
                     PreparedSecretEnvelope::McpOAuthToken(value) => value.access_token.decode()?,
-                    PreparedSecretEnvelope::McpOAuthPkce(_) => {
+                    PreparedSecretEnvelope::McpOAuthPkce(_)
+                    | PreparedSecretEnvelope::ModelCredential(_) => {
                         return Err(SecretProviderResolveError::InvalidEvidence)
                     }
                 }
@@ -697,6 +735,15 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
         Ok(SecretProviderDeleteDisposition::Deleted)
     }
 
+    async fn prepare_or_load_model_credential(
+        &self,
+        request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+        permit: &insight_platform_contracts::ModelCredentialImportPermitV1,
+        key: &insight_platform_contracts::SensitiveModelApiKey,
+    ) -> Result<ProviderPreparedSecretVersion, SecretProviderPrepareError> {
+        self.prepare_model_credential(request, permit, key).await
+    }
+
     async fn prepare_or_load_mcp_oauth_transient(
         &self,
         candidate: NewMcpOAuthTransientSecretBundle,
@@ -724,7 +771,7 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
             pkce_verifier: SecretBytes::encode(candidate.pkce_verifier.expose()),
         });
         let stored_entry = self
-            .create_or_load(&secret_name, &version_id, proposed)
+            .create_or_load(&secret_name, &version_id, proposed, None)
             .await?;
         let secret_id = stored_secret_id(&stored_entry)?.to_owned();
         if stored_entry.version_id != version_id {
@@ -849,7 +896,7 @@ impl InstalledSecretProvider for AwsSecretsManagerProvider {
             verification_evidence_digest: verified.verification_evidence_digest.clone(),
             expires_at: verified.expires_at,
         });
-        let stored = self.create_or_load(&name, &version, proposed).await?;
+        let stored = self.create_or_load(&name, &version, proposed, None).await?;
         self.token_result(preparation, version, stored)
     }
 }
@@ -957,8 +1004,9 @@ impl AwsSecretsManagerProvider {
                     return Err(SecretProviderPrepareError::Rejected);
                 }
                 let mut bytes = exact_secret_bytes(output).map_err(map_resolve_to_prepare)?;
-                let envelope = decode_prepared(&bytes).map_err(map_resolve_to_prepare)?;
+                let envelope = decode_prepared(&bytes).map_err(map_resolve_to_prepare);
                 bytes.fill(0);
+                let envelope = envelope?;
                 Ok(Some(StoredPreparedSecret {
                     secret_id,
                     version_id: version.to_owned(),
@@ -975,11 +1023,20 @@ impl AwsSecretsManagerProvider {
         name: &str,
         version: &str,
         envelope: PreparedSecretEnvelope,
+        import: Option<(
+            &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+            &insight_platform_contracts::ModelCredentialImportPermitV1,
+        )>,
     ) -> Result<StoredPreparedSecret, SecretProviderPrepareError> {
+        check_import_permit(import)?;
         if let Some(existing) = self.load_prepared(name, version).await? {
             return Ok(existing);
         }
         let mut bytes = encode_prepared(&envelope)?;
+        if let Err(error) = check_import_permit(import) {
+            bytes.fill(0);
+            return Err(error);
+        }
         let result = self
             .client
             .create_secret()
@@ -1017,6 +1074,7 @@ impl AwsSecretsManagerProvider {
                     .as_service_error()
                     .is_some_and(|service| service.is_resource_exists_exception()) =>
             {
+                check_import_permit(import)?;
                 self.load_prepared(name, version)
                     .await?
                     .ok_or(SecretProviderPrepareError::WriteUncertain)
@@ -1028,6 +1086,15 @@ impl AwsSecretsManagerProvider {
                 }) =>
             {
                 Err(SecretProviderPrepareError::Rejected)
+            }
+            Err(_) if import.is_some() => {
+                // A failed write response remains uncertain when its readback deadline expires.
+                check_import_permit(import)
+                    .map_err(|_| SecretProviderPrepareError::WriteUncertain)?;
+                self.load_prepared(name, version)
+                    .await
+                    .map_err(|_| SecretProviderPrepareError::WriteUncertain)?
+                    .ok_or(SecretProviderPrepareError::WriteUncertain)
             }
             Err(_) => Err(SecretProviderPrepareError::WriteUncertain),
         }
@@ -1115,124 +1182,65 @@ struct StoredPreparedSecret {
     envelope: PreparedSecretEnvelope,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum PreparedSecretEnvelope {
-    McpOAuthPkce(PreparedMcpOAuthPkce),
-    McpOAuthToken(PreparedMcpOAuthToken),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedMcpOAuthPkce {
-    schema_version: u32,
-    tenant_id: ResourceId,
-    task_id: ResourceId,
-    authorization_binding_id: ResourceId,
-    mcp_deployment: ExactDeploymentRef,
-    preparation_digest: Sha256Digest,
-    callback_binding_digest: Sha256Digest,
-    expires_at: DateTime<Utc>,
-    state: SecretBytes,
-    nonce: SecretBytes,
-    pkce_verifier: SecretBytes,
-}
-
-impl PreparedMcpOAuthPkce {
-    fn validate_for_transient(
+impl AwsSecretsManagerProvider {
+    async fn prepare_model_credential(
         &self,
-        candidate: &NewMcpOAuthTransientSecretBundle,
-    ) -> Result<(), SecretProviderPrepareError> {
-        if self.schema_version != 1
-            || self.tenant_id != candidate.tenant_id
-            || self.task_id != candidate.task_id
-            || self.authorization_binding_id != candidate.authorization_binding_id
-            || self.mcp_deployment != candidate.mcp_deployment
-            || self.preparation_digest != candidate.preparation_digest
-            || self.callback_binding_digest != candidate.callback_binding_digest
-            || self.expires_at != candidate.expires_at
-            || self.expires_at <= Utc::now()
+        request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+        permit: &insight_platform_contracts::ModelCredentialImportPermitV1,
+        key: &insight_platform_contracts::SensitiveModelApiKey,
+    ) -> Result<ProviderPreparedSecretVersion, SecretProviderPrepareError> {
+        check_import_permit(Some((request, permit)))?;
+        let identity = &request.identity;
+        if identity.provider_id != self.provider_id {
+            return Err(SecretProviderPrepareError::Rejected);
+        }
+        let preparation = identity
+            .preparation_digest()
+            .map_err(|_| SecretProviderPrepareError::Rejected)?;
+        let name = self.prepared_secret_name(&identity.tenant_id, &preparation);
+        let version = deterministic_version_id(&preparation)?;
+        let proposed = PreparedSecretEnvelope::ModelCredential(PreparedModelCredential {
+            schema_version: 1,
+            identity: identity.clone(),
+            api_key: SecretBytes::encode(key.expose()),
+        });
+        let stored = self
+            .create_or_load(&name, &version, proposed, Some((request, permit)))
+            .await?;
+        let PreparedSecretEnvelope::ModelCredential(envelope) = &stored.envelope else {
+            return Err(SecretProviderPrepareError::Rejected);
+        };
+        let stored_key = insight_platform_contracts::SensitiveModelApiKey::new(
+            envelope.api_key.decode().map_err(map_resolve_to_prepare)?,
+        )
+        .map_err(|_| SecretProviderPrepareError::Rejected)?;
+        if envelope.schema_version != 1
+            || envelope.identity != *identity
+            || stored_key.expose() != key.expose()
+            || stored.version_id != version
         {
             return Err(SecretProviderPrepareError::Rejected);
         }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedMcpOAuthToken {
-    schema_version: u32,
-    preparation_digest: Sha256Digest,
-    access_token: SecretBytes,
-    refresh_token: Option<SecretBytes>,
-    id_token: Option<SecretBytes>,
-    granted_scopes: Vec<String>,
-    audience_identity_digest: Sha256Digest,
-    issuer_identity_digest: Sha256Digest,
-    subject_identity_digest: Sha256Digest,
-    verification_evidence_digest: Sha256Digest,
-    expires_at: DateTime<Utc>,
-}
-
-impl PreparedMcpOAuthToken {
-    fn validate_for(
-        &self,
-        preparation: &McpOAuthTokenPreparation,
-    ) -> Result<(), SecretProviderPrepareError> {
-        if self.schema_version != 1
-            || self.preparation_digest != preparation.preparation_digest
-            || self.granted_scopes.is_empty()
-            || !self.granted_scopes.windows(2).all(|pair| pair[0] < pair[1])
-            || !self
-                .granted_scopes
-                .iter()
-                .all(|scope| preparation.requested_scopes.binary_search(scope).is_ok())
-            || self.audience_identity_digest != preparation.audience_identity_digest
-            || self.issuer_identity_digest != preparation.issuer_identity_digest
-            || self.expires_at <= Utc::now()
-        {
-            return Err(SecretProviderPrepareError::Rejected);
+        let reference = AwsOpaqueSecretReference {
+            schema_version: 1,
+            secret_id: stored.secret_id.clone(),
+            version_id: Some(version.clone()),
+            version_stage: None,
+            material_kind: AwsSecretMaterialKind::ModelCredential,
+            dedicated_version_secret: true,
         }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-struct SecretBytes(String);
-
-impl SecretBytes {
-    fn encode(bytes: &[u8]) -> Self {
-        Self(BASE64_STANDARD.encode(bytes))
-    }
-
-    fn decode(&self) -> Result<Vec<u8>, SecretProviderResolveError> {
-        let bytes = BASE64_STANDARD
-            .decode(&self.0)
-            .map_err(|_| SecretProviderResolveError::InvalidEvidence)?;
-        if bytes.is_empty() || bytes.len() > insight_platform_egress::MAX_MCP_OAUTH_TOKEN_BYTES_HARD
-        {
-            return Err(SecretProviderResolveError::InvalidEvidence);
-        }
-        Ok(bytes)
-    }
-}
-
-impl fmt::Debug for SecretBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SecretBytes")
-            .field("encoded_byte_length", &self.0.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for SecretBytes {
-    fn drop(&mut self) {
-        // SAFETY: the String remains valid UTF-8 after zeroing and is not observed again during
-        // drop. This avoids a second allocation solely to clear provider-held sensitive text.
-        unsafe { self.0.as_bytes_mut().fill(0) };
+        .encode()?;
+        Ok(ProviderPreparedSecretVersion {
+            secret_binding_id: identity
+                .secret_binding_id()
+                .map_err(|_| SecretProviderPrepareError::Rejected)?,
+            provider_id: self.provider_id.clone(),
+            opaque_reference: reference,
+            opaque_version_identity_digest: digest(version.as_bytes()),
+            storage_evidence_digest: digest(
+                format!("model_credential_storage_v1:{}:{version}", stored.secret_id).as_bytes(),
+            ),
+        })
     }
 }
 
@@ -1254,62 +1262,6 @@ fn exact_secret_bytes(
             Err(SecretProviderResolveError::InvalidEvidence)
         }
     }
-}
-
-fn encode_prepared(
-    envelope: &PreparedSecretEnvelope,
-) -> Result<Vec<u8>, SecretProviderPrepareError> {
-    let bytes = serde_jcs::to_vec(envelope).map_err(|_| SecretProviderPrepareError::Rejected)?;
-    if bytes.is_empty() || bytes.len() > MAX_PREPARED_SECRET_BYTES {
-        return Err(SecretProviderPrepareError::Rejected);
-    }
-    Ok(bytes)
-}
-
-fn decode_prepared(bytes: &[u8]) -> Result<PreparedSecretEnvelope, SecretProviderResolveError> {
-    let value = parse_strict_json(
-        bytes,
-        JsonLimits {
-            max_bytes: MAX_PREPARED_SECRET_BYTES,
-            max_depth: 16,
-            max_items_per_array: insight_platform_contracts::MAX_MCP_OAUTH_SCOPES,
-            max_properties_per_object: 32,
-            max_string_bytes: insight_platform_egress::MAX_MCP_OAUTH_TOKEN_BYTES_HARD * 2,
-        },
-    )
-    .map_err(|_| SecretProviderResolveError::InvalidEvidence)?;
-    serde_json::from_value(value).map_err(|_| SecretProviderResolveError::InvalidEvidence)
-}
-
-fn exact_binding(
-    binding_id: ResourceId,
-    provider_id: ResourceId,
-    purpose: SecretPurpose,
-    version_digest: Sha256Digest,
-) -> Result<ExactSecretBindingRef, SecretProviderPrepareError> {
-    ExactSecretBindingRef::build(
-        binding_id,
-        1,
-        provider_id,
-        purpose,
-        SecretResolutionPolicy::Pinned {
-            opaque_version_identity_digest: version_digest,
-        },
-    )
-    .map_err(|_| SecretProviderPrepareError::Rejected)
-}
-
-fn deterministic_binding_id(
-    task_id: &ResourceId,
-    preparation: &Sha256Digest,
-) -> Result<ResourceId, SecretProviderPrepareError> {
-    let hash = Sha256::digest(preparation.as_str().as_bytes());
-    let mut bytes = task_id.uuid().into_bytes();
-    bytes[6..16].copy_from_slice(&hash[..10]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    ResourceId::from_uuid_v7(ResourceKind::SecretBinding, Uuid::from_bytes(bytes))
-        .map_err(|_| SecretProviderPrepareError::Rejected)
 }
 
 fn deterministic_version_id(
@@ -1382,42 +1334,6 @@ fn validate_reference_policy(
         }
     }
     Ok(())
-}
-
-fn validate_seal_identity(
-    tenant_id: &ResourceId,
-    secret_binding_id: &ResourceId,
-    provider_id: &ResourceId,
-    binding_generation: u64,
-) -> Result<(), SecretReferenceSealError> {
-    if tenant_id.kind() != ResourceKind::Tenant
-        || secret_binding_id.kind() != ResourceKind::SecretBinding
-        || provider_id.kind() != ResourceKind::SecretProvider
-        || binding_generation == 0
-    {
-        return Err(SecretReferenceSealError::Rejected);
-    }
-    Ok(())
-}
-
-fn kms_context(
-    tenant_id: &ResourceId,
-    secret_binding_id: &ResourceId,
-    provider_id: &ResourceId,
-    generation: u64,
-    key_id: &str,
-) -> HashMap<String, String> {
-    HashMap::from([
-        ("schema_version".to_owned(), "1".to_owned()),
-        ("tenant_id".to_owned(), tenant_id.to_string()),
-        (
-            "secret_binding_id".to_owned(),
-            secret_binding_id.to_string(),
-        ),
-        ("provider_id".to_owned(), provider_id.to_string()),
-        ("binding_generation".to_owned(), generation.to_string()),
-        ("key_id".to_owned(), key_id.to_owned()),
-    ])
 }
 
 fn zero_optional_kms_plaintext(plaintext: Option<KmsBlob>) {
@@ -1734,3 +1650,7 @@ mod tests {
         assert!(context.contains_key("key_id"));
     }
 }
+
+#[cfg(test)]
+#[path = "aws_model_credential_tests.rs"]
+mod model_credential_tests;

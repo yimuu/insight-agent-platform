@@ -2127,8 +2127,6 @@ fn materialization_failure(code: &'static str, request_sent: bool) -> ModelAdapt
     }
 }
 
-const INLINE_MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES: usize = 65_536;
-
 /// Bounded first-release Inline output materializer. Oversized output fails with the stable
 /// `model_output_too_large` code and is never truncated or staged as an Artifact.
 pub struct InlineModelOutputMaterializer<I> {
@@ -2151,10 +2149,11 @@ where
         &self,
         execution: &insight_platform_models::execution::ModelAdapterExecutionRequest,
     ) -> Result<(), ModelAdapterFailure> {
-        let maximum = usize::try_from(execution.provider.request_limits.maximum_response_bytes)
+        let capacity = u64::try_from(self.limits.inline_value_limits().max_bytes)
             .ok()
-            .and_then(|bytes| bytes.checked_add(INLINE_MODEL_RESPONSE_ENVELOPE_OVERHEAD_BYTES));
-        if maximum.is_none_or(|maximum| maximum > self.limits.inline_value_limits().max_bytes) {
+            .and_then(insight_platform_contracts::inline_model_provider_response_capacity);
+        let maximum = execution.provider.request_limits.maximum_response_bytes;
+        if maximum == 0 || capacity.is_none_or(|capacity| maximum > capacity) {
             let mut failure = materialization_failure("model_output_too_large", false);
             failure.class = ModelAdapterFailureClass::RejectedBeforeDispatch;
             return Err(failure);
@@ -2217,6 +2216,9 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod response_capacity_tests;
 
 #[cfg(test)]
 mod tests {

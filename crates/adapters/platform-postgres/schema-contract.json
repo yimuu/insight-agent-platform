@@ -8,6 +8,7 @@
   },
   "contract": "insight.platform/v1/postgres-baseline",
   "functions": [
+    "artifact_lock_scan_policy(text, text)",
     "history_delete_event(text, text, text)",
     "history_delete_prefix(text, text, bigint, bigint)",
     "history_delete_published_outbox(text, text, timestamp with time zone)",
@@ -29,17 +30,17 @@
     "is_trace_id(text)"
   ],
   "physical_inventory": {
-    "digest": "sha256:aec3331937c1e43784ac85eaab888602b7e22784bee7ce558c7dd7c305a2cede",
+    "digest": "sha256:6f1d0b9d2170bbfcb1d97f66b6aa98db5ccc056260eeab82d5adcfbf48d92f28",
     "path": "schema-inventory.json"
   },
   "postgres_major": 16,
   "schema": "insight_platform",
-  "schema_contract_version": 14,
+  "schema_contract_version": 15,
   "schema_snapshot": {
-    "digest": "sha256:627762273fbb539b5c7a55768f73e1726ca2f20fc4cb3bd189e88d817ab6819c",
+    "digest": "sha256:4d60adc7af234e46f6704a1df3e101ac7ca2640597178dda7709ef8bf2de2b61",
     "path": "schema.sql"
   },
-  "schema_snapshot_digest": "sha256:627762273fbb539b5c7a55768f73e1726ca2f20fc4cb3bd189e88d817ab6819c",
+  "schema_snapshot_digest": "sha256:4d60adc7af234e46f6704a1df3e101ac7ca2640597178dda7709ef8bf2de2b61",
   "table_count": 23,
   "tables": [
     "artifact_blobs",

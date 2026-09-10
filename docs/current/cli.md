@@ -1,18 +1,41 @@
 # `insight` CLI
 
-`insight` 是 public `/v1` 客户端和本地多进程 supervisor，不拥有业务 authority。官方预构建 CLI 是默认入口；
-预构建本地 runtime 支持 Linux x86_64/ARM64。macOS 的 CLI 安装不包含可直接执行的 runtime，须在仓库 checkout 中
-显式使用 `insight dev --from-source` 并安装 Rust；下方默认 `dev` 示例均以 Linux 为前提。
+模型来源的批量导入、多个厂商的变量映射、密钥文件、连接检测与默认选择见[模型配置](model-configuration.md)。
+
+`insight` 是公开 `/v1` 客户端，不拥有业务 authority。整个平台的默认启动方式见[部署与运维](operations.md)；
+CLI 可以连接部署好的服务完成模型管理和 Agent 编写、发布与运行。
+
+`run watch` 先读取 Run，再排空该次事件页；已观察终态时仍继续读取满页后的事件，保留原游标。
+普通和持久游标路径均通过[真实 HTTP 回归](../specs/unified-installation/model-public-event-review.md#recorded-local-evidence)。
+O 的真实 CLI 旅程也已取得 Run 完成之后的最后一条 Node 事件，见
+[部署证据](../specs/unified-installation/deployment-review.md#o-current-delivery-evidence)。
+历史 watch 未取得预期事件不能作为重新派发模型请求的依据。
+
+`insight connect` 为已有 workspace 保存私有连接引用；它不创建 Tenant、复制 token 或启动服务。
+安装工具签发短期 session 后，使用实际输出的 origin、Tenant 和 token 文件建立连接。普通 `init/dev/start`
+等入口只说明统一安装方式；AWS 物理资格使用文末明确命名空间。
 
 ## Agent 北极星旅程
 
 ```bash
-insight init --path ./my-agent --name my-agent
-insight dev --path ./my-agent
+mkdir -m 700 ./my-agent
+insight connect --path ./my-agent --endpoint "$CONSOLE_ORIGIN" \
+  --tenant "$TENANT_ID" --token-file "$SESSION_FILE" --ca-file "$PUBLIC_CA_FILE"
 insight agent validate --path ./my-agent --file ./my-agent/agent.yaml
 insight agent publish --path ./my-agent --file ./my-agent/agent.yaml
 insight agent run my-agent --path ./my-agent --input '{"message":"hello"}'
 ```
+
+同源 Console origin 已转发管理与运行请求；直接连接两个 Gateway 时，`--endpoint` 指向管理端，
+另显式提供 `--runtime-endpoint`。默认本地安装将 `PUBLIC_CA_FILE` 指向安装工具
+[交付的公共 CA](installation.md#obtain-the-public-ca)，同一信任输入也用于 Artifact 上传。
+全部端点使用公开受信任证书时可省略 `--ca-file`；该参数只接受公共证书。
+连接文件由 [CLI connection owner](../../apps/insight-cli/src/connection.rs) 定义并校验；`.insight` 为
+0700，文件为 0600。每个命令重新读取 token 文件，续发不复制 token 到连接文件。连接保存只确认
+本地引用；JWT Tenant/expiry 检查不验证签名、不产生授权，当前权限与认证仍由 Gateway 判断。
+同 workspace 不可切换两个 origin 或 Tenant；换目标使用新 workspace，保留原 Receipt/CAS journal。
+可重新执行同一 `connect` 更新 token/CA 文件引用。已有旧安装状态或未绑定的发布、恢复记录不能被
+首次连接接管。离线 `agent validate` 仍只需要显式精确 compiler 输入。
 
 `agent publish` 代管 Artifact materialization、Draft validation、immutable publish、Deployment activation、Receipt 与 ETag；
 崩溃后按 0600 journal 和服务端 authority 恢复。默认文本输出只显示 Agent、环境、状态和下一条命令；
@@ -50,7 +73,7 @@ spec:
   instructions: |
     Answer using only the provided user input.
   model:
-    ref: project/default-model
+    ref: project/default
   input:
     schema: schemas/input.json
     classification: internal
@@ -73,40 +96,27 @@ CLI 与 Console 使用同一纯 Rust compiler；Console 运行该核心的 WASM 
 
 普通信号使用 `insight agent signal <run-id> <signal-key> --path ./project [--file signal-request.json]`。文件是公开 Run signal 的 typed payload DTO；省略文件发送无 payload 信号。同一 tenant、Run、信号和请求内容复用相同幂等键，每次重试仍经过当前服务端授权，成功响应不缓存为新的授权。
 
-## 本地 profile
+## 显式 AWS 物理资格
+
+仓库的 AWS 物理资格流程使用独立的 `qualification-aws` 命名空间；它不是默认安装入口。
+此环境保留现有受限本地 profile、已签 runtime cache 和精确进程清理，用于原资格测试。
+成功准备环境后，资格 producer 从实际 profile 和身份导出普通公共连接；公共 Agent/Run 命令没有
+读取旧 LocalProjectState 的回退路径。
 
 ```bash
 insight doctor --json
-insight dev --path ./my-agent
-insight dev --path ./my-agent --features model,context
-insight status --path ./my-agent
-insight logs --path ./my-agent --role orchestration
-insight stop --path ./my-agent
-insight start --path ./my-agent
-insight reset --path ./my-agent
-insight reset --path ./my-agent --confirm my-agent
+insight qualification-aws init --path ./aws-fixture --name aws-fixture
+insight qualification-aws dev --path ./aws-fixture --from-source
+insight qualification-aws status --path ./aws-fixture
+insight qualification-aws stop --path ./aws-fixture
+insight qualification-aws start --path ./aws-fixture
+insight qualification-aws reset --path ./aws-fixture --confirm aws-fixture
 ```
 
-默认 profile 名为 `starter`。closed feature 是 `model`、`remote-capability`、`context`、`mcp`、`sandbox` 和其
-canonical union `all`。同一 release/source 内增加 feature 保留现有本地身份，并重建所选角色的完整配置与实际 binary manifest；
-隐式移除被拒绝。配置更新要求先停止已有角色，在本地 lifecycle lock 下验证整批旧摘要与私有 staging 的新摘要，
-以原子写入 runtime profile 作为提交点。中断后 `dev/start/status/stop` 会先恢复该有界 journal；未知文件漂移或仍有活跃角色则拒绝。
-其他 profile 读取遇未恢复 journal 也会停止，不消费半更新配置。源码构建指纹覆盖迁移后的服务、CLI、编译器/合同及工具源，
-排除构建缓存；实际 executable digest 另行校验，不能由源码指纹代替。切换 exact
-release/source 时必须先以 persisted feature 集合运行一次 `dev`，不能在同一次操作中同时切 identity 和增加 feature。`start` 从已验证的
-runtime profile 恢复 exact feature/release/source closure，并在安全 running 点修复 project summary；它不会从可能滞后的 summary 反向切换。
-预构建 `start` 只读取本地已签名 release 和 exact image cache，重新验证原身份；缓存缺失或漂移会失败，下载与版本切换使用显式 `dev`。
-`--offline` 只使用已验证 cache，缺失时给出精确 pull 指令；`--from-source` 与 `--offline` 冲突，且不存在验证失败后的源码 fallback。
-
-不支持的预构建启动在获取 release 和准备配置前拒绝；`start` 对已验证 profile 或待恢复 journal 的目标模式执行同一检查，
-早于恢复写入与已运行判断。源码目标可以正常恢复，`status/logs/stop/reset` 仍可观察或清理不支持的 profile。
-`doctor.ready` 只汇总报告所列依赖检查，不证明主机支持预构建 runtime；源码启动还要求其可选 Rust 检查通过。
-
-Artifact、Policy 与配额的初始化输入由 CLI 和建库工具共用的[部署合同](../../crates/deployment/platform-deployment-contracts/src/development.rs)校验。
-同一项目重建运行配置时保留其原始文件与持久身份，恢复 journal 也不能替换该输入。文件缺失、摘要漂移或当前策略与物理绑定不一致时拒绝，
-需要初始化新的本地身份；不会重分配身份来绕过数据库的重放检查。
-
-`status` 明确输出 `single-node-development`、`production=false` 和 L4～L6 `not_run`。
+显式资格的预构建 runtime 仅支持 Linux x86_64/ARM64；macOS 资格使用 `--from-source` 和 Rust。
+profile 更改、restart 身份验证、原 cache、lease/generation、停止与清理的边界保持不变；不支持或漂移
+仍拒绝，不能切换到另一身份绕过失败。`doctor.ready` 只证明报告所列依赖，不构成资格或生产证明。
+正常 Native、Compose 和 Helm 使用[统一安装入口](operations.md)，不通过此资格 namespace 启动。
 
 ## 安装与更新
 
@@ -117,8 +127,8 @@ insight update apply --version <exact-stable-version>
 ```
 
 update 验证组织 Ed25519 trust root、canonical ReleaseBundle、目标平台、CLI size/digest、profile/schema digest 与 exact
-image manifest，再以同目录原子 rename 替换 binary。它不自动变更 project-local runtime identity；先 `insight stop`，再以
-原 feature 集合运行一次 `insight dev` 完成 release transition，之后才可在另一次 `dev` 增加 feature。
+image manifest，再以同目录原子 rename 替换 binary。它不自动变更服务安装或已有运行环境；服务版本更新由部署工具管理。
+显式 AWS 资格的 release transition 仍先停止 profile，再以原 feature 集合执行 `qualification-aws dev`；不能借 CLI 更新改写原恢复身份。
 
 Task 的高级 `list` 命令每次只读取一个有界页面，支持 `--purpose respondable|viewable`、状态、种类、Run、page-size 与 cursor；空页面仍可能有下一页。`get --purpose viewable` 只请求安全元数据，表单和修改继续各自检查当前权限。CLI 依据拥有域区分 Approval 的拒绝与交互拒绝，重试保留原 Receipt 和 ETag。
 

@@ -1,11 +1,23 @@
 # 部署与运维
 
-## 单节点开发环境
+## Compose 与 Helm 安装
 
-本地环境使用 `insight init/dev/start/status/logs/stop/reset` 管理 project-local authority。默认 `starter` 与每个显式
-feature 都运行相同 public `/v1` 合同和独立 role；loopback、local OIDC/CA 与单节点部署始终标记 non-production。
+默认单机启动使用 [共享安装工具](installation.md)，容器分别运行各 role 与 Console。安装和 serving
+使用不同命令、凭据及卷；初始化通过后，重复启动核验原身份、权限、对象和进程配置。`verify` 只读检查，
+`session` 显式续发短期登录凭据；它们不会修复漂移或重置数据。模型来源、API key、默认值和执行额度通过
+[公开配置入口](model-configuration.md) 管理，部署工具只负责允许的物理目标和初始化身份。
 
-预构建 runtime 由 Linux image 提取并在宿主执行，只支持 Linux x86_64/ARM64。macOS 使用仓库 checkout 的显式
+普通 Native 启动使用同一安装 owner 的 `tools/install/platform_native.py`，具体命令、冻结宿主产物及前台停止语义见
+[Native 安装](installation.md#start-native-processes)。Compose/Helm 的启动、停止与 rollout 由部署工具管理。
+
+## 显式 AWS 物理资格环境
+
+以下保留的资格路径只通过 `insight qualification-aws <command>` 进入；不是普通用户的默认启动方式。
+本节 `init/dev/start/status/logs/stop/reset` 均为该命名空间的子命令。`starter` 与每个显式 feature 运行相同
+public `/v1` 合同和独立 role，单节点及本地 OIDC/CA 始终是 non-production fixture。此固定 LocalStack
+Community 实例不提供所需的跨容器持久恢复，不能用于默认安装，也不能将它的短生命周期资格转授为耐久性证据。
+
+此资格路径的预构建 runtime 由 Linux image 提取并在宿主执行，只支持 Linux x86_64/ARM64。macOS 使用仓库 checkout 的显式
 `--from-source` 路径；四平台 CLI archive 不等同于四平台预构建 runtime。启动与恢复在写配置前验证目标运行模式，
 不支持时仍保留状态查看和清理入口。
 
@@ -29,11 +41,11 @@ feature 都运行相同 public `/v1` 合同和独立 role；loopback、local OID
   identity 切换与 feature 增加分开执行，恢复和摘要核验规则见 [CLI 本地 profile](cli.md#本地-profile)；
 - `start` 的 feature 与 exact release/source 选择只来自已完整验证的 runtime profile，而不是 project summary；它不会隐式切换 identity，并在
   已证明完整 running closure 时原子修复中断留下的 project summary 漂移；
-- `stop` 只停止 Platform role；PostgreSQL、NATS 与 LocalStack dependency 保持 ready，以保留同一份
-  database/object/KMS/Secret authority；
+- `stop` 只停止该资格项目的 Platform role；PostgreSQL、NATS 与 LocalStack dependency 保持运行，
+  只在原实例的生命周期内继续使用其对象、KMS 与 Secret。此行为不证明依赖重建后仍保留数据；
 - `reset` 先打印 project path 与 Compose volume 范围，再要求 exact project name，删除后不可恢复。
 
-Console 直接使用 Artifact 授予的短时 HTTPS URL 上传对象。本地 bucket 的浏览器跨来源规则由
+该 AWS 资格 Console 直接使用 Artifact 授予的短时 HTTPS URL 上传对象。其 bucket 的浏览器跨来源规则由
 [CLI 开发上传策略](../../apps/insight-cli/src/local_artifact_cors.rs) 统一管理：首次 provision 安装，后续 `dev/start`
 按有界合同严格解码并核验，缺失或漂移时拒绝启动，不自动修补。许可仅覆盖本机临时 Console 端口的上传；对象下载仍经 Gateway，
 预签名 URL 和 Artifact 的当前授权、期限、摘要与长度验收继续生效。生产 bucket 应由部署者配置 exact HTTPS Console origin。
@@ -41,12 +53,16 @@ Console 直接使用 Artifact 授予的短时 HTTPS URL 上传对象。本地 bu
 
 Artifact Gateway 在签发上传目标前将准入时间规范为共同的微秒精度，使 JSON 授权与 PostgreSQL 任务
 保持同一截止。授权不晚于任务、到期拒绝和原 Receipt 重放规则仍严格执行；重试不会刷新已提交的上传窗口。
+授权过期不表示 Operation 终态；未提交 complete 的过期上传保留原恢复记录，先核对公开 Artifact 和
+Operation 状态，不能自动续期或生成新 Receipt。确认原操作终态后才显式使用新的独立 state directory。
+Artifact Gateway 的扫描准入通过受限物理函数锁定精确策略行，业务判定仍在原事务内执行；Registry
+写权限和 append-only quota ledger 的 UPDATE 权限不会因此授予上传角色。
 
-默认发行路径从签名 ReleaseBundle 解析 exact runtime image tag@index digest，并把所选 binary closure 提取到
+该显式 AWS 资格的发行路径从签名 ReleaseBundle 解析 exact runtime image tag@index digest，并把所选 binary closure 提取到
 `.insight/runtime/releases/<bundle-digest>/bin`。缓存不完整、image/profile/schema drift 或签名失败均 fail closed；不会回退
 到 Cargo。`--offline` 需要 bundle、signature、image 与 binary cache 全部已存在。
 预构建 `start` 同样使用本地签名缓存并重验当前 CLI 和原 release 身份，不向发行服务下载另一份 bundle。
-`insight update apply` 只原子安装已签名的 exact CLI；随后显式运行同 feature 的 `insight stop && insight dev` 才完成 project-local
+`insight update apply` 只原子安装已签名的 exact CLI；随后显式运行同 feature 的 `insight qualification-aws stop && insight qualification-aws dev` 才完成 project-local
 release transition，之后另一次 `dev` 才可增加 feature。
 
 `doctor`检查Docker Engine/Compose、固定dependency端口、Docker CPU/memory和本地free disk，不会自动删除用户容器或
@@ -57,15 +73,16 @@ image digest、containerd节点、Direct/Disabled NetworkPolicy和不存在publi
 content bytes/time、稳定 5 分钟后的 RSS/CPU、project/volume disk 与 source compilation count。预算为 cold ≤300 秒、warm
 ≤60 秒、RSS ≤6 GiB、CPU ≤10% 单核等效、disk ≤8 GiB、source compilation=0；只有真实测量通过才能标 Passed。
 
-开发 profile 的 Native Capability 与 Registry 按秒领取和恢复工作，空闲后到达的任务或验证会等待下一次扫描。
+该资格 profile 的 Native Capability 与 Registry 按秒领取和恢复工作，空闲后到达的任务或验证会等待下一次扫描。
 Artifact 扫描在本批完成后等待一秒，后置 finalizer 也按秒轮询，上传完成的可见延迟会累加两个阶段的等待。
 Orchestration 每五秒推进恢复、到期 Timer、重试、收敛、Task 过期和子任务取消；业务 Job 领取仍独立按半秒扫描。
 这些周期降低空扫描和未使用标识的生成开销，同时增加开发环境中的后台推进延迟；恢复页容量、租约与生产部署输入保持原约束。
 
-Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用容器或 volume 名称；固定宿主端口仍限制完整 profile 的并行启动。
-验证脚本创建的临时项目属于单次运行，结束时使用 CLI 的 `stop/reset` 清理进程、Compose 容器与 volume，
+此 AWS 资格的 Compose 名称使用完整租户 UUID，避免相近时间创建的项目共用容器或 volume 名称；固定宿主端口仍限制完整 profile 的并行启动。
+AWS 资格脚本创建的临时项目属于单次运行，结束时使用 `qualification-aws stop/reset` 清理进程、Compose 容器与 volume，
 随后删除该次项目目录。`run-productization-journey.sh --logs-directory <new-path>` 在删除前导出有界日志；CI 自动上传日志及独立的验证报告。
-只有显式传入 `--keep-failed-resources` 才保留失败旅程，成功运行始终清理。PostgreSQL 物理测试使用独立临时目录与进程守卫；
+该 AWS 资格旅程通过显式 `--keep-failed-resources` 保留失败现场，成功运行清理自身资源。新的完整共享安装
+qualification 则始终保留失败安装的原卷与私有恢复材料，仅通过或明确的 exact cleanup 后删除。PostgreSQL 物理测试使用独立临时目录与进程守卫；
 排查断言失败时可设置 `INSIGHT_TEST_KEEP_FAILED_RESOURCES=1` 保留该测试目录。未完成的清理会保留所属目录供重试；
 日志导出失败即使发生在目录删除之后，也会使验证失败。
 Kind 产品旅程在 bootstrap 和 Sandbox 验证成功后清理已消费的 seed 项目，释放依赖端口后才启动新的公开验证项目。
@@ -234,6 +251,12 @@ Kind 的产品镜像 repository 必须包含显式 registry，Docker Hub 名称�
 开发初始化在同一事务内建立租户与真实 Scheduling Policy 绑定，初始任务可以直接进入正常领取流程。重复启动只核验当前绑定，保留调度额度与进度；合法的后续策略改绑可继续使用。绑定缺失或漂移会拒绝启动，需要通过拥有域诊断，不能依赖 worker 或启动工具自动修补。
 
 Outbox、History、Security Authority 与 Artifact 的四个 pool 各用已有 owning grants 的独立数据库角色。Artifact 四角色在同一事务中初始化；其他尚无独立 grants 的本地角色仍使用测试 owner，不能据此声明全生产最小权限资格。初始化工具只允许固定本地或固定 Kind loopback 数据库配置，权限来自 PostgreSQL owner 的 grants。JetStream 使用独立初始化证书创建 owning stream，publisher 仅发布安全通知；本地持久卷保留 Pod 重建前的流数据。Kind 的 PVC 不构成生产备份或跨集群恢复承诺。
+
+Security Authority 的模型连接授权还读取声明 Artifact 与 Blob 的精确身份、状态及摘要元数据列，以核验当前可用性；
+角色不因此取得对象定位信息、Artifact metadata、正文、写入或行锁权限。角色授权由安装步骤提供，普通启动不会修补现有安装。
+
+Artifact DataReader 同样承担 Scheduler 的 TypedPlan、RunValue 和 Skill 读取授权。它只读取这些路径所需的
+Run 冻结绑定和 Registry 版本、部署及策略状态列，继续按当前租约、租户和精确摘要校验；不获得 Run 当前 payload、业务写入或行锁权限。
 
 生成配置、Helm 渲染和权限边界检查可以离线验证；只有真实启动并完成 owning qualification harness 才能记录该 exact revision 的 Kubernetes 动态证据。
 源码 workflow 先准备 owning WASM compiler；签名候选消费发行 Console 资产。夹具在访问依赖前核对运行 profile 的完整 Tenant 身份。

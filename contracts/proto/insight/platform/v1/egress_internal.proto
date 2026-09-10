@@ -7,6 +7,10 @@ package insight.platform.v1;
 // bodies are not expanded into JSON arrays. The operation, metadata and payload are jointly
 // digest-bound by the adapter.
 service EgressBrokerService {
+  // Gateway-only import; sensitive payload is transient and never metadata or a public digest.
+  rpc ImportModelCredential(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
+  // Gateway-only bounded, non-durable protocol observation.
+  rpc ProbeModelConnection(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
   rpc OpenModelProvider(ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);
   rpc CancelModelProvider(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);
   rpc RoundTripCapabilityHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);

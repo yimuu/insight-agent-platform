@@ -22,7 +22,7 @@ pub const MAX_AGENT_COMPILER_DIAGNOSTICS: usize = 32;
 pub fn compiler_semantic_identity() -> Sha256Digest {
     canonical_digest(&serde_json::json!({
         "dialect": "insight.agent-authoring",
-        "semantic_version": 5,
+        "semantic_version": 7,
         "source_bundle_version": AGENT_SOURCE_BUNDLE_VERSION,
         "runtime_plan_version": 6
     }))

@@ -1,11 +1,12 @@
 use crate::{
     invocation_repository::load_enabled_exact_published_version,
     repository::{
-        append_command_event, append_scheduler_event, claim_command_receipt,
-        decode_deployment_closure, decode_versioned_payload, job_from_row, job_projection,
-        load_deployment, load_exact_frozen_selection_policy, load_job_for_update_by_text,
-        load_resource, load_run_for_update, require_tenant_permission, safety_scan_cursor_from_row,
-        safety_scan_page, terminalize_command_receipt, PgRepository, RepositoryError,
+        append_command_event, append_command_event_version_for_run, append_scheduler_event,
+        claim_command_receipt, decode_deployment_closure, decode_versioned_payload, job_from_row,
+        job_projection, load_deployment, load_exact_frozen_selection_policy,
+        load_job_for_update_by_text, load_resource, load_run_for_update, require_tenant_permission,
+        safety_scan_cursor_from_row, safety_scan_page, terminalize_command_receipt, PgRepository,
+        RepositoryError,
     },
 };
 use chrono::{DateTime, Duration, Utc};
@@ -46,6 +47,8 @@ use insight_platform_models::{
 use insight_platform_orchestrator::derive_candidate_selection;
 use sqlx::{postgres::PgRow, Acquire, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod dispatch_authorization;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedModelExecution {
@@ -3768,12 +3771,13 @@ impl<'a> PgModelTurnTransaction<'a> {
                 ));
             }
         };
-        append_command_event(
+        append_command_event_version_for_run(
             &mut transaction,
             &command.audit,
             "model_turn",
             &command.model_turn_id.to_string(),
-            as_i64(next_turn.version, "ModelTurn version")?,
+            Some(as_i64(next_turn.version, "ModelTurn version")?),
+            Some(&next_turn.run_id.to_string()),
             event_type,
             &TypedPayload::new(
                 1,

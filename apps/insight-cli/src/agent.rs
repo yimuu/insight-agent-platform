@@ -11,10 +11,9 @@ use insight_platform_agent_compiler::{
     ModelLoopCompilerLimits, ResolvedAgentBindings, ResolvedModelBinding,
 };
 use insight_platform_contracts::{
-    canonical_digest, AdministrativeGate, AgentProductState, DeploymentClosure, EntityLifecycle,
-    ExactDeploymentRef, ExactPolicyBinding, ExactVersionRef, OperationViewV1, PublicJobState,
-    PublishedVersionPayload, RegistryResourceKind, ResourceDocument, ResourceDraftPayload,
-    ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
+    AdministrativeGate, AgentProductState, DeploymentClosure, EntityLifecycle, ExactDeploymentRef,
+    ExactVersionRef, OperationViewV1, PublicJobState, RegistryResourceKind, ResourceDocument,
+    ResourceDraftPayload, ResourceId, ResourceKind, Sha256Digest, UtcTimestamp,
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -189,21 +188,6 @@ pub struct ResourceViewV1 {
     pub version: u64,
     pub draft: ResourceDraftPayload,
     pub etag: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResourceVersionViewV1 {
-    schema_version: u32,
-    resource_id: ResourceId,
-    resource_kind: RegistryResourceKind,
-    resource_version_id: ResourceId,
-    revision_no: u64,
-    content_digest: Sha256Digest,
-    artifact_id: Option<ResourceId>,
-    payload: PublishedVersionPayload,
-    created_at: UtcTimestamp,
-    etag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -429,6 +413,31 @@ pub(crate) fn compile_project_online(
             model: None,
             deployment_features: Vec::new(),
         })
+    } else if let Some(model_ref) = &resolution.model_ref {
+        let authoring = read_authoring_profile(client)?;
+        if compiler_profile(&authoring) != profile {
+            return Err(AgentCommandError::InvalidAuthority(
+                "authoring policies changed during compilation; capture a new attempt".to_owned(),
+            ));
+        }
+        let model = authoring
+            .models
+            .into_iter()
+            .find(|model| &model.alias == model_ref)
+            .ok_or_else(|| {
+                AgentCommandError::InvalidAuthority(
+                    "requested model is not available in the current authoring profile".to_owned(),
+                )
+            })?;
+        Some(ResolvedAgentBindings {
+            model: Some(ResolvedModelBinding {
+                manifest_ref: model_ref.clone(),
+                deployment: model.deployment,
+                selection_policy: model.selection_policy,
+            }),
+            slots: Vec::new(),
+            deployment_features: Vec::new(),
+        })
     } else {
         None
     };
@@ -456,7 +465,10 @@ fn compile_project_with_bindings(
             resolution.execution_kind,
             agent_compiler::AgentExecutionKind::FullPlan
                 | agent_compiler::AgentExecutionKind::FrameworkGraph
-        ) {
+        ) && (resolution.execution_kind != agent_compiler::AgentExecutionKind::ModelChat
+            || bindings.model.is_none()
+            || !bindings.slots.is_empty())
+        {
             return Err(AgentCommandError::InvalidLocalState(
                 "slot selections require full_plan authoring".into(),
             ));
@@ -614,162 +626,48 @@ pub fn restored_compiler_profile(
 pub fn offline_compiler_profile(
     project_root: &Path,
 ) -> Result<AgentCompilerProfile, AgentCommandError> {
-    let bootstrap = load_bootstrap_profile(project_root)?;
-    let revision_digest = local_identity_digest(
-        project_root,
-        "offline-scheduling-policy-revision",
-        &bootstrap.scheduling_policy_revision_id,
-    )?;
-    let deployment_digest = local_identity_digest(
-        project_root,
-        "offline-scheduling-policy-deployment",
-        &bootstrap.scheduling_policy_deployment_id,
-    )?;
-    let binding = ExactPolicyBinding {
-        revision: ExactVersionRef::new(bootstrap.scheduling_policy_revision_id, revision_digest)
-            .map_err(|error| AgentCommandError::InvalidLocalState(error.to_string()))?,
-        deployment: ExactDeploymentRef::new(
-            bootstrap.scheduling_policy_deployment_id,
-            deployment_digest,
-        )
-        .map_err(|error| AgentCommandError::InvalidLocalState(error.to_string()))?,
-    };
-    Ok(default_profile(binding))
+    restored_compiler_profile(project_root, Path::new("agent.yaml"))?.ok_or_else(||
+        AgentCommandError::InvalidLocalState("offline validation requires an explicit exact .insight/agent-compiler-profile.json; capture the server profile or restore a published source package".to_owned()))
 }
 
-pub fn online_compiler_profile(
+fn read_authoring_profile(
     client: &PublicHttpClient,
-    project_root: &Path,
-) -> Result<AgentCompilerProfile, AgentCommandError> {
-    let bootstrap = load_bootstrap_profile(project_root)?;
-    let revision: PublicJsonResponse<ResourceVersionViewV1> = client.get_json(
-        &format!(
-            "/v1/policies/{}/versions/{}",
-            bootstrap.scheduling_policy_id, bootstrap.scheduling_policy_revision_id
-        ),
-        StatusCode::OK,
-    )?;
-    let deployment: PublicJsonResponse<insight_platform_api::resource::DeploymentViewV1> = client
-        .get_json(
-        &format!(
-            "/v1/policies/{}/deployments/{}",
-            bootstrap.scheduling_policy_id, bootstrap.scheduling_policy_deployment_id
-        ),
-        StatusCode::OK,
-    )?;
-    if revision.body.schema_version != 1
-        || revision.body.resource_id != bootstrap.scheduling_policy_id
-        || revision.body.resource_kind != RegistryResourceKind::Policy
-        || revision.body.resource_version_id != bootstrap.scheduling_policy_revision_id
-        || revision.body.resource_version_id.kind() != ResourceKind::PolicyRevision
-        || revision.body.revision_no == 0
-        || revision.body.payload.document.kind() != RegistryResourceKind::Policy
-        || revision.body.etag != revision.etag
-        || !bootstrap_policy_deployment_matches(&deployment.body, &deployment.etag, &bootstrap)
-    {
-        return Err(AgentCommandError::InvalidAuthority(
-            "built-in Scheduling policy identity is inconsistent".to_owned(),
-        ));
-    }
-    let binding = ExactPolicyBinding {
-        revision: ExactVersionRef::new(
-            revision.body.resource_version_id,
-            revision.body.content_digest,
+) -> Result<insight_platform_api::product::AgentAuthoringProfileV1, AgentCommandError> {
+    let profile = client
+        .get_body_json::<insight_platform_api::product::AgentAuthoringProfileV1>(
+            "/v1/agent-authoring-profile",
+            StatusCode::OK,
+        )?
+        .body;
+    profile.validate().map_err(|_| {
+        AgentCommandError::InvalidAuthority(
+            "authoring profile violates its exact contract".to_owned(),
         )
-        .map_err(|error| AgentCommandError::InvalidAuthority(error.to_string()))?,
-        deployment: ExactDeploymentRef::new(
-            deployment.body.deployment_id,
-            deployment.body.closure_digest,
-        )
-        .map_err(|error| AgentCommandError::InvalidAuthority(error.to_string()))?,
-    };
-    Ok(default_profile(binding))
+    })?;
+    Ok(profile)
 }
-
-fn bootstrap_policy_deployment_matches(
-    deployment: &insight_platform_api::resource::DeploymentViewV1,
-    response_etag: &str,
-    bootstrap: &insight_platform_deployment_contracts::development::DevelopmentArtifactAuthorityConfigV1,
-) -> bool {
-    deployment.validate().is_ok()
-        && deployment.resource_id == bootstrap.scheduling_policy_id
-        && deployment.resource_kind == RegistryResourceKind::Policy
-        && deployment.deployment_id == bootstrap.scheduling_policy_deployment_id
-        && deployment.resource_version_id == bootstrap.scheduling_policy_revision_id
-        // The bootstrap Policy deployment is local; an Agent's selected environment is separate.
-        && deployment.environment == "local"
-        && deployment.etag == response_etag
-}
-
-fn default_profile(binding: ExactPolicyBinding) -> AgentCompilerProfile {
+fn compiler_profile(
+    profile: &insight_platform_api::product::AgentAuthoringProfileV1,
+) -> AgentCompilerProfile {
     AgentCompilerProfile {
-        default_deadline_seconds: 120,
-        default_environment: "development".to_owned(),
-        policy_versions: vec![binding.revision.clone()],
-        deployment_policies: vec![binding.clone()],
-        execution_profile: binding,
+        default_deadline_seconds: profile.default_deadline_seconds,
+        default_environment: profile.default_environment.clone(),
+        policy_versions: profile.policy_versions.clone(),
+        deployment_policies: profile.deployment_policies.clone(),
+        execution_profile: profile.execution_profile.clone(),
         model_loop: ModelLoopCompilerLimits {
-            maximum_rounds: 1,
-            maximum_capability_calls: 1,
-            maximum_parallel_calls_per_round: 1,
-            token_budget: 2_304,
+            maximum_rounds: profile.model_loop.maximum_rounds,
+            maximum_capability_calls: profile.model_loop.maximum_capability_calls,
+            maximum_parallel_calls_per_round: profile.model_loop.maximum_parallel_calls_per_round,
+            token_budget: profile.model_loop.token_budget,
         },
     }
 }
-
-fn load_bootstrap_profile(
-    project_root: &Path,
-) -> Result<
-    insight_platform_deployment_contracts::development::DevelopmentArtifactAuthorityConfigV1,
-    AgentCommandError,
-> {
-    use insight_platform_deployment_contracts::development::{
-        DevelopmentArtifactAuthorityConfigV1, MAX_DEVELOPMENT_ARTIFACT_BOOTSTRAP_BYTES,
-    };
-    let local = |error: crate::CliError| AgentCommandError::InvalidLocalState(error.to_string());
-    let state_directory = project_root.join(crate::PROJECT_DIRECTORY);
-    let project = crate::load_local_project_state(&state_directory).map_err(local)?;
-    crate::validate_loaded_local_identity(&state_directory, &project.identity).map_err(local)?;
-    let runtime = state_directory.join(crate::RUNTIME_DIRECTORY);
-    let profile = crate::read_runtime_profile_state(&runtime, &project.identity)
-        .map_err(local)?
-        .ok_or_else(|| {
-            AgentCommandError::InvalidLocalState(
-                "no current runtime compiler profile; run insight dev first".into(),
-            )
-        })?;
-    let expected: Sha256Digest = profile
-        .config_digests
-        .get("artifact-bootstrap")
-        .ok_or_else(|| AgentCommandError::InvalidLocalState("bootstrap digest missing".into()))?
-        .parse()
-        .map_err(|_| AgentCommandError::InvalidLocalState("bootstrap digest invalid".into()))?;
-    let path = runtime
-        .join(crate::RUNTIME_CONFIGURATION_DIRECTORY)
-        .join(crate::RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE);
-    let bytes =
-        crate::read_runtime_file_bytes(&path, MAX_DEVELOPMENT_ARTIFACT_BOOTSTRAP_BYTES as u64)
-            .map_err(local)?
-            .ok_or_else(|| AgentCommandError::InvalidLocalState("bootstrap missing".into()))?;
-    DevelopmentArtifactAuthorityConfigV1::decode(&bytes, &expected).map_err(|_| {
-        AgentCommandError::InvalidLocalState("bootstrap configuration invalid or drifted".into())
-    })
-}
-
-fn local_identity_digest(
-    project_root: &Path,
-    purpose: &str,
-    id: &ResourceId,
-) -> Result<Sha256Digest, AgentCommandError> {
-    canonical_digest(&serde_json::json!({
-        "project_root": project_root.file_name().and_then(|name| name.to_str()).unwrap_or("project"),
-        "purpose": purpose,
-        "resource_id": id,
-        "schema_version": 1
-    }))
-    .map_err(|error| AgentCommandError::InvalidLocalState(error.to_string()))?
-    .parse()
-    .map_err(|error| AgentCommandError::InvalidLocalState(format!("digest: {error}")))
+pub fn online_compiler_profile(
+    client: &PublicHttpClient,
+    _project_root: &Path,
+) -> Result<AgentCompilerProfile, AgentCommandError> {
+    Ok(compiler_profile(&read_authoring_profile(client)?))
 }
 
 fn resolve_model_bindings(
@@ -1057,7 +955,9 @@ pub fn publish_agent(
         &compilation.source_map_bytes,
     )?;
 
-    let uploader = artifact::HttpsArtifactObjectUploader::new()?;
+    let uploader = artifact::HttpsArtifactObjectUploader::with_additional_roots(
+        runtime_client.additional_roots(),
+    )?;
     let upload = |path: &Path, intent: &agent_compiler::ArtifactIntent| {
         artifact::upload_artifact(
             runtime_client,

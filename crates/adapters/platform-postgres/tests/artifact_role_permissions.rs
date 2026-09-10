@@ -92,12 +92,21 @@ async fn artifact_roles_have_closed_mutually_denied_table_permissions() {
 
     assert!(privilege(&pool, gateway, "artifacts", "INSERT").await);
     assert!(privilege(&pool, gateway, "quota_accounts", "UPDATE").await);
+    assert!(privilege(&pool, gateway, "deployments", "SELECT").await);
+    assert!(!privilege(&pool, gateway, "deployments", "UPDATE").await);
+    assert!(!privilege(&pool, gateway, "deployments", "INSERT").await);
+    assert!(!privilege(&pool, gateway, "deployments", "DELETE").await);
     assert!(!privilege(&pool, gateway, "artifacts", "DELETE").await);
     assert!(!privilege(&pool, gateway, "secret_bindings", "SELECT").await);
 
     assert!(privilege(&pool, worker, "artifacts", "UPDATE").await);
     assert!(privilege(&pool, worker, "jobs", "INSERT").await);
-    assert!(!privilege(&pool, worker, "artifacts", "INSERT").await);
+    assert!(privilege(&pool, worker, "artifacts", "INSERT").await);
+    assert!(privilege(&pool, worker, "artifact_blobs", "INSERT").await);
+    assert!(privilege(&pool, worker, "invocations", "SELECT").await);
+    assert!(!privilege(&pool, worker, "invocations", "UPDATE").await);
+    assert!(!privilege(&pool, worker, "invocations", "INSERT").await);
+    assert!(!privilege(&pool, worker, "invocations", "DELETE").await);
     assert!(!privilege(&pool, worker, "artifact_links", "SELECT").await);
     assert!(!privilege(&pool, worker, "tenant_principals", "SELECT").await);
 

@@ -324,6 +324,8 @@ pub fn watch_run<W: Write>(
     let mut cursor = None::<String>;
     let mut last_sequence = 0_u64;
     loop {
+        // Observe terminality before the page snapshot so the final page cannot predate it.
+        let run = read_run(client, run_id)?;
         let frames = client.get_sse_json::<PublicRunEvent>(
             &format!("/v1/runs/{run_id}/events"),
             cursor.as_deref(),
@@ -341,7 +343,6 @@ pub fn watch_run<W: Write>(
             cursor = Some(next_cursor);
             last_sequence = sequence;
         }
-        let run = read_run(client, run_id)?;
         if terminal_run_state(run.state) && !page_is_full {
             write_watch_record(
                 writer,
@@ -388,6 +389,8 @@ pub fn watch_run_with_cursor_journal<W: Write>(
     run_journal::save_cursor(&path, &journal)?;
     let started = Instant::now();
     loop {
+        // A terminal snapshot followed by a drained page includes its committed events.
+        let run = read_run(client, run_id)?;
         let frames = client.get_sse_json::<PublicRunEvent>(
             &format!("/v1/runs/{run_id}/events"),
             journal.cursor.as_deref(),
@@ -407,7 +410,6 @@ pub fn watch_run_with_cursor_journal<W: Write>(
             journal.last_sequence = sequence;
             run_journal::save_cursor(&path, &journal)?;
         }
-        let run = read_run(client, run_id)?;
         if terminal_run_state(run.state) && !page_is_full {
             write_watch_record(
                 writer,
@@ -916,11 +918,6 @@ mod tests {
         let server_run_id = run_id.clone();
         let server_failed = failed.clone();
         let server = thread::spawn(move || {
-            let (mut events, _) = listener.accept().unwrap();
-            let (head, _) = read_request(&mut events);
-            assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
-            write_empty_sse_response(&mut events);
-
             let (mut read, _) = listener.accept().unwrap();
             let (head, _) = read_request(&mut read);
             assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
@@ -932,6 +929,10 @@ mod tests {
                 None,
                 &server_failed,
             );
+            let (mut events, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut events);
+            assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+            write_empty_sse_response(&mut events);
         });
         let client = PublicHttpClient::new(
             format!("http://127.0.0.1:{port}"),
@@ -984,6 +985,18 @@ mod tests {
             let server_run_id = run_id.clone();
             let server_code = code;
             let server = thread::spawn(move || {
+                let (mut read, _) = listener.accept().unwrap();
+                let (head, _) = read_request(&mut read);
+                assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
+                let running = running_run(server_run_id.clone());
+                write_json_response(
+                    &mut read,
+                    "200 OK",
+                    "11111111111111111111111111111111",
+                    Some(&running.etag),
+                    None,
+                    &running,
+                );
                 let (mut stream, _) = listener.accept().unwrap();
                 let (head, _) = read_request(&mut stream);
                 assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
@@ -1404,12 +1417,6 @@ mod tests {
                 assert_eq!(header_value(&head, "authorization"), Some("Bearer token"));
                 match step {
                     0 => {
-                        assert!(head
-                            .starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
-                        assert_eq!(header_value(&head, "last-event-id"), None);
-                        write_sse_response(&mut stream, &queued);
-                    }
-                    1 => {
                         assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
                         write_json_response(
                             &mut stream,
@@ -1420,16 +1427,13 @@ mod tests {
                             &running,
                         );
                     }
-                    2 => {
+                    1 => {
                         assert!(head
                             .starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
-                        assert_eq!(
-                            header_value(&head, "last-event-id"),
-                            Some(server_cursor_one.as_str())
-                        );
-                        write_sse_response(&mut stream, &completed);
+                        assert_eq!(header_value(&head, "last-event-id"), None);
+                        write_sse_response(&mut stream, &queued);
                     }
-                    3 => {
+                    2 => {
                         assert!(head.starts_with(&format!("GET /v1/runs/{server_run_id} HTTP/1.1")));
                         write_json_response(
                             &mut stream,
@@ -1439,6 +1443,15 @@ mod tests {
                             None,
                             &server_terminal,
                         );
+                    }
+                    3 => {
+                        assert!(head
+                            .starts_with(&format!("GET /v1/runs/{server_run_id}/events HTTP/1.1")));
+                        assert_eq!(
+                            header_value(&head, "last-event-id"),
+                            Some(server_cursor_one.as_str())
+                        );
+                        write_sse_response(&mut stream, &completed);
                     }
                     _ => unreachable!(),
                 }
@@ -1469,6 +1482,8 @@ mod tests {
         assert_eq!(records[2]["run"]["state"], "succeeded");
         server.join().unwrap();
     }
+
+    include!("run_watch_tests.rs");
 
     fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
         let mut bytes = Vec::new();

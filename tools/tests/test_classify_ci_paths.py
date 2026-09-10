@@ -79,6 +79,31 @@ class ClassifyCiPathsTests(unittest.TestCase):
         result = MODULE.classify(["apps/services/platform-mcp-service/src/main.rs"])
         self.assertTrue(result["runtime"])
 
+    def test_installation_inputs_and_consumers_select_runtime_for_actual_installation(self) -> None:
+        for path in (
+            "deploy/release/development-profile-v1.json",
+            "deploy/dev/nats.conf",
+            "deploy/images/console.Dockerfile",
+            "deploy/helm/insight-platform-installation/templates/phase-job.yaml",
+            "tools/rust/platform-deployment-tooling/src/renderer.rs",
+            "tools/rust/platform-installation-tooling/src/main.rs",
+            "tools/install/platform_compose.py",
+            "tools/install/platform_native.py",
+            "tools/install/native_runtime.py",
+            "tools/install/provider_lifecycle.py",
+            "tools/install/public_trust.py",
+            "tools/tests/test_installation_native.py",
+            "tools/tests/test_public_trust.py",
+            "tools/rust/platform-deployment-tooling/src/s3_profile.rs",
+            "crates/adapters/platform-openbao/src/transport.rs",
+            "tools/qualification/qualify-platform-installation-compose.py",
+            "crates/deployment/platform-deployment-contracts/src/installation.rs",
+            "crates/deployment/platform-deployment-contracts/src/public_trust.rs",
+            "crates/protocols/platform-api/src/model_configuration.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.classify([path])["runtime"])
+
     def test_dependency_change_selects_runtime_and_policy(self) -> None:
         result = MODULE.classify(["Cargo.lock"])
         self.assertTrue(result["runtime"])

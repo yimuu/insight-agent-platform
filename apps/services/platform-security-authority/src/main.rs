@@ -1,6 +1,6 @@
 //! Dedicated SecretBinding authority process.
 //!
-//! This role has a restricted PostgreSQL credential and exposes exactly two internal methods. It
+//! This role has a restricted PostgreSQL credential and exposes bounded authorization methods. It
 //! deliberately has no HTTP client, DNS resolver, KMS, Secret Manager, provider catalog or public
 //! API dependency. The Egress Broker is the only accepted mTLS caller.
 
@@ -160,6 +160,66 @@ struct RestrictedSecretAuthority {
     repository: PgRepository,
     service_principal_id: ResourceId,
     dependency_metrics: Arc<DependencyObservationMetrics>,
+}
+
+#[async_trait]
+impl insight_platform_security::ModelDispatchAuthority for RestrictedSecretAuthority {
+    async fn authorize_model_dispatch(
+        &self,
+        request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    > {
+        let result = self.repository.authorize_model_dispatch(request).await;
+        self.observe_postgresql(&result);
+        result
+    }
+}
+
+#[async_trait]
+impl insight_platform_security::ContextDispatchAuthority for RestrictedSecretAuthority {
+    async fn authorize_context_dispatch(
+        &self,
+        request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ContextDispatchPermitV1,
+        insight_platform_contracts::ContextDispatchAuthorizationError,
+    > {
+        let result = self.repository.authorize_context_dispatch(request).await;
+        self.observe_postgresql(&result);
+        result
+    }
+}
+
+#[async_trait]
+impl insight_platform_security::ModelConnectionProbeAuthority for RestrictedSecretAuthority {
+    async fn authorize_model_connection_probe(
+        &self,
+        request: &insight_platform_contracts::ModelConnectionProbeAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelConnectionProbePermitV1,
+        insight_platform_contracts::ModelConnectionError,
+    > {
+        let result=insight_platform_security::ModelConnectionProbeAuthority::authorize_model_connection_probe(&self.repository,request).await;
+        self.observe_postgresql(&result);
+        result
+    }
+}
+
+#[async_trait]
+impl insight_platform_security::ModelCredentialImportAuthority for RestrictedSecretAuthority {
+    async fn authorize_model_credential_import(
+        &self,
+        request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelCredentialImportPermitV1,
+        insight_platform_contracts::ModelCredentialImportError,
+    > {
+        let result = insight_platform_security::ModelCredentialImportAuthority::authorize_model_credential_import(&self.repository, request).await;
+        self.observe_postgresql(&result);
+        result
+    }
 }
 
 #[async_trait]

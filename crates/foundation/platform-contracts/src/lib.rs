@@ -11,12 +11,24 @@ pub mod capability;
 pub mod command;
 pub mod component_role;
 pub mod context;
+pub mod context_destination;
+pub mod context_dispatch;
 pub mod execution;
+pub mod http_credential;
 pub mod id;
 pub mod json;
 pub mod limits;
 pub mod mcp;
 pub mod model;
+pub mod model_configuration;
+pub mod model_connection;
+pub mod model_credentials;
+pub mod model_declaration;
+pub mod model_destination;
+pub mod model_dispatch;
+pub mod model_installation;
+pub mod model_policy_bootstrap;
+pub mod model_quota;
 pub mod nominal;
 pub mod operation;
 pub mod outbox;
@@ -42,7 +54,10 @@ pub use command::{
 };
 pub use component_role::{ComponentRole, ComponentRoleError};
 pub use context::*;
+pub use context_destination::*;
+pub use context_dispatch::*;
 pub use execution::*;
+pub use http_credential::*;
 pub use id::{ResourceId, ResourceIdError, ResourceKind};
 pub use json::{
     canonical_digest, canonical_json, parse_strict_json, JsonLimits, StrictJsonError,
@@ -54,6 +69,15 @@ pub use limits::{
 };
 pub use mcp::*;
 pub use model::*;
+pub use model_configuration::*;
+pub use model_connection::*;
+pub use model_credentials::*;
+pub use model_declaration::*;
+pub use model_destination::*;
+pub use model_dispatch::*;
+pub use model_installation::*;
+pub use model_policy_bootstrap::*;
+pub use model_quota::*;
 pub use nominal::{
     canonical_schema_digest, is_known_pinned_nominal_reference, nominal_schemas,
     pinned_nominal_reference,

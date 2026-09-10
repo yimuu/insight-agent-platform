@@ -35,12 +35,20 @@ impl PgRepository {
         Ok(resource)
     }
 
-    pub async fn read_agent_authoring_policy_for_principal(
+    /// Installed execution/selection policies and the tenant's optional default are resolved in
+    /// one current-authority snapshot. This query creates no binding and mutates no default.
+    pub async fn read_agent_authoring_model_for_principal(
         &self,
         tenant_id: &ResourceId,
         principal_id: &ResourceId,
         principal_kind: PrincipalKind,
-    ) -> Result<ExactPolicyBinding, RepositoryError> {
+        catalog: &insight_platform_contracts::ModelInstallationCatalogV1,
+    ) -> Result<Option<ExactDeploymentRef>, RepositoryError> {
+        if !catalog.validate() {
+            return Err(RepositoryError::CorruptRow(
+                "authoring installation catalog".to_owned(),
+            ));
+        }
         let mut transaction = begin_read_only_repeatable(&self.pool).await?;
         let principal = load_current_principal_snapshot(
             &mut transaction,
@@ -49,42 +57,85 @@ impl PgRepository {
             principal_kind,
         )
         .await?;
-        if !principal.permissions.contains(Permission::PolicyRead) {
+        if [
+            Permission::AgentWrite,
+            Permission::PolicyRead,
+            Permission::ModelRead,
+        ]
+        .iter()
+        .any(|permission| !principal.permissions.contains(*permission))
+        {
             return Err(RepositoryError::PermissionDenied);
         }
-        let row = sqlx::query(
-            r#"
-            SELECT tenant_id, state, version, config_schema_version, config,
-                   config_digest, created_at, updated_at
-            FROM insight_platform.tenants
-            WHERE tenant_id = $1 AND state = 'active'
-            "#,
-        )
-        .bind(tenant_id.to_string())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RepositoryError::NotFound("active tenant"))?;
-        let tenant = tenant_from_row(row)?;
-        let deployment = tenant
-            .config
-            .scheduling_policy
-            .ok_or_else(|| RepositoryError::NotFound("tenant Agent authoring Policy binding"))?;
-        let (revision, _) = load_exact_active_policy_deployment(
-            &mut transaction,
-            tenant_id,
-            &deployment,
-            PolicyKind::Scheduling,
-        )
-        .await?;
-        let binding = ExactPolicyBinding {
-            deployment,
-            revision,
-        };
-        binding
-            .validate()
-            .map_err(|failure| RepositoryError::CorruptRow(failure.to_string()))?;
+        let tenant = load_tenant(&mut transaction, tenant_id).await?;
+        if tenant.state != "active" {
+            return Err(RepositoryError::PermissionDenied);
+        }
+        for (binding, kind) in [
+            (&catalog.policies.execution, PolicyKind::Execution),
+            (&catalog.policies.selection, PolicyKind::Selection),
+        ] {
+            let (revision, _) = load_exact_active_policy_deployment(
+                &mut transaction,
+                tenant_id,
+                &binding.deployment,
+                kind,
+            )
+            .await?;
+            let deployment = load_deployment(
+                &mut transaction,
+                tenant_id,
+                &binding.deployment.deployment_id,
+            )
+            .await?;
+            if revision != binding.revision || deployment.environment != catalog.environment {
+                return Err(RepositoryError::Conflict("authoring installation policy"));
+            }
+        }
+        if let Some(model) = &tenant.config.default_model {
+            model_default_commands::validate_default_model_closure(
+                &mut transaction,
+                tenant_id,
+                model,
+                false,
+            )
+            .await?;
+            let deployment =
+                load_deployment(&mut transaction, tenant_id, &model.deployment_id).await?;
+            if deployment.environment != catalog.environment {
+                return Err(RepositoryError::Conflict(
+                    "authoring default model environment",
+                ));
+            }
+            let DeploymentClosure::ModelProfile(profile) =
+                decode_deployment_closure(&deployment.bindings)?
+            else {
+                return Err(RepositoryError::Conflict("authoring default model kind"));
+            };
+            let provider = load_deployment(
+                &mut transaction,
+                tenant_id,
+                &profile.provider_deployment.deployment_id,
+            )
+            .await?;
+            let DeploymentClosure::ModelProvider(provider_closure) =
+                decode_deployment_closure(&provider.bindings)?
+            else {
+                return Err(RepositoryError::Conflict("authoring default provider kind"));
+            };
+            if provider.environment != catalog.environment
+                || provider_closure
+                    .secret_bindings
+                    .iter()
+                    .any(|secret| secret.provider_id != catalog.secret_provider_id)
+            {
+                return Err(RepositoryError::Conflict(
+                    "authoring default provider installation",
+                ));
+            }
+        }
         transaction.commit().await?;
-        Ok(binding)
+        Ok(tenant.config.default_model)
     }
 
     pub async fn read_resource_version_for_principal(

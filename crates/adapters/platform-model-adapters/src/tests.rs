@@ -1,4 +1,9 @@
 use super::*;
+
+#[path = "responses_text_tests.rs"]
+mod responses_text_tests;
+#[path = "responses_usage_tests.rs"]
+mod responses_usage_tests;
 use chrono::Duration as ChronoDuration;
 use futures::{stream, StreamExt};
 use insight_platform_contracts::{
@@ -96,6 +101,7 @@ fn limits() -> ModelTurnLimits {
     ModelTurnLimits::from_profile(&profile).unwrap()
 }
 
+#[derive(Clone)]
 struct Fixture {
     request: ModelAdapterExecutionRequest,
     response: CanonicalModelResponse,
@@ -103,6 +109,15 @@ struct Fixture {
 }
 
 fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
+    let contract_digest = match adapter_name {
+        OPENAI_RESPONSES_ADAPTER_NAME => {
+            ModelProviderWireProtocol::OpenAiResponses.adapter_contract_digest()
+        }
+        ANTHROPIC_MESSAGES_ADAPTER_NAME => {
+            ModelProviderWireProtocol::AnthropicMessages.adapter_contract_digest()
+        }
+        _ => sha(contract),
+    };
     let now = Utc::now();
     let tenant_id = id(ResourceKind::Tenant, 1);
     let model_turn_id = id(ResourceKind::ModelTurn, 2);
@@ -116,7 +131,7 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
     let installed_adapter = InstalledModelAdapter {
         qualified_name: adapter_name.to_owned(),
         worker_manifest_digest: sha(manifest),
-        adapter_contract_digest: sha(contract),
+        adapter_contract_digest: contract_digest.clone(),
     };
     let descriptor = InstalledModelAdapterDescriptor::from(&installed_adapter);
     let provider = ModelProviderResourceSpec {
@@ -158,7 +173,7 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
         context: ContextWindowContract {
             maximum_context_tokens: 4_096,
             maximum_output_tokens: 512,
-            tokenizer_contract_digest: sha('c'),
+            tokenizer_contract_digest: Some(sha('c')),
             estimator_contract_digest: sha('d'),
         },
         tools: ModelToolContract {
@@ -187,9 +202,9 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
         data_handling: ProviderDataHandlingContract {
             maximum_classification: DataClassification::Confidential,
             allowed_regions: vec![region.clone()],
-            maximum_retention_milliseconds: 86_400_000,
+            maximum_retention_milliseconds: Some(86_400_000),
             training: ProviderTrainingPolicy::Prohibited,
-            subprocessor_set_digest: sha('e'),
+            subprocessor_set_digest: Some(sha('e')),
         },
         limits: ModelLimits {
             maximum_messages: 16,
@@ -202,9 +217,10 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
             maximum_output_tokens: 512,
         },
         catalog_evidence: ModelCatalogEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
             artifact: artifact(11, 'f'),
             source_digest: sha('1'),
-            adapter_contract_digest: sha(contract),
+            adapter_contract_digest: contract_digest.clone(),
             observed_at: now - ChronoDuration::minutes(1),
             expires_at: now + ChronoDuration::days(1),
         },
@@ -219,7 +235,10 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
         trust_policy: policy(15, '5'),
         data_policy: policy(16, '6'),
         region,
-        conformance_evidence: artifact(17, '7'),
+        admission_evidence: insight_platform_contracts::ModelAdmissionEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
+            artifact: artifact(17, '7'),
+        },
     };
     let model_closure = ModelDeploymentClosure {
         profile_revision: profile_revision.clone(),
@@ -1152,6 +1171,7 @@ async fn final_attempt_still_rejects_a_retry_instruction_outside_the_deadline() 
 struct FixtureWireConnector {
     request: Mutex<Option<ModelProviderWireRequest>>,
     events: Mutex<Option<Vec<Result<ModelProviderWireEvent, ModelAdapterFailure>>>>,
+    calls: AtomicUsize,
 }
 
 impl FixtureWireConnector {
@@ -1159,11 +1179,94 @@ impl FixtureWireConnector {
         Self {
             request: Mutex::new(None),
             events: Mutex::new(Some(events.into_iter().map(Ok).collect())),
+            calls: AtomicUsize::new(0),
         }
     }
 
     fn take_request(&self) -> ModelProviderWireRequest {
         self.request.lock().unwrap().take().unwrap()
+    }
+}
+
+#[test]
+fn physical_adapter_constructor_rejects_unrecognized_contract_digest_before_io() {
+    for protocol in [
+        ModelProviderWireProtocol::OpenAiResponses,
+        ModelProviderWireProtocol::AnthropicMessages,
+    ] {
+        let fixture = wire_fixture(protocol.qualified_name());
+        let connector = Arc::new(FixtureWireConnector::new(vec![]));
+        let mut descriptor = fixture.descriptor;
+        descriptor.adapter_contract_digest = sha('f');
+        let rejected = match protocol {
+            ModelProviderWireProtocol::OpenAiResponses => {
+                OpenAiResponsesAdapter::new(descriptor, connector.clone()).is_err()
+            }
+            ModelProviderWireProtocol::AnthropicMessages => {
+                AnthropicMessagesAdapter::new(descriptor, connector.clone()).is_err()
+            }
+        };
+        assert!(rejected);
+        assert_eq!(connector.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn protocol_mapping_identities_bind_their_current_semantics_without_changing_the_wire_abi() {
+    for (protocol, name, path, version) in [
+        (
+            ModelProviderWireProtocol::OpenAiResponses,
+            "openai.responses/v1",
+            "/v1/responses",
+            "responses-v1",
+        ),
+        (
+            ModelProviderWireProtocol::AnthropicMessages,
+            "anthropic.messages/2023-06-01",
+            "/v1/messages",
+            "2023-06-01",
+        ),
+    ] {
+        let mut declaration = serde_json::json!({
+            "schema_version": 1,
+            "kind": "insight.model-provider-adapter-contract/v1",
+            "protocol": protocol,
+            "qualified_name": name,
+            "canonical_request_abi": 1,
+            "canonical_response_abi": 1,
+            "normalized_stream_abi": 1,
+            "provider_wire_request_abi": 2,
+            "endpoint_path": path,
+            "protocol_version": version,
+            "wire_mapping_semantics": match protocol {
+                ModelProviderWireProtocol::OpenAiResponses => 4,
+                ModelProviderWireProtocol::AnthropicMessages => 2,
+            },
+        });
+        assert_eq!(
+            canonical_digest(&declaration).unwrap(),
+            protocol.adapter_contract_digest().as_str()
+        );
+        declaration["wire_mapping_semantics"] = serde_json::json!(match protocol {
+            ModelProviderWireProtocol::OpenAiResponses => 3,
+            ModelProviderWireProtocol::AnthropicMessages => 1,
+        });
+        let old_digest: Sha256Digest = canonical_digest(&declaration).unwrap().parse().unwrap();
+        assert_ne!(old_digest, protocol.adapter_contract_digest());
+        let fixture = wire_fixture(protocol.qualified_name());
+        let connector = Arc::new(FixtureWireConnector::new(vec![]));
+        let mut descriptor = fixture.descriptor;
+        descriptor.adapter_contract_digest = old_digest;
+        let rejected = match protocol {
+            ModelProviderWireProtocol::OpenAiResponses => {
+                OpenAiResponsesAdapter::new(descriptor, connector.clone()).is_err()
+            }
+            ModelProviderWireProtocol::AnthropicMessages => {
+                AnthropicMessagesAdapter::new(descriptor, connector.clone()).is_err()
+            }
+        };
+        assert!(rejected);
+        assert_eq!(connector.calls.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -1173,6 +1276,7 @@ impl ModelProviderWireConnector for FixtureWireConnector {
         &self,
         request: ModelProviderWireRequest,
     ) -> Result<ModelProviderWireStream, ModelAdapterFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let mut captured = self.request.lock().unwrap();
         if captured.replace(request).is_some() {
             return Err(rejected("fixture_duplicate_wire_request"));
@@ -1196,6 +1300,7 @@ impl ModelProviderWireConnector for FixtureWireConnector {
 }
 
 struct FixtureEgressBroker {
+    calls: AtomicUsize,
     request: Mutex<Option<ModelProviderWireRequest>>,
     status_code: u16,
     content_type: String,
@@ -1222,6 +1327,7 @@ impl FixtureEgressBroker {
 
     fn raw(status_code: u16, content_type: &str, chunks: Vec<Vec<u8>>) -> Self {
         Self {
+            calls: AtomicUsize::new(0),
             request: Mutex::new(None),
             status_code,
             content_type: content_type.to_owned(),
@@ -1236,6 +1342,7 @@ impl ModelProviderEgressBroker for FixtureEgressBroker {
         &self,
         request: ModelProviderWireRequest,
     ) -> Result<ModelProviderEgressResponse, ModelAdapterFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let mut captured = self.request.lock().unwrap();
         if captured.replace(request).is_some() {
             return Err(rejected("fixture_duplicate_egress_request"));
@@ -1347,6 +1454,19 @@ fn enable_structured_output(fixture: &mut Fixture) {
         }))
         .unwrap(),
     );
+    fixture
+        .request
+        .request
+        .response_contract
+        .output_schema_digest = fixture
+        .request
+        .request
+        .response_contract
+        .structured_schema
+        .as_ref()
+        .unwrap()
+        .canonical_digest
+        .clone();
     fixture.request.request_digest = canonical_request_digest(&fixture.request.request).unwrap();
 }
 
@@ -1354,6 +1474,17 @@ async fn execute_wire_fixture(
     fixture: Fixture,
     events: Vec<ModelProviderWireEvent>,
 ) -> (ModelAdapterExecutionOutcome, ModelProviderWireRequest) {
+    let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+    (outcome.unwrap(), connector.take_request())
+}
+
+async fn execute_wire_fixture_result(
+    fixture: Fixture,
+    events: Vec<ModelProviderWireEvent>,
+) -> (
+    Result<ModelAdapterExecutionOutcome, ModelAdapterHostError>,
+    Arc<FixtureWireConnector>,
+) {
     let connector = Arc::new(FixtureWireConnector::new(events));
     let adapter: Arc<dyn ModelProviderAdapter> = match fixture.descriptor.qualified_name.as_str() {
         OPENAI_RESPONSES_ADAPTER_NAME => Arc::new(
@@ -1368,15 +1499,23 @@ async fn execute_wire_fixture(
     registry.install(adapter).unwrap();
     let outcome = ModelAdapterHost::new(registry, Arc::new(DropModelLiveDeltas), limits())
         .execute(fixture.request)
-        .await
-        .unwrap();
-    (outcome, connector.take_request())
+        .await;
+    (outcome, connector)
 }
 
 async fn execute_brokered_fixture(
     fixture: Fixture,
     broker: Arc<FixtureEgressBroker>,
 ) -> ModelAdapterExecutionOutcome {
+    execute_brokered_fixture_result(fixture, broker)
+        .await
+        .unwrap()
+}
+
+async fn execute_brokered_fixture_result(
+    fixture: Fixture,
+    broker: Arc<FixtureEgressBroker>,
+) -> Result<ModelAdapterExecutionOutcome, ModelAdapterHostError> {
     let connector: Arc<dyn ModelProviderWireConnector> =
         Arc::new(BrokeredModelProviderWireConnector::new(broker));
     let adapter: Arc<dyn ModelProviderAdapter> = match fixture.descriptor.qualified_name.as_str() {
@@ -1393,7 +1532,6 @@ async fn execute_brokered_fixture(
     ModelAdapterHost::new(registry, Arc::new(DropModelLiveDeltas), limits())
         .execute(fixture.request)
         .await
-        .unwrap()
 }
 
 fn openai_text_events(text: &str) -> Vec<ModelProviderWireEvent> {
@@ -1575,6 +1713,167 @@ fn anthropic_tool_events() -> Vec<ModelProviderWireEvent> {
 }
 
 #[tokio::test]
+async fn undeclared_usage_guarantees_still_require_actual_protocol_measurements() {
+    for adapter in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for declared in [false, true] {
+            let events = if adapter == OPENAI_RESPONSES_ADAPTER_NAME {
+                openai_text_events("hello")
+            } else {
+                anthropic_text_events("hello")
+            };
+            let mut fixture = wire_fixture(adapter);
+            fixture.request.profile.usage.provider_reports_usage = declared;
+            let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+            let ModelAdapterExecutionOutcome::Succeeded(success) = outcome.unwrap() else {
+                panic!("an undeclared guarantee must not reject actual complete measurements");
+            };
+            assert!(connector.request.lock().unwrap().is_some());
+            assert_eq!(
+                success.response.usage.accounting_quality,
+                AccountingQuality::ProviderReported
+            );
+            assert_eq!(success.response.usage.input_tokens, Some(50));
+            assert_eq!(success.response.usage.output_tokens, Some(10));
+        }
+        for field in ["input_tokens", "output_tokens"] {
+            for invalid in [
+                None,
+                Some(Value::Null),
+                Some(serde_json::json!(-1)),
+                Some(serde_json::json!(1.5)),
+                Some(serde_json::json!("10")),
+            ] {
+                let mut events = if adapter == OPENAI_RESPONSES_ADAPTER_NAME {
+                    openai_text_events("hello")
+                } else {
+                    anthropic_text_events("hello")
+                };
+                let usage = if adapter == OPENAI_RESPONSES_ADAPTER_NAME {
+                    &mut events.last_mut().unwrap().data["response"]["usage"]
+                } else if field == "input_tokens" {
+                    &mut events[0].data["message"]["usage"]
+                } else {
+                    &mut events[4].data["usage"]
+                }
+                .as_object_mut()
+                .unwrap();
+                if let Some(value) = invalid {
+                    usage.insert(field.into(), value);
+                } else {
+                    usage.remove(field);
+                }
+                let mut fixture = wire_fixture(adapter);
+                fixture.request.profile.usage.provider_reports_usage = false;
+                let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+                let ModelAdapterExecutionOutcome::Failed(failure) = outcome.unwrap() else {
+                    panic!("incomplete or malformed measurements must not succeed");
+                };
+                assert!(connector.request.lock().unwrap().is_some());
+                assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
+                assert!(failure.request_sent);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_optional_metadata_is_typed_in_diagnostics_and_model_execution() {
+    let events_with = |metadata: Value| {
+        let mut events = openai_text_events("hello");
+        let response = events.last_mut().unwrap().data["response"]
+            .as_object_mut()
+            .unwrap();
+        response.insert("id".into(), serde_json::json!("resp_fixture"));
+        response.insert("object".into(), serde_json::json!("response"));
+        response.extend(metadata.as_object().unwrap().clone());
+        events
+    };
+    for metadata in [
+        serde_json::json!({}),
+        serde_json::json!({"completed_at":null,"frequency_penalty":null,"presence_penalty":null}),
+        serde_json::json!({"completed_at":1788980000,"frequency_penalty":0.25,"presence_penalty":-0.25}),
+        serde_json::json!({"completed_at":0,"frequency_penalty":-2,"presence_penalty":2}),
+    ] {
+        let events = events_with(metadata);
+        assert!(model_connection_response(
+            ModelProviderWireProtocol::OpenAiResponses,
+            &serde_json::to_vec(&events.last().unwrap().data["response"]).unwrap()
+        ));
+        let (outcome, wire) =
+            execute_wire_fixture(wire_fixture(OPENAI_RESPONSES_ADAPTER_NAME), events).await;
+        let ModelAdapterExecutionOutcome::Succeeded(success) = outcome else {
+            panic!("valid optional response metadata was rejected");
+        };
+        assert_eq!(
+            success.response.message.as_ref().unwrap().parts,
+            vec![CanonicalMessagePart::Text("hello".into())]
+        );
+        assert_eq!(success.response.usage.input_tokens, Some(50));
+        assert_eq!(success.response.usage.output_tokens, Some(10));
+        for field in ["completed_at", "frequency_penalty", "presence_penalty"] {
+            assert!(wire.request_body.get(field).is_none());
+        }
+    }
+    for metadata in [
+        serde_json::json!({"completed_at":-1}),
+        serde_json::json!({"completed_at":1.5}),
+        serde_json::json!({"completed_at":"1788980000"}),
+        serde_json::json!({"completed_at":false}),
+        serde_json::json!({"completed_at":{}}),
+        serde_json::json!({"completed_at":[]}),
+        serde_json::json!({"frequency_penalty":-2.01}),
+        serde_json::json!({"frequency_penalty":2.01}),
+        serde_json::json!({"frequency_penalty":"0"}),
+        serde_json::json!({"frequency_penalty":true}),
+        serde_json::json!({"frequency_penalty":{}}),
+        serde_json::json!({"presence_penalty":-2.01}),
+        serde_json::json!({"presence_penalty":2.01}),
+        serde_json::json!({"presence_penalty":"0"}),
+        serde_json::json!({"presence_penalty":[]}),
+        serde_json::json!({"unknown_provider_extension":null}),
+    ] {
+        let unknown = metadata.get("unknown_provider_extension").is_some();
+        let events = events_with(metadata);
+        assert!(!model_connection_response(
+            ModelProviderWireProtocol::OpenAiResponses,
+            &serde_json::to_vec(&events.last().unwrap().data["response"]).unwrap()
+        ));
+        let (outcome, _) =
+            execute_wire_fixture(wire_fixture(OPENAI_RESPONSES_ADAPTER_NAME), events).await;
+        let ModelAdapterExecutionOutcome::Failed(failure) = outcome else {
+            panic!("invalid optional response metadata was accepted");
+        };
+        assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
+        assert!(failure.request_sent);
+        assert!(failure.safe_code.ends_with(if unknown {
+            "unknown_field"
+        } else {
+            "invalid_response_metadata"
+        }));
+    }
+    let events = events_with(serde_json::json!({"frequency_penalty":0}));
+    let response = serde_json::to_string(&events.last().unwrap().data["response"])
+        .unwrap()
+        .replace("\"frequency_penalty\":0", "\"frequency_penalty\":1e999");
+    assert!(!model_connection_response(
+        ModelProviderWireProtocol::OpenAiResponses,
+        response.as_bytes()
+    ));
+    let raw = format!("event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{response}}}\n\n");
+    let broker = Arc::new(FixtureEgressBroker::raw(
+        200,
+        "text/event-stream",
+        vec![raw.into_bytes()],
+    ));
+    let outcome =
+        execute_brokered_fixture(wire_fixture(OPENAI_RESPONSES_ADAPTER_NAME), broker).await;
+    assert!(matches!(outcome, ModelAdapterExecutionOutcome::Failed(_)));
+}
+
+#[tokio::test]
 async fn production_wire_adapters_share_text_stream_and_usage_contract() {
     for (adapter_name, protocol, events) in [
         (
@@ -1688,6 +1987,283 @@ async fn production_wire_adapters_share_native_structured_output_contract() {
 }
 
 #[tokio::test]
+async fn production_wire_adapters_support_explicit_textual_json_without_prompt_injection() {
+    for (adapter_name, events) in [
+        (
+            OPENAI_RESPONSES_ADAPTER_NAME,
+            openai_text_events("{\"answer\":\"hello\"}"),
+        ),
+        (
+            ANTHROPIC_MESSAGES_ADAPTER_NAME,
+            anthropic_text_events("{\"answer\":\"hello\"}"),
+        ),
+    ] {
+        let mut fixture = wire_fixture(adapter_name);
+        enable_structured_output(&mut fixture);
+        fixture.request.profile.structured_output.native = false;
+        let original_request_digest = fixture.request.request_digest.clone();
+        let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+        let Ok(ModelAdapterExecutionOutcome::Succeeded(success)) = outcome else {
+            panic!("explicit textual JSON output was rejected: {outcome:?}");
+        };
+        let wire = connector.take_request();
+        assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            success.response.structured_output.as_ref().unwrap().value,
+            serde_json::json!({"answer": "hello"})
+        );
+        assert!(success.response.message.is_none());
+        assert!(wire.request_body.get("text").is_none());
+        assert!(wire.request_body.get("output_config").is_none());
+        assert_eq!(wire.model_request_digest, original_request_digest);
+        let (instruction, prompt) = if adapter_name == OPENAI_RESPONSES_ADAPTER_NAME {
+            (
+                wire.request_body.pointer("/input/0/content/0/text"),
+                wire.request_body.pointer("/input/1/content/0/text"),
+            )
+        } else {
+            (
+                wire.request_body.pointer("/system/0/text"),
+                wire.request_body.pointer("/messages/0/content/0/text"),
+            )
+        };
+        assert_eq!(
+            instruction,
+            Some(&Value::String("Answer safely.".to_owned()))
+        );
+        assert_eq!(prompt, Some(&Value::String("Say hello.".to_owned())));
+    }
+}
+
+#[tokio::test]
+async fn textual_json_rejects_unsupported_modes_and_oversized_requests_before_dispatch() {
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for case in [
+            "tools",
+            "tool_intent",
+            "mixed_output",
+            "historical_tool",
+            "schema",
+            "request",
+            "disabled",
+        ] {
+            let mut fixture = wire_fixture(adapter_name);
+            enable_structured_output(&mut fixture);
+            fixture.request.profile.structured_output.native = false;
+            match case {
+                "tools" | "tool_intent" | "mixed_output" => {
+                    enable_tool(&mut fixture);
+                    if case == "tools" {
+                        fixture.request.request.response_contract.allow_tool_intents = false;
+                    }
+                    if case != "tools" {
+                        fixture.request.request.tools.clear();
+                    }
+                    if case == "mixed_output" {
+                        fixture
+                            .request
+                            .profile
+                            .structured_output
+                            .may_combine_with_tool_intent = true;
+                        fixture
+                            .request
+                            .request
+                            .response_contract
+                            .allow_message_with_tool_intents = true;
+                    }
+                }
+                "historical_tool" => {
+                    let value = serde_json::json!({"result": "original tool output"});
+                    let content_digest = canonical_digest(&value).unwrap().parse().unwrap();
+                    let mut message = fixture.request.request.messages.last().unwrap().clone();
+                    message.role = CanonicalMessageRole::Tool;
+                    message.source.assembly_phase =
+                        insight_platform_models::PromptAssemblyPhase::CapabilityToolResult;
+                    message.parts = vec![CanonicalMessagePart::ToolResult(
+                        insight_platform_models::ModelToolResult {
+                            call_id: "past-call".to_owned(),
+                            invocation_id: id(ResourceKind::CapabilityInvocation, 81),
+                            output_value_id: id(ResourceKind::RunValue, 82),
+                            output_schema_digest: sha('3'),
+                            content_digest,
+                            classification: DataClassification::Internal,
+                            value: ValueRef::Inline { value },
+                        },
+                    )];
+                    fixture.request.request.messages.push(message);
+                }
+                "schema" => {
+                    fixture
+                        .request
+                        .profile
+                        .structured_output
+                        .maximum_schema_bytes = 1
+                }
+                "request" => {
+                    fixture
+                        .request
+                        .provider
+                        .request_limits
+                        .maximum_request_bytes = 1
+                }
+                "disabled" => {
+                    fixture
+                        .request
+                        .profile
+                        .structured_output
+                        .textual_json_fallback = false
+                }
+                _ => unreachable!(),
+            }
+            fixture.request.request_digest =
+                canonical_request_digest(&fixture.request.request).unwrap();
+            if !matches!(case, "request" | "disabled") {
+                fixture.request.validate_at(Utc::now(), limits()).unwrap();
+            }
+            let (outcome, connector) = execute_wire_fixture_result(fixture, vec![]).await;
+            match outcome {
+                Ok(ModelAdapterExecutionOutcome::Failed(failure)) => {
+                    assert_eq!(
+                        failure.class,
+                        ModelAdapterFailureClass::RejectedBeforeDispatch,
+                        "{adapter_name}/{case}"
+                    );
+                    assert!(!failure.request_sent);
+                }
+                Err(_) if matches!(case, "request" | "disabled") => {}
+                other => panic!("{adapter_name}/{case} accepted unsupported mode: {other:?}"),
+            }
+            assert_eq!(
+                connector.calls.load(Ordering::SeqCst),
+                0,
+                "{adapter_name}/{case}"
+            );
+            assert!(connector.request.lock().unwrap().is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn structured_text_is_strict_json_and_exact_schema_without_repair_or_retry() {
+    let outputs = [
+        "{\"answer\":\"secret-canary\",\"answer\":\"hello\"}",
+        "{\"answer\":NaN}",
+        "{\"answer\":1e999}",
+        "{\"answer\":42}",
+        "{\"answer\":\"hello\",\"unexpected\":true}",
+        "{\"answer\":\"hello\"} trailing",
+        "{\"answer\":\"hello\"}{\"answer\":\"again\"}",
+        "```json\n{\"answer\":\"hello\"}\n```",
+        "prefix {\"answer\":\"hello\"}",
+        "[]",
+        "{\"answer\":\"\\ud800\"}",
+    ];
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for native in [false, true] {
+            for output in outputs {
+                let mut fixture = wire_fixture(adapter_name);
+                enable_structured_output(&mut fixture);
+                fixture.request.profile.structured_output.native = native;
+                let events = if adapter_name == OPENAI_RESPONSES_ADAPTER_NAME {
+                    openai_text_events(output)
+                } else {
+                    anthropic_text_events(output)
+                };
+                let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+                let Ok(ModelAdapterExecutionOutcome::Failed(failure)) = outcome else {
+                    panic!("{adapter_name}/native={native} accepted invalid structured text: {outcome:?}");
+                };
+                assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
+                assert!(failure.safe_code.ends_with("invalid_structured_output"));
+                assert!(failure.request_sent);
+                assert!(!format!("{failure:?}").contains("secret-canary"));
+                assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
+                let wire = connector.take_request();
+                let has_native = wire.request_body.get("text").is_some()
+                    || wire.request_body.get("output_config").is_some();
+                assert_eq!(has_native, native);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn textual_json_output_has_exact_byte_bound_and_real_incremental_sse_validation() {
+    let raw = "{\"answer\":\"你好\\\"\\n\"}";
+    let parsed = serde_json::from_str::<Value>(raw).unwrap();
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for fits in [false, true] {
+            let mut fixture = wire_fixture(adapter_name);
+            enable_structured_output(&mut fixture);
+            fixture.request.profile.structured_output.native = false;
+            fixture
+                .request
+                .profile
+                .structured_output
+                .maximum_output_bytes = u32::try_from(raw.len() - usize::from(!fits)).unwrap();
+            let events = if adapter_name == OPENAI_RESPONSES_ADAPTER_NAME {
+                openai_text_events(raw)
+            } else {
+                anthropic_text_events(raw)
+            };
+            let broker = Arc::new(FixtureEgressBroker::from_events(events));
+            let outcome = execute_brokered_fixture(fixture, broker.clone()).await;
+            match outcome {
+                ModelAdapterExecutionOutcome::Succeeded(success) if fits => {
+                    assert_eq!(success.response.structured_output.unwrap().value, parsed);
+                }
+                ModelAdapterExecutionOutcome::Failed(failure) if !fits => {
+                    assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
+                    assert!(failure.safe_code.ends_with("invalid_structured_output"));
+                }
+                other => panic!("{adapter_name}/fits={fits}: {other:?}"),
+            }
+            assert!(broker.request.lock().unwrap().is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn textual_json_rejects_tool_output_and_incomplete_streams() {
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for tool_output in [false, true] {
+            let mut fixture = wire_fixture(adapter_name);
+            enable_structured_output(&mut fixture);
+            fixture.request.profile.structured_output.native = false;
+            let mut events = match (adapter_name, tool_output) {
+                (OPENAI_RESPONSES_ADAPTER_NAME, true) => openai_tool_events(),
+                (OPENAI_RESPONSES_ADAPTER_NAME, false) => {
+                    openai_text_events("{\"answer\":\"hello\"}")
+                }
+                (_, true) => anthropic_tool_events(),
+                (_, false) => anthropic_text_events("{\"answer\":\"hello\"}"),
+            };
+            if !tool_output {
+                events.pop();
+            }
+            let (outcome, connector) = execute_wire_fixture_result(fixture, events).await;
+            let Ok(ModelAdapterExecutionOutcome::Failed(failure)) = outcome else {
+                panic!("{adapter_name}/tools={tool_output}: {outcome:?}");
+            };
+            assert!(failure.request_sent);
+            assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn production_wire_adapters_fail_closed_on_unknown_provider_fields() {
     for (adapter_name, events) in [
         (
@@ -1742,6 +2318,117 @@ async fn brokered_connector_feeds_strict_incremental_sse_to_both_adapters() {
         assert!(request.is_some());
         assert_eq!(request.as_ref().unwrap().secret_bindings.len(), 1);
         assert!(!format!("{:?}", request.as_ref().unwrap()).contains("api_key"));
+    }
+}
+
+fn metadata_sse(events: &[ModelProviderWireEvent], newline: &str) -> Vec<u8> {
+    let mut encoded = "\u{feff}".to_owned();
+    for event in events {
+        encoded.push_str(&format!(
+            ": ignored{newline}id: transport-canary{newline}retry: 999999999999999999999999999999{newline}event: {}{newline}data: {}{newline}{newline}",
+            event.event_name,
+            serde_json::to_string(&event.data).unwrap()
+        ));
+    }
+    encoded.into_bytes()
+}
+
+#[tokio::test]
+async fn brokered_sse_metadata_preserves_exact_response_usage_and_request_without_reconnect() {
+    for (adapter_name, events) in [
+        (OPENAI_RESPONSES_ADAPTER_NAME, openai_text_events("hello")),
+        (
+            ANTHROPIC_MESSAGES_ADAPTER_NAME,
+            anthropic_text_events("hello"),
+        ),
+    ] {
+        let fixture = wire_fixture(adapter_name);
+        let baseline_broker = Arc::new(FixtureEgressBroker::from_events(events.clone()));
+        let baseline = execute_brokered_fixture(fixture.clone(), baseline_broker.clone()).await;
+        let ModelAdapterExecutionOutcome::Succeeded(ref expected) = baseline else {
+            panic!("baseline fixture failed");
+        };
+        assert_eq!(expected.response.usage.input_tokens, Some(50));
+        assert_eq!(expected.response.usage.output_tokens, Some(10));
+        for newline in ["\n", "\r", "\r\n"] {
+            let encoded = metadata_sse(&events, newline);
+            let broker = Arc::new(FixtureEgressBroker::raw(
+                200,
+                "text/event-stream",
+                encoded.chunks(1).map(<[u8]>::to_vec).collect(),
+            ));
+            let outcome = execute_brokered_fixture(fixture.clone(), broker.clone()).await;
+            // Includes the canonical output, provider-response digest, usage and stream evidence.
+            assert_eq!(outcome, baseline);
+            assert!(!format!("{outcome:?}").contains("transport-canary"));
+            assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
+            let request = broker.request.lock().unwrap();
+            let request = request.as_ref().unwrap();
+            assert_eq!(request.model_request_digest, fixture.request.request_digest);
+            assert_eq!(
+                request.request_body_digest,
+                baseline_broker
+                    .request
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .request_body_digest
+            );
+        }
+        assert_eq!(baseline_broker.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn brokered_sse_metadata_never_repairs_payload_or_invents_terminal_success() {
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        for case in ["business_unknown", "truncated", "done_only"] {
+            let mut events = if adapter_name == OPENAI_RESPONSES_ADAPTER_NAME {
+                openai_text_events("hello")
+            } else {
+                anthropic_text_events("hello")
+            };
+            if case == "business_unknown" {
+                events[0].data["unsupported_business_field"] = serde_json::json!("payload-canary");
+            }
+            let mut encoded = metadata_sse(&events, "\n");
+            if case == "truncated" {
+                encoded.pop();
+            } else if case == "done_only" {
+                encoded = b"id: transport-canary\nretry: 1\ndata: [DONE]\r\n\r\n".to_vec();
+            }
+            let broker = Arc::new(FixtureEgressBroker::raw(
+                200,
+                "text/event-stream",
+                encoded.chunks(1).map(<[u8]>::to_vec).collect(),
+            ));
+            let outcome =
+                execute_brokered_fixture(wire_fixture(adapter_name), broker.clone()).await;
+            let ModelAdapterExecutionOutcome::Failed(failure) = outcome else {
+                panic!("{adapter_name}/{case} invented success");
+            };
+            assert!(failure.request_sent);
+            assert_eq!(
+                failure.class,
+                if case == "done_only" {
+                    ModelAdapterFailureClass::RetryableAfterDispatch
+                } else {
+                    ModelAdapterFailureClass::Permanent
+                }
+            );
+            match case {
+                "business_unknown" => assert!(failure.safe_code.ends_with("unknown_field")),
+                "truncated" => assert_eq!(failure.safe_code, "model_sse_incomplete_event"),
+                "done_only" => assert!(failure.safe_code.ends_with("missing_terminal")),
+                _ => unreachable!(),
+            }
+            assert!(!format!("{failure:?}").contains("canary"));
+            assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
+        }
     }
 }
 

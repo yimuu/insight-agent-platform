@@ -7,9 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::{stream, StreamExt};
 use insight_platform_contracts::{
-    canonical_digest, canonical_json, CanonicalHttpEndpoint, CapabilityEndpointScheme, DataRegion,
-    ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, ResourceId, ResourceKind,
-    SecretPurpose, SecretResolutionPolicy, Sha256Digest,
+    canonical_digest, canonical_json, CapabilityEndpointScheme, ExactSecretBindingRef, ResourceId,
+    ResourceKind, SecretPurpose, SecretResolutionPolicy, Sha256Digest,
 };
 use insight_platform_model_adapters::{
     ModelAdapterCancelOutcome, ModelAdapterCancelRequest, ModelAdapterFailure,
@@ -47,6 +46,8 @@ pub use mcp_oauth::*;
 pub use mcp_oauth_start::*;
 pub use mcp_streamable_http::*;
 pub use remote_context::*;
+
+mod model_connection;
 
 pub const MAX_INSTALLED_MODEL_ENDPOINTS: usize = 1_024;
 pub const MAX_EGRESS_IN_FLIGHT_HARD: usize = 4_096;
@@ -92,44 +93,19 @@ impl Default for ModelProviderEgressLimits {
     }
 }
 
-/// Process-installed endpoint and policy closure. Callers submit only its exact identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InstalledModelProviderEndpoint {
-    pub schema_version: u32,
-    pub protocol: ModelProviderWireProtocol,
-    pub provider_deployment: ExactDeploymentRef,
-    pub provider_revision: ExactVersionRef,
-    pub endpoint: CanonicalHttpEndpoint,
-    pub endpoint_identity_digest: Sha256Digest,
-    pub credential_purpose: SecretPurpose,
-    pub network_policy: ExactVersionRef,
-    pub tls_policy: ExactVersionRef,
-    pub trust_policy: ExactVersionRef,
-    pub data_policy: ExactVersionRef,
-    pub region: DataRegion,
-    #[serde(default)]
-    pub development_loopback: bool,
-    #[serde(default)]
-    pub development_anonymous: bool,
-    #[serde(default)]
-    pub trusted_root_pem: Option<String>,
+pub use insight_platform_contracts::InstalledModelDestinationGrant;
+
+trait ValidateInstalledModelDestination {
+    fn validate(&self) -> Result<(), EgressConfigurationError>;
+    fn matches(&self, request: &ModelProviderWireRequest) -> bool;
 }
 
-impl InstalledModelProviderEndpoint {
-    pub fn validate(&self) -> Result<(), EgressConfigurationError> {
-        self.provider_deployment
-            .validate()
-            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
-        self.provider_revision
-            .validate()
-            .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
+impl ValidateInstalledModelDestination for InstalledModelDestinationGrant {
+    fn validate(&self) -> Result<(), EgressConfigurationError> {
         self.endpoint
             .validate()
             .map_err(|_| EgressConfigurationError::InvalidEndpoint)?;
         if self.schema_version != 1
-            || self.provider_deployment.resource_kind != ResourceKind::ModelProviderDeployment
-            || self.provider_revision.resource_kind != ResourceKind::ModelProviderRevision
             || self.endpoint.scheme != CapabilityEndpointScheme::Https
             || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
             || !valid_broker_base_path(&self.endpoint.base_path)
@@ -167,8 +143,6 @@ impl InstalledModelProviderEndpoint {
 
     fn matches(&self, request: &ModelProviderWireRequest) -> bool {
         self.protocol == request.protocol
-            && self.provider_deployment == request.provider_deployment
-            && self.provider_revision == request.provider_revision
             && self.endpoint_identity_digest == request.endpoint_identity_digest
             && self.network_policy == request.network_policy
             && self.tls_policy == request.tls_policy
@@ -191,44 +165,40 @@ fn valid_model_trust_roots(pem: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub struct InstalledModelProviderEndpointCatalog {
-    entries: BTreeMap<(ResourceId, Sha256Digest), InstalledModelProviderEndpoint>,
+pub struct InstalledModelDestinationCatalog {
+    entries: Vec<InstalledModelDestinationGrant>,
 }
 
-impl InstalledModelProviderEndpointCatalog {
+impl InstalledModelDestinationCatalog {
     pub fn new(
-        entries: Vec<InstalledModelProviderEndpoint>,
+        entries: Vec<InstalledModelDestinationGrant>,
     ) -> Result<Self, EgressConfigurationError> {
         // An empty installed closure is a valid deny-all state. This lets deployments enable the
         // broker before a Model endpoint is admitted without inventing a permissive placeholder.
         if entries.len() > MAX_INSTALLED_MODEL_ENDPOINTS {
             return Err(EgressConfigurationError::InvalidEndpointCatalog);
         }
-        let mut catalog = BTreeMap::new();
-        for entry in entries {
+        for (index, entry) in entries.iter().enumerate() {
             entry.validate()?;
-            let key = (
-                entry.provider_deployment.deployment_id.clone(),
-                entry.provider_deployment.deployment_digest.clone(),
-            );
-            if catalog.insert(key, entry).is_some() {
+            // Purpose and trust material are not alternative selectors. Two grants with the same
+            // physical/policy selector would be ambiguous for a multi-credential request.
+            if entries[..index]
+                .iter()
+                .any(|other| entry.same_selector(other))
+            {
                 return Err(EgressConfigurationError::DuplicateEndpoint);
             }
         }
-        Ok(Self { entries: catalog })
+        Ok(Self { entries })
     }
 
     fn resolve(
         &self,
         request: &ModelProviderWireRequest,
-    ) -> Result<InstalledModelProviderEndpoint, ModelAdapterFailure> {
-        let key = (
-            request.provider_deployment.deployment_id.clone(),
-            request.provider_deployment.deployment_digest.clone(),
-        );
+    ) -> Result<InstalledModelDestinationGrant, ModelAdapterFailure> {
         self.entries
-            .get(&key)
-            .filter(|entry| entry.matches(request))
+            .iter()
+            .find(|entry| entry.matches(request))
             .cloned()
             .ok_or_else(|| rejected_before_dispatch("model_egress_endpoint_not_installed"))
     }
@@ -493,7 +463,7 @@ fn valid_broker_base_path(path: &str) -> bool {
     })
 }
 
-fn endpoint_url(entry: &InstalledModelProviderEndpoint) -> Result<Url, EgressConfigurationError> {
+fn endpoint_url(entry: &InstalledModelDestinationGrant) -> Result<Url, EgressConfigurationError> {
     let base = entry.endpoint.base_path.trim_end_matches('/');
     let path = if base.is_empty() {
         entry.protocol.endpoint_path().to_owned()
@@ -649,10 +619,13 @@ impl Drop for InFlightRegistration {
 
 /// Production HTTPS implementation of the Model Provider broker port.
 pub struct ReqwestModelProviderEgressBroker {
-    catalog: InstalledModelProviderEndpointCatalog,
+    catalog: InstalledModelDestinationCatalog,
     secrets: Arc<dyn SecretMaterialResolver>,
     dns: Arc<dyn EgressDnsResolver>,
     transport: Arc<dyn PinnedModelProviderHttpTransport>,
+    authorization: Arc<dyn insight_platform_security::ModelDispatchAuthority>,
+    probe_authority: Option<Arc<dyn insight_platform_security::ModelConnectionProbeAuthority>>,
+    probe_permits: Arc<Semaphore>,
     limits: ModelProviderEgressLimits,
     permits: Arc<Semaphore>,
     active: Arc<Mutex<BTreeMap<ModelProviderRequestIdentity, CancellationToken>>>,
@@ -660,9 +633,10 @@ pub struct ReqwestModelProviderEgressBroker {
 
 impl ReqwestModelProviderEgressBroker {
     pub fn new(
-        catalog: InstalledModelProviderEndpointCatalog,
+        catalog: InstalledModelDestinationCatalog,
         secrets: Arc<dyn SecretMaterialResolver>,
         dns: Arc<dyn EgressDnsResolver>,
+        authorization: Arc<dyn insight_platform_security::ModelDispatchAuthority>,
         limits: ModelProviderEgressLimits,
     ) -> Result<Self, EgressConfigurationError> {
         Self::with_transport(
@@ -670,15 +644,17 @@ impl ReqwestModelProviderEgressBroker {
             secrets,
             dns,
             Arc::new(ReqwestPinnedModelProviderHttpTransport),
+            authorization,
             limits,
         )
     }
 
     fn with_transport(
-        catalog: InstalledModelProviderEndpointCatalog,
+        catalog: InstalledModelDestinationCatalog,
         secrets: Arc<dyn SecretMaterialResolver>,
         dns: Arc<dyn EgressDnsResolver>,
         transport: Arc<dyn PinnedModelProviderHttpTransport>,
+        authorization: Arc<dyn insight_platform_security::ModelDispatchAuthority>,
         limits: ModelProviderEgressLimits,
     ) -> Result<Self, EgressConfigurationError> {
         limits.validate()?;
@@ -687,10 +663,23 @@ impl ReqwestModelProviderEgressBroker {
             secrets,
             dns,
             transport,
+            authorization,
+            probe_authority: None,
+            probe_permits: Arc::new(Semaphore::new(
+                insight_platform_contracts::MODEL_PROBE_MAXIMUM_IN_FLIGHT,
+            )),
             limits,
             permits: Arc::new(Semaphore::new(limits.maximum_in_flight)),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         })
+    }
+
+    pub fn with_model_connection_authority(
+        mut self,
+        authority: Arc<dyn insight_platform_security::ModelConnectionProbeAuthority>,
+    ) -> Self {
+        self.probe_authority = Some(authority);
+        self
     }
 
     pub fn capacity_snapshot(&self) -> EgressCapacitySnapshot {
@@ -730,7 +719,7 @@ impl ReqwestModelProviderEgressBroker {
 
     async fn resolve_addresses(
         &self,
-        entry: &InstalledModelProviderEndpoint,
+        entry: &InstalledModelDestinationGrant,
         cancellation: &CancellationToken,
         deadline: DateTime<Utc>,
     ) -> Result<(String, Vec<SocketAddr>), ModelAdapterFailure> {
@@ -782,7 +771,7 @@ impl ReqwestModelProviderEgressBroker {
     async fn resolve_credential(
         &self,
         request: &ModelProviderWireRequest,
-        entry: &InstalledModelProviderEndpoint,
+        entry: &InstalledModelDestinationGrant,
         cancellation: &CancellationToken,
     ) -> Result<ResolvedSecretMaterial, ModelAdapterFailure> {
         let binding = request
@@ -823,9 +812,31 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         request.validate_at(Utc::now())?;
         let entry = self.catalog.resolve(&request)?;
         let registration = self.register(request.identity(), request.deadline)?;
+        let authorization = dispatch_authorization(&request);
+        let authorized = tokio::select! {
+            biased;
+            _ = registration.cancellation.cancelled() => return Err(rejected_before_dispatch("model_egress_cancelled")),
+            result = tokio::time::timeout(Duration::from_secs(5), self.authorization.authorize_model_dispatch(&authorization)) => result,
+        };
+        let permit = match authorized {
+            Ok(Ok(permit)) if permit.validate_for(&authorization, Utc::now()) => permit,
+            Ok(Err(insight_platform_contracts::ModelDispatchAuthorizationError::Unavailable))
+            | Err(_) => {
+                return Err(retryable_before_dispatch(
+                    "model_dispatch_authority_unavailable",
+                    request.deadline,
+                ));
+            }
+            _ => return Err(rejected_before_dispatch("model_dispatch_not_authorized")),
+        };
         let (dns_host, addresses) = self
             .resolve_addresses(&entry, &registration.cancellation, request.deadline)
             .await?;
+        if !permit.validate_for(&authorization, Utc::now()) {
+            return Err(rejected_before_dispatch(
+                "model_dispatch_authorization_expired",
+            ));
+        }
         let credential = if entry.development_anonymous {
             None
         } else {
@@ -853,6 +864,11 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         let total_timeout = remaining.min(contract_total);
         let connect_timeout =
             Duration::from_millis(request.connect_timeout_milliseconds).min(total_timeout);
+        if !permit.validate_for(&authorization, Utc::now()) {
+            return Err(rejected_before_dispatch(
+                "model_dispatch_authorization_expired",
+            ));
+        }
         if connect_timeout.is_zero() || total_timeout.is_zero() {
             return Err(rejected_before_dispatch("model_egress_deadline_elapsed"));
         }
@@ -903,6 +919,45 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         };
         cancellation.cancel();
         Ok(ModelAdapterCancelOutcome::Accepted)
+    }
+}
+
+fn dispatch_authorization(
+    request: &ModelProviderWireRequest,
+) -> insight_platform_contracts::ModelDispatchAuthorizationV1 {
+    insight_platform_contracts::ModelDispatchAuthorizationV1 {
+        schema_version: 1,
+        tenant_id: request.tenant_id.clone(),
+        model_turn_id: request.model_turn_id.clone(),
+        job_id: request.job_id.clone(),
+        worker_process_generation_id: request.worker_process_generation_id.clone(),
+        attempt_no: request.attempt_no,
+        lease_generation: request.lease_generation,
+        admission_digest: request.admission_digest.clone(),
+        model_request_digest: request.model_request_digest.clone(),
+        provider_deployment: request.provider_deployment.clone(),
+        provider_revision: request.provider_revision.clone(),
+        endpoint_identity_digest: request.endpoint_identity_digest.clone(),
+        secret_bindings: request.secret_bindings.clone(),
+        network_policy: request.network_policy.clone(),
+        tls_policy: request.tls_policy.clone(),
+        trust_policy: request.trust_policy.clone(),
+        data_policy: request.data_policy.clone(),
+        region: request.region.clone(),
+        adapter_qualified_name: match request.protocol {
+            ModelProviderWireProtocol::OpenAiResponses => {
+                insight_platform_model_adapters::OPENAI_RESPONSES_ADAPTER_NAME
+            }
+            ModelProviderWireProtocol::AnthropicMessages => {
+                insight_platform_model_adapters::ANTHROPIC_MESSAGES_ADAPTER_NAME
+            }
+        }
+        .to_owned(),
+        maximum_request_bytes: request.maximum_request_bytes,
+        maximum_response_bytes: request.maximum_response_bytes,
+        connect_timeout_milliseconds: request.connect_timeout_milliseconds,
+        total_timeout_milliseconds: request.total_timeout_milliseconds,
+        deadline: request.deadline,
     }
 }
 

@@ -101,8 +101,6 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
             || request.lease.run_id != request.run_id
             || request.deadline > request.lease.deadline
             || request.maximum_rounds == 0
-            || request.maximum_capability_calls == 0
-            || request.maximum_parallel_calls_per_round == 0
             || request.token_budget == 0
         {
             return Err(DurablePlanDriverError::InvariantViolation);
@@ -112,6 +110,7 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
             skill_slot_ids,
             capability_slot_ids,
             input,
+            output,
             maximum_rounds,
             maximum_capability_calls,
             maximum_parallel_calls_per_round,
@@ -121,6 +120,19 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
         else {
             return Err(DurablePlanDriverError::InvariantViolation);
         };
+        insight_platform_plan::validate_model_loop_tool_budget_for_slots(
+            *maximum_capability_calls,
+            *maximum_parallel_calls_per_round,
+            !skill_slot_ids.is_empty() || !capability_slot_ids.is_empty(),
+        )
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        request
+            .response_schema
+            .validate()
+            .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+        if &request.response_schema.canonical_digest != output.schema_digest() {
+            return Err(DurablePlanDriverError::InvariantViolation);
+        }
         let requested_skill_slots = request
             .tool_slots
             .iter()
@@ -177,34 +189,20 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
             token_budget: facts.model.safety.instruction_token_budget,
             text: facts.model.safety.platform_instruction.clone(),
         }];
-        let agent_text = canonical_text(&serde_json::json!({
-            "agent_interface": facts.run_bindings.agent_interface,
-            "contract_digest": facts.agent.contract_digest,
-            "input_schema_digest": facts.agent.input_schema.canonical_digest,
-            "output_schema_digest": facts.agent.output_schema.canonical_digest,
-        }))?;
-        blocks.push(exact_block(
-            PromptAssemblyPhase::AgentContract,
-            0,
-            "agent_contract",
-            facts.run_bindings.agent_interface.revision_id.to_string(),
-            facts.run_bindings.agent_interface.semantic_digest.clone(),
-            DataClassification::Internal,
-            agent_text,
+        blocks.push(agent_contract_block(
+            &facts.run_bindings.agent_interface,
+            &facts.agent.contract_digest,
+            &facts.agent.input_schema.canonical_digest,
+            &facts.agent.output_schema,
         )?);
-        let node_text = canonical_text(&serde_json::json!({
-            "node": request.plan_node,
-            "plan_node_key": request.plan_node_key,
-            "plan_revision": facts.run_bindings.plan,
-        }))?;
-        blocks.push(exact_block(
-            PromptAssemblyPhase::PlanNodeInstruction,
-            0,
-            "plan_node",
-            request.node_execution_id.to_string(),
-            facts.run_bindings.plan.semantic_digest.clone(),
-            DataClassification::Internal,
-            node_text,
+        blocks.push(model_node_instruction_block(
+            &request.plan_node,
+            &request.plan_node_key,
+            &facts.run_bindings.plan,
+            &request.node_execution_id,
+            &request.response_schema,
+            facts.profile.structured_output.textual_json_fallback
+                && !facts.profile.structured_output.native,
         )?);
         if let Some(block) = agent_instruction_block(
             facts.agent.author_instructions.as_deref(),
@@ -337,8 +335,8 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
             messages: assembled.messages,
             tools: facts.tools,
             response_contract: ModelResponseContract {
-                output_schema_digest: facts.agent.output_schema.canonical_digest.clone(),
-                structured_schema: Some(facts.agent.output_schema),
+                output_schema_digest: request.response_schema.canonical_digest.clone(),
+                structured_schema: Some(request.response_schema),
                 allow_tool_intents,
                 allow_message_with_tool_intents: false,
             },
@@ -396,6 +394,62 @@ fn canonical_text(value: &serde_json::Value) -> Result<String, DurablePlanDriver
         canonical_json(value).map_err(|_| DurablePlanDriverError::InvariantViolation)?,
     )
     .map_err(|_| DurablePlanDriverError::InvariantViolation)
+}
+
+fn agent_contract_block(
+    interface: &ExactVersionRef,
+    contract_digest: &Sha256Digest,
+    input_schema_digest: &Sha256Digest,
+    output_schema: &insight_platform_contracts::ClosedJsonSchema,
+) -> Result<PromptAssemblyBlock, DurablePlanDriverError> {
+    let text = serde_json::json!({
+        "agent_interface": interface, "contract_digest": contract_digest,
+        "input_schema_digest": input_schema_digest, "output_schema_digest": output_schema.canonical_digest,
+    });
+    exact_block(
+        PromptAssemblyPhase::AgentContract,
+        0,
+        "agent_contract",
+        interface.revision_id.to_string(),
+        interface.semantic_digest.clone(),
+        DataClassification::Internal,
+        canonical_text(&text)?,
+    )
+}
+
+fn model_node_instruction_block(
+    node: &insight_platform_plan::RuntimeNode,
+    node_key: &insight_platform_plan::PlanNodeKey,
+    revision: &ExactVersionRef,
+    node_execution_id: &ResourceId,
+    response_schema: &insight_platform_contracts::ClosedJsonSchema,
+    textual_json_fallback: bool,
+) -> Result<PromptAssemblyBlock, DurablePlanDriverError> {
+    response_schema
+        .validate()
+        .map_err(|_| DurablePlanDriverError::InvariantViolation)?;
+    let insight_platform_plan::RuntimeNode::ModelLoop { output, .. } = node else {
+        return Err(DurablePlanDriverError::InvariantViolation);
+    };
+    if output.schema_digest() != &response_schema.canonical_digest {
+        return Err(DurablePlanDriverError::InvariantViolation);
+    }
+    let mut text = serde_json::json!({
+        "node": node, "plan_node_key": node_key, "plan_revision": revision,
+        "response_schema_digest": response_schema.canonical_digest,
+    });
+    if textual_json_fallback {
+        text["response_schema"] = response_schema.schema.clone();
+    }
+    exact_block(
+        PromptAssemblyPhase::PlanNodeInstruction,
+        0,
+        "plan_node",
+        node_execution_id.to_string(),
+        revision.semantic_digest.clone(),
+        DataClassification::Internal,
+        canonical_text(&text)?,
+    )
 }
 
 fn agent_instruction_block(
@@ -485,6 +539,222 @@ mod agent_instruction_tests {
         assert_eq!(block.source_digest, revision.semantic_digest);
         assert_eq!(block.classification, DataClassification::Internal);
         assert_eq!(block.text, "Use only the current input.");
+    }
+    #[test]
+    fn textual_output_schema_is_attributed_and_charged_before_dispatch() {
+        let interface = ExactVersionRef::new(
+            "aif_0198f1c3-8f49-7c3e-b1f3-773c28367b90".parse().unwrap(),
+            digest('a'),
+        )
+        .unwrap();
+        let schema=insight_platform_contracts::ClosedJsonSchema::build(serde_json::json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["answer"],"properties":{"answer":{"type":"string","minLength":0,"maxLength":128,"x-platform-max-bytes":512}}})).unwrap();
+        let node_key = insight_platform_plan::PlanNodeKey::new("answer".into()).unwrap();
+        let node = insight_platform_plan::RuntimeNode::ModelLoop {
+            model_slot_id: "model".into(),
+            skill_slot_ids: vec![],
+            capability_slot_ids: vec![],
+            input: insight_platform_plan::ExactDataPortRef::RunInput {
+                schema_digest: digest('c'),
+            },
+            model_route: None,
+            output: insight_platform_plan::ExactDataPortRef::NodeOutput {
+                producer_node_id: node_key.clone(),
+                port_id: insight_platform_plan::DataPortKey::new("draft".into()).unwrap(),
+                schema_digest: schema.canonical_digest.clone(),
+            },
+            maximum_rounds: 1,
+            maximum_capability_calls: 0,
+            maximum_parallel_calls_per_round: 0,
+            token_budget: 10240,
+            resume: insight_platform_plan::PlanNodeKey::new("review".into()).unwrap(),
+        };
+        let revision = ExactVersionRef::new(
+            ResourceId::from_uuid_v7(ResourceKind::AgentPlanRevision, uuid::Uuid::now_v7())
+                .unwrap(),
+            digest('d'),
+        )
+        .unwrap();
+        let execution =
+            ResourceId::from_uuid_v7(ResourceKind::NodeExecution, uuid::Uuid::now_v7()).unwrap();
+        let plain =
+            model_node_instruction_block(&node, &node_key, &revision, &execution, &schema, false)
+                .unwrap();
+        let fallback =
+            model_node_instruction_block(&node, &node_key, &revision, &execution, &schema, true)
+                .unwrap();
+        let final_schema=insight_platform_contracts::ClosedJsonSchema::build(serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+            "required":["review"],"properties":{"review":{"type":"boolean"}}})).unwrap();
+        let agent =
+            agent_contract_block(&interface, &digest('b'), &digest('c'), &final_schema).unwrap();
+        let agent_json: Value = serde_json::from_str(&agent.text).unwrap();
+        assert_eq!(
+            agent_json["output_schema_digest"],
+            serde_json::json!(final_schema.canonical_digest)
+        );
+        assert!(agent_json.get("response_schema").is_none());
+        assert_ne!(final_schema.canonical_digest, schema.canonical_digest);
+        assert_eq!(
+            serde_json::from_str::<Value>(&fallback.text).unwrap()["response_schema"],
+            schema.schema
+        );
+        assert!(serde_json::from_str::<Value>(&plain.text)
+            .unwrap()
+            .get("response_schema")
+            .is_none());
+        let assemble = |contract: PromptAssemblyBlock, maximum: u64| {
+            let mut blocks = vec![contract, agent.clone()];
+            for (phase, text) in [
+                (
+                    PromptAssemblyPhase::PlatformSafety,
+                    "Use trusted instructions.",
+                ),
+                (PromptAssemblyPhase::UserInput, "你好"),
+            ] {
+                blocks.push(
+                    exact_block(
+                        phase,
+                        0,
+                        "fixture_input",
+                        format!("{phase:?}"),
+                        digest('d'),
+                        DataClassification::Internal,
+                        text.into(),
+                    )
+                    .unwrap(),
+                );
+            }
+            assemble_prompt_messages(blocks, 65536, maximum)
+        };
+        let without = assemble(plain, 16384).unwrap();
+        let actual = assemble(fallback.clone(), 16384).unwrap();
+        assert!(actual.total_estimated_tokens > without.total_estimated_tokens);
+        assert_eq!(
+            actual.total_bytes - without.total_bytes,
+            fallback.byte_budget
+                - without
+                    .source_map
+                    .iter()
+                    .find(|s| s.phase == PromptAssemblyPhase::PlanNodeInstruction)
+                    .unwrap()
+                    .included_bytes
+        );
+        let attributed = actual
+            .source_map
+            .iter()
+            .find(|s| s.phase == PromptAssemblyPhase::PlanNodeInstruction)
+            .unwrap();
+        assert_eq!(attributed.source_digest, revision.semantic_digest);
+        assert_eq!(attributed.included_bytes, fallback.text.len() as u32);
+        assert_eq!(
+            attributed.estimated_tokens,
+            insight_platform_contracts::estimate_model_text_tokens(fallback.text.len() as u32)
+                .unwrap()
+        );
+        assert!(matches!(
+            assemble(fallback, without.total_estimated_tokens),
+            Err(insight_platform_models::PromptAssemblyError::TotalBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires the explicit local corpus capacity fixture produced by document_review_source"]
+    fn document_review_corpus_fits_actual_prompt_assembly() {
+        use insight_platform_contracts::{ClosedJsonSchema, ClosedValueSchema};
+        let path = std::env::var_os("PLATFORM_DOCUMENT_REVIEW_CAPACITY_FIXTURE")
+            .expect("explicit corpus fixture path");
+        let bytes = std::fs::read(path).unwrap();
+        let fixture = insight_platform_contracts::parse_strict_json(
+            &bytes,
+            insight_platform_contracts::JsonLimits {
+                max_bytes: 262144,
+                max_depth: 32,
+                max_properties_per_object: 128,
+                max_items_per_array: 256,
+                max_string_bytes: 32768,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fixture["scope"],
+            "local_corpus_typed_observation_capacity_only"
+        );
+        assert_eq!(fixture["live_authorization_qualified"], false);
+        let instruction =
+            insight_platform_registry::model_configuration::BASIC_MODEL_PLATFORM_INSTRUCTION;
+        assert_eq!(fixture["platform_instruction"], instruction);
+        let node: insight_platform_plan::RuntimeNode =
+            serde_json::from_value(fixture["plan_node"].clone()).unwrap();
+        let key = insight_platform_plan::PlanNodeKey::new(
+            fixture["plan_node_key"].as_str().unwrap().into(),
+        )
+        .unwrap();
+        let schema = ClosedJsonSchema::try_from(
+            serde_json::from_value::<ClosedValueSchema>(fixture["model_output_schema"].clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let final_schema = ClosedJsonSchema::build(fixture["agent_output_schema"].clone()).unwrap();
+        assert_ne!(schema.canonical_digest, final_schema.canonical_digest);
+        assert!(schema.schema["properties"].get("review").is_none());
+        // Only attribution identities are synthetic; corpus, schemas and instructions are real source bytes.
+        let id = |kind| ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap();
+        let interface =
+            ExactVersionRef::new(id(ResourceKind::AgentInterfaceRevision), digest('a')).unwrap();
+        let revision =
+            ExactVersionRef::new(id(ResourceKind::AgentPlanRevision), digest('b')).unwrap();
+        let input = canonical_text(&fixture["model_input"]).unwrap();
+        assert_eq!(
+            input.len() as u64,
+            fixture["model_input_bytes"].as_u64().unwrap()
+        );
+        let blocks = vec![
+            exact_block(
+                PromptAssemblyPhase::PlatformSafety,
+                0,
+                "model_safety_policy",
+                "local-capacity".into(),
+                digest('c'),
+                DataClassification::Internal,
+                instruction.into(),
+            )
+            .unwrap(),
+            agent_contract_block(&interface, &digest('d'), &digest('e'), &final_schema).unwrap(),
+            model_node_instruction_block(
+                &node,
+                &key,
+                &revision,
+                &id(ResourceKind::NodeExecution),
+                &schema,
+                true,
+            )
+            .unwrap(),
+            agent_instruction_block(
+                Some(fixture["author_instructions"].as_str().unwrap()),
+                &interface,
+            )
+            .unwrap()
+            .unwrap(),
+            exact_block(
+                PromptAssemblyPhase::UserInput,
+                0,
+                "run_value",
+                id(ResourceKind::RunValue).to_string(),
+                digest_value(&fixture["model_input"]).unwrap(),
+                DataClassification::Internal,
+                input,
+            )
+            .unwrap(),
+        ];
+        let assembly = assemble_prompt_messages(blocks, 262144, 8192).unwrap();
+        let response = assembly
+            .source_map
+            .iter()
+            .find(|s| s.phase == PromptAssemblyPhase::PlanNodeInstruction)
+            .unwrap();
+        assert_eq!(response.source_digest, revision.semantic_digest);
+        assert!(assembly.total_estimated_tokens + 1024 <= 10240);
+        println!("local_corpus_prompt_bytes={} estimated_tokens={} declared_output_budget=1024 live_authorization=false",assembly.total_bytes,assembly.total_estimated_tokens);
     }
 }
 

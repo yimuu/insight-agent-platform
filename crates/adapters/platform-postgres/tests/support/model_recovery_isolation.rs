@@ -9,7 +9,7 @@ fn fresh(kind: ResourceKind) -> ResourceId {
     ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7()).unwrap()
 }
 
-async fn isolated_fixture(pool: &PgPool, original: &Fixture) -> Fixture {
+pub(super) async fn isolated_fixture(pool: &PgPool, original: &Fixture) -> Fixture {
     let mut fixture = original.clone();
     fixture.run_id = fresh(ResourceKind::Run);
     fixture.scope_id = fresh(ResourceKind::ScopeInstance);
@@ -40,7 +40,7 @@ async fn isolated_fixture(pool: &PgPool, original: &Fixture) -> Fixture {
     fixture
 }
 
-async fn admit(
+pub(super) async fn admit(
     pool: &PgPool,
     repo: &PgRepository,
     fixture: &Fixture,
@@ -693,5 +693,12 @@ async fn verify_run_control_pages(pool: &PgPool, repo: &PgRepository, original: 
         .await
         .unwrap();
         assert_eq!(run_state, "cancelled");
+        model_public_events::assert_projection(
+            pool,
+            repo,
+            fixture,
+            &["model.cancelled", "run.cancelled", "node.cancelled"],
+        )
+        .await;
     }
 }

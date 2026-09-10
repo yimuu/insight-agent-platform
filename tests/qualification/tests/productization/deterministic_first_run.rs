@@ -662,7 +662,9 @@ fn agent_resource_spec(
 #[ignore = "requires the explicit physical-process qualification harness"]
 fn public_cli_deterministic_first_run() {
     let (Ok(project), Ok(insight)) = (env::var(PROJECT_ENV), env::var(INSIGHT_BIN_ENV)) else {
-        panic!("{PROJECT_ENV} or {INSIGHT_BIN_ENV} is unset; productization P2 journey requires its declared fixture environment");
+        panic!(
+            "{PROJECT_ENV} or {INSIGHT_BIN_ENV} is unset; productization P2 journey requires its declared fixture environment"
+        );
     };
     let project = Path::new(&project);
     let insight = Path::new(&insight);
@@ -1303,7 +1305,12 @@ fn public_cli_deterministic_first_run() {
     );
     let stopped = Command::new(insight)
         .current_dir(workspace_root())
-        .args(["stop", "--path", project.to_str().unwrap()])
+        .args([
+            "qualification-aws",
+            "stop",
+            "--path",
+            project.to_str().unwrap(),
+        ])
         .output()
         .expect("insight stop starts");
     assert!(
@@ -1324,7 +1331,12 @@ fn public_cli_deterministic_first_run() {
     }
     let restarted = Command::new(insight)
         .current_dir(workspace_root())
-        .args(["start", "--path", project.to_str().unwrap()])
+        .args([
+            "qualification-aws",
+            "start",
+            "--path",
+            project.to_str().unwrap(),
+        ])
         .output()
         .expect("insight dev restart starts");
     assert!(
@@ -1371,8 +1383,7 @@ fn public_cli_deterministic_first_run() {
         canonical_digest(&plan)
     );
     assert_eq!(
-        fs::read(&restarted_downloaded_plan_path)
-            .expect("restarted Artifact download is readable"),
+        fs::read(&restarted_downloaded_plan_path).expect("restarted Artifact download is readable"),
         canonical_bytes(&plan),
         "restart must preserve the exact object and KMS authority needed to decrypt existing content"
     );

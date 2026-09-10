@@ -1,20 +1,19 @@
-//! Production AWS-compatible S3/KMS providers installed by an immutable CandidateManifest.
+//! Installed S3 object transport with explicitly selected AWS KMS or OpenBao reference encryption.
 //!
 //! Configuration contains no credentials. Both SDK clients use the default credential chain so a
 //! deployment can supply short-lived workload identity (for example Kubernetes web identity).
 
 use super::{
-    valid_opaque_object_key, ArtifactBrokerConfigurationError, ArtifactExternalDependency,
-    ArtifactExternalDependencyObserver, ArtifactExternalDependencyOutcome, ArtifactObjectBytes,
-    ArtifactObjectDeletionReceipt, ArtifactObjectMetadata, ArtifactObjectReferenceUnsealError,
-    ArtifactObjectReferenceUnsealer, ArtifactObjectStoreError, DecryptedArtifactObjectReference,
+    reference_key::ArtifactReferenceKey, valid_opaque_object_key, ArtifactBrokerConfigurationError,
+    ArtifactExternalDependency, ArtifactExternalDependencyObserver,
+    ArtifactExternalDependencyOutcome, ArtifactObjectBytes, ArtifactObjectDeletionReceipt,
+    ArtifactObjectMetadata, ArtifactObjectReferenceUnsealError, ArtifactObjectReferenceUnsealer,
+    ArtifactObjectStoreError, ArtifactProviderCatalogConfigV2, DecryptedArtifactObjectReference,
     InstalledArtifactObjectStore, InstalledArtifactObjectStoreCatalog,
     NoopArtifactExternalDependencyObserver, MAX_ARTIFACT_BROKER_TIMEOUT,
-    MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS,
 };
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_kms::{primitives::Blob, types::EncryptionAlgorithmSpec, Client as KmsClient};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
@@ -25,7 +24,7 @@ use insight_platform_artifacts::{
 use insight_platform_contracts::{canonical_digest, ResourceId, ResourceKind, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fmt,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -38,7 +37,7 @@ pub const MAX_AWS_ARTIFACT_PROVIDER_TIMEOUT_MILLISECONDS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AwsS3StorageBindingConfig {
+pub struct S3StorageBindingConfig {
     pub schema_version: u32,
     pub storage_binding_digest: Sha256Digest,
     pub endpoint: String,
@@ -51,8 +50,8 @@ pub struct AwsS3StorageBindingConfig {
     pub maximum_object_bytes: u64,
 }
 
-impl AwsS3StorageBindingConfig {
-    fn calculated_digest(&self) -> Result<Sha256Digest, AwsArtifactProviderConfigError> {
+impl S3StorageBindingConfig {
+    pub fn calculated_digest(&self) -> Result<Sha256Digest, ArtifactProviderConfigError> {
         canonical_digest(&serde_json::json!({
             "backend": "s3",
             "bucket": self.bucket,
@@ -65,12 +64,12 @@ impl AwsS3StorageBindingConfig {
             "region": self.region,
             "schema_version": self.schema_version,
         }))
-        .map_err(|_| AwsArtifactProviderConfigError::InvalidStorageBinding)?
+        .map_err(|_| ArtifactProviderConfigError::InvalidStorageBinding)?
         .parse()
-        .map_err(|_| AwsArtifactProviderConfigError::InvalidStorageBinding)
+        .map_err(|_| ArtifactProviderConfigError::InvalidStorageBinding)
     }
 
-    fn validate(&self) -> Result<(), AwsArtifactProviderConfigError> {
+    pub fn validate(&self) -> Result<(), ArtifactProviderConfigError> {
         if self.schema_version != 1
             || !valid_https_service_endpoint(&self.endpoint)
             || !valid_region(&self.region)
@@ -83,7 +82,7 @@ impl AwsS3StorageBindingConfig {
             || self.maximum_object_bytes > MAX_AWS_ARTIFACT_OBJECT_BYTES
             || self.calculated_digest()? != self.storage_binding_digest
         {
-            return Err(AwsArtifactProviderConfigError::InvalidStorageBinding);
+            return Err(ArtifactProviderConfigError::InvalidStorageBinding);
         }
         Ok(())
     }
@@ -102,7 +101,7 @@ pub struct AwsKmsKeyBindingConfig {
 }
 
 impl AwsKmsKeyBindingConfig {
-    fn calculated_digest(&self) -> Result<Sha256Digest, AwsArtifactProviderConfigError> {
+    pub fn calculated_digest(&self) -> Result<Sha256Digest, ArtifactProviderConfigError> {
         canonical_digest(&serde_json::json!({
             "connect_timeout_milliseconds": self.connect_timeout_milliseconds,
             "endpoint": self.endpoint,
@@ -112,12 +111,12 @@ impl AwsKmsKeyBindingConfig {
             "region": self.region,
             "schema_version": self.schema_version,
         }))
-        .map_err(|_| AwsArtifactProviderConfigError::InvalidKmsBinding)?
+        .map_err(|_| ArtifactProviderConfigError::InvalidKmsBinding)?
         .parse()
-        .map_err(|_| AwsArtifactProviderConfigError::InvalidKmsBinding)
+        .map_err(|_| ArtifactProviderConfigError::InvalidKmsBinding)
     }
 
-    fn validate(&self) -> Result<(), AwsArtifactProviderConfigError> {
+    pub fn validate(&self) -> Result<(), ArtifactProviderConfigError> {
         if self.schema_version != 1
             || !valid_https_service_endpoint(&self.endpoint)
             || !valid_region(&self.region)
@@ -128,64 +127,14 @@ impl AwsKmsKeyBindingConfig {
             )
             || self.calculated_digest()? != self.kms_binding_digest
         {
-            return Err(AwsArtifactProviderConfigError::InvalidKmsBinding);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AwsArtifactProviderCatalogConfig {
-    pub schema_version: u32,
-    pub write_storage_binding_digest: Sha256Digest,
-    pub s3_storage_bindings: Vec<AwsS3StorageBindingConfig>,
-    pub kms_key_bindings: Vec<AwsKmsKeyBindingConfig>,
-}
-
-impl AwsArtifactProviderCatalogConfig {
-    pub fn validate(&self) -> Result<(), AwsArtifactProviderConfigError> {
-        if self.schema_version != 1
-            || self.s3_storage_bindings.is_empty()
-            || self.kms_key_bindings.is_empty()
-            || self.s3_storage_bindings.len() > MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS
-            || self.kms_key_bindings.len() > MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS
-            || !self
-                .s3_storage_bindings
-                .iter()
-                .any(|binding| binding.storage_binding_digest == self.write_storage_binding_digest)
-        {
-            return Err(AwsArtifactProviderConfigError::InvalidCatalog);
-        }
-        let mut storage_digests = BTreeSet::new();
-        let mut referenced_kms_digests = BTreeSet::new();
-        for binding in &self.s3_storage_bindings {
-            binding.validate()?;
-            if !storage_digests.insert(binding.storage_binding_digest.clone()) {
-                return Err(AwsArtifactProviderConfigError::DuplicateStorageBinding);
-            }
-            referenced_kms_digests.insert(binding.kms_binding_digest.clone());
-        }
-        let mut kms_digests = BTreeSet::new();
-        let mut kms_key_ids = BTreeSet::new();
-        for binding in &self.kms_key_bindings {
-            binding.validate()?;
-            if !kms_digests.insert(binding.kms_binding_digest.clone()) {
-                return Err(AwsArtifactProviderConfigError::DuplicateKmsBinding);
-            }
-            if !kms_key_ids.insert(binding.key_id.clone()) {
-                return Err(AwsArtifactProviderConfigError::DuplicateKmsKey);
-            }
-        }
-        if referenced_kms_digests != kms_digests {
-            return Err(AwsArtifactProviderConfigError::KmsBindingClosureMismatch);
+            return Err(ArtifactProviderConfigError::InvalidKmsBinding);
         }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AwsArtifactProviderConfigError {
+pub enum ArtifactProviderConfigError {
     InvalidCatalog,
     InvalidStorageBinding,
     InvalidKmsBinding,
@@ -197,62 +146,39 @@ pub enum AwsArtifactProviderConfigError {
 
 /// Installed production providers. Construction performs no object/KMS operation and does not
 /// accept credentials; readiness and qualification must exercise the resulting clients.
-pub struct AwsArtifactProviderCatalog {
+pub struct ArtifactProviderCatalog {
     stores: InstalledArtifactObjectStoreCatalog,
     unsealer: Arc<dyn ArtifactObjectReferenceUnsealer>,
     readiness: Vec<AwsArtifactProviderReadiness>,
-    upload: AwsArtifactUploadProvider,
+    upload: S3ArtifactUploadProvider,
 }
 
-impl fmt::Debug for AwsArtifactProviderCatalog {
+impl fmt::Debug for ArtifactProviderCatalog {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("AwsArtifactProviderCatalog")
+            .debug_struct("ArtifactProviderCatalog")
             .finish_non_exhaustive()
     }
 }
 
-impl AwsArtifactProviderCatalog {
+impl ArtifactProviderCatalog {
     pub async fn install(
-        config: AwsArtifactProviderCatalogConfig,
-    ) -> Result<Self, AwsArtifactProviderConfigError> {
+        config: ArtifactProviderCatalogConfigV2,
+    ) -> Result<Self, ArtifactProviderConfigError> {
         Self::install_with_observer(config, Arc::new(NoopArtifactExternalDependencyObserver)).await
     }
 
     pub async fn install_with_observer(
-        config: AwsArtifactProviderCatalogConfig,
+        config: ArtifactProviderCatalogConfigV2,
         observer: Arc<dyn ArtifactExternalDependencyObserver>,
-    ) -> Result<Self, AwsArtifactProviderConfigError> {
+    ) -> Result<Self, ArtifactProviderConfigError> {
         config.validate()?;
 
         let mut kms_by_digest = BTreeMap::new();
-        for binding in config.kms_key_bindings {
-            let shared = aws_config::defaults(BehaviorVersion::latest())
-                .region(aws_sdk_kms::config::Region::new(binding.region.clone()))
-                .load()
-                .await;
-            let timeout = aws_sdk_kms::config::timeout::TimeoutConfig::builder()
-                .connect_timeout(Duration::from_millis(binding.connect_timeout_milliseconds))
-                .operation_timeout(Duration::from_millis(
-                    binding.operation_timeout_milliseconds,
-                ))
-                .build();
-            let client = KmsClient::from_conf(
-                aws_sdk_kms::Config::from(&shared)
-                    .to_builder()
-                    .endpoint_url(binding.endpoint)
-                    .region(aws_sdk_kms::config::Region::new(binding.region))
-                    .timeout_config(timeout)
-                    .build(),
-            );
-            kms_by_digest.insert(
-                binding.kms_binding_digest,
-                Arc::new(AwsKmsKeyBinding {
-                    client,
-                    key_id: Arc::from(binding.key_id),
-                    observer: Arc::clone(&observer),
-                }),
-            );
+        for binding in config.reference_key_bindings {
+            let digest = binding.digest().clone();
+            let installed = ArtifactReferenceKey::install(binding, Arc::clone(&observer)).await?;
+            kms_by_digest.insert(digest, Arc::new(installed));
         }
 
         let write_digest = config.write_storage_binding_digest.clone();
@@ -264,7 +190,7 @@ impl AwsArtifactProviderCatalog {
             let kms = kms_by_digest
                 .get(&binding.kms_binding_digest)
                 .cloned()
-                .ok_or(AwsArtifactProviderConfigError::KmsBindingClosureMismatch)?;
+                .ok_or(ArtifactProviderConfigError::KmsBindingClosureMismatch)?;
             let shared = aws_config::defaults(BehaviorVersion::latest())
                 .region(aws_sdk_s3::config::Region::new(binding.region.clone()))
                 .load()
@@ -293,7 +219,7 @@ impl AwsArtifactProviderCatalog {
             });
             kms_by_storage_digest.insert(binding.storage_binding_digest.clone(), Arc::clone(&kms));
             if binding.storage_binding_digest == write_digest {
-                upload = Some(AwsArtifactUploadProvider {
+                upload = Some(S3ArtifactUploadProvider {
                     s3: client.clone(),
                     bucket: Arc::clone(&bucket),
                     storage_binding_digest: binding.storage_binding_digest.clone(),
@@ -315,11 +241,11 @@ impl AwsArtifactProviderCatalog {
             .map_err(map_catalog_configuration_error)?;
         Ok(Self {
             stores,
-            unsealer: Arc::new(AwsKmsArtifactObjectReferenceUnsealer {
+            unsealer: Arc::new(InstalledArtifactReferenceUnsealer {
                 bindings: kms_by_storage_digest,
             }),
             readiness,
-            upload: upload.ok_or(AwsArtifactProviderConfigError::InvalidCatalog)?,
+            upload: upload.ok_or(ArtifactProviderConfigError::InvalidCatalog)?,
         })
     }
 
@@ -332,21 +258,21 @@ impl AwsArtifactProviderCatalog {
         (self.unsealer, self.stores)
     }
 
-    pub fn into_gateway_provider(self) -> AwsArtifactUploadProvider {
+    pub fn into_gateway_provider(self) -> S3ArtifactUploadProvider {
         self.upload
     }
 
     pub fn into_gateway_components(
         self,
     ) -> (
-        AwsArtifactUploadProvider,
+        S3ArtifactUploadProvider,
         Arc<dyn ArtifactObjectReferenceUnsealer>,
         InstalledArtifactObjectStoreCatalog,
     ) {
         (self.upload, self.unsealer, self.stores)
     }
 
-    pub async fn check_readiness(&self) -> Result<(), AwsArtifactProviderReadinessError> {
+    pub async fn check_readiness(&self) -> Result<(), ArtifactProviderReadinessError> {
         for readiness in &self.readiness {
             readiness.check().await?;
         }
@@ -355,7 +281,7 @@ impl AwsArtifactProviderCatalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedAwsArtifactUpload {
+pub struct PreparedArtifactUpload {
     pub upload_url: String,
     pub storage_backend: String,
     pub storage_binding_digest: Sha256Digest,
@@ -364,14 +290,14 @@ pub struct PreparedAwsArtifactUpload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletedAwsArtifactUploadEvidence {
+pub struct CompletedArtifactUploadEvidence {
     pub object_generation: String,
     pub observed_size_bytes: u64,
     pub backend_evidence_digest: Sha256Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedAwsArtifactObject {
+pub struct StagedArtifactObject {
     pub storage_backend: String,
     pub storage_binding_digest: Sha256Digest,
     pub object_reference_ciphertext: Vec<u8>,
@@ -382,7 +308,7 @@ pub struct StagedAwsArtifactObject {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AwsArtifactUploadError {
+pub enum ArtifactUploadProviderError {
     InvalidRequest,
     TooLarge,
     StorageUnavailable,
@@ -391,17 +317,17 @@ pub enum AwsArtifactUploadError {
 }
 
 #[derive(Clone)]
-pub struct AwsArtifactUploadProvider {
+pub struct S3ArtifactUploadProvider {
     s3: S3Client,
     bucket: Arc<str>,
     storage_binding_digest: Sha256Digest,
     maximum_object_bytes: u64,
-    kms: Arc<AwsKmsKeyBinding>,
+    kms: Arc<ArtifactReferenceKey>,
     observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct AwsArtifactUploadRequest<'a> {
+pub struct S3ArtifactUploadRequest<'a> {
     pub tenant_id: &'a ResourceId,
     pub artifact_id: &'a ResourceId,
     pub blob_id: &'a ResourceId,
@@ -416,41 +342,41 @@ pub struct AwsArtifactUploadRequest<'a> {
 fn upload_presigning_config(
     now: SystemTime,
     expires_at: SystemTime,
-) -> Result<PresigningConfig, AwsArtifactUploadError> {
+) -> Result<PresigningConfig, ArtifactUploadProviderError> {
     let remaining = expires_at
         .duration_since(now)
-        .map_err(|_| AwsArtifactUploadError::InvalidRequest)?;
+        .map_err(|_| ArtifactUploadProviderError::InvalidRequest)?;
     let seconds = remaining.as_secs();
     if seconds == 0 || remaining > Duration::from_secs(3_600) {
-        return Err(AwsArtifactUploadError::InvalidRequest);
+        return Err(ArtifactUploadProviderError::InvalidRequest);
     }
     PresigningConfig::builder()
         .start_time(now)
         .expires_in(Duration::from_secs(seconds))
         .build()
-        .map_err(|_| AwsArtifactUploadError::InvalidRequest)
+        .map_err(|_| ArtifactUploadProviderError::InvalidRequest)
 }
 
-impl fmt::Debug for AwsArtifactUploadProvider {
+impl fmt::Debug for S3ArtifactUploadProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("AwsArtifactUploadProvider")
+            .debug_struct("S3ArtifactUploadProvider")
             .field("storage_binding_digest", &self.storage_binding_digest)
             .finish_non_exhaustive()
     }
 }
 
-impl AwsArtifactUploadProvider {
+impl S3ArtifactUploadProvider {
     pub fn storage_binding_digest(&self) -> &Sha256Digest {
         &self.storage_binding_digest
     }
 
     pub async fn stage_bytes(
         &self,
-        request: AwsArtifactUploadRequest<'_>,
+        request: S3ArtifactUploadRequest<'_>,
         expected_content_digest: &Sha256Digest,
         bytes: Vec<u8>,
-    ) -> Result<StagedAwsArtifactObject, AwsArtifactUploadError> {
+    ) -> Result<StagedArtifactObject, ArtifactUploadProviderError> {
         if request.tenant_id.kind() != ResourceKind::Tenant
             || request.artifact_id.kind() != ResourceKind::Artifact
             || request.blob_id.kind() != ResourceKind::InternalBlob
@@ -466,14 +392,14 @@ impl AwsArtifactUploadProvider {
                     || value.chars().any(char::is_control)
             })
         {
-            return Err(AwsArtifactUploadError::InvalidRequest);
+            return Err(ArtifactUploadProviderError::InvalidRequest);
         }
         let object_key = format!(
             "v1/{}/{}/{}",
             request.tenant_id, request.artifact_id, request.blob_id
         );
         if !valid_opaque_object_key(&object_key) {
-            return Err(AwsArtifactUploadError::InvalidRequest);
+            return Err(ArtifactUploadProviderError::InvalidRequest);
         }
         let plaintext = serde_jcs::to_vec(&serde_json::json!({
             "backend": "s3",
@@ -481,7 +407,7 @@ impl AwsArtifactUploadProvider {
             "schema_version": 1,
             "storage_binding_digest": self.storage_binding_digest,
         }))
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
         let encryption_context = object_encryption_context(
             request.tenant_id,
             request.blob_id,
@@ -489,33 +415,9 @@ impl AwsArtifactUploadProvider {
             request.encryption_domain_id,
             &self.kms.key_id,
         );
-        let encrypted = self
-            .kms
-            .client
-            .encrypt()
-            .key_id(&*self.kms.key_id)
-            .plaintext(Blob::new(plaintext))
-            .set_encryption_context(Some(encryption_context))
-            .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
-            .send()
-            .await;
-        observe_external(
-            &self.kms.observer,
-            ArtifactExternalDependency::Kms,
-            encrypted.is_ok(),
-        );
-        let encrypted = encrypted.map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
-        if encrypted.key_id() != Some(&*self.kms.key_id)
-            || encrypted.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
-        {
-            return Err(AwsArtifactUploadError::InvalidEvidence);
-        }
-        let object_reference_ciphertext = encrypted
-            .ciphertext_blob
-            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
-            .into_inner();
+        let object_reference_ciphertext = self.kms.encrypt(plaintext, encryption_context).await?;
         let content_length = i64::try_from(request.expected_size_bytes)
-            .map_err(|_| AwsArtifactUploadError::TooLarge)?;
+            .map_err(|_| ArtifactUploadProviderError::TooLarge)?;
         let mut put = self
             .s3
             .put_object()
@@ -538,7 +440,7 @@ impl AwsArtifactUploadProvider {
                 stored
                     .version_id()
                     .filter(|generation| valid_object_generation(generation))
-                    .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+                    .ok_or(ArtifactUploadProviderError::InvalidEvidence)?
                     .to_owned()
             }
             Err(_) => {
@@ -554,7 +456,8 @@ impl AwsArtifactUploadProvider {
                     ArtifactExternalDependency::S3,
                     existing.is_ok(),
                 );
-                let existing = existing.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+                let existing =
+                    existing.map_err(|_| ArtifactUploadProviderError::StorageUnavailable)?;
                 if existing.content_length() != Some(content_length)
                     || existing
                         .metadata()
@@ -562,12 +465,12 @@ impl AwsArtifactUploadProvider {
                         .map(String::as_str)
                         != Some(expected_content_digest.as_str())
                 {
-                    return Err(AwsArtifactUploadError::InvalidEvidence);
+                    return Err(ArtifactUploadProviderError::InvalidEvidence);
                 }
                 existing
                     .version_id()
                     .filter(|generation| valid_object_generation(generation))
-                    .ok_or(AwsArtifactUploadError::InvalidEvidence)?
+                    .ok_or(ArtifactUploadProviderError::InvalidEvidence)?
                     .to_owned()
             }
         };
@@ -581,10 +484,10 @@ impl AwsArtifactUploadProvider {
             "storage_binding_digest": self.storage_binding_digest,
             "tenant_id": request.tenant_id,
         }))
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?
         .parse()
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
-        Ok(StagedAwsArtifactObject {
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
+        Ok(StagedArtifactObject {
             storage_backend: "s3".to_owned(),
             storage_binding_digest: self.storage_binding_digest.clone(),
             object_reference_ciphertext,
@@ -595,10 +498,128 @@ impl AwsArtifactUploadProvider {
         })
     }
 
+    /// Verify physical declaration bytes before a trusted one-shot bootstrap records an Artifact.
+    /// This creates no business authorization and never reads the current generation implicitly.
+    pub async fn verify_staged_bytes(
+        &self,
+        request: S3ArtifactUploadRequest<'_>,
+        staged: &StagedArtifactObject,
+        expected_content_digest: &Sha256Digest,
+    ) -> Result<CompletedArtifactUploadEvidence, ArtifactUploadProviderError> {
+        if request.tenant_id.kind() != ResourceKind::Tenant
+            || request.artifact_id.kind() != ResourceKind::Artifact
+            || request.blob_id.kind() != ResourceKind::InternalBlob
+            || request.encryption_domain_id.kind() != ResourceKind::EncryptionDomain
+            || request.expected_size_bytes == 0
+            || request.expected_size_bytes > self.maximum_object_bytes
+            || staged.storage_backend != "s3"
+            || staged.storage_binding_digest != self.storage_binding_digest
+            || staged.key_id != self.kms.key_id.as_ref()
+            || staged.observed_size_bytes != request.expected_size_bytes
+            || !valid_object_generation(&staged.object_generation)
+            || staged.object_reference_ciphertext.is_empty()
+            || staged.object_reference_ciphertext.len()
+                > insight_platform_artifacts::MAX_ARTIFACT_OBJECT_REFERENCE_BYTES
+        {
+            return Err(ArtifactUploadProviderError::InvalidRequest);
+        }
+        let staged_digest: Sha256Digest = canonical_digest(&serde_json::json!({
+            "artifact_id": request.artifact_id, "blob_id": request.blob_id,
+            "kind": "s3_workload_stage", "object_generation": staged.object_generation,
+            "schema_version": 1, "size_bytes": request.expected_size_bytes,
+            "storage_binding_digest": self.storage_binding_digest, "tenant_id": request.tenant_id,
+        }))
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?
+        .parse()
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
+        if staged_digest != staged.backend_evidence_digest {
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
+        }
+        let object_key = format!(
+            "v1/{}/{}/{}",
+            request.tenant_id, request.artifact_id, request.blob_id
+        );
+        let unsealer = InstalledArtifactReferenceUnsealer {
+            bindings: BTreeMap::from([(
+                self.storage_binding_digest.clone(),
+                Arc::clone(&self.kms),
+            )]),
+        };
+        let plaintext = unsealer
+            .decrypt_reference(
+                request.tenant_id,
+                request.blob_id,
+                &self.storage_binding_digest,
+                request.encryption_domain_id,
+                &staged.key_id,
+                &staged.object_reference_ciphertext,
+            )
+            .await
+            .map_err(|error| match error {
+                ArtifactObjectReferenceUnsealError::Unavailable => {
+                    ArtifactUploadProviderError::KmsUnavailable
+                }
+                ArtifactObjectReferenceUnsealError::Rejected
+                | ArtifactObjectReferenceUnsealError::InvalidEvidence => {
+                    ArtifactUploadProviderError::InvalidEvidence
+                }
+            })?;
+        let expected_locator = serde_jcs::to_vec(&serde_json::json!({
+            "backend": "s3", "object_key": object_key, "schema_version": 1,
+            "storage_binding_digest": self.storage_binding_digest,
+        }))
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
+        if plaintext.expose() != expected_locator.as_slice() {
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
+        }
+        let store = AwsS3ObjectStore {
+            client: self.s3.clone(),
+            bucket: Arc::clone(&self.bucket),
+            storage_binding_digest: self.storage_binding_digest.clone(),
+            maximum_object_bytes: self.maximum_object_bytes,
+            observer: Arc::clone(&self.observer),
+        };
+        let map_storage = |error| match error {
+            ArtifactObjectStoreError::Unavailable | ArtifactObjectStoreError::NotFound => {
+                ArtifactUploadProviderError::StorageUnavailable
+            }
+            ArtifactObjectStoreError::TooLarge => ArtifactUploadProviderError::TooLarge,
+            ArtifactObjectStoreError::Rejected | ArtifactObjectStoreError::InvalidEvidence => {
+                ArtifactUploadProviderError::InvalidEvidence
+            }
+        };
+        let head = store
+            .head_exact(&object_key, &staged.object_generation)
+            .await
+            .map_err(map_storage)?;
+        if head.byte_length != request.expected_size_bytes {
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
+        }
+        let maximum = usize::try_from(request.expected_size_bytes)
+            .map_err(|_| ArtifactUploadProviderError::TooLarge)?;
+        let object = store
+            .read_exact(&object_key, &staged.object_generation, maximum)
+            .await
+            .map_err(map_storage)?;
+        if object.metadata != head || crate::sha256(object.expose()) != *expected_content_digest {
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
+        }
+        let backend_evidence_digest = canonical_digest(&serde_json::json!({
+            "schema_version": 1, "kind": "s3_staged_bytes_verified",
+            "stage_evidence_digest": staged_digest, "content_digest": expected_content_digest,
+            "object_generation": staged.object_generation, "size_bytes": request.expected_size_bytes,
+        })).map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?.parse().map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
+        Ok(CompletedArtifactUploadEvidence {
+            object_generation: staged.object_generation.clone(),
+            observed_size_bytes: request.expected_size_bytes,
+            backend_evidence_digest,
+        })
+    }
+
     pub async fn prepare_upload(
         &self,
-        request: AwsArtifactUploadRequest<'_>,
-    ) -> Result<PreparedAwsArtifactUpload, AwsArtifactUploadError> {
+        request: S3ArtifactUploadRequest<'_>,
+    ) -> Result<PreparedArtifactUpload, ArtifactUploadProviderError> {
         if request.tenant_id.kind() != ResourceKind::Tenant
             || request.artifact_id.kind() != ResourceKind::Artifact
             || request.blob_id.kind() != ResourceKind::InternalBlob
@@ -613,14 +634,14 @@ impl AwsArtifactUploadProvider {
                     || value.chars().any(char::is_control)
             })
         {
-            return Err(AwsArtifactUploadError::InvalidRequest);
+            return Err(ArtifactUploadProviderError::InvalidRequest);
         }
         let object_key = format!(
             "v1/{}/{}/{}",
             request.tenant_id, request.artifact_id, request.blob_id
         );
         if !valid_opaque_object_key(&object_key) {
-            return Err(AwsArtifactUploadError::InvalidRequest);
+            return Err(ArtifactUploadProviderError::InvalidRequest);
         }
         let plaintext = serde_jcs::to_vec(&serde_json::json!({
             "backend": "s3",
@@ -628,7 +649,7 @@ impl AwsArtifactUploadProvider {
             "schema_version": 1,
             "storage_binding_digest": self.storage_binding_digest,
         }))
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
         let encryption_context = object_encryption_context(
             request.tenant_id,
             request.blob_id,
@@ -636,33 +657,9 @@ impl AwsArtifactUploadProvider {
             request.encryption_domain_id,
             &self.kms.key_id,
         );
-        let result = self
-            .kms
-            .client
-            .encrypt()
-            .key_id(&*self.kms.key_id)
-            .plaintext(Blob::new(plaintext))
-            .set_encryption_context(Some(encryption_context))
-            .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
-            .send()
-            .await;
-        observe_external(
-            &self.kms.observer,
-            ArtifactExternalDependency::Kms,
-            result.is_ok(),
-        );
-        let encrypted = result.map_err(|_| AwsArtifactUploadError::KmsUnavailable)?;
-        if encrypted.key_id() != Some(&*self.kms.key_id)
-            || encrypted.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
-        {
-            return Err(AwsArtifactUploadError::InvalidEvidence);
-        }
-        let ciphertext = encrypted
-            .ciphertext_blob
-            .ok_or(AwsArtifactUploadError::InvalidEvidence)?
-            .into_inner();
+        let ciphertext = self.kms.encrypt(plaintext, encryption_context).await?;
         let content_length = i64::try_from(request.expected_size_bytes)
-            .map_err(|_| AwsArtifactUploadError::TooLarge)?;
+            .map_err(|_| ArtifactUploadProviderError::TooLarge)?;
         let mut upload_request = self
             .s3
             .put_object()
@@ -678,12 +675,12 @@ impl AwsArtifactUploadProvider {
                 request.expires_at,
             )?)
             .await
-            .map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+            .map_err(|_| ArtifactUploadProviderError::StorageUnavailable)?;
         let upload_url = presigned.uri().to_string();
         if !upload_url.starts_with("https://") || upload_url.len() > 16_384 {
-            return Err(AwsArtifactUploadError::InvalidEvidence);
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
         }
-        Ok(PreparedAwsArtifactUpload {
+        Ok(PreparedArtifactUpload {
             upload_url,
             storage_backend: "s3".to_owned(),
             storage_binding_digest: self.storage_binding_digest.clone(),
@@ -699,7 +696,7 @@ impl AwsArtifactUploadProvider {
         blob_id: &ResourceId,
         object_generation: &str,
         expected_size_bytes: u64,
-    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+    ) -> Result<CompletedArtifactUploadEvidence, ArtifactUploadProviderError> {
         self.complete_upload_inner(
             tenant_id,
             artifact_id,
@@ -716,7 +713,7 @@ impl AwsArtifactUploadProvider {
         artifact_id: &ResourceId,
         blob_id: &ResourceId,
         expected_size_bytes: u64,
-    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+    ) -> Result<CompletedArtifactUploadEvidence, ArtifactUploadProviderError> {
         self.complete_upload_inner(tenant_id, artifact_id, blob_id, None, expected_size_bytes)
             .await
     }
@@ -728,14 +725,14 @@ impl AwsArtifactUploadProvider {
         blob_id: &ResourceId,
         expected_generation: Option<&str>,
         expected_size_bytes: u64,
-    ) -> Result<CompletedAwsArtifactUploadEvidence, AwsArtifactUploadError> {
+    ) -> Result<CompletedArtifactUploadEvidence, ArtifactUploadProviderError> {
         if tenant_id.kind() != ResourceKind::Tenant
             || artifact_id.kind() != ResourceKind::Artifact
             || blob_id.kind() != ResourceKind::InternalBlob
             || expected_generation.is_some_and(|generation| !valid_object_generation(generation))
             || expected_size_bytes > self.maximum_object_bytes
         {
-            return Err(AwsArtifactUploadError::InvalidRequest);
+            return Err(ArtifactUploadProviderError::InvalidRequest);
         }
         let object_key = format!("v1/{tenant_id}/{artifact_id}/{blob_id}");
         let result = self
@@ -751,13 +748,13 @@ impl AwsArtifactUploadProvider {
             ArtifactExternalDependency::S3,
             result.is_ok(),
         );
-        let output = result.map_err(|_| AwsArtifactUploadError::StorageUnavailable)?;
+        let output = result.map_err(|_| ArtifactUploadProviderError::StorageUnavailable)?;
         let observed_generation = output
             .version_id()
             .filter(|generation| valid_object_generation(generation))
-            .ok_or(AwsArtifactUploadError::InvalidEvidence)?;
+            .ok_or(ArtifactUploadProviderError::InvalidEvidence)?;
         if expected_generation.is_some_and(|expected| expected != observed_generation) {
-            return Err(AwsArtifactUploadError::InvalidEvidence);
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
         }
         let metadata = metadata_from_s3(
             output.version_id(),
@@ -766,16 +763,16 @@ impl AwsArtifactUploadProvider {
             self.maximum_object_bytes,
         )
         .map_err(|error| match error {
-            ArtifactObjectStoreError::TooLarge => AwsArtifactUploadError::TooLarge,
+            ArtifactObjectStoreError::TooLarge => ArtifactUploadProviderError::TooLarge,
             ArtifactObjectStoreError::Unavailable | ArtifactObjectStoreError::NotFound => {
-                AwsArtifactUploadError::StorageUnavailable
+                ArtifactUploadProviderError::StorageUnavailable
             }
             ArtifactObjectStoreError::Rejected | ArtifactObjectStoreError::InvalidEvidence => {
-                AwsArtifactUploadError::InvalidEvidence
+                ArtifactUploadProviderError::InvalidEvidence
             }
         })?;
         if metadata.byte_length != expected_size_bytes {
-            return Err(AwsArtifactUploadError::InvalidEvidence);
+            return Err(ArtifactUploadProviderError::InvalidEvidence);
         }
         let backend_evidence_digest = canonical_digest(&serde_json::json!({
             "artifact_id": artifact_id,
@@ -787,10 +784,10 @@ impl AwsArtifactUploadProvider {
             "storage_binding_digest": self.storage_binding_digest,
             "tenant_id": tenant_id,
         }))
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?
         .parse()
-        .map_err(|_| AwsArtifactUploadError::InvalidEvidence)?;
-        Ok(CompletedAwsArtifactUploadEvidence {
+        .map_err(|_| ArtifactUploadProviderError::InvalidEvidence)?;
+        Ok(CompletedArtifactUploadEvidence {
             object_generation: observed_generation.to_owned(),
             observed_size_bytes: metadata.byte_length,
             backend_evidence_digest,
@@ -801,19 +798,19 @@ impl AwsArtifactUploadProvider {
 struct AwsArtifactProviderReadiness {
     s3: S3Client,
     bucket: Arc<str>,
-    kms: Arc<AwsKmsKeyBinding>,
+    kms: Arc<ArtifactReferenceKey>,
     observer: Arc<dyn ArtifactExternalDependencyObserver>,
 }
 
 impl AwsArtifactProviderReadiness {
-    async fn check(&self) -> Result<(), AwsArtifactProviderReadinessError> {
+    async fn check(&self) -> Result<(), ArtifactProviderReadinessError> {
         let result = self.s3.head_bucket().bucket(&*self.bucket).send().await;
         observe_external(
             &self.observer,
             ArtifactExternalDependency::S3,
             result.is_ok(),
         );
-        result.map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
+        result.map_err(|_| ArtifactProviderReadinessError::StorageUnavailable)?;
         let versioning = self
             .s3
             .get_bucket_versioning()
@@ -829,34 +826,11 @@ impl AwsArtifactProviderReadiness {
             versioning_enabled,
         );
         let versioning =
-            versioning.map_err(|_| AwsArtifactProviderReadinessError::StorageUnavailable)?;
+            versioning.map_err(|_| ArtifactProviderReadinessError::StorageUnavailable)?;
         if !bucket_versioning_enabled(versioning.status()) {
-            return Err(AwsArtifactProviderReadinessError::StorageInvalidEvidence);
+            return Err(ArtifactProviderReadinessError::StorageInvalidEvidence);
         }
-        let result = self
-            .kms
-            .client
-            .describe_key()
-            .key_id(&*self.kms.key_id)
-            .send()
-            .await;
-        observe_external(
-            &self.kms.observer,
-            ArtifactExternalDependency::Kms,
-            result.is_ok(),
-        );
-        let output = result.map_err(|_| AwsArtifactProviderReadinessError::KmsUnavailable)?;
-        let metadata = output
-            .key_metadata()
-            .ok_or(AwsArtifactProviderReadinessError::KmsInvalidEvidence)?;
-        if metadata.arn() != Some(&*self.kms.key_id)
-            || !metadata.enabled()
-            || metadata.key_state() != Some(&aws_sdk_kms::types::KeyState::Enabled)
-            || metadata.key_usage() != Some(&aws_sdk_kms::types::KeyUsageType::EncryptDecrypt)
-            || metadata.key_spec() != Some(&aws_sdk_kms::types::KeySpec::SymmetricDefault)
-        {
-            return Err(AwsArtifactProviderReadinessError::KmsInvalidEvidence);
-        }
+        self.kms.check_readiness().await?;
         Ok(())
     }
 }
@@ -866,7 +840,7 @@ fn bucket_versioning_enabled(status: Option<&aws_sdk_s3::types::BucketVersioning
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AwsArtifactProviderReadinessError {
+pub enum ArtifactProviderReadinessError {
     StorageUnavailable,
     StorageInvalidEvidence,
     KmsUnavailable,
@@ -1060,17 +1034,11 @@ impl InstalledArtifactObjectStore for AwsS3ObjectStore {
     }
 }
 
-struct AwsKmsKeyBinding {
-    client: KmsClient,
-    key_id: Arc<str>,
-    observer: Arc<dyn ArtifactExternalDependencyObserver>,
+struct InstalledArtifactReferenceUnsealer {
+    bindings: BTreeMap<Sha256Digest, Arc<ArtifactReferenceKey>>,
 }
 
-struct AwsKmsArtifactObjectReferenceUnsealer {
-    bindings: BTreeMap<Sha256Digest, Arc<AwsKmsKeyBinding>>,
-}
-
-impl AwsKmsArtifactObjectReferenceUnsealer {
+impl InstalledArtifactReferenceUnsealer {
     async fn decrypt_reference(
         &self,
         tenant_id: &ResourceId,
@@ -1094,64 +1062,21 @@ impl AwsKmsArtifactObjectReferenceUnsealer {
             encryption_domain_id,
             key_id,
         );
-        let result = binding
-            .client
-            .decrypt()
-            .ciphertext_blob(Blob::new(ciphertext))
-            .key_id(key_id)
-            .set_encryption_context(Some(encryption_context))
-            .encryption_algorithm(EncryptionAlgorithmSpec::SymmetricDefault)
-            .send()
-            .await;
-        observe_external(
-            &binding.observer,
-            ArtifactExternalDependency::Kms,
-            result.is_ok(),
-        );
-        let output = result.map_err(|error| match error.as_service_error() {
-            Some(service)
-                if service.is_incorrect_key_exception()
-                    || service.is_invalid_ciphertext_exception()
-                    || service.is_invalid_grant_token_exception()
-                    || service.is_invalid_key_usage_exception()
-                    || service.is_not_found_exception()
-                    || service.is_disabled_exception()
-                    || service.is_kms_invalid_state_exception() =>
-            {
-                ArtifactObjectReferenceUnsealError::Rejected
-            }
-            _ => ArtifactObjectReferenceUnsealError::Unavailable,
-        })?;
-        if output.key_id() != Some(key_id)
-            || output.encryption_algorithm() != Some(&EncryptionAlgorithmSpec::SymmetricDefault)
-            || output.ciphertext_for_recipient().is_some()
-        {
-            if let Some(plaintext) = output.plaintext {
-                let mut bytes = plaintext.into_inner();
-                bytes.fill(0);
-            }
-            return Err(ArtifactObjectReferenceUnsealError::InvalidEvidence);
-        }
-        DecryptedArtifactObjectReference::new(
-            output
-                .plaintext
-                .ok_or(ArtifactObjectReferenceUnsealError::InvalidEvidence)?
-                .into_inner(),
-        )
+        binding.decrypt(ciphertext, encryption_context).await
     }
 }
 
-impl fmt::Debug for AwsKmsArtifactObjectReferenceUnsealer {
+impl fmt::Debug for InstalledArtifactReferenceUnsealer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("AwsKmsArtifactObjectReferenceUnsealer")
+            .debug_struct("InstalledArtifactReferenceUnsealer")
             .field("binding_count", &self.bindings.len())
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl ArtifactObjectReferenceUnsealer for AwsKmsArtifactObjectReferenceUnsealer {
+impl ArtifactObjectReferenceUnsealer for InstalledArtifactReferenceUnsealer {
     async fn unseal(
         &self,
         authorized: &AuthorizedArtifactObjectRead,
@@ -1300,20 +1225,20 @@ fn valid_object_generation(value: &str) -> bool {
 
 fn map_catalog_configuration_error(
     error: ArtifactBrokerConfigurationError,
-) -> AwsArtifactProviderConfigError {
+) -> ArtifactProviderConfigError {
     match error {
         ArtifactBrokerConfigurationError::DuplicateStorageBinding => {
-            AwsArtifactProviderConfigError::DuplicateStorageBinding
+            ArtifactProviderConfigError::DuplicateStorageBinding
         }
         ArtifactBrokerConfigurationError::InvalidLimits
         | ArtifactBrokerConfigurationError::InvalidStorageBinding
         | ArtifactBrokerConfigurationError::StorageBindingCatalogTooLarge => {
-            AwsArtifactProviderConfigError::InvalidCatalog
+            ArtifactProviderConfigError::InvalidCatalog
         }
     }
 }
 
-fn observe_external(
+pub(crate) fn observe_external(
     observer: &Arc<dyn ArtifactExternalDependencyObserver>,
     dependency: ArtifactExternalDependency,
     success: bool,
@@ -1331,6 +1256,7 @@ fn observe_external(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ArtifactReferenceKeyBindingConfig;
     use aws_sdk_s3::primitives::ByteStream;
     use insight_platform_artifacts::EncryptedArtifactObjectReference;
     use insight_platform_contracts::{ArtifactRef, DataClassification};
@@ -1380,8 +1306,8 @@ mod tests {
         binding
     }
 
-    fn valid_s3(kms_binding_digest: Sha256Digest) -> AwsS3StorageBindingConfig {
-        let mut binding = AwsS3StorageBindingConfig {
+    fn valid_s3(kms_binding_digest: Sha256Digest) -> S3StorageBindingConfig {
+        let mut binding = S3StorageBindingConfig {
             schema_version: 1,
             storage_binding_digest: digest('b'),
             endpoint: "https://s3.platform.example".to_owned(),
@@ -1401,11 +1327,11 @@ mod tests {
     fn candidate_catalog_is_closed_and_digest_bound() {
         let kms = valid_kms();
         let s3 = valid_s3(kms.kms_binding_digest.clone());
-        let catalog = AwsArtifactProviderCatalogConfig {
-            schema_version: 1,
+        let catalog = ArtifactProviderCatalogConfigV2 {
+            schema_version: 2,
             write_storage_binding_digest: s3.storage_binding_digest.clone(),
             s3_storage_bindings: vec![s3.clone()],
-            kms_key_bindings: vec![kms.clone()],
+            reference_key_bindings: vec![ArtifactReferenceKeyBindingConfig::AwsKms(kms.clone())],
         };
         catalog.validate().unwrap();
 
@@ -1413,7 +1339,7 @@ mod tests {
         drifted.s3_storage_bindings[0].bucket = "other-artifacts".to_owned();
         assert_eq!(
             drifted.validate(),
-            Err(AwsArtifactProviderConfigError::InvalidStorageBinding)
+            Err(ArtifactProviderConfigError::InvalidStorageBinding)
         );
 
         let mut missing = catalog;
@@ -1425,7 +1351,7 @@ mod tests {
             .clone();
         assert_eq!(
             missing.validate(),
-            Err(AwsArtifactProviderConfigError::KmsBindingClosureMismatch)
+            Err(ArtifactProviderConfigError::KmsBindingClosureMismatch)
         );
     }
 
@@ -1470,16 +1396,118 @@ mod tests {
         s3.bucket = bucket;
         s3.storage_binding_digest = s3.calculated_digest().unwrap();
         let storage_binding_digest = s3.storage_binding_digest.clone();
-        let catalog = AwsArtifactProviderCatalog::install(AwsArtifactProviderCatalogConfig {
-            schema_version: 1,
+        let catalog = ArtifactProviderCatalog::install(ArtifactProviderCatalogConfigV2 {
+            schema_version: 2,
             write_storage_binding_digest: storage_binding_digest.clone(),
             s3_storage_bindings: vec![s3],
-            kms_key_bindings: vec![kms],
+            reference_key_bindings: vec![ArtifactReferenceKeyBindingConfig::AwsKms(kms)],
         })
         .await
         .unwrap();
+        exercise_installed_provider(catalog).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated real HTTPS S3/OpenBao installation and private catalog"]
+    async fn real_installed_s3_and_openbao_round_trip_exact_generation() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::var("PLATFORM_TEST_ARTIFACT_PROVIDER_CATALOG_PATH")
+            .expect("explicit private Artifact physical catalog required");
+        let path = std::path::Path::new(&path);
+        assert!(path.is_absolute());
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        assert!(metadata.len() <= 1_048_576);
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        let value = insight_platform_contracts::parse_strict_json(
+            &bytes,
+            insight_platform_contracts::JsonLimits::CONTRACT_FIXTURE,
+        )
+        .unwrap();
+        let config: ArtifactProviderCatalogConfigV2 = serde_json::from_value(value).unwrap();
+        assert!(config.reference_key_bindings.iter().all(|binding| matches!(
+            binding,
+            ArtifactReferenceKeyBindingConfig::OpenBaoTransit(_)
+        )));
+        let catalog = ArtifactProviderCatalog::install(config).await.unwrap();
+        exercise_installed_provider(catalog).await;
+    }
+
+    async fn exercise_installed_provider(catalog: ArtifactProviderCatalog) {
         catalog.check_readiness().await.unwrap();
         let (upload, unsealer, stores) = catalog.into_gateway_components();
+        let storage_binding_digest = upload.storage_binding_digest().clone();
+
+        let stage_tenant = id(ResourceKind::Tenant, "4101");
+        let stage_artifact = id(ResourceKind::Artifact, "4102");
+        let stage_blob = id(ResourceKind::InternalBlob, "4103");
+        let stage_domain = id(ResourceKind::EncryptionDomain, "4104");
+        let stage_bytes = b"actual bootstrap declaration bytes";
+        let stage_digest = crate::sha256(stage_bytes);
+        let stage_request = S3ArtifactUploadRequest {
+            tenant_id: &stage_tenant,
+            artifact_id: &stage_artifact,
+            blob_id: &stage_blob,
+            encryption_domain_id: &stage_domain,
+            expected_size_bytes: stage_bytes.len() as u64,
+            declared_media_type: Some("application/json"),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+        };
+        let staged = upload
+            .stage_bytes(stage_request, &stage_digest, stage_bytes.to_vec())
+            .await
+            .unwrap();
+        let verified = upload
+            .verify_staged_bytes(stage_request, &staged, &stage_digest)
+            .await
+            .unwrap();
+        assert_eq!(verified.object_generation, staged.object_generation);
+        assert_eq!(verified.observed_size_bytes, stage_bytes.len() as u64);
+        assert_ne!(
+            verified.backend_evidence_digest,
+            staged.backend_evidence_digest
+        );
+        assert_eq!(
+            upload
+                .verify_staged_bytes(stage_request, &staged, &digest('f'))
+                .await,
+            Err(ArtifactUploadProviderError::InvalidEvidence)
+        );
+        let mut tampered = staged.clone();
+        tampered.object_reference_ciphertext[0] ^= 1;
+        assert_eq!(
+            upload
+                .verify_staged_bytes(stage_request, &tampered, &stage_digest)
+                .await,
+            Err(ArtifactUploadProviderError::InvalidEvidence)
+        );
+        let mut different_generation = staged.clone();
+        different_generation.object_generation = "different-version".into();
+        assert_eq!(
+            upload
+                .verify_staged_bytes(stage_request, &different_generation, &stage_digest)
+                .await,
+            Err(ArtifactUploadProviderError::InvalidEvidence)
+        );
+        let replay = upload
+            .stage_bytes(stage_request, &stage_digest, stage_bytes.to_vec())
+            .await
+            .unwrap();
+        assert_eq!(replay.object_generation, staged.object_generation);
+        assert_eq!(
+            upload
+                .verify_staged_bytes(stage_request, &replay, &stage_digest)
+                .await
+                .unwrap(),
+            verified
+        );
 
         let tenant_id = id(ResourceKind::Tenant, "4001");
         let artifact_id = id(ResourceKind::Artifact, "4002");
@@ -1487,7 +1515,7 @@ mod tests {
         let encryption_domain_id = id(ResourceKind::EncryptionDomain, "4004");
         let bytes = b"real s3/kms fixture";
         let prepared = upload
-            .prepare_upload(AwsArtifactUploadRequest {
+            .prepare_upload(S3ArtifactUploadRequest {
                 tenant_id: &tenant_id,
                 artifact_id: &artifact_id,
                 blob_id: &blob_id,

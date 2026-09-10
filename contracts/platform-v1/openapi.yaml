@@ -120,6 +120,328 @@ paths:
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  /model-configuration:
+    get:
+      operationId: getModelConfiguration
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-permission: model.read
+      x-insight-maximum-request-bytes: 16384
+      responses:
+        "200":
+          description: Current authenticated model configuration result
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelConfigurationCatalogViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-configuration/resources:
+    get:
+      operationId: listModelConfigurationResources
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-permission: model.read
+      x-insight-maximum-request-bytes: 16384
+      description: Current tenant Model resources in ascending ID order, with at most 25 items. The optional after ID is a keyset boundary, not a snapshot or authorization token. Current ModelRead is checked on every page.
+      parameters:
+        - {name: kind, in: query, required: true, schema: {enum: [model_provider, model_profile]}}
+        - {name: after, in: query, schema: {$ref: "#/components/schemas/PlatformResourceId"}}
+      responses:
+        "200":
+          description: Current authenticated model configuration result
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelConfigurationResourcePageV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-configuration:declare:
+    post:
+      operationId: declareModelConfiguration
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-permission: model.write
+      x-insight-maximum-request-bytes: 16384
+      description: Bounded pure compiler preview; source compilation additionally requires current SecretBind. It allocates no identities or Receipts. Ordinary Artifact and Resource publication remain required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/DeclareModelConfigurationRequestV1"}
+      responses:
+        "200":
+          description: Current authenticated model configuration result
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelConfigurationDeclarationV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-configuration:compile:
+    post:
+      operationId: compileModelConfiguration
+      x-insight-operation-kind: query
+      x-insight-command-receipt: false
+      x-insight-permission: model.write
+      x-insight-maximum-request-bytes: 16384
+      description: Bounded pure compiler preview; source compilation additionally requires current SecretBind. It allocates no identities or Receipts. Ordinary Artifact and Resource publication remain required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/CompileModelConfigurationRequestV1"}
+      responses:
+        "200":
+          description: Current authenticated model configuration result
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/CompiledModelConfigurationV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-credentials:
+    post:
+      operationId: importModelCredential
+      summary: Import one model API key into an installed SecretProvider
+      tags: [Resources]
+      x-insight-permission: secret.bind
+      x-insight-idempotency: explicit_operation_uuid_and_exact_prepared_secret_binding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ImportModelCredentialRequestV1"}
+      responses:
+        "200":
+          description: The exact active pinned SecretBinding; plaintext and opaque provider references are never returned.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ImportModelCredentialResponseV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503":
+          description: Temporarily unavailable or credential_import_outcome_unknown; retain and retry only the same operation identity and input.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ApiProblem"}
+  /model-configuration:probe:
+    post:
+      operationId: probeModelConnection
+      summary: Observe one bounded text protocol exchange with an already deployed exact Model
+      tags: [Resources]
+      x-insight-permission: model.read AND secret.bind
+      x-insight-idempotency: one_attempt_no_durable_execution
+      x-insight-total-deadline-seconds: 30
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ModelConnectionProbeRequestV1"}
+      responses:
+        "200":
+          description: A closed protocol observation only; no model capability or prompt-compliance qualification is implied.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ModelConnectionObservationV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-credentials/{secret_binding_id}:
+    get:
+      operationId: getModelCredential
+      summary: Read safe current model credential metadata
+      tags: [Resources]
+      x-insight-permission: secret.bind OR secret.revoke
+      parameters:
+        - name: secret_binding_id
+          in: path
+          required: true
+          schema: {$ref: "#/components/schemas/ModelCredentialId"}
+      responses:
+        "200":
+          description: Current tenant-bound metadata without provider locators or credential material.
+          headers:
+            ETag: {schema: {type: string, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ModelCredentialMetadataViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-credentials/{secret_binding_id}:revoke:
+    post:
+      operationId: revokeModelCredential
+      summary: Revoke the current logical binding with generation and version CAS
+      tags: [Resources]
+      x-insight-permission: secret.revoke
+      x-insight-idempotency: tenant_principal_scoped_receipt
+      parameters:
+        - name: secret_binding_id
+          in: path
+          required: true
+          schema: {$ref: "#/components/schemas/ModelCredentialId"}
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RevokeModelCredentialRequestV1"}
+      responses:
+        "200":
+          description: Current metadata after authorized CAS or Receipt replay; no physical provider deletion.
+          headers:
+            ETag: {schema: {type: string, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ModelCredentialMetadataViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "412": {$ref: "#/components/responses/PrivateApiProblem"}
+        "428": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-default:
+    get:
+      operationId: getModelDefault
+      summary: Read the tenant-owned exact default Model Deployment pointer
+      tags: [Resources]
+      x-insight-permission: model.read
+      responses:
+        "200":
+          description: Current Tenant version and configured default, including an explicit null when unset.
+          headers:
+            ETag: {schema: {type: string, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ModelDefaultViewV1"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+    put:
+      operationId: setModelDefault
+      summary: Set or explicitly clear the tenant default under its current ETag
+      tags: [Resources]
+      x-insight-permission: model.write
+      x-insight-idempotency: tenant_principal_scoped_receipt
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SetModelDefaultRequestV1"}
+      responses:
+        "200":
+          description: The current Tenant projection after applying or replaying the authorized command.
+          headers:
+            ETag: {schema: {type: string, maxLength: 128}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ModelDefaultViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "412": {$ref: "#/components/responses/PrivateApiProblem"}
+        "428": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+  /model-quotas/{model_deployment_id}:
+    parameters:
+      - name: model_deployment_id
+        in: path
+        required: true
+        schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelQuotaDeploymentId"}
+    get:
+      operationId: getModelQuota
+      x-insight-permission: model.read
+      description: Current allocation and usage for one exact Model deployment; absence is explicit null. Tenant concurrency is a read-only observation.
+      responses:
+        "200":
+          description: Existing quota accounts projected without internal account identifiers.
+          headers:
+            ETag: {schema: {type: string, pattern: '^"model-quota-[0-9a-f]{64}"$'}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelQuotaViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
+    put:
+      operationId: setModelQuota
+      x-insight-permission: tenant.manage
+      x-insight-maximum-request-bytes: 2048
+      x-insight-idempotency: tenant_principal_exact_deployment_original_cas_receipt
+      description: Atomically set three finite cumulative limits without resetting reserved or used amounts. Existing frozen deployments remain valid targets. A limit cannot fall below current reservations plus use.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/SetModelQuotaRequestV1"}
+      responses:
+        "200":
+          description: The allocation committed or replayed under current authorization.
+          headers:
+            ETag: {schema: {type: string, pattern: '^"model-quota-[0-9a-f]{64}"$'}}
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelQuotaViewV1"}
+        "400": {$ref: "#/components/responses/PrivateApiProblem"}
+        "401": {$ref: "#/components/responses/PrivateApiProblem"}
+        "403": {$ref: "#/components/responses/PrivateApiProblem"}
+        "404": {$ref: "#/components/responses/PrivateApiProblem"}
+        "409": {$ref: "#/components/responses/PrivateApiProblem"}
+        "412": {$ref: "#/components/responses/PrivateApiProblem"}
+        "428": {$ref: "#/components/responses/PrivateApiProblem"}
+        "503": {$ref: "#/components/responses/PrivateApiProblem"}
   /{resource_noun}:
     post:
       operationId: createManagedResource
@@ -1432,6 +1754,14 @@ components:
       required: true
       schema: {type: string, minLength: 1, maxLength: 255, pattern: "^[ -~]+$"}
   responses:
+    PrivateApiProblem:
+      description: A bounded authenticated management problem without sensitive values.
+      headers:
+        trace-id: {$ref: "#/components/headers/TraceId"}
+        Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ApiProblem"}
     ApiProblem:
       description: A bounded, stable public problem response.
       headers:
@@ -1556,11 +1886,133 @@ components:
     PublicManagementDeploymentId:
       type: string
       pattern: "^(adep|skdep|cdep|xdep|mpdep|mdep|mcdep|pdep|sxdep)_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ResourceAlias:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9._-]{0,63}$"
+    ImportModelCredentialRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, operation_id, provider_id, api_key]
+      x-insight-maximum-body-bytes: 8192
+      properties:
+        schema_version: {const: 1}
+        operation_id: {type: string, pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+        provider_id: {type: string, pattern: "^spr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+        api_key: {type: string, minLength: 1, maxLength: 4096, pattern: "^[!-~]+$", writeOnly: true, x-insight-secret-bearing: true}
+    ImportModelCredentialResponseV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, binding]
+      properties:
+        schema_version: {const: 1}
+        binding:
+          type: object
+          additionalProperties: false
+          required: [secret_binding_id, binding_generation, provider_id, purpose, resolution_policy, resolution_policy_digest]
+          properties:
+            secret_binding_id: {type: string, pattern: "^sbd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+            binding_generation: {const: 1}
+            provider_id: {type: string, pattern: "^spr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+            purpose: {const: model_api_key}
+            resolution_policy:
+              type: object
+              additionalProperties: false
+              required: [kind, opaque_version_identity_digest]
+              properties:
+                kind: {const: pinned}
+                opaque_version_identity_digest: {$ref: "#/components/schemas/Digest"}
+            resolution_policy_digest: {$ref: "#/components/schemas/Digest"}
+    ModelCredentialId:
+      type: string
+      pattern: "^sbd_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ModelCredentialMetadataViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, tenant_id, secret_binding_id, provider_id, purpose, state, generation, version, etag]
+      properties:
+        schema_version: {const: 1}
+        tenant_id: {type: string, pattern: "^ten_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+        secret_binding_id: {$ref: "#/components/schemas/ModelCredentialId"}
+        provider_id: {type: string, pattern: "^spr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+        purpose: {const: model_api_key}
+        state: {type: string, enum: [active, revoked]}
+        generation: {type: integer, minimum: 1, maximum: 9223372036854775807}
+        version: {type: integer, minimum: 1, maximum: 9223372036854775807}
+        etag: {type: string, minLength: 1, maxLength: 128}
+    RevokeModelCredentialRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, expected_generation]
+      properties:
+        schema_version: {const: 1}
+        expected_generation: {type: integer, minimum: 1, maximum: 9223372036854775807}
+    ModelConnectionProbeRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, installation_digest, model_deployment]
+      properties:
+        schema_version: {const: 1}
+        installation_digest: {$ref: "#/components/schemas/Digest"}
+        model_deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+    ModelConnectionObservationV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, model_deployment, provider_deployment, model_identity, protocol, observed_at, outcome]
+      properties:
+        schema_version: {const: 1}
+        model_deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+        provider_deployment:
+          type: object
+          additionalProperties: false
+          required: [resource_kind, deployment_id, deployment_digest]
+          properties:
+            resource_kind: {const: model_provider_deployment}
+            deployment_id: {type: string, pattern: "^mpdep_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+            deployment_digest: {$ref: "#/components/schemas/Digest"}
+        model_identity:
+          type: object
+          additionalProperties: false
+          required: [value, stability]
+          properties:
+            value: {type: string, minLength: 1, maxLength: 255}
+            stability: {type: string, enum: [pinned, externally_mutable]}
+        protocol: {type: string, enum: [open_ai_responses, anthropic_messages]}
+        observed_at: {$ref: "#/components/schemas/UtcTimestamp"}
+        outcome: {type: string, enum: [response_received, credentials_rejected, model_unavailable, rate_limited, provider_unavailable, invalid_response, timed_out, transport_unavailable]}
+    SetModelDefaultRequestV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, default_model]
+      properties:
+        schema_version: {const: 1}
+        default_model:
+          oneOf:
+            - {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+            - {type: "null"}
+    ModelDefaultViewV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, tenant_id, default_model, version, etag]
+      properties:
+        schema_version: {const: 1}
+        tenant_id: {type: string, pattern: "^ten_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+        default_model:
+          oneOf:
+            - {$ref: "#/components/schemas/ModelExactDeploymentRef"}
+            - {type: "null"}
+        version: {type: integer, minimum: 1, maximum: 9223372036854775807}
+        etag: {type: string, minLength: 1, maxLength: 128}
     CreateResourceRequestV1:
       type: object
       additionalProperties: false
       required: [display_name, document]
       properties:
+        alias:
+          oneOf:
+            - {$ref: "#/components/schemas/ResourceAlias"}
+            - {type: "null"}
         display_name: {type: string, minLength: 1, maxLength: 255}
         document: {$ref: "#/components/schemas/ResourceDocument"}
     ResourceDraftPayload:
@@ -1568,6 +2020,10 @@ components:
       additionalProperties: false
       required: [display_name, document, validation]
       properties:
+        alias:
+          oneOf:
+            - {$ref: "#/components/schemas/ResourceAlias"}
+            - {type: "null"}
         display_name: {type: string, minLength: 1, maxLength: 255}
         document: {$ref: "#/components/schemas/ResourceDocument"}
         validation:
@@ -1899,15 +2355,22 @@ components:
       required: [maximum_rounds, maximum_capability_calls, maximum_parallel_calls_per_round, token_budget]
       properties:
         maximum_rounds: {type: integer, minimum: 1, maximum: 65535}
-        maximum_capability_calls: {type: integer, minimum: 1, maximum: 4294967295}
-        maximum_parallel_calls_per_round: {type: integer, minimum: 1, maximum: 65535}
+        maximum_capability_calls: {type: integer, minimum: 0, maximum: 4294967295}
+        maximum_parallel_calls_per_round: {type: integer, minimum: 0, maximum: 65535}
         token_budget: {type: integer, minimum: 1, maximum: 9007199254740991}
+      oneOf:
+        - properties:
+            maximum_capability_calls: {const: 0}
+            maximum_parallel_calls_per_round: {const: 0}
+        - properties:
+            maximum_capability_calls: {minimum: 1}
+            maximum_parallel_calls_per_round: {minimum: 1}
     AgentAuthoringModelBindingV1:
       type: object
       additionalProperties: false
       required: [alias, deployment, selection_policy]
       properties:
-        alias: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]{0,63}$"}
+        alias: {type: string, minLength: 9, maxLength: 71, pattern: "^project/[a-z][a-z0-9-]{0,62}$"}
         deployment: {$ref: "#/components/schemas/ModelExactDeploymentRef"}
         selection_policy: {$ref: "#/components/schemas/AgentAuthoringPolicyBindingV1"}
     AuthoringDeploymentSelectorV1:
@@ -1925,6 +2388,27 @@ components:
             kind: {const: active}
             resource_id: {$ref: "#/components/schemas/PublicManagementResourceId"}
             environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]*$"}
+        - type: object
+          additionalProperties: false
+          required: [kind, alias, environment]
+          properties:
+            kind: {const: alias}
+            alias: {$ref: "#/components/schemas/ResourceAlias"}
+            environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]*$"}
+        - type: object
+          additionalProperties: false
+          required: [kind, environment]
+          properties:
+            kind: {const: default_model}
+            environment: {type: string, minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9_.-]*$"}
+    AuthoringNonModelDeploymentSelectorV1:
+      allOf:
+        - {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}
+        - not:
+            type: object
+            required: [kind]
+            properties:
+              kind: {const: default_model}
     AuthoringSlotTargetV1:
       oneOf:
         - type: object
@@ -1939,7 +2423,7 @@ components:
           required: [kind, candidates, selection_policy, tool_alias]
           properties:
             kind: {const: capability}
-            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringNonModelDeploymentSelectorV1"}}
             selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
             tool_alias: {type: [string, "null"], minLength: 1, maxLength: 128}
         - type: object
@@ -1947,21 +2431,21 @@ components:
           required: [kind, candidates, selection_policy]
           properties:
             kind: {const: child_agent}
-            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringNonModelDeploymentSelectorV1"}}
             selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
         - type: object
           additionalProperties: false
           required: [kind, candidates, selection_policy]
           properties:
             kind: {const: skill}
-            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}}
+            candidates: {type: array, minItems: 1, maxItems: 16, items: {$ref: "#/components/schemas/AuthoringNonModelDeploymentSelectorV1"}}
             selection_policy: {$ref: "./schemas/deployment-closure.schema.json#/$defs/ExactPolicyBinding"}
         - type: object
           additionalProperties: false
           required: [kind, deployment, consistency, allowed_projection, authorization_policy, ranking_policy]
           properties:
             kind: {const: context}
-            deployment: {$ref: "#/components/schemas/AuthoringDeploymentSelectorV1"}
+            deployment: {$ref: "#/components/schemas/AuthoringNonModelDeploymentSelectorV1"}
             consistency: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/consistency"}
             allowed_projection: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/allowed_projection"}
             authorization_policy: {$ref: "#/components/schemas/ContextSlotTargetInputV1/properties/binding/properties/authorization_policy"}
@@ -2018,7 +2502,7 @@ components:
                     required: [kind, code]
                     properties:
                       kind: {const: rejected}
-                      code: {type: string, enum: [invalid, denied, not_found, disabled, contract_mismatch, unavailable]}
+                      code: {type: string, enum: [invalid, denied, not_found, default_not_configured, disabled, contract_mismatch, unavailable]}
     AgentDeploymentFeaturesV1:
       type: object
       additionalProperties: false
@@ -2663,7 +3147,7 @@ components:
       properties:
         revision_id:
           type: string
-          pattern: "^polr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          pattern: "^prev_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         resource_kind: {const: policy_revision}
         semantic_digest: {$ref: "#/components/schemas/Digest"}
     ContextExactDeploymentRef:

@@ -9,6 +9,16 @@ Agent、Skill、Capability、Context、MCP、Model、Policy 和 Sandbox 复用
 Resource -> immutable ResourceVersion -> Deployment -> Binding 生命周期。Run admission 冻结 exact binding；active head
 变化不会改变既有 Run。Capability 是唯一通用可调用合同，Native、Remote HTTP/gRPC、MCP Tool 与 Sandbox 只是实现后端。
 
+Remote Context 的安装目录只约束物理目的地址、信任根、区域、容量与凭据用途映射，不重复保存 Registry 的业务身份。
+每次派发前，Security 用同一个只读数据库快照核对当前 Query、Run、Job 的稳定租约身份、principal 与 exact 依赖；
+Egress 单独绑定实际 Inline 输入摘要，并在解析凭据、DNS 和打开 HTTP 前检查许可。权限变化或租约失效拒绝旧请求，
+心跳更新 Job 版本不会单独使同一有效租约失效。此短期许可不保证撤回已打开的 HTTP 请求，也不是新的派发表或事务收据。
+外部 Remote Search 协议的正文编解码不携带这些业务授权事实；协议资格不能替代运行时授权或人工响应证据。
+HTTP 正文、完整 RPC frame 与最终 Inline 观察分别受限，前一层能接收的字节不保证后一层能容纳。
+超过后续容量时保留真实请求/响应证据并走既有 fenced failure settlement，不截断或伪造 Artifact。
+RPC 提交后的连接错误属于派发结果不确定，不表示提供方未被调用，也不会触发自动重发；
+安全诊断只保留闭合阶段和摘要，当前 Query/Job、额度与 deadline owner 决定最终收口。
+
 不可信代码只有一条物理路径：Sandbox Dispatcher -> internal OpenSandbox Server -> Kubernetes API -> BatchSandbox Controller ->
 containerd/runc。普通 Sandbox Capability 原子创建 shared durable Job；Dispatcher领取并续租同一Job，持久化physical evidence，
 通过immutable fixed Armed runner最多启动一次Package，并在提交terminal结果前重新验证current Job lease fence。OpenSandbox、
@@ -23,6 +33,10 @@ Agent 作者包保留原始源文件，CLI、WASM 和 Registry 使用同一个�
 独立重编译并比对 Plan。Plan 携带完整值 Schema；内部标量和数组使用值 Schema，公共对象输入保持独立的封闭对象约束。
 编译期形状检查在原生与 WASM 一致，物化值在执行及提交边界按冻结文档校验。执行要求绑定 Program 或领域操作的语义身份，
 进程可执行文件 digest 单独记录，重新构建可执行文件不会自动变成另一种业务语义。
+
+ModelLoop 的响应使用该节点输出端口绑定的封闭对象 Schema；Agent 的最终输出可以在后续计算或人工任务后另行组成。
+AgentContract 保留外部接口身份，模型响应 Schema 的摘要与所需文字指令归属 PlanNodeInstruction，并计入同一提示容量。
+首次准入和工具续轮在原有事务中再次核对 exact Plan；续轮不能更换响应合同。其他内部端口仍可使用标量或数组。
 
 普通 Job 领取共享有限分区和持久公平状态。物理扫描只略过完全没有租户公平记录的分区；已有租户是否绑定 Policy、是否有到期工作或是否能通过配额检查，不影响其分区继续获得扫描。新租户与公平记录原子创建后即进入后续扫描。
 每轮选择一个分区内的有限租户集合，再在本地剩余容量、当前 Policy、配额

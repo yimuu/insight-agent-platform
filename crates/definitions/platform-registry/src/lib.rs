@@ -6,6 +6,9 @@
 #![allow(async_fn_in_trait)]
 
 pub mod authoring;
+pub mod model_configuration;
+pub mod model_policy_bootstrap;
+pub mod model_quota;
 
 use chrono::{DateTime, Utc};
 use insight_platform_agent_compiler::{
@@ -72,7 +75,8 @@ pub fn validate_resource_draft_replacement(
     current: &ResourceDraftPayload,
     replacement: &ResourceDraftPayload,
 ) -> Result<(), RegistryCommandError> {
-    if current.document.kind() != replacement.document.kind() {
+    if current.document.kind() != replacement.document.kind() || current.alias != replacement.alias
+    {
         return Err(RegistryCommandError::InvalidResourceDraft);
     }
     if let (ResourceDocument::Agent(current_agent), ResourceDocument::Agent(replacement_agent)) =
@@ -638,6 +642,7 @@ mod tests {
         }))
         .unwrap();
         let draft = ResourceDraftPayload {
+            alias: None,
             display_name: "example".to_owned(),
             document: insight_platform_contracts::ResourceDocument::Agent(
                 insight_platform_contracts::AgentResourceSpec {
@@ -732,6 +737,18 @@ mod tests {
             Err(RegistryCommandError::InvalidResourceDraft)
         );
         assert_eq!(validate_resource_draft_replacement(&draft, &draft), Ok(()));
+        let mut aliased = draft.clone();
+        aliased.alias = Some("primary-model".parse().unwrap());
+        assert!(validate_resource_draft_replacement(&draft, &aliased).is_err());
+        assert!(validate_resource_draft_replacement(&aliased, &draft).is_err());
+        let mut renamed = aliased.clone();
+        renamed.display_name = "Renamed display only".to_owned();
+        assert_eq!(
+            validate_resource_draft_replacement(&aliased, &renamed),
+            Ok(())
+        );
+        renamed.alias = Some("another-model".parse().unwrap());
+        assert!(validate_resource_draft_replacement(&aliased, &renamed).is_err());
     }
 }
 

@@ -9,10 +9,11 @@
     "build": "pnpm compiler:build && tsc -b && vite build",
     "browser:fixture": "node tests/fixture-server.mjs",
     "browser:fixture:qualify": "node tests/qualify-browser-fixture.mjs",
-    "browser:gateway": "node tests/gateway-server.mjs",
+    "start": "node server/main.mjs",
+    "browser:gateway": "node server/native.mjs",
     "browser:gateway:journey": "node tests/real-gateway-journey.mjs",
     "lint": "oxlint",
-    "test": "pnpm compiler:build && node --check tests/fixture-server.mjs && node --check tests/gateway-server.mjs && node --check tests/qualify-browser-fixture.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs src/agent/*.test.mjs src/task/*.test.mjs tests/gateway-server.test.mjs tests/browser-process.test.mjs",
+    "test": "pnpm compiler:build && node --check tests/fixture-server.mjs && node --check server/config.mjs && node --check server/gateway-server.mjs && node --check server/native.mjs && node --check server/main.mjs && node --check tests/qualify-browser-fixture.mjs && node --check tests/real-gateway-journey.mjs && node --test src/api/*.test.mjs src/agent/*.test.mjs src/task/*.test.mjs src/model/*.test.mjs server/*.test.mjs tests/gateway-server.test.mjs tests/browser-process.test.mjs tests/model-chat-installation-journey.test.mjs",
     "preview": "vite preview",
     "compiler:build": "node scripts/build-agent-compiler.mjs"
   },

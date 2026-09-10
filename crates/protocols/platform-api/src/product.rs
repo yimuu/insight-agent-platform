@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const PRODUCT_LIST_MAX_PAGE_SIZE: u16 = 50;
 pub const PRODUCT_LIST_DEFAULT_PAGE_SIZE: u16 = 25;
 pub const PRODUCT_LIST_CURSOR_TTL_SECONDS: i64 = 900;
+pub const DEFAULT_AGENT_MODEL_REFERENCE: &str = "project/default";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +26,7 @@ pub struct AgentModelLoopLimitsV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthoringModelBindingV1 {
+    /// A directly usable project reference for the shared Agent compiler, not a Registry alias.
     pub alias: String,
     pub deployment: ExactDeploymentRef,
     pub selection_policy: ExactPolicyBinding,
@@ -49,18 +51,26 @@ impl AgentAuthoringProfileV1 {
         execution_profile: ExactPolicyBinding,
         models: Vec<AgentAuthoringModelBindingV1>,
     ) -> Result<Self, ListError> {
+        Self::build_for_installation("development".to_owned(), execution_profile, models)
+    }
+
+    pub fn build_for_installation(
+        environment: String,
+        execution_profile: ExactPolicyBinding,
+        models: Vec<AgentAuthoringModelBindingV1>,
+    ) -> Result<Self, ListError> {
         let mut profile = Self {
             schema_version: 1,
             default_deadline_seconds: 120,
-            default_environment: "development".to_owned(),
+            default_environment: environment,
             policy_versions: vec![execution_profile.revision.clone()],
             deployment_policies: vec![execution_profile.clone()],
             execution_profile,
             model_loop: AgentModelLoopLimitsV1 {
                 maximum_rounds: 1,
-                maximum_capability_calls: 1,
-                maximum_parallel_calls_per_round: 1,
-                token_budget: 2_304,
+                maximum_capability_calls: 0,
+                maximum_parallel_calls_per_round: 0,
+                token_budget: 10_240,
             },
             models,
             profile_digest:
@@ -84,8 +94,11 @@ impl AgentAuthoringProfileV1 {
             || self.deployment_policies.len() > 16
             || self.models.len() > 16
             || self.model_loop.maximum_rounds == 0
-            || self.model_loop.maximum_capability_calls == 0
-            || self.model_loop.maximum_parallel_calls_per_round == 0
+            || insight_platform_plan::validate_model_loop_tool_budget(
+                self.model_loop.maximum_capability_calls,
+                self.model_loop.maximum_parallel_calls_per_round,
+            )
+            .is_err()
             || self.model_loop.token_budget == 0
             || self.execution_profile.validate().is_err()
             || self.policy_versions.iter().any(|revision| {
@@ -101,7 +114,7 @@ impl AgentAuthoringProfileV1 {
                 .windows(2)
                 .any(|pair| pair[0].alias >= pair[1].alias)
             || self.models.iter().any(|binding| {
-                !valid_environment(&binding.alias)
+                !valid_authoring_model_reference(&binding.alias)
                     || binding.deployment.resource_kind != ResourceKind::ModelDeployment
                     || binding.deployment.validate().is_err()
                     || binding.selection_policy.validate().is_err()
@@ -564,6 +577,15 @@ fn valid_display_name(value: &str) -> bool {
     !value.is_empty() && value.chars().count() <= 255 && !value.chars().any(char::is_control)
 }
 
+fn valid_authoring_model_reference(value: &str) -> bool {
+    value.strip_prefix("project/").is_some_and(|name| {
+        let mut bytes = name.bytes();
+        name.len() <= 63
+            && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
 fn valid_environment(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
@@ -634,6 +656,65 @@ mod tests {
                 digest(marker),
             )
             .unwrap(),
+        }
+    }
+
+    #[test]
+    fn authoring_model_references_are_directly_usable_project_names() {
+        let binding = |alias: String| AgentAuthoringModelBindingV1 {
+            alias,
+            deployment: ExactDeploymentRef::new(id(ResourceKind::ModelDeployment, 20), digest('a'))
+                .unwrap(),
+            selection_policy: policy_binding(21, 'b'),
+        };
+        for reference in [
+            "project/default".to_owned(),
+            "project/a".to_owned(),
+            format!("project/{}", "a".repeat(63)),
+        ] {
+            let profile = AgentAuthoringProfileV1::build(
+                policy_binding(22, 'c'),
+                vec![binding(reference.clone())],
+            )
+            .unwrap();
+            assert_eq!(profile.models[0].alias, reference);
+        }
+        for reference in [
+            "default".to_owned(),
+            "project/".to_owned(),
+            "project/a.b".to_owned(),
+            "project/a_b".to_owned(),
+            "project/A".to_owned(),
+            "project/a/b".to_owned(),
+            "project/中文".to_owned(),
+            format!("project/{}", "a".repeat(64)),
+            id(ResourceKind::ModelDeployment, 23).to_string(),
+        ] {
+            assert_eq!(
+                AgentAuthoringProfileV1::build(policy_binding(22, 'c'), vec![binding(reference)]),
+                Err(ListError::Invalid)
+            );
+        }
+    }
+
+    #[test]
+    fn authoring_profile_tool_budgets_are_paired_and_default_to_zero() {
+        let original = AgentAuthoringProfileV1::build(policy_binding(10, 'b'), vec![]).unwrap();
+        assert_eq!(original.model_loop.maximum_capability_calls, 0);
+        assert_eq!(original.model_loop.maximum_parallel_calls_per_round, 0);
+        for (total, parallel, accepted) in [
+            (0, 0, true),
+            (1, 1, true),
+            (8, 2, true),
+            (0, 1, false),
+            (1, 0, false),
+            (1, 2, false),
+        ] {
+            let mut profile = original.clone();
+            profile.model_loop.maximum_capability_calls = total;
+            profile.model_loop.maximum_parallel_calls_per_round = parallel;
+            profile.profile_digest = profile.expected_digest().unwrap();
+            assert_eq!(profile.validate().is_ok(), accepted);
         }
     }
 

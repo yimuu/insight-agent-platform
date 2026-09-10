@@ -225,20 +225,32 @@ pub struct HttpsArtifactObjectUploader {
 }
 
 impl HttpsArtifactObjectUploader {
+    #[cfg(test)]
     pub fn new() -> Result<Self, ArtifactClientError> {
-        Self::with_additional_root(None)
+        Self::with_additional_roots(&[])
     }
 
+    #[cfg(test)]
     fn with_additional_root(
         additional_root: Option<Certificate>,
     ) -> Result<Self, ArtifactClientError> {
+        Self::with_additional_roots(&additional_root.into_iter().collect::<Vec<_>>())
+    }
+    pub fn with_additional_roots(
+        additional_roots: &[Certificate],
+    ) -> Result<Self, ArtifactClientError> {
+        if additional_roots.len() > 16 {
+            return Err(ArtifactClientError::InvalidRequest(
+                "too many additional trust roots".to_owned(),
+            ));
+        }
         let mut builder = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
             .timeout(Duration::from_secs(300))
             .user_agent("insight-cli-artifact-upload/0.1");
-        if let Some(root) = additional_root {
-            builder = builder.add_root_certificate(root);
+        for root in additional_roots {
+            builder = builder.add_root_certificate(root.clone());
         }
         let client = builder.build().map_err(|_| {
             ArtifactClientError::InvalidRequest(

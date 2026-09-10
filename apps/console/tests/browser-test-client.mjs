@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { startGatewayConsoleServer } from './gateway-server.mjs'
+import { startGatewayConsoleServer } from '../server/native.mjs'
 
 export const browserBinary = process.env.INSIGHT_CONSOLE_BROWSER_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 export const explicitBrowserBundle = process.env.INSIGHT_CONSOLE_BUNDLE_ROOT

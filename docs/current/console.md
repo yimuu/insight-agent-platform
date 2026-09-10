@@ -1,7 +1,10 @@
 # 运行控制台
 
+Models 页面中的来源、密钥轮换、连接检测与默认模型操作见[模型配置](model-configuration.md)。
+
 [Console](../../apps/console) 是无 BFF、无数据库的静态 React 客户端，访问 Gateway 的 `/readyz` 与 public `/v1`，
-生产静态资源由 Gateway/Ingress 同源托管。默认页面为 Agents、Runs、Tasks 和 Settings；关联对象提供低敏诊断信息。
+静态资源由独立 Console transport 提供，公开 API 按路由透明转发至 Management 或 Runtime Gateway，保持同源。
+页面包含 Agents、Runs、Tasks、Models 和 Settings；关联对象提供低敏诊断信息。
 业务状态、资格判断和正文读取授权由服务端拥有。
 
 Agent 编辑器提供表单与 YAML 视图，可编辑引用的输入/输出 schema、完整 Plan JSON、静态框架 graph export 和 slot bindings。
@@ -47,12 +50,12 @@ Run values 先列出 metadata，再由用户选择读取单个值。正文必须
 token 只保存在内存，切换连接、租户、主体或选中对象会取消在途请求并清空相关正文与游标；
 401/403 清除受影响内容。诊断展示使用脱敏投影，浏览器不持久化 credential。
 
-本地真实浏览器测试使用透明同源代理，分别读取实际 runtime profile 的 Management 与 Runtime Gateway 地址。
-作者、发布和依赖查询转到 Management；Run、Task 与 Artifact 操作转到 Runtime。两个地址仅允许 loopback HTTP origin，
-代理不生成响应、不缓存正文，也不改变 Authorization、Receipt、ETag 或 SSE cursor；未知路径仍由真实 Gateway 拒绝。
-此开发测试 transport 不增加 BFF 或业务权限；生产仍由部署配置完成同源路由。
+Console transport 使用 Node.js 提供静态 bundle 和透明同源转发，不持有业务状态或增加业务权限。
+Compose、Helm 和 Native 都从共享安装配置取得 Management 与 Runtime Gateway 地址；Native 启动计划
+传入冻结的 Console 配置文件，其上游限定为 loopback HTTP。转发保留 Authorization、Receipt、ETag 和 SSE cursor，不缓存私有响应。
+各路由的归属由[共享路由实现](../../apps/console/server/gateway-server.mjs)定义；未知公开路径由 Gateway 拒绝。
 
-Node.js 只用于构建静态 bundle 和运行浏览器测试，不是平台服务运行时：
+Console 的源代码构建和本地测试命令为：
 
 ```bash
 cd apps/console

@@ -66,7 +66,12 @@ fn aws(container: &str, args: &[&str]) -> Result<Value, String> {
 fn cli(insight: &Path, project: &Path, action: &str) -> Result<std::process::Output, String> {
     Command::new(insight)
         .current_dir(workspace_root())
-        .args([action, "--path", project.to_str().unwrap()])
+        .args([
+            "qualification-aws",
+            action,
+            "--path",
+            project.to_str().unwrap(),
+        ])
         .output()
         .map_err(|e| e.to_string())
 }

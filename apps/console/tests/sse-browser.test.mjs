@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { startGatewayConsoleServer } from './gateway-server.mjs'
+import { startGatewayConsoleServer } from '../server/native.mjs'
 
 const browserBinary = process.env.INSIGHT_CONSOLE_BROWSER_BIN ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const bundleRoot = process.env.INSIGHT_CONSOLE_BUNDLE_ROOT
@@ -13,6 +13,7 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 const runA = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b90'
 const runB = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b91'
 const runC = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b92'
+const runWithoutOutput = 'run_0198f1c3-8f49-7c3e-b1f3-773c28367b94'
 
 async function eventually(check, label) {
   const deadline = Date.now() + 8_000
@@ -57,6 +58,7 @@ function runView(id, state = 'running') {
   return {
     schema_version: 1, run_id: id, agent_deployment_id: 'adep_0198f1c3-8f49-7c3e-b1f3-773c28367b93',
     state, version: state === 'succeeded' ? 2 : 1, etag: '"run-v1"',
+    output_value_id: state === 'succeeded' ? 'val_0198f1c3-8f49-7c3e-b1f3-773c28367b95' : null,
     created_at: '2026-09-01T00:00:00Z', started_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', deadline: '2026-09-07T00:00:00Z',
   }
 }
@@ -102,8 +104,14 @@ test('Run UI follows, preserves a history error, and fences identity/resource ch
     }
     if (path === `/v1/runs/${runB}`) { releaseB = () => send(response, 200, runView(runB)); return }
     if (path === `/v1/runs/${runC}`) { releaseC = () => send(response, 200, runView(runC)); return }
+    if (path === `/v1/runs/${runWithoutOutput}`) { send(response, 200, runView(runWithoutOutput, 'failed')); return }
+    if (path === `/v1/runs/${runWithoutOutput}/events`) {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'x-insight-run-replay-floor': '0', 'x-insight-run-high-water': '0', 'x-insight-history-truncated': 'false' })
+      response.end(': no events\n\n')
+      return
+    }
     if (path === `/v1/runs/${runA}/result`) { if (resultFailure) send(response, 503, { code: 'content_unavailable', detail: 'Current result content is unavailable.', retryable: true }); else send(response, 200, { value: 'authorized-result-canary' }); return }
-    if (path === '/v1/tasks/int_old') {
+    if (path === '/v1/tasks/int_old?purpose=respondable') {
       releaseTask = () => send(response, 200, { task_id: 'int_old', state: 'pending', safe_prompt_key: 'old-task-private-canary' })
       return
     }
@@ -189,6 +197,12 @@ test('Run UI follows, preserves a history error, and fences identity/resource ch
     resultFailure = false
     await evaluate(`[...document.querySelectorAll('button')].filter(button => button.textContent === 'Refresh').at(-1).click()`)
     await waitDom(`document.body.innerText.includes('authorized-result-canary')`, 'fresh result authorization restores body')
+
+    await openRun(runWithoutOutput)
+    await waitDom(`document.querySelector('.panel__heading > .status')?.textContent === 'failed'`, 'failed Run without an output')
+    await delay(100)
+    assert.equal(requests.some(({ path }) => path === `/v1/runs/${runWithoutOutput}/result`), false, 'an absent output is not a result read capability')
+    assert.equal(await evaluate(`document.body.innerText.includes('authorized-result-canary')`), false)
 
     await input('input[placeholder="run_…"]', runB)
     assert.equal(await evaluate(`document.body.innerText.includes('authorized-result-canary') || document.querySelectorAll('.timeline li').length > 0`), false)

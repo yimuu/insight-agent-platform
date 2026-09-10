@@ -105,6 +105,10 @@ pub fn decide_schedule_initial_scan(
     command: &ScheduleInitialArtifactScan,
     now: DateTime<Utc>,
 ) -> Result<ArtifactScanScheduleDecision, ArtifactWorkError> {
+    artifact
+        .metadata
+        .upload_operation_id()
+        .map_err(|_| ArtifactWorkError::InvalidCommand)?;
     command.validate_at(now)?;
     if artifact.tenant_id != command.audit.tenant_id
         || blob.tenant_id != command.audit.tenant_id
@@ -244,6 +248,10 @@ pub fn decide_schedule_artifact_rescan(
     command: &ScheduleArtifactRescan,
     now: DateTime<Utc>,
 ) -> Result<ArtifactRescanScheduleDecision, ArtifactWorkError> {
+    artifact
+        .metadata
+        .upload_operation_id()
+        .map_err(|_| ArtifactWorkError::InvalidCommand)?;
     command.validate_at(now)?;
     if artifact.tenant_id != command.audit.tenant_id
         || blob.tenant_id != command.audit.tenant_id
@@ -597,7 +605,7 @@ impl StageWorkloadArtifact {
     }
 
     pub fn metadata(&self) -> Result<ArtifactMetadataSnapshot, ArtifactWorkError> {
-        ArtifactMetadataSnapshot::new(None, self.verification_job_id.clone())
+        ArtifactMetadataSnapshot::new_upload(None, self.verification_job_id.clone())
             .map_err(|_| ArtifactWorkError::InvalidCommand)
     }
 
@@ -1252,6 +1260,10 @@ pub fn decide_commit_artifact_scan(
     command: &CommitArtifactScanOutcome,
     database_now: DateTime<Utc>,
 ) -> Result<ArtifactScanDecision, ArtifactWorkError> {
+    artifact
+        .metadata
+        .upload_operation_id()
+        .map_err(|_| ArtifactWorkError::InvalidCommand)?;
     command.validate_at(database_now)?;
     job.validate()?;
     if artifact.tenant_id != command.audit.tenant_id
@@ -2412,7 +2424,7 @@ mod tests {
                 ArtifactScanKind::Rescan => ArtifactState::Quarantined,
             },
             version: 4,
-            metadata: ArtifactMetadataSnapshot::new(
+            metadata: ArtifactMetadataSnapshot::new_upload(
                 Some("input.json".to_owned()),
                 operation_id.clone(),
             )

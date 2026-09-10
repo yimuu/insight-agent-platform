@@ -27,7 +27,7 @@ class RequiredCiResultsTests(unittest.TestCase):
     def test_lane_set_excludes_periodic_productization(self) -> None:
         self.assertEqual(
             set(MODULE.expected_results(selections())),
-            {"changes", "quick", "lint", "test", "cli", "console", "policy"},
+            {"changes", "quick", "lint", "test", "cli", "console", "installation", "policy"},
         )
 
     def test_runtime_selection_requires_static_and_rust_lanes_and_skips_cli(self) -> None:
@@ -35,6 +35,7 @@ class RequiredCiResultsTests(unittest.TestCase):
         expected = MODULE.expected_results(selected)
         self.assertEqual(expected["lint"], "success")
         self.assertEqual(expected["test"], "success")
+        self.assertEqual(expected["installation"], "success")
         self.assertEqual(expected["cli"], "skipped")
         self.assertEqual(expected["policy"], "success")
         self.assertEqual(MODULE.validate_results(selected, expected), [])
@@ -44,6 +45,7 @@ class RequiredCiResultsTests(unittest.TestCase):
         expected = MODULE.expected_results(selected)
         self.assertEqual(expected["cli"], "success")
         self.assertEqual(expected["lint"], "skipped")
+        self.assertEqual(expected["installation"], "skipped")
         self.assertEqual(MODULE.validate_results(selected, expected), [])
 
     def test_selected_lane_cannot_be_skipped(self) -> None:
@@ -63,6 +65,14 @@ class RequiredCiResultsTests(unittest.TestCase):
             MODULE.validate_results(selected, actual),
             ["policy lane expected skipped but was 'success'"],
         )
+
+    def test_console_only_still_requires_actual_installation(self) -> None:
+        selected = selections(console=True)
+        actual = MODULE.expected_results(selected)
+        self.assertEqual(actual["installation"], "success")
+        actual["installation"] = "skipped"
+        self.assertEqual(MODULE.validate_results(selected, actual),
+                         ["installation lane expected success but was 'skipped'"])
 
     def test_failure_and_cancelled_results_are_rejected(self) -> None:
         selected = selections(runtime=True)

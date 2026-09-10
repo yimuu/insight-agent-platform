@@ -57,6 +57,9 @@ use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 use x509_parser::{extensions::GeneralName, parse_x509_certificate};
 
+mod model_connection;
+mod model_credentials;
+
 pub mod proto {
     tonic::include_proto!("insight.platform.v1");
 }
@@ -67,13 +70,14 @@ use proto::{
 };
 
 pub const EGRESS_INTERNAL_RPC_SCHEMA_VERSION: u32 = 1;
+pub use insight_platform_contracts::limits::MAX_EGRESS_METADATA_BYTES_HARD;
 pub use insight_platform_contracts::{
     CAPABILITY_WORKER_WORKLOAD_IDENTITY, CONTEXT_WORKER_WORKLOAD_IDENTITY,
-    MCP_CALLBACK_WORKLOAD_IDENTITY, MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY,
-    MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY, MCP_HOST_WORKLOAD_IDENTITY,
-    MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY, MODEL_WORKER_WORKLOAD_IDENTITY,
+    GATEWAY_WORKLOAD_IDENTITY, MCP_CALLBACK_WORKLOAD_IDENTITY,
+    MCP_CLEANUP_WORKER_WORKLOAD_IDENTITY, MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY,
+    MCP_HOST_WORKLOAD_IDENTITY, MCP_SUBSCRIPTION_WORKER_WORKLOAD_IDENTITY,
+    MODEL_WORKER_WORKLOAD_IDENTITY,
 };
-pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
 pub const MAX_EGRESS_PAYLOAD_BYTES_HARD: usize = 64 * 1_048_576;
 pub const MAX_EGRESS_RPC_MESSAGE_BYTES_HARD: usize =
     MAX_EGRESS_METADATA_BYTES_HARD + MAX_EGRESS_PAYLOAD_BYTES_HARD + 8_192;
@@ -90,8 +94,8 @@ const UNARY_CAPABILITY_GRPC: &str = "capability_grpc.unary/v1";
 const CAPABILITY_GRPC_OUTCOME: &str = "capability_grpc.outcome/v1";
 const CANCEL_CAPABILITY_GRPC: &str = "capability_grpc.cancel/v1";
 const CAPABILITY_GRPC_CANCEL_OUTCOME: &str = "capability_grpc.cancel_outcome/v1";
-const QUERY_REMOTE_CONTEXT: &str = "remote_context.query/v1";
-const REMOTE_CONTEXT_OUTCOME: &str = "remote_context.outcome/v1";
+const QUERY_REMOTE_CONTEXT: &str = "remote_context.query/v2";
+const REMOTE_CONTEXT_OUTCOME: &str = "remote_context.outcome/v2";
 const EXCHANGE_MCP_OAUTH_AUTHORIZATION_CODE: &str = "mcp_oauth.exchange_authorization_code/v1";
 const MCP_OAUTH_AUTHORIZATION_CODE_OUTCOME: &str = "mcp_oauth.authorization_code_outcome/v1";
 const DELETE_MCP_OAUTH_PKCE_SECRET: &str = "mcp_oauth.delete_pkce_secret/v1";
@@ -535,6 +539,7 @@ impl McpStreamableHttpSubscriptionSink for EgressMcpSubscriptionBridge {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressCallerRole {
+    Gateway,
     ModelWorker,
     CapabilityWorker,
     ContextWorker,
@@ -548,6 +553,7 @@ pub enum EgressCallerRole {
 impl EgressCallerRole {
     fn from_uri(uri: &str) -> Option<Self> {
         match uri {
+            GATEWAY_WORKLOAD_IDENTITY => Some(Self::Gateway),
             MODEL_WORKER_WORKLOAD_IDENTITY => Some(Self::ModelWorker),
             CAPABILITY_WORKER_WORKLOAD_IDENTITY => Some(Self::CapabilityWorker),
             CONTEXT_WORKER_WORKLOAD_IDENTITY => Some(Self::ContextWorker),
@@ -629,6 +635,77 @@ fn remote_context_rpc_failure(code: &str, retryable: bool) -> RemoteContextFailu
         },
         safe_message: "Remote Context Egress RPC failed before dispatch".to_owned(),
         dispatch_evidence_digest: None,
+    }
+}
+
+fn remote_context_rpc_uncertain(code: &str, attempted: &Sha256Digest) -> RemoteContextFailure {
+    RemoteContextFailure {
+        code: code.to_owned(),
+        class: insight_platform_context::RemoteContextFailureClass::UncertainDispatch,
+        safe_message: "Remote Context RPC was attempted; provider dispatch is unknown".to_owned(),
+        dispatch_evidence_digest: Some(attempted.clone()),
+    }
+}
+
+fn decode_remote_context_outcome(
+    response: Result<ClosedEgressEnvelope, Status>,
+    request: &RemoteContextSearchRequest,
+    attempted: &Sha256Digest,
+    limits: EgressInternalRpcLimits,
+) -> Result<RemoteContextSearchResponse, RemoteContextFailure> {
+    let response = response
+        .map_err(|_| remote_context_rpc_uncertain("context_egress_rpc_unavailable", attempted))?;
+    let outcome =
+        decode_metadata::<UnaryOutcome<RemoteContextSearchResponse, RemoteContextFailure>>(
+            response,
+            REMOTE_CONTEXT_OUTCOME,
+            limits,
+        )
+        .map_err(|_| {
+            remote_context_rpc_uncertain("context_egress_rpc_response_invalid", attempted)
+        })?;
+    match outcome {
+        UnaryOutcome::Succeeded(response) if response.validate_for(request, Utc::now()).is_ok() => {
+            Ok(response)
+        }
+        UnaryOutcome::Failed(failure) if failure.validate().is_ok() => Err(failure),
+        _ => Err(remote_context_rpc_uncertain(
+            "context_egress_rpc_response_invalid",
+            attempted,
+        )),
+    }
+}
+
+fn encode_remote_context_outcome(
+    outcome: UnaryOutcome<RemoteContextSearchResponse, RemoteContextFailure>,
+    request_digest: &Sha256Digest,
+    limits: EgressInternalRpcLimits,
+) -> Result<ClosedEgressEnvelope, EgressRpcError> {
+    match encode_metadata(&outcome, REMOTE_CONTEXT_OUTCOME, limits) {
+        Ok(envelope) => Ok(envelope),
+        Err(error) => {
+            let UnaryOutcome::Succeeded(response) = outcome else {
+                return Err(error);
+            };
+            let evidence = typed_digest(&serde_json::json!({
+                "schema_version": 1,
+                "stage": "remote_context_result_rpc_capacity_rejected",
+                "request_digest": request_digest,
+                "response_digest": typed_digest(&response)?,
+            }))?;
+            encode_metadata(
+                &UnaryOutcome::<RemoteContextSearchResponse, RemoteContextFailure>::Failed(
+                    RemoteContextFailure {
+                        code: "context_egress_rpc_result_too_large".to_owned(),
+                        class: insight_platform_context::RemoteContextFailureClass::PermanentAfterDispatch,
+                        safe_message: "Remote Context result exceeds RPC capacity after provider dispatch".to_owned(),
+                        dispatch_evidence_digest: Some(evidence),
+                    },
+                ),
+                REMOTE_CONTEXT_OUTCOME,
+                limits,
+            )
+        }
     }
 }
 
@@ -987,33 +1064,25 @@ impl RemoteContextSearchConnector for EgressBrokerGrpcClient {
             .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
         let envelope = encode_metadata(&request, QUERY_REMOTE_CONTEXT, self.limits)
             .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
+        let attempted = typed_digest(&serde_json::json!({
+            "schema_version": 1,
+            "stage": "remote_context_rpc_call_attempted",
+            "envelope_digest": envelope.envelope_digest,
+        }))
+        .map_err(|_| remote_context_rpc_failure("context_egress_rpc_request_invalid", false))?;
+        let mut outbound = Request::new(envelope);
+        outbound.set_timeout((request.deadline - Utc::now()).to_std().map_err(|_| {
+            remote_context_rpc_failure("context_egress_rpc_request_invalid", false)
+        })?);
         let mut client = self.client.clone();
-        let response = client.query_remote_context(Request::new(envelope)).await;
+        let response = client.query_remote_context(outbound).await;
         observe_egress_rpc(&self.dependency_observer, response.is_ok());
-        let response = response
-            .map_err(|_| remote_context_rpc_failure("context_egress_rpc_unavailable", true))?;
-        match decode_metadata::<UnaryOutcome<RemoteContextSearchResponse, RemoteContextFailure>>(
-            response.into_inner(),
-            REMOTE_CONTEXT_OUTCOME,
+        decode_remote_context_outcome(
+            response.map(Response::into_inner),
+            &request,
+            &attempted,
             self.limits,
         )
-        .map_err(|_| remote_context_rpc_failure("context_egress_rpc_response_invalid", true))?
-        {
-            UnaryOutcome::Succeeded(response)
-                if response.validate_for(&request, Utc::now()).is_ok() =>
-            {
-                Ok(response)
-            }
-            UnaryOutcome::Succeeded(_) => Err(remote_context_rpc_failure(
-                "context_egress_rpc_response_invalid",
-                true,
-            )),
-            UnaryOutcome::Failed(failure) if failure.validate().is_ok() => Err(failure),
-            UnaryOutcome::Failed(_) => Err(remote_context_rpc_failure(
-                "context_egress_rpc_response_invalid",
-                true,
-            )),
-        }
     }
 }
 
@@ -1594,6 +1663,8 @@ pub struct EgressBrokerGrpcService<M, H, G> {
     http: Arc<H>,
     grpc: Arc<G>,
     remote_context: Option<Arc<dyn RemoteContextSearchConnector>>,
+    model_credential_importer: Option<Arc<dyn insight_platform_security::ModelCredentialImporter>>,
+    model_connection_probe: Option<Arc<dyn insight_platform_security::ModelConnectionProbe>>,
     mcp_oauth: Option<Arc<dyn McpOAuthCredentialBroker>>,
     mcp_oauth_pkce_cleaner: Option<Arc<dyn McpOAuthPkceSecretCleaner>>,
     mcp_discovery: Option<Arc<dyn McpDiscoveryTransportConnector>>,
@@ -1611,6 +1682,8 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             http,
             grpc,
             remote_context: None,
+            model_credential_importer: None,
+            model_connection_probe: None,
             mcp_oauth: None,
             mcp_oauth_pkce_cleaner: None,
             mcp_discovery: None,
@@ -1620,6 +1693,22 @@ impl<M, H, G> EgressBrokerGrpcService<M, H, G> {
             mcp_subscription_bridge: None,
             limits,
         }
+    }
+
+    pub fn with_model_connection_probe(
+        mut self,
+        probe: Arc<dyn insight_platform_security::ModelConnectionProbe>,
+    ) -> Self {
+        self.model_connection_probe = Some(probe);
+        self
+    }
+
+    pub fn with_model_credential_importer(
+        mut self,
+        importer: Arc<dyn insight_platform_security::ModelCredentialImporter>,
+    ) -> Self {
+        self.model_credential_importer = Some(importer);
+        self
     }
 
     pub fn with_remote_context(mut self, connector: Arc<dyn RemoteContextSearchConnector>) -> Self {
@@ -1683,6 +1772,25 @@ where
         Pin<Box<dyn Stream<Item = Result<ClosedEgressEnvelope, Status>> + Send + 'static>>;
     type StreamMcpStreamableHttpSubscriptionStream =
         Pin<Box<dyn Stream<Item = Result<ClosedEgressEnvelope, Status>> + Send + 'static>>;
+
+    async fn probe_model_connection(
+        &self,
+        request: Request<ClosedEgressEnvelope>,
+    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
+        model_connection::serve(self.model_connection_probe.as_deref(), request, self.limits).await
+    }
+
+    async fn import_model_credential(
+        &self,
+        request: Request<ClosedEgressEnvelope>,
+    ) -> Result<Response<ClosedEgressEnvelope>, Status> {
+        model_credentials::serve_import(
+            self.model_credential_importer.as_deref(),
+            request,
+            self.limits,
+        )
+        .await
+    }
 
     async fn open_model_provider(
         &self,
@@ -1844,6 +1952,7 @@ where
         request
             .validate_at(Utc::now())
             .map_err(|_| Status::invalid_argument("invalid Remote Context request"))?;
+        let request_digest = typed_digest(&request)?;
         let outcome = match scope_trace(trace, connector.query(request)).await {
             Ok(response) => UnaryOutcome::Succeeded(response),
             Err(failure) => {
@@ -1855,9 +1964,9 @@ where
                 UnaryOutcome::Failed(failure)
             }
         };
-        Ok(Response::new(encode_metadata(
-            &outcome,
-            REMOTE_CONTEXT_OUTCOME,
+        Ok(Response::new(encode_remote_context_outcome(
+            outcome,
+            &request_digest,
             self.limits,
         )?))
     }
@@ -2479,6 +2588,15 @@ fn decode_metadata_payload<T: DeserializeOwned>(
     operation: &'static str,
     limits: EgressInternalRpcLimits,
 ) -> Result<(T, Vec<u8>), EgressRpcError> {
+    let value = decode_metadata_payload_ref(&envelope, operation, limits)?;
+    Ok((value, envelope.payload))
+}
+
+fn decode_metadata_payload_ref<T: DeserializeOwned>(
+    envelope: &ClosedEgressEnvelope,
+    operation: &'static str,
+    limits: EgressInternalRpcLimits,
+) -> Result<T, EgressRpcError> {
     if envelope.schema_version != EGRESS_INTERNAL_RPC_SCHEMA_VERSION
         || envelope.operation != operation
         || envelope.canonical_metadata_json.is_empty()
@@ -2523,7 +2641,7 @@ fn decode_metadata_payload<T: DeserializeOwned>(
         return Err(EgressRpcError::InvalidEnvelope);
     }
     let value = serde_json::from_value(metadata).map_err(|_| EgressRpcError::InvalidEnvelope)?;
-    Ok((value, envelope.payload))
+    Ok(value)
 }
 
 fn decode_canonical_payload_json(
@@ -2739,6 +2857,12 @@ impl From<EgressRpcError> for Status {
         Status::invalid_argument("invalid Egress RPC envelope")
     }
 }
+
+#[cfg(test)]
+mod model_frame_capacity_tests;
+
+#[cfg(test)]
+mod context_frame_capacity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3225,6 +3349,29 @@ mod tests {
         }
     }
 
+    struct FixtureCredentialImporter;
+    #[async_trait]
+    impl insight_platform_security::ModelCredentialImporter for FixtureCredentialImporter {
+        async fn import_model_credential(
+            &self,
+            request: insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+            key: insight_platform_contracts::SensitiveModelApiKey,
+        ) -> Result<ExactSecretBindingRef, insight_platform_contracts::ModelCredentialImportError>
+        {
+            assert_eq!(key.expose(), b"mtls-synthetic-import-key");
+            Ok(ExactSecretBindingRef::build(
+                request.identity.secret_binding_id()?,
+                1,
+                request.identity.provider_id,
+                request.identity.purpose,
+                SecretResolutionPolicy::Pinned {
+                    opaque_version_identity_digest: digest('a'),
+                },
+            )
+            .unwrap())
+        }
+    }
+
     struct MtlsFixture {
         ca_pem: String,
         server_certificate_pem: String,
@@ -3233,6 +3380,8 @@ mod tests {
         capability_key_pem: String,
         model_certificate_pem: String,
         model_key_pem: String,
+        gateway_certificate_pem: String,
+        gateway_key_pem: String,
         mcp_certificate_pem: String,
         mcp_key_pem: String,
         discovery_certificate_pem: String,
@@ -3280,6 +3429,7 @@ mod tests {
         let (capability_certificate_pem, capability_key_pem) =
             client(CAPABILITY_WORKER_WORKLOAD_IDENTITY);
         let (model_certificate_pem, model_key_pem) = client(MODEL_WORKER_WORKLOAD_IDENTITY);
+        let (gateway_certificate_pem, gateway_key_pem) = client(GATEWAY_WORKLOAD_IDENTITY);
         let (mcp_certificate_pem, mcp_key_pem) = client(MCP_HOST_WORKLOAD_IDENTITY);
         let (discovery_certificate_pem, discovery_key_pem) =
             client(MCP_DISCOVERY_WORKER_WORKLOAD_IDENTITY);
@@ -3299,6 +3449,8 @@ mod tests {
             capability_key_pem,
             model_certificate_pem,
             model_key_pem,
+            gateway_certificate_pem,
+            gateway_key_pem,
             mcp_certificate_pem,
             mcp_key_pem,
             discovery_certificate_pem,
@@ -3381,6 +3533,7 @@ mod tests {
                 limits,
             )
             .with_mcp_oauth(Arc::new(FixtureOAuth), Arc::new(FixturePkceCleaner))
+            .with_model_credential_importer(Arc::new(FixtureCredentialImporter))
             .with_remote_context(Arc::new(FixtureRemoteContext)),
         );
         let service = tonic::service::interceptor::InterceptedService::new(
@@ -3502,6 +3655,112 @@ mod tests {
             &fixture.model_key_pem,
         )
         .await;
+        let import_request = insight_platform_contracts::ModelCredentialImportAuthorizationV1 {
+            schema_version: 1,
+            deadline: Utc::now() + Duration::seconds(25),
+            identity: insight_platform_contracts::ModelCredentialImportIdentityV1 {
+                schema_version: 1,
+                operation_id: "a8376371-3d45-4ef6-8c8c-eb1a895fa99c".parse().unwrap(),
+                tenant_id: id(ResourceKind::Tenant),
+                principal_id: id(ResourceKind::Principal),
+                principal_kind: insight_platform_contracts::PrincipalKind::TenantAdmin,
+                provider_id: id(ResourceKind::SecretProvider),
+                purpose: "model_api_key".parse().unwrap(),
+            },
+        };
+        let import_envelope = encode_metadata_payload(
+            &import_request,
+            b"mtls-synthetic-import-key".to_vec(),
+            "model_credential.import/v1",
+            limits,
+        )
+        .unwrap();
+        for unauthorized in [&mut model, &mut capability, &mut context] {
+            assert_eq!(
+                unauthorized
+                    .import_model_credential(traced_request(import_envelope.clone()))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+        let gateway_channel = connect_channel(
+            address,
+            &fixture,
+            &fixture.gateway_certificate_pem,
+            &fixture.gateway_key_pem,
+        )
+        .await;
+        let mut raw_gateway = EgressBrokerServiceClient::new(gateway_channel.clone());
+        assert_eq!(
+            raw_gateway
+                .cancel_capability_http(traced_request(envelope.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let probe_request = insight_platform_contracts::ModelConnectionProbeAuthorizationV1 {
+            schema_version: 1,
+            request_id: id(ResourceKind::ServerRequest),
+            tenant_id: id(ResourceKind::Tenant),
+            principal_id: id(ResourceKind::Principal),
+            principal_kind: insight_platform_contracts::PrincipalKind::TenantAdmin,
+            installation_digest: digest('a'),
+            model_deployment: insight_platform_contracts::ExactDeploymentRef::new(
+                id(ResourceKind::ModelDeployment),
+                digest('b'),
+            )
+            .unwrap(),
+            environment: "development".to_owned(),
+            deadline: insight_platform_contracts::UtcTimestamp::from_datetime(
+                Utc::now() + Duration::seconds(25),
+            ),
+        };
+        let probe_envelope =
+            encode_metadata(&probe_request, "model_connection.probe/v1", limits).unwrap();
+        for unauthorized in [&mut model, &mut capability, &mut context] {
+            assert_eq!(
+                unauthorized
+                    .probe_model_connection(traced_request(probe_envelope.clone()))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+        // This fixture intentionally has no probe installed. The authenticated Gateway reaches
+        // that closed availability decision; all other mTLS roles were rejected before decode.
+        assert_eq!(
+            raw_gateway
+                .probe_model_connection(traced_request(probe_envelope))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        let gateway = EgressBrokerGrpcClient::new(gateway_channel, limits);
+        let imported = scope_trace(
+            ExecutionTraceContext::start(TraceIdentityV1::generate(), TraceFlags::NotSampled)
+                .unwrap(),
+            insight_platform_security::ModelCredentialImporter::import_model_credential(
+                &gateway,
+                import_request.clone(),
+                insight_platform_contracts::SensitiveModelApiKey::new(
+                    b"mtls-synthetic-import-key".to_vec(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            imported.secret_binding_id,
+            import_request.identity.secret_binding_id().unwrap()
+        );
+        drop(raw_gateway);
+        drop(gateway);
         assert_eq!(
             model
                 .cancel_capability_http(traced_request(envelope.clone()))

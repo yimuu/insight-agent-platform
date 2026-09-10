@@ -20,8 +20,8 @@ use insight_platform_contracts::{
     ExactSecretBindingRef, ExactVersionRef, FrozenSlotBinding, FrozenSlotTarget, JsonLimits,
     McpDeploymentClosure, McpTransportBinding, ModelDeploymentClosure,
     ModelProviderDeploymentClosure, OperationViewV1, PlanNodeKind, PolicyDeploymentClosure,
-    PublicJobKind, PublicJobState, PublicJobTarget, RegistryResourceKind, ResourceDocument,
-    ResourceDraftPayload, ResourceId, ResourceKind, SandboxProfileDeploymentClosure, Sha256Digest,
+    PublicJobKind, PublicJobState, PublicJobTarget, RegistryResourceKind, ResourceDraftPayload,
+    ResourceId, ResourceKind, SandboxProfileDeploymentClosure, Sha256Digest,
     SkillDeploymentClosure, UtcTimestamp,
 };
 use reqwest::StatusCode;
@@ -172,6 +172,7 @@ struct ApplyManifestV1 {
     schema_version: u16,
     kind: String,
     resource_noun: ApplyResourceNoun,
+    existing_resource: Option<ApplyExistingResourceV1>,
     create: ApplyCreateResourceRequestV1,
     publish: ApplyPublishResourceRequestV1,
     deployment: Option<ApplyDeploymentRequestV1>,
@@ -179,10 +180,27 @@ struct ApplyManifestV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ApplyCreateResourceRequestV1 {
-    display_name: String,
-    document: ResourceDocument,
+struct ApplyExistingResourceV1 {
+    resource_id: ResourceId,
+    etag: String,
 }
+impl ApplyExistingResourceV1 {
+    fn version(&self) -> Option<u64> {
+        let prefix = format!("\"{}-", self.resource_id);
+        let value = self
+            .etag
+            .strip_prefix(&prefix)?
+            .strip_suffix('"')?
+            .parse::<u64>()
+            .ok()?;
+        (value > 0
+            && value < i64::MAX as u64
+            && insight_platform_api::resource::resource_etag(&self.resource_id, value) == self.etag)
+            .then_some(value)
+    }
+}
+
+type ApplyCreateResourceRequestV1 = insight_platform_api::resource::CreateResourceRequestV1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -315,7 +333,7 @@ impl ApplyDeploymentClosure {
                     trust_policy: bindings.trust_policy,
                     data_policy: bindings.data_policy,
                     region: bindings.region,
-                    conformance_evidence: bindings.conformance_evidence,
+                    admission_evidence: bindings.admission_evidence,
                 })
             }
             Self::ModelProfile(bindings) => {
@@ -681,7 +699,7 @@ struct ApplyModelProviderDeploymentBindings {
     trust_policy: ExactVersionRef,
     data_policy: ExactVersionRef,
     region: DataRegion,
-    conformance_evidence: ArtifactRef,
+    admission_evidence: insight_platform_contracts::ModelAdmissionEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -810,27 +828,81 @@ pub fn apply_manifest(
     let mut journal = match apply_journal::load(&journal_path)? {
         Some(journal) => journal,
         None => {
-            let journal = ApplyJournalV2::new(
+            let mut journal = ApplyJournalV2::new(
                 manifest_digest.clone(),
                 receipt_key(&manifest_digest, "create"),
             );
+            journal.create_intent.if_match = manifest
+                .existing_resource
+                .as_ref()
+                .map(|target| target.etag.clone());
             apply_journal::save(&journal_path, &journal)?;
             journal
         }
     };
     journal.validate(&manifest_digest)?;
     validate_resume_journal(&journal, &manifest)?;
+    if let Some(final_etag) = &journal.final_resource_etag {
+        let resource = journal.resource.as_ref().ok_or_else(|| {
+            ApplyError::InvalidResponse("completed journal omits Resource".to_owned())
+        })?;
+        let deployment = journal.deployment.as_ref().ok_or_else(|| {
+            ApplyError::InvalidResponse("completed journal omits Deployment".to_owned())
+        })?;
+        let current: PublicJsonResponse<ResourceViewV1> = client.get_json(
+            &format!("{base_path}/{}", resource.resource_id),
+            StatusCode::OK,
+        )?;
+        validate_resource_response(&current, kind, Some(&resource.resource_id))?;
+        if &current.etag != final_etag
+            || current.body.active_deployment_id.as_ref() != Some(&deployment.deployment_id)
+            || current.body.gate_state != AdministrativeGate::Enabled
+            || current.body.lifecycle_state != EntityLifecycle::Active
+        {
+            return Err(ApplyError::InvalidResponse(
+                "completed publication differs from current Resource authority".to_owned(),
+            ));
+        }
+    }
 
     if journal.resource.is_none() {
-        let create: PublicJsonResponse<ResourceViewV1> = client.post_json(
-            &base_path,
-            &manifest.create,
-            StatusCode::CREATED,
-            &journal.create_intent.receipt,
-            None,
+        let create: PublicJsonResponse<ResourceViewV1> =
+            if let Some(target) = &manifest.existing_resource {
+                client.put_json(
+                    &format!("{base_path}/{}/draft", target.resource_id),
+                    &manifest.create,
+                    StatusCode::OK,
+                    &journal.create_intent.receipt,
+                    &target.etag,
+                )?
+            } else {
+                client.post_json(
+                    &base_path,
+                    &manifest.create,
+                    StatusCode::CREATED,
+                    &journal.create_intent.receipt,
+                    None,
+                )?
+            };
+        validate_resource_response(
+            &create,
+            kind,
+            manifest
+                .existing_resource
+                .as_ref()
+                .map(|target| &target.resource_id),
         )?;
-        validate_resource_response(&create, kind, None)?;
-        require_location(&create, &format!("{base_path}/{}", create.body.resource_id))?;
+        if let Some(target) = &manifest.existing_resource {
+            if target.version().and_then(|version| version.checked_add(1))
+                != Some(create.body.version)
+            {
+                return Err(ApplyError::InvalidResponse(
+                    "updated Resource is not the requested CAS successor".to_owned(),
+                ));
+            }
+        } else {
+            require_location(&create, &format!("{base_path}/{}", create.body.resource_id))?;
+        }
         journal
             .step_trace_ids
             .insert("create".to_owned(), create.trace_id);
@@ -1100,9 +1172,11 @@ pub fn apply_manifest(
             })?,
         )?;
         validate_resource_response(&activated, kind, Some(&resource_id))?;
-        if activated.body.gate_state != AdministrativeGate::Enabled {
+        if activated.body.gate_state != AdministrativeGate::Enabled
+            || activated.body.active_deployment_id.as_ref() != Some(&deployment_id)
+        {
             return Err(ApplyError::InvalidResponse(
-                "activation did not leave the Resource gate enabled".to_owned(),
+                "activation did not select the requested enabled Deployment".to_owned(),
             ));
         }
         journal
@@ -1208,12 +1282,16 @@ fn validate_manifest(manifest: &ApplyManifestV1) -> Result<(), ApplyError> {
         || manifest.kind != APPLY_MANIFEST_KIND
         || manifest.create.document.kind() != kind
         || !deployment_matches
+        || manifest.existing_resource.as_ref().is_some_and(|target| {
+            target.resource_id.kind() != kind.id_kind() || target.version().is_none()
+        })
     {
         return Err(ApplyError::InvalidManifest(
             "kind, noun, document, deployment closure, or environment mismatch".to_owned(),
         ));
     }
     ResourceDraftPayload {
+        alias: manifest.create.alias.clone(),
         display_name: manifest.create.display_name.clone(),
         document: manifest.create.document.clone(),
         validation: None,
@@ -1314,7 +1392,10 @@ fn validate_resume_journal(
     if journal.create_intent
         != (JournalIntent {
             receipt: receipt_key(digest, "create"),
-            if_match: None,
+            if_match: manifest
+                .existing_resource
+                .as_ref()
+                .map(|target| target.etag.clone()),
         })
     {
         return Err(ApplyError::InvalidResponse(
@@ -1328,6 +1409,14 @@ fn validate_resume_journal(
     if resource.resource_id.kind() != noun.resource_kind().id_kind() {
         return Err(ApplyError::InvalidResponse(
             "journal Resource kind differs from the manifest".to_owned(),
+        ));
+    }
+    if manifest.existing_resource.as_ref().is_some_and(|target| {
+        target.resource_id != resource.resource_id
+            || target.version().and_then(|version| version.checked_add(1)) != Some(resource.version)
+    }) {
+        return Err(ApplyError::InvalidResponse(
+            "journal update is not the original CAS successor".to_owned(),
         ));
     }
     validate_optional_intent(

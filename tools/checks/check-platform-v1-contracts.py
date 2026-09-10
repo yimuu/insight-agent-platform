@@ -35,6 +35,7 @@ CONTRACT_FILES = [
     "contracts/platform-v1/schemas/nominal-types.json",
     "contracts/platform-v1/schemas/frozen-slot-binding.schema.json",
     "contracts/platform-v1/schemas/deployment-closure.schema.json",
+    "contracts/platform-v1/schemas/model-configuration.schema.json",
     "contracts/platform-v1/schemas/worker-manifest.schema.json",
     "contracts/platform-v1/schemas/worker-executable-evidence-v1.schema.json",
     "contracts/platform-v1/schemas/schema-executable-evidence-v1.schema.json",
@@ -505,6 +506,16 @@ def check_foundation_surfaces(errors):
         "  /agent-authoring-bindings:resolve:",
         "  /agent-authoring-profile:",
         "  /agents:",
+        "  /model-configuration:",
+        "  /model-configuration/resources:",
+        "  /model-configuration:declare:",
+        "  /model-configuration:compile:",
+        "  /model-credentials:",
+        "  /model-configuration:probe:",
+        "  /model-credentials/{secret_binding_id}:",
+        "  /model-credentials/{secret_binding_id}:revoke:",
+        "  /model-default:",
+        "  /model-quotas/{model_deployment_id}:",
         "  /{resource_noun}:",
         "  /{resource_noun}/{resource_id}:",
         "  /{resource_noun}/{resource_id}/draft:",
@@ -550,6 +561,15 @@ def check_foundation_surfaces(errors):
         "  /mcp/oauth/callback:",
     ]:
         errors.append("OpenAPI exposes a path outside the reviewed implementing slice")
+    for marker in [
+        "operationId: getModelDefault", "operationId: setModelDefault",
+        "x-insight-permission: model.read", "x-insight-permission: model.write",
+        "    ModelDefaultViewV1:", "    SetModelDefaultRequestV1:",
+        "required: [schema_version, default_model]", "    ResourceAlias:",
+        "    AuthoringNonModelDeploymentSelectorV1:", "kind: {const: default_model}",
+    ]:
+        if marker not in openapi:
+            errors.append("model default and alias contract is incomplete")
     if any(token in openapi for token in ["access_token", "refresh_token", "error_description"]):
         errors.append("MCP OAuth callback OpenAPI exposes a forbidden sensitive query field")
     if "DurablePublicRunEventPayload:" not in openapi or (
@@ -1331,10 +1351,10 @@ def check_machine_registry_contracts(errors):
         ("ModelProviderDeploymentClosure", "model_provider", {
             "provider_revision", "endpoint_identity_digest", "secret_bindings", "protocol_policy",
             "network_policy", "tls_policy", "trust_policy", "data_policy", "region",
-            "conformance_evidence"
+            "admission_evidence"
         }),
         ("ModelDeploymentClosure", "model_profile", {
-            "profile_revision", "provider_deployment", "data_policy", "budget_policy",
+            "profile_revision", "provider_deployment", "data_policy", "safety_policy", "budget_policy",
             "public_projection_policy", "generation_defaults"
         }),
         ("PolicyDeploymentClosure", "policy", {
@@ -1487,7 +1507,7 @@ def check_machine_registry_contracts(errors):
         "resource_suspended", "secret_unavailable", "network_denied",
         "isolation_unavailable", "content_rejected", "cursor_invalid",
         "cursor_expired", "run_event_history_gap", "recompile_required", "run_not_terminal", "operation_not_terminal",
-        "deadline_exceeded", "temporarily_unavailable", "internal_error",
+        "deadline_exceeded", "temporarily_unavailable", "credential_import_outcome_unknown", "internal_error",
     ]
     if error_registry.get("api_problem", {}).get("codes") != expected_api_problem_codes:
         errors.append("ApiProblemCode registry is not closed")

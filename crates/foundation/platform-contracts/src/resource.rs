@@ -1750,6 +1750,8 @@ impl ResourceDocument {
             }
             Self::ModelProfile(spec) => {
                 spec.validate()?;
+                crate::validate_model_profile_declaration(spec)
+                    .map_err(|_| ResourceContractError::InvalidModelContract)?;
                 validate_model_profile_contract(
                     &spec.provider_revision.revision_id,
                     &spec.model_identity,
@@ -1942,6 +1944,7 @@ impl ResourceDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceDraftPayload {
+    pub alias: Option<crate::ResourceAlias>,
     pub display_name: String,
     pub document: ResourceDocument,
     pub validation: Option<ValidationSummary>,
@@ -2778,7 +2781,7 @@ pub struct ModelProviderDeploymentClosure {
     pub trust_policy: ExactVersionRef,
     pub data_policy: ExactVersionRef,
     pub region: DataRegion,
-    pub conformance_evidence: ArtifactRef,
+    pub admission_evidence: crate::ModelAdmissionEvidence,
 }
 
 impl ModelProviderDeploymentClosure {
@@ -2795,7 +2798,7 @@ impl ModelProviderDeploymentClosure {
             &self.trust_policy,
             &self.data_policy,
         ])?;
-        self.conformance_evidence
+        self.admission_evidence
             .validate()
             .map_err(|_| ResourceContractError::InvalidArtifact)
     }

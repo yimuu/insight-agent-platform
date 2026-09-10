@@ -1,5 +1,8 @@
+#[path = "support/artifact_roles.rs"]
+mod artifact_roles;
 #[path = "support/fixture_directory.rs"]
 mod fixture_directory;
+mod support;
 use fixture_directory::FixtureDirectory;
 #[path = "support/mcp_subscription_isolation.rs"]
 mod mcp_subscription_isolation;
@@ -1904,6 +1907,7 @@ async fn seed(
     let tenant_config = TypedPayload::new(
         1,
         &TenantConfig {
+            default_model: None,
             scheduling_policy: None,
             artifact_retention_policy: Some(retention_deployment),
             artifact_io_policy: Some(artifact_io_deployment),
@@ -2848,7 +2852,7 @@ impl ProductionArtifactProcessFixture {
             "work_database_max_connections": 4,
             "database_acquire_timeout_milliseconds": 5000,
             "artifact_provider_catalog": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "write_storage_binding_digest": self.storage_binding_digest,
                 "s3_storage_bindings": [{
                     "schema_version": 1,
@@ -2862,7 +2866,7 @@ impl ProductionArtifactProcessFixture {
                     "operation_timeout_milliseconds": 5000,
                     "maximum_object_bytes": 67108864
                 }],
-                "kms_key_bindings": [{
+                "reference_key_bindings": [{"kind":"aws_kms", "config": {
                     "schema_version": 1,
                     "kms_binding_digest": self.kms_binding_digest,
                     "endpoint": self.endpoint,
@@ -2870,7 +2874,7 @@ impl ProductionArtifactProcessFixture {
                     "key_id": self.key_id,
                     "connect_timeout_milliseconds": 1000,
                     "operation_timeout_milliseconds": 5000
-                }]
+                }}]
             },
             "broker": {
                 "maximum_in_flight": 8,
@@ -4639,7 +4643,11 @@ async fn mcp_subscription_fixture(run_processes: bool) {
             .declared_media_type
             .clone(),
     };
-    let WorkloadArtifactStagePreflight::Authorized(stage_authority) = repository
+    let artifact_roles = artifact_roles::ArtifactRoles::create(&pool).await;
+    let artifact_worker = PgRepository::new(artifact_roles.pools[2].clone());
+    use futures::FutureExt as _;
+    let artifact_result = std::panic::AssertUnwindSafe(async {
+    let WorkloadArtifactStagePreflight::Authorized(stage_authority) = artifact_worker
         .authorize_workload_artifact_stage(&stage_request)
         .await
         .unwrap()
@@ -4650,7 +4658,7 @@ async fn mcp_subscription_fixture(run_processes: bool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let staged = match repository
+    let staged = match artifact_worker
         .stage_workload_artifact(StageWorkloadArtifact {
             schema_version: 1,
             tenant_id: fixture.tenant_id.clone(),
@@ -4685,7 +4693,7 @@ async fn mcp_subscription_fixture(run_processes: bool) {
     )
     .unwrap();
     assert!(matches!(
-        repository
+        artifact_worker
             .authorize_workload_artifact_stage(&stage_request)
             .await
             .unwrap(),
@@ -4746,7 +4754,7 @@ async fn mcp_subscription_fixture(run_processes: bool) {
     assert_eq!(parked_states, ("waiting".to_owned(), "ready".to_owned()));
 
     let scan_worker = id(ResourceKind::WorkerProcessGeneration, 0x658);
-    let mut scan_claims = repository
+    let mut scan_claims = artifact_worker
         .claim_artifact_fixture(ClaimArtifactJobs {
             worker_manifest: artifact_fixture_manifest(),
             role: ArtifactWorkerRole::DataWorker,
@@ -4769,7 +4777,7 @@ async fn mcp_subscription_fixture(run_processes: bool) {
         .unwrap()
         .parse()
         .unwrap();
-    let scan_started = repository
+    let scan_started = artifact_worker
         .start_job(RepositoryJobFence {
             tenant_id: fixture.tenant_id.to_string(),
             job_id: stage_request.verification_job_id.to_string(),
@@ -4780,7 +4788,7 @@ async fn mcp_subscription_fixture(run_processes: bool) {
         })
         .await
         .unwrap();
-    let scan_execution = repository
+    let scan_execution = artifact_worker
         .load_started_artifact_execution(
             ArtifactWorkerRole::DataWorker,
             fixture.tenant_id.clone(),
@@ -4816,13 +4824,20 @@ async fn mcp_subscription_fixture(run_processes: bool) {
             observed_at: scan_now,
         },
         UnusedDiscoveryBlobBackend,
-        repository.clone(),
+        artifact_worker.clone(),
     );
     let verified = scan_service
-        .execute_scan(scan_execution, scan_now)
+        .execute_scan(scan_execution.clone(), scan_now)
         .await
         .unwrap();
     assert!(matches!(verified, CommandOutcome::Applied(_)));
+    let facts = support::fixture_durable_counts(&pool, &fixture.tenant_id).await;
+    assert!(matches!(scan_service.execute_scan(scan_execution, scan_now).await.unwrap(), CommandOutcome::Replayed(_)));
+    assert_eq!(support::fixture_durable_counts(&pool, &fixture.tenant_id).await, facts);
+    let operation_version: i64 = sqlx::query_scalar("SELECT version FROM insight_platform.invocations WHERE tenant_id=$1 AND invocation_id=$2")
+        .bind(fixture.tenant_id.to_string()).bind(original.operation_id.to_string()).fetch_one(&pool).await.unwrap();
+    assert_eq!(u64::try_from(operation_version).unwrap(), parked.version + 1);
+
     let after_scan_states: (String, String, String) = sqlx::query_as(
         r#"
         SELECT owner.state, verification.state, artifact.state
@@ -4849,6 +4864,12 @@ async fn mcp_subscription_fixture(run_processes: bool) {
             "verified".to_owned()
         )
     );
+
+    }).catch_unwind().await;
+    artifact_roles.close().await;
+    if let Err(panic) = artifact_result {
+        std::panic::resume_unwind(panic);
+    }
 
     let finalize_worker = id(ResourceKind::WorkerProcessGeneration, 0x65d);
     let mut finalize_claims = repository

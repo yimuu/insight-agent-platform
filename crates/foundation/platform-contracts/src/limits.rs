@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
 pub const HARD_LIMIT_PROFILE_VERSION: u32 = 6;
+/// Maximum canonical metadata in an Egress internal RPC envelope. Process configurations may
+/// select a smaller allowance; payload bytes have their own independent transport limit.
+pub const MAX_EGRESS_METADATA_BYTES_HARD: usize = 1_048_576;
 pub const Q1_SANDBOX_RUNTIME_BUNDLE_BYTES: u64 = 33_554_432;
 pub const EXPRESSION_INSTRUCTION_HARD_MAX: u64 = 4_096;
 pub const Q1_EXPRESSION_INSTRUCTIONS: u64 = 2_048;

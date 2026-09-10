@@ -398,8 +398,6 @@ fn start_remote_model_environment(
     _insight: &Path,
     project: &Path,
     fixture_directory: &Path,
-    provider_deployment: &Value,
-    provider_revision: &Value,
     endpoint: &Value,
     endpoint_digest: &str,
     policies: &std::collections::BTreeMap<&str, PolicyAuthority>,
@@ -412,11 +410,9 @@ fn start_remote_model_environment(
     let original_config = fs::read(&authority_config_path).expect("Egress config is readable");
     let mut config: Value =
         serde_json::from_slice(&original_config).expect("Egress config is closed JSON");
-    config["model_endpoints"] = json!([{
+    config["model_destination_grants"] = json!([{
         "schema_version": 1,
         "protocol": "open_ai_responses",
-        "provider_deployment": provider_deployment,
-        "provider_revision": provider_revision,
         "endpoint": endpoint,
         "endpoint_identity_digest": endpoint_digest,
         "credential_purpose": "provider.api_key",
@@ -624,7 +620,7 @@ pub(super) fn run(
             "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding], "protocol_policy": policies["protocol"].revision,
             "network_policy": policies["network"].revision, "tls_policy": policies["tls"].revision,
             "trust_policy": policies["trust"].revision, "data_policy": policies["data"].revision,
-            "region": "local", "conformance_evidence": qualification_ref,
+            "region": "local", "admission_evidence": {"basis": "qualification", "artifact": qualification_ref},
         }}},
     });
     let provider_path = write_canonical(fixture, "model-provider.apply.json", &provider_manifest);
@@ -648,7 +644,7 @@ pub(super) fn run(
         "provider_revision": provider_revision, "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding],
         "protocol_policy": policies["protocol"].revision, "network_policy": policies["network"].revision,
         "tls_policy": policies["tls"].revision, "trust_policy": policies["trust"].revision,
-        "data_policy": policies["data"].revision, "region": "local", "conformance_evidence": qualification_ref,
+        "data_policy": policies["data"].revision, "region": "local", "admission_evidence": {"basis": "qualification", "artifact": qualification_ref},
     });
     let provider_deployment =
         exact_deployment(&provider_report, "model_provider", provider_bindings);
@@ -677,7 +673,7 @@ pub(super) fn run(
                 "training": "prohibited", "subprocessor_set_digest": canonical_digest(&json!({"subprocessors": []}))},
             "limits": {"maximum_messages": 16, "maximum_parts": 32, "maximum_text_bytes": 32768, "maximum_tools": 1,
                 "maximum_parallel_tool_calls": 1, "maximum_rounds": 2, "maximum_input_tokens": 2048, "maximum_output_tokens": 256},
-            "catalog_evidence": {"artifact": qualification_ref, "source_digest": canonical_digest(&json!({"catalog": "fixture"})),
+            "catalog_evidence": {"basis": "qualification", "artifact": qualification_ref, "source_digest": canonical_digest(&json!({"catalog": "fixture"})),
                 "adapter_contract_digest": adapter["adapter_contract_digest"],
                 "observed_at": observed_at.to_rfc3339_opts(SecondsFormat::Micros, true),
                 "expires_at": (observed_at + Duration::days(1)).to_rfc3339_opts(SecondsFormat::Micros, true)},
@@ -721,8 +717,6 @@ pub(super) fn run(
         insight,
         project,
         fixture,
-        &provider_deployment,
-        &provider_revision,
         &endpoint,
         &endpoint_digest,
         &policies,

@@ -1,0 +1,148 @@
+{{- if eq .Values.phase "serving" -}}
+{{- $root := . -}}
+{{- range .Values.plan.processes }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" $root | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      insight.platform/installation: {{ $root.Values.owner | quote }}
+      insight.platform/process: {{ .name }}
+  template:
+    metadata:
+      labels:
+        insight.platform/installation: {{ $root.Values.owner | quote }}
+        insight.platform/process: {{ .name }}
+      annotations:
+        insight.platform/input-digest: {{ $root.Values.plan.input_digest | quote }}
+    spec:
+      {{- include "installation.scheduling" $root | nindent 6 }}
+      terminationGracePeriodSeconds: 35
+      containers:
+        - name: process
+          image: {{ $root.Values.plan.runtime_image | quote }}
+          command: [/bin/sh, -ec]
+          args:
+            - {{ printf "set -a; . /run/insight/role/environment; set +a; exec /usr/local/bin/%s" .binary | quote }}
+          securityContext:
+            runAsUser: {{ .uid }}
+            runAsGroup: {{ .uid }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: observability, containerPort: {{ .observability_port }}}
+            {{- if and .port (ne (int .port) (int .observability_port)) }}
+            - {name: service, containerPort: {{ .port }}}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: observability}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: role, mountPath: /run/insight/role, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+            - {name: work, mountPath: /var/lib/insight}
+      volumes:
+        - name: role
+          persistentVolumeClaim: {claimName: role-{{ .name }}, readOnly: true}
+        - name: temporary
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+        - name: work
+          emptyDir: {sizeLimit: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" $root | nindent 4 }}
+spec:
+  selector:
+    insight.platform/installation: {{ $root.Values.owner | quote }}
+    insight.platform/process: {{ .name }}
+  ports:
+    - {name: observability, port: {{ .observability_port }}, targetPort: observability}
+    {{- if and .port (ne (int .port) (int .observability_port)) }}
+    - {name: service, port: {{ .port }}, targetPort: service}
+    {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      insight.platform/installation: {{ .Values.owner | quote }}
+      insight.platform/process: console
+  template:
+    metadata:
+      labels:
+        insight.platform/installation: {{ .Values.owner | quote }}
+        insight.platform/process: console
+    spec:
+      {{- include "installation.scheduling" . | nindent 6 }}
+      containers:
+        - name: console
+          image: {{ .Values.plan.console_image | quote }}
+          args: [--config, /run/insight/console/config.json]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          volumeMounts:
+            - name: configuration
+              mountPath: /run/insight/console/config.json
+              subPath: config.json
+              readOnly: true
+      volumes:
+        - name: configuration
+          persistentVolumeClaim: {claimName: role-console, readOnly: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" . | nindent 4 }}
+spec:
+  selector:
+    insight.platform/installation: {{ .Values.owner | quote }}
+    insight.platform/process: console
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+{{- end -}}

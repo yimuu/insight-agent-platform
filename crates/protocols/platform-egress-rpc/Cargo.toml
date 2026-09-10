@@ -19,6 +19,7 @@ insight-platform-contracts.workspace = true
 insight-platform-rpc-trace.workspace = true
 insight-platform-context.workspace = true
 insight-platform-egress.workspace = true
+insight-platform-security.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-model-adapters.workspace = true
 insight-platform-sandbox.workspace = true

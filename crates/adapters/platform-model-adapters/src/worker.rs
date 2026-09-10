@@ -19,8 +19,8 @@ use std::{error::Error, fmt, sync::Arc};
 /// receives no Provider SDK value and cannot advance durable state.
 #[async_trait]
 pub trait ModelOutputMaterializer: Send + Sync {
-    /// Fails before Provider dispatch when this materializer cannot represent every response
-    /// allowed by the exact frozen execution contract.
+    /// Checks the frozen execution's declared output budget before Provider dispatch.
+    /// This preflight does not replace validation of the actual normalized output in materialize.
     fn validate_execution(
         &self,
         execution: &ModelAdapterExecutionRequest,

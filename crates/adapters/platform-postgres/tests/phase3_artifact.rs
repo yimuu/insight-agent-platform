@@ -2,6 +2,8 @@ use insight_platform_artifacts::store::ArtifactRecoverySlot;
 use insight_platform_artifacts::store::DriveExpiredArtifactJobs;
 use insight_platform_jobs::store::JobCommandFence as JobFence;
 use insight_platform_jobs::store::SafetyScanShard;
+#[path = "support/artifact_public_role_pipeline.rs"]
+mod artifact_public_role_pipeline;
 mod support;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use insight_platform_artifacts::{
@@ -1089,6 +1091,7 @@ async fn seed_retention_root(
     let resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in Artifact retention".to_owned(),
             document: document.clone(),
             validation: None,
@@ -1279,6 +1282,7 @@ async fn seed_artifact_io_policy(
     let resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in Artifact I/O policy".to_owned(),
             document: document.clone(),
             validation: None,
@@ -3816,6 +3820,8 @@ async fn artifact_upload_lifecycle_fixture() {
     .await
     .unwrap();
     assert_eq!(reserved_after_rollback, 0);
+
+    artifact_public_role_pipeline::verify(&pool, &prepared_command).await;
 
     support::revoke_fixture_principal(
         &pool,

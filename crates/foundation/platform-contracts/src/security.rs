@@ -43,6 +43,7 @@ impl TaskEligibilityRule {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfig {
+    pub default_model: Option<ExactDeploymentRef>,
     pub scheduling_policy: Option<ExactDeploymentRef>,
     pub artifact_retention_policy: Option<ExactDeploymentRef>,
     pub artifact_io_policy: Option<ExactDeploymentRef>,
@@ -50,6 +51,11 @@ pub struct TenantConfig {
 
 impl TenantConfig {
     pub fn validate(&self) -> Result<(), SecurityContractError> {
+        if self.default_model.as_ref().is_some_and(|model| {
+            model.resource_kind != ResourceKind::ModelDeployment || model.validate().is_err()
+        }) {
+            return Err(SecurityContractError::InvalidTenantConfig);
+        }
         for policy in [
             &self.scheduling_policy,
             &self.artifact_retention_policy,
@@ -726,6 +732,7 @@ mod tests {
         let retention = exact_policy("7b81", 'a');
         let artifact_io = exact_policy("7b82", 'b');
         let config = TenantConfig {
+            default_model: None,
             scheduling_policy: None,
             artifact_retention_policy: Some(retention.clone()),
             artifact_io_policy: Some(artifact_io.clone()),
@@ -755,6 +762,7 @@ mod tests {
         let policy = exact_policy("7b83", 'c');
         assert_eq!(
             TenantConfig {
+                default_model: None,
                 scheduling_policy: None,
                 artifact_retention_policy: Some(policy.clone()),
                 artifact_io_policy: Some(policy),

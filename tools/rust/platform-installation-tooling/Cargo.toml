@@ -1,0 +1,34 @@
+[package]
+name = "insight-platform-installation-tooling"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "platform-installation"
+path = "src/main.rs"
+
+[dependencies]
+insight-platform-contracts.workspace = true
+insight-platform-openbao.workspace = true
+insight-platform-deployment-contracts.workspace = true
+insight-platform-deployment-tooling.workspace = true
+insight-platform-artifact-broker.workspace = true
+insight-platform-registry.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+aws-config.workspace = true
+aws-sdk-kms.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-secretsmanager.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

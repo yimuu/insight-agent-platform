@@ -17,9 +17,9 @@ use insight_platform_egress::{
     InstalledCapabilityHttpEndpoint, InstalledCapabilityHttpEndpointCatalog,
     InstalledMcpOAuthJwtVerifier, InstalledMcpOAuthVerificationBinding,
     InstalledMcpOAuthVerificationCatalog, InstalledMcpStreamableHttpEndpoint,
-    InstalledMcpStreamableHttpEndpointCatalog, InstalledModelProviderEndpoint,
-    InstalledModelProviderEndpointCatalog, InstalledRemoteContextEndpoint,
-    InstalledRemoteContextEndpointCatalog, McpOAuthEgressLimits, McpRemoteTaskStateKey,
+    InstalledMcpStreamableHttpEndpointCatalog, InstalledModelDestinationCatalog,
+    InstalledModelDestinationGrant, InstalledRemoteContextDestinationCatalog,
+    InstalledRemoteContextDestinationV1, McpOAuthEgressLimits, McpRemoteTaskStateKey,
     McpStreamableHttpEgressLimits, McpSubscriptionStateKey, ModelProviderEgressLimits,
     RemoteContextEgressLimits, ReqwestCapabilityHttpEgressTransport,
     ReqwestMcpOAuthCredentialBroker, ReqwestMcpStreamableHttpConnector,
@@ -38,9 +38,9 @@ use insight_platform_observability::{
     ProcessHttpMetrics, PROCESS_OBSERVABILITY_OPERATIONS,
 };
 use insight_platform_secret_broker::{
-    AwsSecretProviderCatalog, AwsSecretProviderCatalogConfig, BrokeredMcpOAuthSecretStore,
-    BrokeredSecretMaterialResolver, SecretBrokerLimits, SecretExternalDependency,
-    SecretExternalDependencyObserver, SecretExternalDependencyOutcome,
+    BrokeredPreparedSecretStore, BrokeredSecretMaterialResolver, SecretBrokerLimits,
+    SecretExternalDependency, SecretExternalDependencyObserver, SecretExternalDependencyOutcome,
+    SecretProviderCatalog, SecretProviderCatalogConfigV2,
 };
 use insight_platform_security_rpc::{SecurityInternalRpcLimits, SecuritySecretAuthorityGrpcClient};
 use serde::Deserialize;
@@ -120,11 +120,11 @@ struct ProcessConfig {
     mcp_streamable_http_endpoints: Vec<InstalledMcpStreamableHttpEndpoint>,
     mcp_state_keys: McpStateKeyProcessConfig,
     mcp_subscription_bridge: EgressMcpSubscriptionBridgeLimits,
-    secret_provider_catalog: AwsSecretProviderCatalogConfig,
-    model_endpoints: Vec<InstalledModelProviderEndpoint>,
+    secret_provider_catalog: SecretProviderCatalogConfigV2,
+    model_destination_grants: Vec<InstalledModelDestinationGrant>,
     capability_http_endpoints: Vec<InstalledCapabilityHttpEndpoint>,
     capability_grpc_endpoints: Vec<InstalledCapabilityGrpcEndpoint>,
-    remote_context_endpoints: Vec<InstalledRemoteContextEndpoint>,
+    remote_context_destinations: Vec<InstalledRemoteContextDestinationV1>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -329,13 +329,13 @@ impl ProcessConfig {
         self.secret_provider_catalog
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-        InstalledModelProviderEndpointCatalog::new(self.model_endpoints.clone())
+        InstalledModelDestinationCatalog::new(self.model_destination_grants.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         InstalledCapabilityHttpEndpointCatalog::new(self.capability_http_endpoints.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         InstalledCapabilityGrpcEndpointCatalog::new(self.capability_grpc_endpoints.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-        InstalledRemoteContextEndpointCatalog::new(self.remote_context_endpoints.clone())
+        InstalledRemoteContextDestinationCatalog::new(self.remote_context_destinations.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         Ok(())
     }
@@ -375,7 +375,7 @@ async fn run() -> Result<(), ProcessError> {
         ])
         .map_err(|_| ProcessError::InvalidConfiguration)?,
     );
-    let provider_catalog = AwsSecretProviderCatalog::install_with_observer(
+    let provider_catalog = SecretProviderCatalog::install_with_observer(
         config.secret_provider_catalog,
         Arc::new(EgressSecretDependencyObserver {
             metrics: Arc::clone(&dependency_metrics),
@@ -404,14 +404,15 @@ async fn run() -> Result<(), ProcessError> {
         InstalledMcpOAuthVerificationCatalog::new(config.mcp_oauth_verification_bindings)
             .map_err(|_| ProcessError::InvalidConfiguration)?;
     let token_store = Arc::new(
-        BrokeredMcpOAuthSecretStore::new(
-            security_authority,
+        BrokeredPreparedSecretStore::new(
+            security_authority.clone(),
             sealer,
             providers,
             config.mcp_oauth_service_principal_id,
             secret_limits,
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_model_credential_authority(security_authority.clone()),
     );
     let oauth_verifier = Arc::new(InstalledMcpOAuthJwtVerifier::new(
         verification_catalog.clone(),
@@ -463,13 +464,15 @@ async fn run() -> Result<(), ProcessError> {
 
     let model_broker = Arc::new(
         ReqwestModelProviderEgressBroker::new(
-            InstalledModelProviderEndpointCatalog::new(config.model_endpoints)
+            InstalledModelDestinationCatalog::new(config.model_destination_grants)
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
             Arc::clone(&secrets),
             dns.clone(),
+            security_authority.clone(),
             config.model_limits,
         )
-        .map_err(|_| ProcessError::InvalidConfiguration)?,
+        .map_err(|_| ProcessError::InvalidConfiguration)?
+        .with_model_connection_authority(security_authority.clone()),
     );
     let model = Arc::new(BrokeredModelProviderWireConnector::new(
         model_broker.clone(),
@@ -486,8 +489,9 @@ async fn run() -> Result<(), ProcessError> {
     );
     let remote_context = Arc::new(
         ReqwestRemoteContextSearchConnector::new(
-            InstalledRemoteContextEndpointCatalog::new(config.remote_context_endpoints)
+            InstalledRemoteContextDestinationCatalog::new(config.remote_context_destinations)
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
+            security_authority.clone(),
             Arc::clone(&secrets),
             dns.clone(),
             config.remote_context_limits,
@@ -513,12 +517,12 @@ async fn run() -> Result<(), ProcessError> {
         ),
         capacity::secret_capacity_metric(
             "secret_store",
-            token_store,
-            BrokeredMcpOAuthSecretStore::capacity_snapshot,
+            token_store.clone(),
+            BrokeredPreparedSecretStore::capacity_snapshot,
         ),
         capacity::egress_capacity_metric(
             "model_provider",
-            model_broker,
+            model_broker.clone(),
             ReqwestModelProviderEgressBroker::capacity_snapshot,
         ),
         capacity::egress_capacity_metric(
@@ -568,6 +572,8 @@ async fn run() -> Result<(), ProcessError> {
     let maximum = rpc_limits.maximum_message_bytes();
     let service = EgressBrokerServiceServer::new(
         EgressBrokerGrpcService::new(model, http, grpc, rpc_limits)
+            .with_model_credential_importer(token_store.clone())
+            .with_model_connection_probe(model_broker.clone())
             .with_remote_context(remote_context)
             .with_mcp_oauth(oauth, oauth_pkce_cleaner)
             .with_mcp_discovery(mcp_streamable_http.clone())

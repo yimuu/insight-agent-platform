@@ -3,10 +3,10 @@
 //! Scheduler reads and workload Artifact production are closed, bounded and credential-free.
 
 use insight_platform_artifact_broker::{
-    ArtifactBrokerLimits, AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig,
-    AwsArtifactUploadError, AwsArtifactUploadProvider, AwsArtifactUploadRequest,
-    BrokeredArtifactScannerReader, BrokeredSchedulerRunValueReader,
+    ArtifactBrokerLimits, ArtifactProviderCatalog, ArtifactProviderCatalogConfigV2,
+    ArtifactUploadProviderError, BrokeredArtifactScannerReader, BrokeredSchedulerRunValueReader,
     BrokeredSchedulerSkillPackageReader, BrokeredSchedulerTypedPlanReader,
+    S3ArtifactUploadProvider, S3ArtifactUploadRequest,
 };
 use insight_platform_observability_http::process_observability_router;
 mod capacity;
@@ -93,7 +93,7 @@ impl SchedulerRpcArtifactBroker {
 
 struct PostgresWorkloadArtifactStageAuthority {
     repository: Arc<PgRepository>,
-    provider: AwsArtifactUploadProvider,
+    provider: S3ArtifactUploadProvider,
 }
 
 #[async_trait::async_trait]
@@ -136,7 +136,7 @@ impl ArtifactWorkloadStageAuthority for PostgresWorkloadArtifactStageAuthority {
         let staged = tokio::time::timeout(
             remaining,
             self.provider.stage_bytes(
-                AwsArtifactUploadRequest {
+                S3ArtifactUploadRequest {
                     tenant_id: &authorized.tenant_id,
                     artifact_id: &authorized.artifact_id,
                     blob_id: &authorized.blob_id,
@@ -213,14 +213,13 @@ fn map_stage_repository_error(error: RepositoryError) -> ArtifactWorkloadStageEr
     }
 }
 
-fn map_stage_provider_error(error: AwsArtifactUploadError) -> ArtifactWorkloadStageError {
+fn map_stage_provider_error(error: ArtifactUploadProviderError) -> ArtifactWorkloadStageError {
     match error {
-        AwsArtifactUploadError::StorageUnavailable | AwsArtifactUploadError::KmsUnavailable => {
-            ArtifactWorkloadStageError::Unavailable
-        }
-        AwsArtifactUploadError::InvalidRequest
-        | AwsArtifactUploadError::TooLarge
-        | AwsArtifactUploadError::InvalidEvidence => ArtifactWorkloadStageError::Integrity,
+        ArtifactUploadProviderError::StorageUnavailable
+        | ArtifactUploadProviderError::KmsUnavailable => ArtifactWorkloadStageError::Unavailable,
+        ArtifactUploadProviderError::InvalidRequest
+        | ArtifactUploadProviderError::TooLarge
+        | ArtifactUploadProviderError::InvalidEvidence => ArtifactWorkloadStageError::Integrity,
     }
 }
 
@@ -270,7 +269,7 @@ struct ArtifactBrokerProcessConfig {
     read_database_max_connections: u32,
     work_database_max_connections: u32,
     database_acquire_timeout_milliseconds: u64,
-    artifact_provider_catalog: AwsArtifactProviderCatalogConfig,
+    artifact_provider_catalog: ArtifactProviderCatalogConfigV2,
     broker: BrokerLimitsConfig,
     rpc: RpcLimitsConfig,
     scan_worker: ScanWorkerConfig,
@@ -448,7 +447,7 @@ async fn run() -> Result<(), ProcessError> {
     let work_repository = Arc::new(PgRepository::new(work_pool.clone()));
     let dependency_metrics =
         install_artifact_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
-    let providers = AwsArtifactProviderCatalog::install_with_observer(
+    let providers = ArtifactProviderCatalog::install_with_observer(
         config.artifact_provider_catalog.clone(),
         dependency_metrics.artifact,
     )
@@ -774,7 +773,7 @@ mod tests {
             "work_database_max_connections": 8,
             "database_acquire_timeout_milliseconds": 5000,
             "artifact_provider_catalog": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "write_storage_binding_digest": "sha256:b5d4ea2254a7770284738b6ca76a8e7833899ebbe796d61a113f57bd5609b630",
                 "s3_storage_bindings": [{
                     "schema_version": 1,
@@ -788,7 +787,7 @@ mod tests {
                     "operation_timeout_milliseconds": 30000,
                     "maximum_object_bytes": 67108864
                 }],
-                "kms_key_bindings": [{
+                "reference_key_bindings": [{"kind":"aws_kms", "config": {
                     "schema_version": 1,
                     "kms_binding_digest": "sha256:ee8b022acf9fbbb8134127266a11a93cbca559aea8ff563d9cb95965e40719d8",
                     "endpoint": "https://kms.us-east-1.amazonaws.com",
@@ -796,7 +795,7 @@ mod tests {
                     "key_id": "arn:aws:kms:us-east-1:111122223333:key/12345678-1234-1234-1234-123456789012",
                     "connect_timeout_milliseconds": 5000,
                     "operation_timeout_milliseconds": 30000
-                }]
+                }}]
             },
             "broker": {
                 "maximum_in_flight": 128,
