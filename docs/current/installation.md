@@ -17,6 +17,10 @@ The configuration owner is
 The shared Rust renderer supplies Native, Compose and Helm process configuration. It binds
 service addresses, TLS names, selected roles, actual worker executable digests and private file
 references. Compose and Helm do not patch the generated process JSON.
+The installation Helm chart keeps cluster DNS and sets Pod `ndots:1`, so generated
+cluster-qualified provider names are resolved before inherited host search suffixes.
+This applies to chart Jobs, serving processes, Console and dependencies; it does not
+change TLS identities or add retries to installation operations.
 
 ## Start with Compose
 

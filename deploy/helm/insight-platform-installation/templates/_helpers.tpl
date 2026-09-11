@@ -52,6 +52,13 @@ insight.platform/installation: {{ .Values.owner | quote }}
 
 {{- define "installation.scheduling" -}}
 automountServiceAccountToken: false
+# Generated provider names already include the cluster domain. Resolve them
+# before inherited cloud search suffixes can consume the connection deadline.
+dnsPolicy: ClusterFirst
+dnsConfig:
+  options:
+    - name: ndots
+      value: "1"
 nodeSelector:
   kubernetes.io/hostname: {{ .Values.node | quote }}
 {{- end -}}
