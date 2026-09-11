@@ -104,7 +104,7 @@ for forbidden in (
 
 quick_contracts = ci.split("\n  quick:", 1)[-1].split("\n  lint:", 1)[0]
 console_checks = ci.split("\n  console:", 1)[-1].split("\n  policy:", 1)[0]
-if "['build', '--locked', '-p', 'insight-platform-agent-compiler-wasm'" not in (ROOT / "apps/console/scripts/build-agent-compiler.mjs").read_text():
+if not re.search(r"run\('cargo',\s*\[\s*'build',\s*'--locked',\s*'-p',\s*'insight-platform-agent-compiler-wasm'", (ROOT / "apps/console/scripts/build-agent-compiler.ts").read_text()):
     failures.append("Console WASM build must preserve the exact Cargo.lock dependency closure")
 wasm_binding = re.findall(r'^wasm-bindgen\s*=\s*"=([0-9]+\.[0-9]+\.[0-9]+)"$', (ROOT / "crates/authoring/platform-agent-compiler-wasm/Cargo.toml").read_text(), re.MULTILINE)
 if len(wasm_binding) != 1:
@@ -137,7 +137,7 @@ else:
 for marker in (
     "targets: wasm32-unknown-unknown",
     f"cargo install --locked wasm-bindgen-cli --version {wasm_binding}",
-    "node apps/console/tests/compiler-resources.mjs",
+    "node apps/console/tests/compiler-resources.ts",
 ):
     if marker not in console_checks:
         failures.append(f"Console CI lacks its owning compiler verification input: {marker}")

@@ -194,21 +194,16 @@ impl NativeLaunchPlanV1 {
         }
         let bundle = console_root.join("dist");
         if Path::new(&self.console.configuration_file) != output.join("roles/console/config.json")
-            || Path::new(&self.console.entrypoint_file) != console_root.join("server/main.mjs")
+            || Path::new(&self.console.entrypoint_file) != console_root.join("server-dist/main.js")
             || Path::new(&self.console.bundle_directory) != bundle
-            || ![
-                "main.mjs",
-                "config.mjs",
-                "gateway-server.mjs",
-                "process.mjs",
-            ]
-            .iter()
-            .all(|name| {
-                self.artifacts.iter().any(|entry| {
-                    !entry.executable
-                        && Path::new(&entry.path) == console_root.join("server").join(name)
+            || !["main.js", "config.js", "gateway-server.js", "process.js"]
+                .iter()
+                .all(|name| {
+                    self.artifacts.iter().any(|entry| {
+                        !entry.executable
+                            && Path::new(&entry.path) == console_root.join("server-dist").join(name)
+                    })
                 })
-            })
             || !self.artifacts.iter().any(|entry| {
                 !entry.executable && Path::new(&entry.path) == bundle.join("index.html")
             })

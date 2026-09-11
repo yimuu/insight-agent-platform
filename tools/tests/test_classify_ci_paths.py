@@ -25,7 +25,7 @@ class ClassifyCiPathsTests(unittest.TestCase):
         self.assertFalse(result["cli"])
 
     def test_console_only_uses_console_without_runtime(self) -> None:
-        result = MODULE.classify(["apps/console/src/App.tsx"])
+        result = MODULE.classify(["apps/console/src/app/App.tsx"])
         self.assertTrue(result["console"])
         self.assertFalse(result["runtime"])
 

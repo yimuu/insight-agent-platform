@@ -403,7 +403,7 @@ class NativeReleaseImageTests(unittest.TestCase):
             "console-entrypoint": workflow,
         }
         files = ["Cargo.toml", "tools/checks/check-product-release.py", "tools/release/build-product-release.py",
-                 "tools/development/build-development-profile-performance.py", "apps/console/scripts/build-agent-compiler.mjs",
+                 "tools/development/build-development-profile-performance.py", "apps/console/scripts/build-agent-compiler.ts",
                  "crates/authoring/platform-agent-compiler-wasm/Cargo.toml", ".github/workflows/ci.yml",
                  "deploy/images/console.Dockerfile", "deploy/release/performance-budgets-v1.json"]
         for name, changed in cases.items():
@@ -428,9 +428,9 @@ class NativeReleaseImageTests(unittest.TestCase):
                     elif name == "console-root":
                         dockerfile = dockerfile.replace("USER 1000:1000", "USER 0:0")
                     elif name == "console-arbitrary-files":
-                        dockerfile = dockerfile.replace("COPY server/config.mjs server/gateway-server.mjs server/main.mjs server/process.mjs", "COPY server/")
+                        dockerfile = dockerfile.replace("COPY server-dist/config.js server-dist/gateway-server.js server-dist/main.js server-dist/process.js", "COPY server/")
                     else:
-                        dockerfile = dockerfile.replace('/console/server/main.mjs"]', '/console/server/native.mjs"]')
+                        dockerfile = dockerfile.replace('/console/server-dist/main.js"]', '/console/server/native.ts"]')
                     path.write_text(dockerfile)
                 result = subprocess.run([sys.executable, str(root / "tools/checks/check-product-release.py")],
                                         capture_output=True, timeout=5)

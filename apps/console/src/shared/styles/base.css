@@ -1,0 +1,93 @@
+@import './tokens.css';
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 360px;
+  color: var(--ink);
+  background: var(--canvas);
+  font: 15px/1.6 var(--sans);
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+button,
+summary {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+a {
+  color: var(--accent);
+}
+:focus-visible {
+  outline: 3px solid #8dcab0;
+  outline-offset: 3px;
+}
+[hidden] {
+  display: none !important;
+}
+label {
+  min-width: 0;
+}
+label > span {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+}
+input,
+textarea,
+select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+}
+input[type='checkbox'],
+input[type='radio'] {
+  width: auto;
+  accent-color: var(--accent);
+}
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid #8dcab0;
+  outline-offset: 1px;
+}
+textarea {
+  resize: vertical;
+}
+fieldset {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+pre {
+  max-height: 400px;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: #b8e2c3;
+  background: #152019;
+  font: 13px/1.65 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+code {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+summary {
+  padding: 4px 0;
+}
