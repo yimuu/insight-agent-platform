@@ -45,6 +45,7 @@ pub struct ControllerModelAdmissionRequest {
     pub model_slot_id: String,
     pub plan_node_key: insight_platform_plan::PlanNodeKey,
     pub plan_node: RuntimeNode,
+    pub response_schema: ClosedJsonSchema,
     pub input: ResolvedExpressionInput,
     pub input_value: ClosedJsonValue,
     pub tool_slots: Vec<insight_platform_contracts::FrozenSlotBinding>,

@@ -1,6 +1,8 @@
 use super::*;
 use futures::StreamExt;
-use insight_platform_contracts::SecretResolutionPolicy;
+use insight_platform_contracts::{
+    CanonicalHttpEndpoint, DataRegion, ExactDeploymentRef, ExactVersionRef, SecretResolutionPolicy,
+};
 
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use std::{
@@ -11,6 +13,150 @@ use std::{
     },
 };
 use tokio::sync::Notify;
+
+struct FixtureDispatchAuthority;
+
+struct DeniedDispatchAuthority(insight_platform_contracts::ModelDispatchAuthorizationError);
+
+#[async_trait]
+impl insight_platform_security::ModelDispatchAuthority for DeniedDispatchAuthority {
+    async fn authorize_model_dispatch(
+        &self,
+        _request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    > {
+        Err(self.0)
+    }
+}
+
+struct UnexpectedDns;
+
+#[async_trait]
+impl EgressDnsResolver for UnexpectedDns {
+    async fn resolve(&self, _: &str, _: u16) -> Result<Vec<SocketAddr>, DnsResolutionError> {
+        panic!("dispatch authorization must precede DNS");
+    }
+}
+
+#[tokio::test]
+async fn denied_or_unavailable_dispatch_has_no_dns_secret_or_http_effect_even_if_anonymous() {
+    use insight_platform_contracts::ModelDispatchAuthorizationError;
+    for anonymous in [false, true] {
+        for denial in [
+            ModelDispatchAuthorizationError::Rejected,
+            ModelDispatchAuthorizationError::Unavailable,
+        ] {
+            let mut fixture = pinned_fixture();
+            if anonymous {
+                fixture.entry.endpoint.host = "localhost".to_owned();
+                fixture.entry.development_loopback = true;
+                fixture.entry.development_anonymous = true;
+                fixture.entry.trusted_root_pem = Some(fixture_root_pem());
+                fixture.entry.endpoint_identity_digest =
+                    fixture.entry.endpoint.canonical_digest().unwrap();
+                fixture.request.endpoint_identity_digest =
+                    fixture.entry.endpoint_identity_digest.clone();
+            }
+            let secrets = successful_secrets();
+            let transport = Arc::new(FixtureTransport::complete(vec![]));
+            let broker = ReqwestModelProviderEgressBroker::with_transport(
+                InstalledModelDestinationCatalog::new(vec![fixture.entry]).unwrap(),
+                secrets.clone(),
+                Arc::new(UnexpectedDns),
+                transport.clone(),
+                Arc::new(DeniedDispatchAuthority(denial)),
+                ModelProviderEgressLimits::default(),
+            )
+            .unwrap();
+            let failure = expect_failure(broker.open(fixture.request).await);
+            assert!(!failure.request_sent);
+            assert!(matches!(
+                failure.safe_code.as_str(),
+                "model_dispatch_not_authorized" | "model_dispatch_authority_unavailable"
+            ));
+            assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+            assert!(!transport.validated.load(Ordering::SeqCst));
+        }
+    }
+}
+
+struct ExpiringDispatchAuthority;
+
+#[async_trait]
+impl insight_platform_security::ModelDispatchAuthority for ExpiringDispatchAuthority {
+    async fn authorize_model_dispatch(
+        &self,
+        request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    > {
+        Ok(insight_platform_contracts::ModelDispatchPermitV1 {
+            schema_version: 1,
+            request_digest: canonical_digest(&serde_json::to_value(request).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap(),
+            valid_until: Utc::now() + chrono::Duration::milliseconds(20),
+        })
+    }
+}
+
+struct DelayedDns;
+
+#[async_trait]
+impl EgressDnsResolver for DelayedDns {
+    async fn resolve(&self, _: &str, port: u16) -> Result<Vec<SocketAddr>, DnsResolutionError> {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        Ok(vec![SocketAddr::new(
+            Ipv4Addr::new(8, 8, 8, 8).into(),
+            port,
+        )])
+    }
+}
+
+#[tokio::test]
+async fn permit_expiring_during_dns_cannot_resolve_credentials_or_open_http() {
+    let fixture = pinned_fixture();
+    let secrets = successful_secrets();
+    let transport = Arc::new(FixtureTransport::complete(vec![]));
+    let broker = ReqwestModelProviderEgressBroker::with_transport(
+        InstalledModelDestinationCatalog::new(vec![fixture.entry]).unwrap(),
+        secrets.clone(),
+        Arc::new(DelayedDns),
+        transport.clone(),
+        Arc::new(ExpiringDispatchAuthority),
+        ModelProviderEgressLimits::default(),
+    )
+    .unwrap();
+    let failure = expect_failure(broker.open(fixture.request).await);
+    assert_eq!(failure.safe_code, "model_dispatch_authorization_expired");
+    assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+    assert!(!transport.validated.load(Ordering::SeqCst));
+}
+
+#[async_trait]
+impl insight_platform_security::ModelDispatchAuthority for FixtureDispatchAuthority {
+    async fn authorize_model_dispatch(
+        &self,
+        request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    > {
+        assert!(request.validate_at(Utc::now()));
+        Ok(insight_platform_contracts::ModelDispatchPermitV1 {
+            schema_version: 1,
+            request_digest: canonical_digest(&serde_json::to_value(request).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap(),
+            valid_until: request.deadline,
+        })
+    }
+}
 
 fn digest(character: char) -> Sha256Digest {
     format!("sha256:{}", character.to_string().repeat(64))
@@ -47,7 +193,7 @@ fn binding(policy: SecretResolutionPolicy) -> ExactSecretBindingRef {
 }
 
 struct Fixture {
-    entry: InstalledModelProviderEndpoint,
+    entry: InstalledModelDestinationGrant,
     request: ModelProviderWireRequest,
 }
 
@@ -70,11 +216,9 @@ fn fixture(policy: SecretResolutionPolicy) -> Fixture {
     let request_body = serde_json::json!({"model": "qualified-model", "stream": true});
     let request_body_digest = canonical_digest(&request_body).unwrap().parse().unwrap();
     Fixture {
-        entry: InstalledModelProviderEndpoint {
+        entry: InstalledModelDestinationGrant {
             schema_version: 1,
             protocol: ModelProviderWireProtocol::OpenAiResponses,
-            provider_deployment: provider_deployment.clone(),
-            provider_revision: provider_revision.clone(),
             endpoint,
             endpoint_identity_digest: endpoint_identity_digest.clone(),
             credential_purpose: "model_api_key".parse().unwrap(),
@@ -274,10 +418,11 @@ fn broker(
 ) -> Arc<ReqwestModelProviderEgressBroker> {
     Arc::new(
         ReqwestModelProviderEgressBroker::with_transport(
-            InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+            InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap(),
             secrets,
             dns,
             transport,
+            Arc::new(FixtureDispatchAuthority),
             ModelProviderEgressLimits {
                 maximum_in_flight: 2,
                 maximum_dns_answers: 4,
@@ -292,6 +437,36 @@ fn pinned_fixture() -> Fixture {
     fixture(SecretResolutionPolicy::Pinned {
         opaque_version_identity_digest: digest('9'),
     })
+}
+
+#[test]
+fn one_destination_grant_matches_two_accounts_but_keeps_exact_policy_and_purpose_constraints() {
+    let fixture = pinned_fixture();
+    let catalog = InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap();
+    assert!(catalog.resolve(&fixture.request).is_ok());
+    let mut other = fixture.request.clone();
+    other.provider_deployment = exact_deployment(ResourceKind::ModelProviderDeployment, 40, '4');
+    other.provider_revision = exact_version(ResourceKind::ModelProviderRevision, 41, '5');
+    other.secret_bindings[0].secret_binding_id = id(ResourceKind::SecretBinding, 42);
+    assert!(catalog.resolve(&other).is_ok());
+    // Resolving a physical grant is not account authorization: the broker must still submit
+    // these exact identities to the current database authority on each open.
+    assert_ne!(
+        dispatch_authorization(&other),
+        dispatch_authorization(&fixture.request)
+    );
+    other.network_policy.semantic_digest = digest('0');
+    assert!(catalog.resolve(&other).is_err());
+    other.network_policy = fixture.request.network_policy.clone();
+    other.secret_bindings[0].purpose = "wrong_key".parse().unwrap();
+    assert!(catalog.resolve(&other).is_err());
+
+    let mut ambiguous = fixture.entry.clone();
+    ambiguous.credential_purpose = "other_key".parse().unwrap();
+    assert_eq!(
+        InstalledModelDestinationCatalog::new(vec![fixture.entry, ambiguous]).unwrap_err(),
+        EgressConfigurationError::DuplicateEndpoint
+    );
 }
 
 fn successful_secrets() -> Arc<FixtureSecretResolver> {
@@ -376,7 +551,7 @@ fn catalog_rejects_http_ambiguous_paths_and_duplicate_exact_deployments() {
     );
 
     assert_eq!(
-        InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone(), fixture.entry])
+        InstalledModelDestinationCatalog::new(vec![fixture.entry.clone(), fixture.entry])
             .unwrap_err(),
         EgressConfigurationError::DuplicateEndpoint
     );
@@ -423,12 +598,13 @@ async fn explicit_development_endpoint_allows_only_root_bound_localhost() {
         called: AtomicBool::new(false),
     });
     let broker = ReqwestModelProviderEgressBroker::with_transport(
-        InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+        InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap(),
         successful_secrets(),
         Arc::new(FixtureDnsResolver {
             addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
         }),
         transport.clone(),
+        Arc::new(FixtureDispatchAuthority),
         ModelProviderEgressLimits {
             maximum_in_flight: 2,
             maximum_dns_answers: 4,
@@ -472,12 +648,13 @@ async fn explicit_anonymous_development_endpoint_skips_secret_resolution() {
         called: AtomicBool::new(false),
     });
     let broker = ReqwestModelProviderEgressBroker::with_transport(
-        InstalledModelProviderEndpointCatalog::new(vec![fixture.entry.clone()]).unwrap(),
+        InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap(),
         secrets.clone(),
         Arc::new(FixtureDnsResolver {
             addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
         }),
         transport.clone(),
+        Arc::new(FixtureDispatchAuthority),
         ModelProviderEgressLimits {
             maximum_in_flight: 2,
             maximum_dns_answers: 4,
@@ -700,10 +877,13 @@ fn resolved_secret_debug_output_never_contains_material() {
 
 #[test]
 fn empty_installed_catalogs_are_explicit_deny_all_closures() {
-    InstalledModelProviderEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledModelDestinationCatalog::new(Vec::new()).unwrap();
     InstalledCapabilityHttpEndpointCatalog::new(Vec::new()).unwrap();
     InstalledCapabilityGrpcEndpointCatalog::new(Vec::new()).unwrap();
-    InstalledRemoteContextEndpointCatalog::new(Vec::new()).unwrap();
+    InstalledRemoteContextDestinationCatalog::new(Vec::new()).unwrap();
     InstalledMcpStreamableHttpEndpointCatalog::new(Vec::new()).unwrap();
     InstalledMcpOAuthVerificationCatalog::new(Vec::new()).unwrap();
 }
+
+#[path = "model_connection_tests.rs"]
+mod model_connection_tests;

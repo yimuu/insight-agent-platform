@@ -73,7 +73,7 @@ def cleanup(project: Path, expected_identity: str, insight: str, project_name: s
     stop_error = None
     try:
         if journal.exists():
-            subprocess.run([insight, "stop", "--path", str(project)], check=True)
+            subprocess.run([insight, "qualification-aws", "stop", "--path", str(project)], check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         stop_error = error
     # Include shutdown/drain diagnostics and still export on a failed stop.
@@ -94,7 +94,7 @@ def cleanup(project: Path, expected_identity: str, insight: str, project_name: s
     if manifest.exists() and compose.exists():
         if not compose.is_file() or compose.is_symlink():
             raise ValueError("refusing invalid fixture Compose configuration")
-        subprocess.run([insight, "reset", "--path", str(project),
+        subprocess.run([insight, "qualification-aws", "reset", "--path", str(project),
                         "--confirm", project_name], check=True)
     if identity(project) != expected_identity:
         raise ValueError("fixture directory was replaced during cleanup")

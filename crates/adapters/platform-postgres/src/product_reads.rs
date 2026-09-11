@@ -176,9 +176,10 @@ async fn authoring_exact_deployment(
     kind: DependencySlotKind,
     selector: &AuthoringDeploymentSelectorV1,
 ) -> Result<(ExactDeploymentRef, Sha256Digest), AuthoringQueryError> {
-    let (exact_id, resource_id, environment) = match selector {
+    let mut expected_default = None;
+    let (exact_id, resource_id, environment, alias) = match selector {
         AuthoringDeploymentSelectorV1::Exact { deployment } => {
-            (Some(deployment.deployment_id.to_string()), None, None)
+            (Some(deployment.deployment_id.to_string()), None, None, None)
         }
         AuthoringDeploymentSelectorV1::Active {
             resource_id,
@@ -187,11 +188,30 @@ async fn authoring_exact_deployment(
             None,
             Some(resource_id.to_string()),
             Some(environment.as_str()),
+            None,
         ),
+        AuthoringDeploymentSelectorV1::Alias { alias, environment } => {
+            (None, None, Some(environment.as_str()), Some(alias.as_str()))
+        }
+        AuthoringDeploymentSelectorV1::DefaultModel { environment } => {
+            if kind != DependencySlotKind::Model {
+                return Err(AuthoringQueryError::Invalid);
+            }
+            let config = crate::repository::load_tenant(tx, tenant)
+                .await
+                .map_err(authoring_repository_error)?
+                .config;
+            let default = config
+                .default_model
+                .ok_or(AuthoringQueryError::DefaultNotConfigured)?;
+            let id = default.deployment_id.to_string();
+            expected_default = Some(default);
+            (Some(id), None, Some(environment.as_str()), None)
+        }
     };
-    let row=sqlx::query("SELECT d.deployment_id,d.bindings_digest,d.payload_schema_version,d.bindings,r.gate_state,r.lifecycle_state FROM insight_platform.deployments d JOIN insight_platform.resources r ON r.tenant_id=d.tenant_id AND r.resource_id=d.resource_id WHERE d.tenant_id=$1 AND r.resource_kind=$2 AND (($3::text IS NOT NULL AND d.deployment_id=$3) OR ($3::text IS NULL AND r.resource_id=$4 AND d.environment=$5 AND r.active_deployment_id=d.deployment_id))")
+    let row=sqlx::query("SELECT d.deployment_id,d.bindings_digest,d.payload_schema_version,d.bindings,r.gate_state,r.lifecycle_state FROM insight_platform.deployments d JOIN insight_platform.resources r ON r.tenant_id=d.tenant_id AND r.resource_id=d.resource_id WHERE d.tenant_id=$1 AND r.resource_kind=$2 AND ($5::text IS NULL OR d.environment=$5) AND (NOT $7::boolean OR r.active_deployment_id=d.deployment_id) AND (($3::text IS NOT NULL AND d.deployment_id=$3) OR ($3::text IS NULL AND (($4::text IS NOT NULL AND r.resource_id=$4) OR ($6::text IS NOT NULL AND r.payload->>'alias'=$6)) AND r.active_deployment_id=d.deployment_id))")
         .bind(tenant.to_string()).bind(match kind {DependencySlotKind::Model=>"model_profile",DependencySlotKind::Capability=>"capability_interface",DependencySlotKind::Context=>"context_source_interface",DependencySlotKind::ChildAgent=>"agent",DependencySlotKind::Skill=>"skill"})
-        .bind(exact_id).bind(resource_id).bind(environment).fetch_optional(&mut **tx).await.map_err(|_|AuthoringQueryError::Unavailable)?.ok_or(AuthoringQueryError::NotFound)?;
+        .bind(exact_id).bind(resource_id).bind(environment).bind(alias).bind(expected_default.is_some()).fetch_optional(&mut **tx).await.map_err(|_|AuthoringQueryError::Unavailable)?.ok_or(AuthoringQueryError::NotFound)?;
     if row
         .try_get::<String, _>("gate_state")
         .map_err(|_| AuthoringQueryError::Unavailable)?
@@ -218,6 +238,20 @@ async fn authoring_exact_deployment(
     if matches!(selector,AuthoringDeploymentSelectorV1::Exact{deployment} if deployment!=&exact) {
         return Err(AuthoringQueryError::ContractMismatch);
     }
+    if expected_default
+        .as_ref()
+        .is_some_and(|default| default != &exact)
+    {
+        return Err(AuthoringQueryError::ContractMismatch);
+    }
+    if expected_default.is_some()
+        && row
+            .try_get::<String, _>("lifecycle_state")
+            .map_err(|_| AuthoringQueryError::Unavailable)?
+            != "active"
+    {
+        return Err(AuthoringQueryError::Disabled);
+    }
     let payload = insight_platform_contracts::TypedPayload {
         schema_version: row
             .try_get("payload_schema_version")
@@ -229,6 +263,23 @@ async fn authoring_exact_deployment(
     };
     let closure = crate::repository::decode_deployment_closure(&payload)
         .map_err(|_| AuthoringQueryError::Unavailable)?;
+    if kind == DependencySlotKind::Model
+        && matches!(
+            selector,
+            AuthoringDeploymentSelectorV1::DefaultModel { .. }
+                | AuthoringDeploymentSelectorV1::Alias { .. }
+        )
+    {
+        crate::repository::validate_default_model_closure(tx, tenant, &exact, false)
+            .await
+            .map_err(|error| match error {
+                RepositoryError::PermissionDenied => AuthoringQueryError::Denied,
+                RepositoryError::NotFound(_) => AuthoringQueryError::NotFound,
+                RepositoryError::Conflict(_) => AuthoringQueryError::ContractMismatch,
+                RepositoryError::InvalidInput(_) => AuthoringQueryError::Invalid,
+                _ => AuthoringQueryError::Unavailable,
+            })?;
+    }
     Ok((exact, contract_digest(&closure)?))
 }
 async fn authoring_policy(

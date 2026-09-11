@@ -162,7 +162,8 @@ dependency_owner_contracts.each do |relative, needles|
 end
 
 adapter_dependency_contracts = {
-  "crates/adapters/platform-artifact-broker/src/aws.rs" => %w[ArtifactExternalDependency::S3 ArtifactExternalDependency::Kms observe_external],
+  "crates/adapters/platform-artifact-broker/src/aws.rs" => %w[ArtifactExternalDependency::S3 observe_external],
+  "crates/adapters/platform-artifact-broker/src/reference_key.rs" => %w[ArtifactExternalDependency::Kms observe_external],
   "crates/adapters/platform-secret-broker/src/aws.rs" => %w[SecretExternalDependency::Secret SecretExternalDependency::Kms observe_external],
   "apps/services/platform-model-worker/src/lib.rs" => %w[ModelNatsDependencyObserver ModelNatsDependencyOutcome],
 }

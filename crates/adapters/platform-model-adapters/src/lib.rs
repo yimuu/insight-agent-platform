@@ -30,10 +30,14 @@ pub const MAX_MODEL_ADAPTER_SAFE_CODE_BYTES: usize = 128;
 pub const MAX_MODEL_ADAPTER_SAFE_MESSAGE_BYTES: usize = 512;
 
 mod anthropic_messages;
+mod connection;
+pub use connection::*;
 mod openai_responses;
 mod provider_broker;
 mod provider_sse;
 mod provider_wire;
+mod responses_metadata;
+mod structured_output;
 mod worker;
 pub use anthropic_messages::*;
 pub use openai_responses::*;

@@ -53,7 +53,7 @@ export interface ExactVersionRef {
 
 export interface ExactDeploymentRef {
   deployment_id: string
-  resource_kind: 'policy_deployment' | 'model_deployment' | 'agent_deployment' | 'capability_deployment' | 'context_deployment' | 'skill_deployment'
+  resource_kind: 'policy_deployment' | 'model_deployment' | 'model_provider_deployment' | 'agent_deployment' | 'capability_deployment' | 'context_deployment' | 'skill_deployment'
   deployment_digest: string
 }
 
@@ -194,7 +194,7 @@ export interface ResourceView {
   gate_state: string
   draft_generation: number
   version: number
-  draft: { display_name: string; document: JsonObject; validation: JsonObject | null }
+  draft: { alias?: string | null; display_name: string; document: JsonObject; validation: JsonObject | null }
   etag: string
 }
 
@@ -222,7 +222,7 @@ export interface ResourceVersionView {
 export interface PublishResourceResponse {
   schema_version: 1
   resource_id: string
-  resource_kind: 'agent'
+  resource_kind: 'agent' | 'model_provider' | 'model_profile'
   draft_generation: number
   version: number
   published_versions: PublishedVersionSummary[]

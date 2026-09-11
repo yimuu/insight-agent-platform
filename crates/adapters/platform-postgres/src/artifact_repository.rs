@@ -964,6 +964,12 @@ impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata, "Artifact metadata")
+                .map_err(classify_gateway_artifact_read_error)?;
+        metadata
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
         if row.try_get::<String, _>("classification").ok().as_deref()
             != Some(request.artifact.classification().as_str())
             || row
@@ -980,11 +986,7 @@ impl ArtifactObjectReadAuthority<GatewayArtifactReadRequest> for PgRepository {
                 != Some(request.artifact.content_digest().as_str())
             || row.try_get::<Option<i64>, _>("size_bytes").ok().flatten()
                 != i64::try_from(request.artifact.byte_length()).ok()
-            || metadata
-                .value
-                .get("display_name")
-                .and_then(serde_json::Value::as_str)
-                != request.artifact.display_name()
+            || metadata.display_name.as_deref() != request.artifact.display_name()
         {
             return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
         }
@@ -1185,11 +1187,13 @@ impl SchedulerTypedPlanRequestResolver for PgRepository {
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
-        let display_name = metadata
-            .value
-            .get("display_name")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned);
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata, "Artifact metadata")
+                .map_err(classify_gateway_artifact_read_error)?;
+        metadata
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let display_name = metadata.display_name.clone();
         if bindings.plan.revision_id != plan_revision_id
             || bindings.plan.semantic_digest != content_digest
             || agent.typed_plan_artifact_id != artifact_id
@@ -1359,12 +1363,13 @@ impl ArtifactObjectReadAuthority<SchedulerTypedPlanReadRequest> for PgRepository
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
-        if metadata
-            .value
-            .get("display_name")
-            .and_then(serde_json::Value::as_str)
-            != request.artifact.display_name()
-        {
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata, "Artifact metadata")
+                .map_err(classify_gateway_artifact_read_error)?;
+        metadata
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        if metadata.display_name.as_deref() != request.artifact.display_name() {
             return Err(ArtifactObjectReadAuthorityError::InvalidEvidence);
         }
         let blob_id = parse_id(
@@ -1924,10 +1929,13 @@ impl SchedulerSkillPackageRequestResolver for PgRepository {
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
-        let display_name = metadata
-            .value
-            .get("display_name")
-            .and_then(serde_json::Value::as_str);
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata, "Artifact metadata")
+                .map_err(classify_gateway_artifact_read_error)?;
+        metadata
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let display_name = metadata.display_name.as_deref();
         if artifact.artifact_id().to_string() != artifact_id
             || artifact.content_digest().as_str() != blob_digest
             || artifact.classification().as_str() != artifact_classification
@@ -2023,10 +2031,13 @@ impl ArtifactObjectReadAuthority<SchedulerSkillPackageReadRequest> for PgReposit
             "metadata_digest",
         )
         .map_err(classify_gateway_artifact_read_error)?;
-        let display_name = metadata
-            .value
-            .get("display_name")
-            .and_then(serde_json::Value::as_str);
+        let metadata: ArtifactMetadataSnapshot =
+            decode_versioned_payload(&metadata, "Artifact metadata")
+                .map_err(classify_gateway_artifact_read_error)?;
+        metadata
+            .validate()
+            .map_err(|_| ArtifactObjectReadAuthorityError::InvalidEvidence)?;
+        let display_name = metadata.display_name.as_deref();
         if row.try_get::<String, _>("artifact_id").ok().as_deref()
             != Some(request.artifact.artifact_id().to_string().as_str())
             || row.try_get::<String, _>("classification").ok().as_deref()
@@ -2375,7 +2386,8 @@ impl PgRepository {
         .await?;
 
         let metadata = command.metadata()?;
-        let metadata_payload = TypedPayload::from_versioned(1, &metadata, 262_144)?;
+        let metadata_payload =
+            TypedPayload::from_versioned(metadata.schema_version as i32, &metadata, 262_144)?;
         let security_domain_digest = command
             .security_domain(&stage)?
             .canonical_digest()?
@@ -2795,7 +2807,7 @@ impl PgRepository {
             &artifact_id,
             &blob_id,
             &upload_grant_id,
-            &metadata.operation_id,
+            metadata.upload_operation_id()?,
         )
         .await?;
         if prepared.grant.snapshot.subject_principal_id != principal_id
@@ -4700,7 +4712,8 @@ impl ArtifactTransaction for PgArtifactTransaction {
         let operation = command.operation_snapshot();
         let grant = command.upload_grant_snapshot()?;
         let security_domain_digest = command.blob_security_domain().canonical_digest()?;
-        let metadata_payload = TypedPayload::from_versioned(1, &metadata, 262_144)?;
+        let metadata_payload =
+            TypedPayload::from_versioned(metadata.schema_version as i32, &metadata, 262_144)?;
         let operation_payload = TypedPayload::from_versioned(1, &operation, 1_048_576)?;
         let grant_payload = TypedPayload::from_versioned(1, &grant, 262_144)?;
         let expected_size = i64::try_from(command.expected_size_bytes).map_err(|_| {
@@ -6853,6 +6866,19 @@ async fn require_exact_artifact_scan_policy(
     tenant_id: &ResourceId,
     exact: &ExactVersionRef,
 ) -> Result<(), RepositoryError> {
+    // Registry rows are locked without granting this process Registry mutation privileges.
+    // Current-state business checks stay below, in this same transaction after the lock.
+    let present: bool =
+        sqlx::query_scalar("SELECT insight_platform.artifact_lock_scan_policy($1, $2)")
+            .bind(tenant_id.to_string())
+            .bind(exact.revision_id.to_string())
+            .fetch_one(&mut **transaction)
+            .await?;
+    if !present {
+        return Err(RepositoryError::NotFound(
+            "exact Artifact scan Policy Revision",
+        ));
+    }
     let row = sqlx::query(
         r#"
         SELECT version.payload_schema_version, version.payload, version.payload_digest
@@ -6865,7 +6891,6 @@ async fn require_exact_artifact_scan_policy(
           AND version.content_digest = $3
           AND resource.resource_kind = 'policy'
           AND resource.lifecycle_state = 'active' AND resource.gate_state = 'enabled'
-        FOR SHARE OF version, resource
         "#,
     )
     .bind(tenant_id.to_string())
@@ -7232,7 +7257,6 @@ async fn require_deletion_approval(
         WHERE tenant_id = $1 AND task_id = $2 AND task_kind = 'approval'
           AND owner_kind = 'artifact' AND owner_id = $3
           AND state = 'approved' AND responded_at IS NOT NULL
-        FOR SHARE
         "#,
     )
     .bind(command.audit.tenant_id.to_string())
@@ -7869,7 +7893,11 @@ async fn persist_artifact_scan_decision(
             "Artifact rescan Blob",
         )?;
     }
-    let metadata = TypedPayload::from_versioned(1, &decision.metadata, 262_144)?;
+    let metadata = TypedPayload::from_versioned(
+        decision.metadata.schema_version as i32,
+        &decision.metadata,
+        262_144,
+    )?;
     ensure_one(
         sqlx::query(
             r#"
@@ -9067,7 +9095,6 @@ async fn lock_staging_quota(
             FROM insight_platform.quota_ledger
             WHERE tenant_id = $1 AND quota_account_id = $2
               AND correlation_id = $3 AND entry_kind = 'reserve'
-            FOR SHARE
             "#,
         )
         .bind(command.audit.tenant_id.to_string())

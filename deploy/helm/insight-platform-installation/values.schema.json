@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan",
+    "phase",
+    "owner",
+    "namespaceUID",
+    "node",
+    "storageClass",
+    "operation",
+    "prepared",
+    "ready",
+    "providerStarted",
+    "providerReady"
+  ],
+  "properties": {
+    "plan": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "namespace",
+        "input",
+        "input_digest",
+        "runtime_image",
+        "console_image",
+        "dependencies",
+        "processes",
+        "dependency_commands"
+      ],
+      "properties": {
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "postgres",
+            "nats",
+            "s3",
+            "openbao"
+          ],
+          "properties": {
+            "postgres": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._/:-]+@sha256:[a-f0-9]{64}$"
+            },
+            "nats": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._/:-]+@sha256:[a-f0-9]{64}$"
+            },
+            "s3": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._/:-]+@sha256:[a-f0-9]{64}$"
+            },
+            "openbao": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._/:-]+@sha256:[a-f0-9]{64}$"
+            }
+          }
+        },
+        "dependency_commands": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "s3"
+          ],
+          "properties": {
+            "s3": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            }
+          }
+        }
+      }
+    },
+    "phase": {
+      "enum": [
+        "prepare",
+        "provider-start",
+        "dependencies",
+        "provider-observe",
+        "provision",
+        "serving",
+        "verify"
+      ]
+    },
+    "owner": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "namespaceUID": {
+      "type": "string",
+      "minLength": 1
+    },
+    "node": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253
+    },
+    "storageClass": {
+      "type": "string",
+      "maxLength": 253
+    },
+    "operation": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "prepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "job_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "identity_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      }
+    },
+    "ready": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "job_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "identity_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      }
+    },
+    "providerStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "job_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "identity_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "mode": {
+          "enum": [
+            "initialize_once",
+            "serve"
+          ]
+        }
+      }
+    },
+    "providerReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "job_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "pod_uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "identity_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      }
+    }
+  }
+}

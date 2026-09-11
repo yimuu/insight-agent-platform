@@ -41,15 +41,17 @@ import type {
   RunView,
 } from './api/types'
 import './App.css'
+import { ModelSettings } from './model/ModelSettings'
 
-type ViewName = 'agents' | 'runs' | 'tasks' | 'settings'
+type ViewName = 'agents' | 'runs' | 'tasks' | 'models' | 'settings'
 type Notice = { tone: 'error' | 'success' | 'info'; text: string; traceId?: string | null }
 const TERMINAL_RUNS = new Set(['succeeded', 'failed', 'cancelled', 'timed_out'])
 const NAV: Array<{ id: ViewName; label: string; eyebrow: string }> = [
   { id: 'agents', label: 'Agents', eyebrow: '01' },
   { id: 'runs', label: 'Runs', eyebrow: '02' },
   { id: 'tasks', label: 'Tasks', eyebrow: '03' },
-  { id: 'settings', label: 'Settings', eyebrow: '04' },
+  { id: 'models', label: 'Models', eyebrow: '04' },
+  { id: 'settings', label: 'Settings', eyebrow: '05' },
 ]
 const DEFAULT_SCHEMA = JSON.stringify({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -119,6 +121,8 @@ function App() {
   const session = useMemo(() => ({ client, endpoint, tenant, key: crypto.randomUUID() }), [client, endpoint, tenant])
   const sessionScope = session.key
   const report = useCallback((value: Notice | null) => setNotice({ scope: sessionScope, value }), [sessionScope])
+  const reportModelError = useCallback((error: unknown) => report(errorNotice(error)), [report])
+  const reportModelSaved = useCallback((text: string) => report({ tone: 'success', text }), [report])
   const connect = async (event: FormEvent) => {
     event.preventDefault()
     report(null)
@@ -157,6 +161,7 @@ function App() {
       <NoticeBox notice={notice?.scope === sessionScope ? notice.value : null} />
       <Fragment key={sessionScope}>
         {view === 'agents' && <Agents client={client} report={report} onRun={runAgent} />}
+        {view === 'models' && <ModelSettings client={client} onError={reportModelError} onSaved={reportModelSaved} />}
         {view === 'runs' && <Runs client={client} report={report} launchAgent={launchAgent?.scope === sessionScope ? launchAgent.agent : null} onTask={(id) => { setSelectedTask({ scope: sessionScope, id }); setView('tasks') }} />}
         {view === 'tasks' && <TaskInbox key={selectedTask?.scope === sessionScope ? selectedTask.id : 'direct'} client={client} report={report} selectedId={selectedTask?.scope === sessionScope ? selectedTask.id : ''} subjectKey={sessionScope} />}
         {view === 'settings' && <Settings client={client} report={report} tenant={tenant} setTenant={setTenant} ready={ready} endpoint={endpoint} />}
@@ -514,7 +519,7 @@ function Runs({ client, report, launchAgent, onTask }: { client: PlatformClient 
           const current = await client.getRun(activeRunId, { signal })
           if (signal.aborted) return
           setRun((existing) => existing && existing.version > current.data.version ? existing : current.data)
-          if (TERMINAL_RUNS.has(current.data.state)) {
+          if (TERMINAL_RUNS.has(current.data.state) && current.data.output_value_id !== null) {
             try {
               const output = await client.getRunResult(activeRunId, { signal })
               if (!signal.aborted) setResult(output.data)
@@ -522,6 +527,8 @@ function Runs({ client, report, launchAgent, onTask }: { client: PlatformClient 
               if (!signal.aborted) setResult(null)
               if (!(error instanceof PlatformProblem) || error.status !== 409) throw error
             }
+          } else {
+            setResult(null)
           }
         }
       } catch (error) {

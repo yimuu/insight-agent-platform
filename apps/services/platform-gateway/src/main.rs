@@ -1,4 +1,10 @@
 //! Deployable public Gateway for the clean-cut Platform `/v1` contract.
+mod authoring_profile;
+mod model_configuration;
+mod model_connection;
+mod model_credentials;
+mod model_default;
+mod model_quota;
 mod recovery;
 
 use insight_platform_orchestrator::store::OrchestrationSignalAuthority;
@@ -267,6 +273,10 @@ impl ProcessRole {
                         | "context-datasets"
                         | "models"
                         | "model-providers"
+                        | "model-default"
+                        | "model-credentials"
+                        | "model-configuration"
+                        | "model-quotas"
                         | "mcp-servers"
                         | "policies"
                         | "sandbox-runtimes"
@@ -291,6 +301,8 @@ struct ProcessConfig {
     registry_validation_profile_digest: Sha256Digest,
     oidc: InstalledOidcVerifierConfig,
     artifact_gateway: Option<ArtifactGatewayConfig>,
+    model_credential_egress: Option<model_credentials::GatewayEgressConfig>,
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -344,6 +356,18 @@ impl ProcessConfig {
             || self.shutdown_grace_milliseconds > 60_000
         {
             return Err(ProcessError::InvalidConfiguration);
+        }
+        if self
+            .model_installation
+            .as_ref()
+            .is_some_and(|catalog| !catalog.validate() || self.role != ProcessRole::ManagementApi)
+        {
+            return Err(ProcessError::InvalidConfiguration);
+        }
+        match (self.role, self.model_credential_egress.as_ref()) {
+            (ProcessRole::ManagementApi, Some(egress)) => egress.validate()?,
+            (ProcessRole::RuntimeApi, None) => {}
+            _ => return Err(ProcessError::InvalidConfiguration),
         }
         match (self.role, self.artifact_gateway.as_ref()) {
             (ProcessRole::ManagementApi | ProcessRole::RuntimeApi, Some(artifact_gateway)) => {
@@ -2477,6 +2501,7 @@ fn run_view_from_record(
 
 #[derive(Clone)]
 struct PgResources {
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
     artifacts: Arc<dyn ArtifactMutationForwarder>,
     repository: Arc<PgRepository>,
     validator_digest: Sha256Digest,
@@ -2485,6 +2510,32 @@ struct PgResources {
 
 #[async_trait]
 impl ResourceApplication for PgResources {
+    async fn read_model_quota(
+        &self,
+        intent: insight_platform_api::resource::ReadModelQuotaIntent,
+    ) -> Result<insight_platform_api::resource::ModelQuotaViewV1, ResourceApplicationError> {
+        self.read_model_quota_inner(intent).await
+    }
+    async fn set_model_quota(
+        &self,
+        intent: insight_platform_api::resource::SetModelQuotaIntent,
+    ) -> Result<insight_platform_api::resource::ModelQuotaViewV1, ResourceApplicationError> {
+        self.set_model_quota_inner(intent).await
+    }
+
+    async fn read_model_default(
+        &self,
+        intent: insight_platform_api::resource::ReadModelDefaultIntent,
+    ) -> Result<insight_platform_api::resource::ModelDefaultViewV1, ResourceApplicationError> {
+        self.read_model_default_inner(intent).await
+    }
+    async fn set_model_default(
+        &self,
+        intent: insight_platform_api::resource::SetModelDefaultIntent,
+    ) -> Result<insight_platform_api::resource::ModelDefaultViewV1, ResourceApplicationError> {
+        self.set_model_default_inner(intent).await
+    }
+
     async fn read_agent_authoring_profile(
         &self,
         intent: ReadAgentAuthoringProfileIntent,
@@ -2492,17 +2543,31 @@ impl ResourceApplication for PgResources {
         if intent.deadline <= chrono::Utc::now() {
             return Err(ResourceApplicationError::Unavailable);
         }
-        let binding = self
-            .repository
-            .read_agent_authoring_policy_for_principal(
+        let catalog = self
+            .model_installation
+            .as_ref()
+            .ok_or(ResourceApplicationError::Unavailable)?;
+        let remaining = (intent.deadline - chrono::Utc::now())
+            .to_std()
+            .map_err(|_| ResourceApplicationError::Unavailable)?;
+        let model = tokio::time::timeout(
+            remaining,
+            self.repository.read_agent_authoring_model_for_principal(
                 &intent.principal.tenant_id,
                 &intent.principal.principal_id,
                 intent.principal.principal_kind,
-            )
-            .await
-            .map_err(map_resource_repository_error)?;
-        AgentAuthoringProfileV1::build(binding, Vec::new())
-            .map_err(|_| ResourceApplicationError::Internal)
+                catalog,
+            ),
+        )
+        .await
+        .map_err(|_| ResourceApplicationError::Unavailable)?
+        .map_err(map_resource_repository_error)?;
+        authoring_profile::build(
+            catalog.environment.clone(),
+            catalog.policies.execution.clone(),
+            catalog.policies.selection.clone(),
+            model,
+        )
     }
 
     async fn list_agents(
@@ -3701,6 +3766,8 @@ fn map_task_repository_error(error: RepositoryError) -> TaskApplicationError {
 struct RouterDependencies {
     repository: Arc<PgRepository>,
     artifact_mutation_forwarder: Option<Arc<dyn ArtifactMutationForwarder>>,
+    model_credential_importer: Option<Arc<dyn model_credentials::ModelManagementEgress>>,
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
@@ -3716,6 +3783,8 @@ fn build_router(
     let RouterDependencies {
         repository,
         artifact_mutation_forwarder,
+        model_credential_importer,
+        model_installation,
         verifier,
         validator_digest,
         validation_profile_digest,
@@ -3734,6 +3803,24 @@ fn build_router(
     ));
     let protected = match role {
         ProcessRole::ManagementApi => operation
+            .merge(insight_platform_api::model_configuration::build_model_configuration_router(
+                insight_platform_api::model_configuration::ModelConfigurationHttpState::new(
+                    Arc::new(model_configuration::PgModelConfiguration { repository:repository.clone(),catalog:model_installation.clone() }),
+                    Arc::new(SystemAuthenticationClock),
+                ),
+            ))
+            .merge(insight_platform_api::model_connection::build_model_connection_router(
+                insight_platform_api::model_connection::ModelConnectionHttpState::new(
+                    Arc::new(model_connection::PgModelConnections{ repository:repository.clone(),catalog:model_installation.clone(),egress:model_credential_importer.clone().ok_or(ProcessError::InvalidConfiguration)? }),Arc::new(SystemAuthenticationClock))))
+            .merge(insight_platform_api::model_credential_management::build_model_credential_management_router(
+                insight_platform_api::model_credential_management::ModelCredentialManagementHttpState::new(
+                    Arc::new(model_connection::PgModelCredentials(repository.clone())),Arc::new(SystemAuthenticationClock))))
+            .merge(insight_platform_api::model_credentials::build_model_credential_router(
+                insight_platform_api::model_credentials::ModelCredentialHttpState::new(
+                    model_credential_importer.ok_or(ProcessError::InvalidConfiguration)?,
+                    Arc::new(SystemAuthenticationClock),
+                ),
+            ))
             .merge(insight_platform_api::recovery::build_recovery_router(
                 insight_platform_api::recovery::RecoveryHttpState::new(
                     Arc::new(recovery::PgRecovery(repository.clone())),
@@ -3749,6 +3836,7 @@ fn build_router(
             .merge(build_resource_router(
                 ResourceHttpState::new(
                     Arc::new(PgResources {
+                        model_installation,
                         artifacts: artifact_mutation_forwarder
                             .ok_or(ProcessError::InvalidConfiguration)?,
                         repository,
@@ -3875,6 +3963,7 @@ enum ProcessError {
     Database(sqlx::Error),
     Schema(insight_platform_postgres::AuthoritySchemaError),
     ServerUnavailable,
+    EgressUnavailable,
     DependencyObserverUnavailable,
     ShutdownDeadlineExceeded,
 }
@@ -3886,6 +3975,7 @@ impl fmt::Display for ProcessError {
             Self::Io(error) => write!(formatter, "I/O failed: {error}"),
             Self::Database(error) => write!(formatter, "database failed: {error}"),
             Self::Schema(error) => write!(formatter, "schema verification failed: {error}"),
+            Self::EgressUnavailable => formatter.write_str("Gateway credential Egress unavailable"),
             Self::ServerUnavailable => formatter.write_str("Gateway HTTP server unavailable"),
             Self::DependencyObserverUnavailable => {
                 formatter.write_str("Gateway dependency observer unavailable")
@@ -3995,8 +4085,18 @@ fn install_list_cursor_codec(
         .map_err(|_| ProcessError::InvalidConfiguration)
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            received = terminate.recv() => received.ok_or_else(|| std::io::Error::other("termination signal unavailable")),
+            received = tokio::signal::ctrl_c() => received,
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 #[tokio::main]
@@ -4031,6 +4131,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             )?) as Arc<dyn ArtifactMutationForwarder>),
         ),
     };
+    let model_credential_importer = match config.model_credential_egress.as_ref() {
+        Some(egress) => Some(egress.install().await?),
+        None => None,
+    };
     let database_url = required(DATABASE_URL_ENV)?;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
@@ -4061,6 +4165,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             RouterDependencies {
                 repository,
                 artifact_mutation_forwarder,
+                model_credential_importer,
+                model_installation: config.model_installation,
                 verifier,
                 validator_digest: config.registry_validator_digest,
                 validation_profile_digest: config.registry_validation_profile_digest,
@@ -4079,7 +4185,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ));
     let shutdown_grace = Duration::from_millis(config.shutdown_grace_milliseconds);
     let result = tokio::select! {
-        _ = shutdown_signal() => {
+        signal = shutdown_signal() => {
             cancellation.cancel();
             let drained = tokio::time::timeout(shutdown_grace, async {
                 let (server_result, postgres_result) = tokio::join!(
@@ -4091,7 +4197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 postgres_result.map_err(|_| ProcessError::DependencyObserverUnavailable)
             }).await;
             match drained {
-                Ok(result) => result,
+                Ok(result) => result.and_then(|()| signal.map_err(ProcessError::Io)),
                 Err(_) => {
                     server.abort();
                     postgres_health.abort();
@@ -4123,6 +4229,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     result.map_err(Into::into)
 }
+
+#[cfg(all(test, unix))]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4254,6 +4363,8 @@ mod tests {
             registry_validator_digest: fixed_digest('1'),
             registry_validation_profile_digest: fixed_digest('2'),
             oidc: oidc_config(),
+            model_credential_egress: None,
+            model_installation: None,
             artifact_gateway: Some(ArtifactGatewayConfig {
                 endpoint: "https://localhost:8081/".to_owned(),
             }),
@@ -4278,6 +4389,8 @@ mod tests {
             registry_validator_digest: fixed_digest('1'),
             registry_validation_profile_digest: fixed_digest('2'),
             oidc: oidc_config(),
+            model_credential_egress: None,
+            model_installation: None,
             artifact_gateway: Some(ArtifactGatewayConfig {
                 endpoint: "https://localhost:8081/".to_owned(),
             }),
@@ -4295,6 +4408,7 @@ mod tests {
         ));
 
         runtime.role = ProcessRole::ManagementApi;
+        runtime.model_credential_egress = Some(model_credentials::fixture_config());
         assert!(matches!(
             runtime.validate(),
             Err(ProcessError::InvalidConfiguration)
@@ -4342,6 +4456,8 @@ mod tests {
             RouterDependencies {
                 repository: Arc::new(PgRepository::new(pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
+                model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),
+                model_installation: None,
                 verifier: oidc_config().install().unwrap(),
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
@@ -4413,6 +4529,8 @@ mod tests {
             RouterDependencies {
                 repository: Arc::new(PgRepository::new(management_pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
+                model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),
+                model_installation: None,
                 verifier: oidc_config().install().unwrap(),
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
@@ -4431,6 +4549,8 @@ mod tests {
             RouterDependencies {
                 repository: Arc::new(PgRepository::new(runtime_pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
+                model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),
+                model_installation: None,
                 verifier: oidc_config().install().unwrap(),
                 validator_digest: fixed_digest('1'),
                 validation_profile_digest: fixed_digest('2'),
@@ -4460,6 +4580,11 @@ mod tests {
             ),
             (
                 "/v1/model-providers/mpr_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
+                401,
+                404,
+            ),
+            (
+                "/v1/model-quotas/mdep_0198f1cc-32e4-75e1-a9e8-d95ca0f80001",
                 401,
                 404,
             ),
@@ -4512,6 +4637,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(runtime_response.status().as_u16(), runtime_status, "{uri}");
+        }
+        for (router, expected) in [(management, 401), (runtime, 404)] {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/v1/model-quotas/mdep_0198f1cc-32e4-75e1-a9e8-d95ca0f80001")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "PUT model quota");
         }
     }
 

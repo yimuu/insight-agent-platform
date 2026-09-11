@@ -199,7 +199,7 @@ pub(super) async fn load_completed_upload_replay(
     )
     .await
     .map_err(required_receipt_authority)?;
-    if bundle.artifact.metadata.operation_id != result.operation_id
+    if bundle.artifact.metadata.upload_operation_id()? != &result.operation_id
         || bundle.grant.snapshot.subject_principal_id != identity.principal_id
         || bundle.grant.snapshot.subject_principal_kind != identity.principal_kind
         || bundle.grant.snapshot.generation != result.grant_generation

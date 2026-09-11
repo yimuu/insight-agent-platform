@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { checkedBundleRoot } from './gateway-server.mjs'
+import { checkedBundleRoot } from '../server/gateway-server.mjs'
 
 test('accepts an explicit regular candidate bundle root', () => {
   const root = mkdtempSync(join(tmpdir(), 'insight-console-candidate-'))
@@ -36,7 +36,7 @@ test('rejects symbolic links anywhere in a candidate bundle', () => {
 
 test('transparent local proxy preserves both physical Gateway surfaces and opaque command/SSE headers', async () => {
   const { createServer } = await import('node:http')
-  const { startGatewayConsoleServer } = await import('./gateway-server.mjs')
+  const { startGatewayConsoleServer } = await import('../server/native.mjs')
   const root = mkdtempSync(join(tmpdir(), 'insight-console-dual-gateway-'))
   writeFileSync(join(root, 'index.html'), '<!doctype html>')
   const calls = []
@@ -87,7 +87,7 @@ test('transparent local proxy preserves both physical Gateway surfaces and opaqu
     assert.equal(missing.headers.get('etag'), '"actual-404"')
     assert.equal(await missing.text(), 'actual upstream missing')
     for (const unsafe of ['https://127.0.0.1:80', 'http://example.com', 'http://user@127.0.0.1', 'http://127.0.0.1/path']) {
-      await assert.rejects(startGatewayConsoleServer({ bundleRoot: root, gatewayOrigin: proxy.origin, managementGatewayOrigin: unsafe }), /origin-only loopback/)
+      await assert.rejects(startGatewayConsoleServer({ bundleRoot: root, gatewayOrigin: proxy.origin, managementGatewayOrigin: unsafe }), /origin-only loopback|Invalid Console transport configuration/)
     }
   } finally {
     if (proxy) await proxy.close()
@@ -98,7 +98,7 @@ test('transparent local proxy preserves both physical Gateway surfaces and opaqu
 
 test('disconnecting a Console event reader closes the actual upstream stream', async () => {
   const { createServer, get } = await import('node:http')
-  const { startGatewayConsoleServer } = await import('./gateway-server.mjs')
+  const { startGatewayConsoleServer } = await import('../server/native.mjs')
   const root = mkdtempSync(join(tmpdir(), 'insight-console-disconnect-'))
   writeFileSync(join(root, 'index.html'), '<!doctype html>')
   let observeClose

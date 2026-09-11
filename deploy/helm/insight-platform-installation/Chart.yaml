@@ -1,0 +1,6 @@
+apiVersion: v2
+name: insight-platform-installation
+description: Shared one-shot local installation and private per-process consumers
+type: application
+version: 0.1.0
+appVersion: "1"

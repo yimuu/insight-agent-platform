@@ -856,7 +856,7 @@ fn valid_remote_name(value: &str, maximum: usize) -> bool {
         && value.trim() == value
 }
 
-fn valid_http_header_name(value: &str) -> bool {
+pub(crate) fn valid_http_header_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.bytes().all(|byte| {

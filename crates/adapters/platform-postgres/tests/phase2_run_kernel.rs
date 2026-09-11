@@ -1,7 +1,11 @@
+#[path = "support/artifact_roles.rs"]
+mod artifact_roles;
 #[path = "support/child_budget_admission.rs"]
 mod child_budget_admission;
 #[path = "support/orchestration_claim_rounds.rs"]
 mod orchestration_claim_rounds;
+#[path = "support/scheduler_artifact_read_role.rs"]
+mod scheduler_artifact_read_role;
 mod support;
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifacts::{
@@ -823,7 +827,6 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
     let repository = PgRepository::new(pool.clone());
     seed_authorities(&repository, &pool).await;
     let (bindings, policy_deployment) = seed_agent_registry(&pool).await;
-    let expected_authoring_policy = policy_deployment.clone();
     let root_target = repository
         .resolve_root_run_target(&id(TENANT_ID), &id(AGENT_ID))
         .await
@@ -845,39 +848,6 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         CommandOutcome::Applied(_)
     ));
     security.commit().await.unwrap();
-    let authoring_policy = repository
-        .read_agent_authoring_policy_for_principal(
-            &id(TENANT_ID),
-            &id(PRINCIPAL_ID),
-            PrincipalKind::AgentRunner,
-        )
-        .await
-        .unwrap();
-    assert_eq!(authoring_policy.deployment, expected_authoring_policy);
-    assert_eq!(
-        authoring_policy.revision.resource_kind,
-        ResourceKind::PolicyRevision
-    );
-    assert!(matches!(
-        repository
-            .read_agent_authoring_policy_for_principal(
-                &id(TENANT_ID),
-                &id(DENIED_PRINCIPAL_ID),
-                PrincipalKind::AgentRunner,
-            )
-            .await,
-        Err(RepositoryError::PermissionDenied)
-    ));
-    assert!(matches!(
-        repository
-            .read_agent_authoring_policy_for_principal(
-                &id(TENANT_B_ID),
-                &id(PRINCIPAL_ID),
-                PrincipalKind::AgentRunner,
-            )
-            .await,
-        Err(RepositoryError::NotFound("tenant Agent authoring Policy binding"))
-    ));
     repository
         .create_quota_account(NewQuotaAccount {
             tenant_id: TENANT_ID.to_owned(),
@@ -1240,224 +1210,7 @@ fn run_admission_and_controls_are_atomic_exact_and_first_winner() {
         .await
         .unwrap();
     assert!(artifact_read_deadline > artifact_read_database_now);
-    let typed_plan_bytes = canonical_json(&serde_json::to_value(runtime_plan()).unwrap()).unwrap();
-    let expected_typed_plan_artifact = ArtifactRef::new(
-        id(TYPED_PLAN_ARTIFACT_ID),
-        runtime_plan().canonical_digest(plan_limits()).unwrap(),
-        u64::try_from(typed_plan_bytes.len()).unwrap(),
-        "application/json",
-        DataClassification::Internal,
-        Some("typed-plan.json".to_owned()),
-    )
-    .unwrap();
-    let typed_plan_read = repository
-        .resolve_typed_plan_read(SchedulerTypedPlanLease {
-        tenant_id: id(TENANT_ID),
-        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
-        orchestration_job_id: id(&running_for_recovery.job_id),
-        worker_process_generation_id: id(WORKER_D_ID),
-        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
-        lease_token_digest: digest('0'),
-        request_digest: digest('3'),
-        maximum_bytes: typed_plan_bytes.len(),
-        deadline: artifact_read_deadline,
-    })
-        .await
-        .unwrap();
-    assert_eq!(typed_plan_read.plan_revision_id, id(AGENT_PLAN_ID));
-    assert_eq!(typed_plan_read.artifact, expected_typed_plan_artifact);
-    let authorized = repository
-        .authorize_object_read(&typed_plan_read)
-        .await
-        .unwrap();
-    assert_eq!(authorized.blob_id, id(TYPED_PLAN_BLOB_ID));
-    let mut wrong_fence = typed_plan_read.clone();
-    wrong_fence.lease_token_digest = digest('4');
-    assert!(matches!(
-        repository.authorize_object_read(&wrong_fence).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    let skill_package_lease = SchedulerSkillPackageLease {
-        tenant_id: id(TENANT_ID),
-        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
-        orchestration_job_id: id(&running_for_recovery.job_id),
-        worker_process_generation_id: id(WORKER_D_ID),
-        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
-        lease_token_digest: digest('0'),
-        skill_slot_id: "review_skill".to_owned(),
-        skill_deployment_id: id(SKILL_DEPLOYMENT_ID),
-        request_digest: digest('8'),
-        maximum_bytes: MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
-        deadline: artifact_read_deadline,
-    };
-    let skill_package_read = repository
-        .resolve_skill_package_read(skill_package_lease.clone())
-        .await
-        .unwrap();
-    assert_eq!(skill_package_read.skill_revision_id, id(SKILL_REVISION_ID));
-    assert_eq!(
-        skill_package_read.artifact.artifact_id(),
-        &id(SKILL_PACKAGE_ARTIFACT_ID)
-    );
-    assert_eq!(
-        repository
-            .authorize_object_read(&skill_package_read)
-            .await
-            .unwrap()
-            .blob_id,
-        id(SKILL_PACKAGE_BLOB_ID)
-    );
-    let mut wrong_skill_slot = skill_package_lease.clone();
-    wrong_skill_slot.skill_slot_id = "missing_skill".to_owned();
-    assert!(matches!(
-        repository
-            .resolve_skill_package_read(wrong_skill_slot)
-            .await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    let mut unbound_skill = skill_package_lease;
-    unbound_skill.skill_deployment_id =
-        id("skdep_0198f1c3-9a00-7c3e-b1f3-773c28367204");
-    assert!(matches!(
-        repository.resolve_skill_package_read(unbound_skill).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    let artifact_value_body = json!({"question": "artifact terminal"});
-    let artifact_value_bytes = canonical_json(&artifact_value_body).unwrap();
-    let artifact_value_digest: Sha256Digest = canonical_digest(&artifact_value_body)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let artifact_value_metadata =
-        TypedPayload::new(1, &json!({"display_name": "terminal.json"})).unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.artifact_blobs (
-            tenant_id, blob_id, backend, storage_binding_digest,
-            security_domain_digest, object_reference_ciphertext, object_generation, key_id,
-            encryption_domain_id, content_digest, size_bytes, state, verified_at,
-            created_at, updated_at
-        ) VALUES ($1, $2, 'fixture', $3, $4, $5, 'run-value-generation-1',
-                  'fixture-key', $6, $7, $8, 'verified', statement_timestamp(),
-                  statement_timestamp(), statement_timestamp())
-        "#,
-    )
-    .bind(TENANT_ID)
-    .bind("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
-    .bind(digest('5').to_string())
-    .bind(digest('6').to_string())
-    .bind(vec![10_u8, 11, 12])
-    .bind("enc_0198f1c3-9a00-7c3e-b1f3-773c2836ae03")
-    .bind(artifact_value_digest.to_string())
-    .bind(i64::try_from(artifact_value_bytes.len()).unwrap())
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.artifacts (
-            tenant_id, artifact_id, blob_id, purpose, classification,
-            expected_size_bytes, expected_digest, declared_media_type,
-            verified_media_type, state, metadata_schema_version, metadata,
-            metadata_digest, retention_policy_revision_id, retain_until, created_by
-        ) VALUES ($1, $2, $3, 'run_output', 'internal', $4, $5,
-                  'application/json', 'application/json', 'ready', $6, $7, $8,
-                  $9, $10, $11)
-        "#,
-    )
-    .bind(TENANT_ID)
-    .bind("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
-    .bind("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
-    .bind(i64::try_from(artifact_value_bytes.len()).unwrap())
-    .bind(artifact_value_digest.to_string())
-    .bind(artifact_value_metadata.schema_version)
-    .bind(&artifact_value_metadata.value)
-    .bind(&artifact_value_metadata.digest)
-    .bind(POLICY_REVISION_ID)
-    .bind(Utc::now() + Duration::days(30))
-    .bind(PRINCIPAL_ID)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO insight_platform.run_values (
-            tenant_id, value_id, run_id, node_id, value_kind, classification,
-            schema_digest, content_digest, inline_value, artifact_id
-        ) VALUES ($1, $2, $3, NULL, 'terminal_fixture', 'internal', $4, $5, NULL, $6)
-        "#,
-    )
-    .bind(TENANT_ID)
-    .bind("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02")
-    .bind(running_for_recovery.run_id.as_deref().unwrap())
-    .bind(agent_schema().canonical_digest.to_string())
-    .bind(artifact_value_digest.to_string())
-    .bind("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
-    .execute(&pool)
-    .await
-    .unwrap();
-    let run_value_lease = SchedulerRunValueLease {
-        tenant_id: id(TENANT_ID),
-        run_id: id(running_for_recovery.run_id.as_deref().unwrap()),
-        orchestration_job_id: id(&running_for_recovery.job_id),
-        worker_process_generation_id: id(WORKER_D_ID),
-        lease_generation: u64::try_from(running_for_recovery.lease_epoch).unwrap(),
-        lease_token_digest: digest('0'),
-        run_value_id: id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02"),
-        request_digest: digest('7'),
-        maximum_bytes: artifact_value_bytes.len(),
-        deadline: artifact_read_deadline,
-    };
-    let run_value_read = repository
-        .resolve_run_value_read(run_value_lease.clone())
-        .await
-        .unwrap();
-    assert_eq!(run_value_read.schema_digest, agent_schema().canonical_digest);
-    assert_eq!(run_value_read.classification, DataClassification::Internal);
-    assert_eq!(
-        run_value_read.artifact.artifact_id(),
-        &id("art_0198f1c3-9a00-7c3e-b1f3-773c2836ae01")
-    );
-    let authorized_value = repository
-        .authorize_object_read(&run_value_read)
-        .await
-        .unwrap();
-    assert_eq!(
-        authorized_value.blob_id,
-        id("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
-    );
-    let mut wrong_value = run_value_lease;
-    wrong_value.run_value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae04");
-    assert!(matches!(
-        repository.resolve_run_value_read(wrong_value).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    let expired_running_job = sqlx::query(
-        r#"
-        UPDATE insight_platform.jobs
-        SET lease_expires_at = clock_timestamp() - interval '1 millisecond'
-        WHERE tenant_id = $1 AND job_id = $2 AND state = 'running'
-        "#,
-    )
-    .bind(TENANT_ID)
-    .bind(&running_for_recovery.job_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    assert_eq!(expired_running_job.rows_affected(), 1);
-    assert!(sqlx::query_scalar::<_, bool>("SELECT $1 > clock_timestamp()")
-        .bind(artifact_read_deadline)
-        .fetch_one(&pool)
-        .await
-        .unwrap());
-    assert!(matches!(
-        repository.authorize_object_read(&typed_plan_read).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
-    assert!(matches!(
-        repository.authorize_object_read(&run_value_read).await,
-        Err(ArtifactObjectReadAuthorityError::Denied)
-    ));
+    scheduler_artifact_read_role::verify(&pool, &running_for_recovery, artifact_read_deadline).await;
     let running_recovery = DriveExpiredOrchestrationJobs {
         shard: SafetyScanShard::whole(),
         after: None,
@@ -11305,8 +11058,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
         .await
         .unwrap();
     }
-    let typed_plan_metadata =
-        TypedPayload::new(1, &json!({"display_name": "typed-plan.json"})).unwrap();
+    let typed_plan_metadata = fixture_artifact_metadata("typed-plan.json");
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifact_blobs (
@@ -11356,8 +11108,7 @@ async fn seed_agent_registry(pool: &PgPool) -> (RunBindingsSnapshot, ExactDeploy
     .execute(pool)
     .await
     .unwrap();
-    let skill_package_metadata =
-        TypedPayload::new(1, &json!({"display_name": "review.skill"})).unwrap();
+    let skill_package_metadata = fixture_artifact_metadata("review.skill");
     sqlx::query(
         r#"
         INSERT INTO insight_platform.artifact_blobs (
@@ -11974,4 +11725,13 @@ async fn settle_child_completion_fixture(
         "child_call_2"
     );
     applied.activations[0].job.clone()
+}
+
+fn fixture_artifact_metadata(display_name: &str) -> TypedPayload {
+    let metadata = insight_platform_artifacts::ArtifactMetadataSnapshot::new_installation(
+        Some(display_name.to_owned()),
+        id("req_0198f1c3-9a00-7c3e-b1f3-773c2836ae05"),
+    )
+    .unwrap();
+    TypedPayload::from_versioned(2, &metadata, 65_536).unwrap()
 }

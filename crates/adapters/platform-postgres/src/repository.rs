@@ -9,6 +9,13 @@ mod controller_queries;
 mod installation_commands;
 mod job_commands;
 mod model_commands;
+mod model_configuration;
+mod model_connection;
+mod model_credential_import;
+mod model_default_commands;
+mod model_policy_bootstrap;
+mod model_quota;
+pub(crate) use model_default_commands::validate_default_model_closure;
 mod model_convergence;
 use model_convergence::{model_run_convergence_goal, settle_suppressed_model_continuation};
 mod quota_commands;
@@ -33,9 +40,9 @@ use insight_platform_contracts::{
     ActiveTarget, AdministrativeGate, AgentDeploymentClosure, AgentResourceSpec, ArtifactRef,
     ArtifactRetentionPolicy, AuthoringPackage, CandidateSelectionPolicyDocument, ClosedJsonSchema,
     CommandAudit, CommandOutcome, DataClassification, DeploymentClosure, EntityLifecycle,
-    ExactDatasetGenerationRef, ExactDeploymentRef, ExactPolicyBinding, ExactSecretBindingRef,
-    ExactVersionRef, Failure, FailureClass, FailureCode, FailureSource, FrozenSlotTarget,
-    HardLimitProfile, InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
+    ExactDatasetGenerationRef, ExactDeploymentRef, ExactSecretBindingRef, ExactVersionRef, Failure,
+    FailureClass, FailureCode, FailureSource, FrozenSlotTarget, HardLimitProfile,
+    InstallationPrincipalBinding, InvocationState, JobKind, JobState, JsonLimits,
     NodeExecutionState, Permission, PermissionSet, PlanNodeKind, PlatformFailureCode, PolicyKind,
     PolicyReferenceRole, PrincipalBindingState, PrincipalBindingsPayload, PrincipalKind,
     PrincipalSnapshot, PublicRunEventType, PublishedVersionPayload, RegistryResourceKind,
@@ -599,6 +606,8 @@ async fn verify_development_profile_replay(
     let mut immutable_config = current_tenant.config.clone();
     // An explicit later Scheduling binding is mutable domain authority, not seed drift.
     immutable_config.scheduling_policy = expected_config.scheduling_policy.clone();
+    // An authoring default is later mutable Tenant state, never an initialization repair target.
+    immutable_config.default_model = expected_config.default_model.clone();
     let immutable_payload = TypedPayload::with_limit(1, &immutable_config, 65_536)?;
     if current_tenant.state != command.tenant.state
         || immutable_payload.digest != evidence.tenant_config.digest
@@ -986,6 +995,9 @@ impl PgRepository {
         let exact_binding = command.exact_binding()?;
         let mut transaction = self.pool.begin().await?;
         require_tenant_permission(&mut transaction, &command.audit, Permission::SecretBind).await?;
+        if let Some(identity) = &command.delegated_import {
+            model_credential_import::require_import_principal(&mut transaction, identity).await?;
+        }
         if claim_command_receipt(
             &mut transaction,
             &command.audit,
@@ -1043,8 +1055,33 @@ impl PgRepository {
         .bind(&payload.value)
         .bind(&payload.digest)
         .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RepositoryError::Conflict("secret binding"))?;
+        .await?;
+        let Some(row) = row else {
+            // A current exact Binding remains authoritative after the original Receipt expires.
+            // Never replace its ciphertext or reopen a revoked Binding on an import retry.
+            if command.delegated_import.is_none() {
+                return Err(RepositoryError::Conflict("secret binding"));
+            }
+            let current = load_secret_binding_resolution_in_transaction(
+                &mut transaction,
+                &command.audit.tenant_id,
+                &command.secret_binding_id,
+            )
+            .await?;
+            validate_registered_prepared_binding(&current, &command)?;
+            terminalize_command_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.secret_binding_id.to_string(),
+                "registered",
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(PreparedSecretBindingRegistrationOutcome {
+                disposition: PreparedSecretBindingRegistrationDisposition::Replayed,
+                exact_binding,
+            });
+        };
         let aggregate_version: i64 = row.try_get("version")?;
         let current = secret_binding_resolution_from_row(row)?;
         validate_registered_prepared_binding(&current, &command)?;
@@ -1061,6 +1098,7 @@ impl PgRepository {
                 &serde_json::json!({
                     "generation": current.generation,
                     "preparation_digest": command.preparation_digest,
+                    "delegated_import": command.delegated_import,
                     "provider_id": command.provider_id,
                     "provider_storage_evidence_digest": command.provider_storage_evidence_digest,
                     "purpose": command.purpose,
@@ -16900,6 +16938,7 @@ fn development_artifact_authority_material(
     let retention_resource = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in local Artifact retention".to_owned(),
             document: retention_document.clone(),
             validation: None,
@@ -16915,6 +16954,7 @@ fn development_artifact_authority_material(
     let artifact_io_resource = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in local Artifact I/O".to_owned(),
             document: artifact_io_document.clone(),
             validation: None,
@@ -16930,6 +16970,7 @@ fn development_artifact_authority_material(
     let scheduling_resource = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in local Scheduling".to_owned(),
             document: scheduling_document.clone(),
             validation: None,
@@ -16998,6 +17039,7 @@ fn development_artifact_authority_material(
         }),
     )?;
     let tenant_config = TenantConfig {
+        default_model: None,
         scheduling_policy: Some(
             ExactDeploymentRef::new(
                 seed.scheduling_policy_deployment_id.clone(),
@@ -17496,6 +17538,7 @@ pub enum ResourcePublishPreparation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResourcePublishReceiptResult {
+    alias: Option<insight_platform_contracts::ResourceAlias>,
     schema_version: u32,
     tenant_id: String,
     resource_id: String,
@@ -18948,6 +18991,7 @@ async fn load_resource_publish_receipt(
         }
     }
     let draft = ResourceDraftPayload {
+        alias: result.alias,
         display_name: result.display_name,
         document: first_payload.document,
         validation: Some(first_payload.validation),
@@ -18987,6 +19031,7 @@ async fn terminalize_resource_publish_receipt(
     display_name: &str,
 ) -> Result<(), RepositoryError> {
     let result = ResourcePublishReceiptResult {
+        alias: decode_resource_draft(&published.resource.payload)?.alias,
         schema_version: 1,
         tenant_id: published.resource.tenant_id.clone(),
         resource_id: published.resource.resource_id.clone(),
@@ -19079,7 +19124,7 @@ async fn append_command_event_version(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn append_command_event_version_for_run(
+pub(crate) async fn append_command_event_version_for_run(
     transaction: &mut Transaction<'_, Postgres>,
     audit: &CommandAudit,
     aggregate_kind: &str,
@@ -19168,6 +19213,10 @@ fn public_run_event_type(
     use PublicRunEventType as Public;
 
     match (aggregate_kind, event_type) {
+        ("model_turn", name) => name.parse::<Public>().ok().filter(|event| {
+            event.durable_source_kind()
+                == Some(insight_platform_contracts::PublicRunEventSourceKind::ModelTurn)
+        }),
         ("run", "run.admitted") => Some(Public::RunQueued),
         ("run", "run.pause_requested") => Some(Public::RunPaused),
         ("run", "run.pause_resumed") => Some(Public::RunResumed),
@@ -19195,7 +19244,7 @@ fn public_run_event_type(
 
 fn public_terminal_run_event(payload: &Value) -> Option<PublicRunEventType> {
     use PublicRunEventType as Public;
-    match payload.get("state").and_then(Value::as_str) {
+    match payload.get("terminal_state").and_then(Value::as_str) {
         Some("succeeded") => Some(Public::RunCompleted),
         Some("failed") => Some(Public::RunFailed),
         Some("cancelled") => Some(Public::RunCancelled),
@@ -19206,7 +19255,7 @@ fn public_terminal_run_event(payload: &Value) -> Option<PublicRunEventType> {
 
 fn public_terminal_node_event(payload: &Value) -> Option<PublicRunEventType> {
     use PublicRunEventType as Public;
-    match payload.get("state").and_then(Value::as_str) {
+    match payload.get("terminal_state").and_then(Value::as_str) {
         Some("succeeded") => Some(Public::NodeCompleted),
         Some("failed") => Some(Public::NodeFailed),
         Some("cancelled") => Some(Public::NodeCancelled),
@@ -19281,7 +19330,7 @@ fn public_run_event_from_row(row: PgRow) -> Result<PublicRunEventRecord, Reposit
     })
 }
 
-async fn load_tenant(
+pub(crate) async fn load_tenant(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
 ) -> Result<TenantRecord, RepositoryError> {
@@ -19733,7 +19782,7 @@ async fn load_secret_binding_metadata_for_update(
     load_secret_binding_metadata_with_lock(transaction, tenant_id, secret_binding_id, true).await
 }
 
-async fn load_secret_binding_resolution_in_transaction(
+pub(crate) async fn load_secret_binding_resolution_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     secret_binding_id: &ResourceId,
@@ -20250,7 +20299,7 @@ async fn lock_active_policy_deployment_for_binding(
     Ok(())
 }
 
-async fn load_run(
+pub(crate) async fn load_run(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     run_id: &ResourceId,
@@ -20880,9 +20929,21 @@ pub(crate) async fn validate_deployment_closure_exists(
             require_ready_run_artifact(
                 transaction,
                 tenant_id,
-                &model_provider.conformance_evidence,
+                &model_provider.admission_evidence.artifact,
             )
             .await?;
+            if model_provider.admission_evidence.basis
+                == insight_platform_contracts::ModelEvidenceBasis::OperatorDeclaration
+            {
+                insight_platform_contracts::validate_model_provider_declaration(&provider)
+                    .map_err(|_| RepositoryError::Conflict("Model Provider declaration"))?;
+                if model_provider.admission_evidence.artifact != provider.authoring_package.artifact
+                {
+                    return Err(RepositoryError::Conflict(
+                        "Model Provider declaration Artifact",
+                    ));
+                }
+            }
         }
         DeploymentClosure::ModelProfile(model_profile) => {
             let profile = crate::invocation_repository::load_enabled_exact_published_version(
@@ -22574,6 +22635,81 @@ mod tests {
             validate_development_bootstrap(&mismatched_tenant),
             Err(RepositoryError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn model_public_projection_uses_only_owning_durable_source() {
+        use PublicRunEventType as Public;
+        for (name, expected) in [
+            ("model.started", Public::ModelStarted),
+            ("model.tool_intent", Public::ModelToolIntent),
+            ("model.completed", Public::ModelCompleted),
+            ("model.failed", Public::ModelFailed),
+            ("model.cancelled", Public::ModelCancelled),
+            ("model.timed_out", Public::ModelTimedOut),
+        ] {
+            assert_eq!(
+                public_run_event_type("model_turn", name, &Value::Null),
+                Some(expected)
+            );
+            for wrong_source in ["run", "node_execution", "invocation", "unknown"] {
+                assert_eq!(
+                    public_run_event_type(wrong_source, name, &Value::Null),
+                    None
+                );
+            }
+        }
+        for name in [
+            "model.delta",
+            "model.retry_scheduled",
+            "model.cancelling",
+            "model.unknown",
+            "run.completed",
+            "node.started",
+        ] {
+            assert_eq!(
+                public_run_event_type("model_turn", name, &Value::Null),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_public_projection_requires_actual_producer_field() {
+        use PublicRunEventType as Public;
+        for (state, run, node) in [
+            ("succeeded", Public::RunCompleted, Public::NodeCompleted),
+            ("failed", Public::RunFailed, Public::NodeFailed),
+            ("cancelled", Public::RunCancelled, Public::NodeCancelled),
+            ("timed_out", Public::RunTimedOut, Public::NodeTimedOut),
+        ] {
+            for (source, name, expected) in [
+                ("run", "run.terminal_committed", run),
+                ("run", "run.terminal_converged", run),
+                ("node_execution", "node.terminal_committed", node),
+                ("node_execution", "node.terminal_converged", node),
+            ] {
+                assert_eq!(
+                    public_run_event_type(
+                        source,
+                        name,
+                        &serde_json::json!({"terminal_state":state})
+                    ),
+                    Some(expected)
+                );
+                assert_eq!(
+                    public_run_event_type(source, name, &serde_json::json!({"state":state})),
+                    None
+                );
+                for invalid in [
+                    Value::Null,
+                    serde_json::json!({"terminal_state":"running"}),
+                    serde_json::json!({"terminal_state":1}),
+                ] {
+                    assert_eq!(public_run_event_type(source, name, &invalid), None);
+                }
+            }
+        }
     }
 
     #[test]

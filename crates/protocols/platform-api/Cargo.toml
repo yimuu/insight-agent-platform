@@ -23,6 +23,7 @@ insight-platform-contracts.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-mcp-host.workspace = true
 insight-platform-tasks.workspace = true
+insight-platform-security.workspace = true
 jsonwebtoken.workspace = true
 ring.workspace = true
 serde.workspace = true

@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
--- Provisioning-only grants for the three Artifact process roles. Data Worker intentionally uses
--- a separate read-only pool for Sandbox materialization and a mutation pool for scan commits.
+-- Provisioning-only grants for the four Artifact database roles. Data Worker intentionally uses
+-- a separate read-only materialization pool and a mutation pool for scan/stage commits.
 BEGIN;
 
 SELECT pg_catalog.set_config('insight_platform.artifact_gateway_role', :'artifact_gateway_role', true);
@@ -38,30 +38,61 @@ BEGIN
         'GRANT SELECT ON insight_platform.invocations, insight_platform.jobs, insight_platform.run_values, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         reader_role
     );
+    -- Scheduler TypedPlan/RunValue/Skill reads and the Skill's current Selection Policy closure.
+    -- Preserve column-only reads: no Run current payload, table-wide reads, DML or row locks.
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, run_id, version, state, bindings_schema_version, bindings, bindings_digest) ON insight_platform.runs TO %I',
+        reader_role
+    );
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, resource_version_id, resource_id, resource_version_kind, content_digest, artifact_id, payload_schema_version, payload, payload_digest) ON insight_platform.resource_versions TO %I',
+        reader_role
+    );
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, deployment_id, resource_id, resource_version_id, payload_schema_version, bindings, bindings_digest) ON insight_platform.deployments TO %I',
+        reader_role
+    );
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, resource_id, resource_kind, lifecycle_state, gate_state) ON insight_platform.resources TO %I',
+        reader_role
+    );
 
     EXECUTE pg_catalog.format(
-        'GRANT SELECT ON insight_platform.tenants, insight_platform.principals, insight_platform.tenant_principals, insight_platform.resources, insight_platform.resource_versions, insight_platform.quota_accounts, insight_platform.quota_ledger, insight_platform.jobs, insight_platform.tasks, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
+        'GRANT SELECT ON insight_platform.tenants, insight_platform.principals, insight_platform.tenant_principals, insight_platform.resources, insight_platform.resource_versions, insight_platform.deployments, insight_platform.quota_accounts, insight_platform.quota_ledger, insight_platform.jobs, insight_platform.tasks, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         gateway_role
     );
     EXECUTE pg_catalog.format(
-        'GRANT INSERT ON insight_platform.quota_ledger, insight_platform.jobs, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
+        'GRANT INSERT ON insight_platform.quota_ledger, insight_platform.jobs, insight_platform.tasks, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         gateway_role
     );
     EXECUTE pg_catalog.format(
         'GRANT UPDATE ON insight_platform.quota_accounts, insight_platform.jobs, insight_platform.receipts, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         gateway_role
     );
+    EXECUTE pg_catalog.format(
+        'GRANT EXECUTE ON FUNCTION insight_platform.artifact_lock_scan_policy(text, text) TO %I',
+        gateway_role
+    );
 
     EXECUTE pg_catalog.format(
-        'GRANT SELECT ON insight_platform.jobs, insight_platform.resources, insight_platform.resource_versions, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
+        'GRANT SELECT ON insight_platform.jobs, insight_platform.invocations, insight_platform.resources, insight_platform.resource_versions, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         worker_role
     );
     EXECUTE pg_catalog.format(
-        'GRANT INSERT ON insight_platform.jobs, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events TO %I',
+        'GRANT INSERT ON insight_platform.jobs, insight_platform.artifacts, insight_platform.artifact_blobs, insight_platform.events, insight_platform.receipts, insight_platform.outbox_events TO %I',
         worker_role
     );
     EXECUTE pg_catalog.format(
         'GRANT UPDATE ON insight_platform.jobs, insight_platform.receipts, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
+        worker_role
+    );
+    EXECUTE pg_catalog.format(
+        'GRANT EXECUTE ON FUNCTION insight_platform.artifact_lock_scan_policy(text, text) TO %I',
+        worker_role
+    );
+    -- Existing MCP verification wake advances only its operation version/timestamp by exact CAS.
+    EXECUTE pg_catalog.format(
+        'GRANT UPDATE (version, updated_at) ON insight_platform.invocations TO %I',
         worker_role
     );
 

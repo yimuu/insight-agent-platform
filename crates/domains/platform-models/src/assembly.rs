@@ -108,11 +108,9 @@ pub fn assemble_prompt_messages(
         }
         let included_bytes = u32::try_from(block.text.len())
             .map_err(|_| PromptAssemblyError::BlockBudgetExceeded)?;
-        let estimated_tokens = included_bytes
-            .checked_add(3)
-            .ok_or(PromptAssemblyError::BlockBudgetExceeded)?
-            / 4;
-        let estimated_tokens = estimated_tokens.max(1);
+        let estimated_tokens =
+            insight_platform_contracts::estimate_model_text_tokens(included_bytes)
+                .ok_or(PromptAssemblyError::BlockBudgetExceeded)?;
         if included_bytes > block.byte_budget || estimated_tokens > block.token_budget {
             return Err(PromptAssemblyError::BlockBudgetExceeded);
         }
@@ -241,11 +239,9 @@ pub fn derive_prompt_source_map(
         };
         let included_bytes =
             u32::try_from(encoded.len()).map_err(|_| PromptAssemblyError::BlockBudgetExceeded)?;
-        let estimated_tokens = included_bytes
-            .checked_add(3)
-            .ok_or(PromptAssemblyError::BlockBudgetExceeded)?
-            / 4;
-        let estimated_tokens = estimated_tokens.max(1);
+        let estimated_tokens =
+            insight_platform_contracts::estimate_model_text_tokens(included_bytes)
+                .ok_or(PromptAssemblyError::BlockBudgetExceeded)?;
         if included_bytes > message.source.byte_budget
             || estimated_tokens > message.source.token_budget
             || digest_bytes(&encoded)? != message.source.content_digest

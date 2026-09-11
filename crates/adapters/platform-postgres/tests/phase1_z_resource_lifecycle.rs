@@ -1,6 +1,8 @@
 mod product_authoring_query_fixture;
 #[path = "support/recovery_scanner_isolation.rs"]
 mod recovery_scanner_isolation;
+#[path = "support/resource_alias.rs"]
+mod resource_alias;
 mod support;
 use chrono::{Duration, Utc};
 use insight_platform_contracts::TypedPayload;
@@ -252,6 +254,7 @@ async fn prove_sandbox_package_image_publication(
         package_digest: digest('6'),
     });
     let draft = ResourceDraftPayload {
+        alias: None,
         display_name: "Sandbox package publication fixture".to_owned(),
         document: package_document.clone(),
         validation: None,
@@ -669,6 +672,7 @@ async fn resource_lifecycle_fixture() {
     let retention_resource_payload = TypedPayload::new(
         1,
         &ResourceDraftPayload {
+            alias: None,
             display_name: "Built-in Artifact retention".to_owned(),
             document: retention_document.clone(),
             validation: None,
@@ -908,6 +912,7 @@ async fn resource_lifecycle_fixture() {
         sandbox_secret_resolution: None,
     }));
     let draft = ResourceDraftPayload {
+        alias: None,
         display_name: "Tenant authorization policy".to_owned(),
         document: document.clone(),
         validation: None,
@@ -1543,6 +1548,7 @@ async fn resource_lifecycle_fixture() {
     let agent_contract_digest = compilation.compiled.resource_intent.contract_digest.clone();
     let agent_plan_digest = compilation.compiled.typed_plan_digest.clone();
     let agent_draft = ResourceDraftPayload {
+        alias: None,
         display_name: "Deployment closure agent".to_owned(),
         document: agent_document.clone(),
         validation: None,
@@ -2193,7 +2199,7 @@ async fn resource_lifecycle_fixture() {
     assert_eq!(first_update.version, 10);
     assert_eq!(first_update.draft_generation, 2);
 
-    let mut second_updated_draft = draft;
+    let mut second_updated_draft = draft.clone();
     second_updated_draft.display_name = "Later current draft".to_owned();
     let second_update = applied(
         registry_command!(
@@ -2505,6 +2511,7 @@ async fn resource_lifecycle_fixture() {
         requirement_set_digest,
     });
     let skill_draft = ResourceDraftPayload {
+        alias: None,
         display_name: "Qualified deployment skill".to_owned(),
         document: skill_document.clone(),
         validation: None,
@@ -2681,6 +2688,7 @@ async fn resource_lifecycle_fixture() {
         semantic_digest: digest('4'),
     });
     let sandbox_profile_draft = ResourceDraftPayload {
+        alias: None,
         display_name: "OpenSandbox deployment profile".to_owned(),
         document: sandbox_profile_document.clone(),
         validation: None,
@@ -2893,6 +2901,7 @@ async fn resource_lifecycle_fixture() {
         .unwrap();
         assert_eq!(atomic_evidence, (1, 1, 1));
     }
+    resource_alias::verify(&pool, &repository, &draft, &skill_draft).await;
     Box::pin(registry_publication_revisions::verify(
         &pool,
         &repository,

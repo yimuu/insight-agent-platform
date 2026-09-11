@@ -27,7 +27,7 @@ def main():
             project = Path(tempfile.mkdtemp(prefix="insight-cleanup-")).resolve()
             project_identity = identity(project)
             owned.append((project, project_identity))
-            run([insight, "init", "--path", str(project), "--name", "cleanup-probe"])
+            run([insight, "qualification-aws", "init", "--path", str(project), "--name", "cleanup-probe"])
             manifest = json.loads((project / ".insight/project.json").read_bytes())
             tenant = manifest["identity"]["tenant_id"]
             compose_project = "insight-" + tenant.removeprefix("ten_").replace("-", "")

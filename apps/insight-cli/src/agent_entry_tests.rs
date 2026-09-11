@@ -10,7 +10,7 @@ pub(crate) fn project() -> TempDir {
         directory.path(),
         "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        &worker_profile::fixture_binaries(directory.path()),
+        &workspace_assets::worker_binary_fixtures(directory.path()),
     )
     .unwrap();
     let corpus = workspace_assets::workspace_path("contracts/product-experience/agent-compiler/v2");
@@ -24,6 +24,19 @@ pub(crate) fn project() -> TempDir {
         directory.path().join("schema-message.json"),
     )
     .unwrap();
+    // Explicit fixture compiler inputs model an exported exact source profile. No runtime
+    // bootstrap or synthetic Scheduling digest supplies execution authority.
+    let corpus_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(corpus.join("corpus.json")).unwrap()).unwrap();
+    let path = directory
+        .path()
+        .join(".insight/agent-compiler-profile.json");
+    fs::write(&path, serde_json::to_vec(&corpus_value["profile"]).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     directory
 }
 
@@ -115,24 +128,18 @@ fn captured_source_is_used_even_when_disk_changes_after_inspection() {
 }
 
 #[test]
-fn authoring_reads_full_shared_bootstrap_and_rejects_current_profile_drift() {
+fn offline_authoring_requires_explicit_profile_and_rejects_unknown_fields() {
     let directory = project();
-    let profile = agent::offline_compiler_profile(directory.path()).unwrap();
-    let runtime = directory
+    agent::offline_compiler_profile(directory.path()).unwrap();
+    let path = directory
         .path()
-        .join(PROJECT_DIRECTORY)
-        .join(RUNTIME_DIRECTORY);
-    let path = runtime
-        .join(RUNTIME_CONFIGURATION_DIRECTORY)
-        .join(RUNTIME_ARTIFACT_BOOTSTRAP_CONFIG_FILE);
-    let mut bootstrap: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(
-        profile.execution_profile.revision.revision_id.to_string(),
-        bootstrap["scheduling_policy_revision_id"]
-    );
-    bootstrap["unknown_authoring_field"] = serde_json::json!(true);
-    fs::write(&path, serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+        .join(".insight/agent-compiler-profile.json");
+    let original = fs::read(&path).unwrap();
+    let mut profile: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    profile["unknown_authoring_field"] = serde_json::json!(true);
+    fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    assert!(agent::offline_compiler_profile(directory.path()).is_err());
+    fs::remove_file(path).unwrap();
     assert!(agent::offline_compiler_profile(directory.path()).is_err());
 }
 

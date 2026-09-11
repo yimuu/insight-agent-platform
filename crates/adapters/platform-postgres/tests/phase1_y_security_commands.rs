@@ -1,3 +1,5 @@
+#[path = "support/model_credential_import.rs"]
+mod model_credential_import;
 use chrono::{Duration, Utc};
 use insight_platform_contracts::{
     CommandAudit, CommandOutcome, Permission, PermissionSet, PrincipalBindingsPayload,
@@ -334,6 +336,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
         reference_digest: digest('d'),
         opaque_version_identity_digest: digest('e'),
         provider_storage_evidence_digest: digest('f'),
+        delegated_import: None,
     };
     prepared.audit.request_digest = prepared.semantic_request_digest().unwrap();
     let applied = repository
@@ -420,7 +423,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
         );
 
         let unauthorized_read =
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM insight_platform.runs")
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM insight_platform.run_values")
                 .fetch_one(&restricted_pool)
                 .await
                 .unwrap_err();
@@ -661,7 +664,7 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
         .bind(TENANT_ID).bind(PREPARED_SECRET_ID).fetch_one(&pool).await.unwrap();
     assert_eq!(
         limited_repository
-            .register_prepared(prepared)
+            .register_prepared(prepared.clone())
             .await
             .unwrap_err(),
         PreparedSecretBindingRegistrationError::Rejected
@@ -672,5 +675,6 @@ async fn security_commands_are_fenced_atomic_and_secret_safe() {
         .bind(TENANT_ID).bind(PREPARED_SECRET_ID).fetch_one(&pool).await.unwrap();
     assert_eq!(after, before);
     assert_eq!(binding_after, binding_before);
+    model_credential_import::verify(&repository, &limited_repository, &prepared).await;
     limited.close().await;
 }

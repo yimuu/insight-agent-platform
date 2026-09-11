@@ -19,6 +19,7 @@ def expected_results(selections: Mapping[str, bool]) -> dict[str, str]:
         "test": "success" if runtime else "skipped",
         "cli": "success" if selections["cli"] and not runtime else "skipped",
         "console": "success" if selections["console"] else "skipped",
+        "installation": "success" if runtime or selections["console"] else "skipped",
         "policy": "success" if selections["policy"] else "skipped",
     }
 
@@ -53,6 +54,7 @@ def main() -> None:
         "test",
         "cli",
         "console",
+        "installation",
         "policy",
     ):
         parser.add_argument(f"--{lane}-result", choices=RESULTS, required=True)
@@ -70,6 +72,7 @@ def main() -> None:
             "test",
             "cli",
             "console",
+            "installation",
             "policy",
         )
     }

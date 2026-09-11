@@ -440,6 +440,11 @@ where
                     .node(&command.facts.plan_node_key)
                     .map_err(|_| DurablePlanDriverError::InvariantViolation)?
                     .clone(),
+                response_schema: command
+                    .materialized
+                    .plan
+                    .model_response_schema(&command.facts.plan_node_key)
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?,
                 input: input.clone(),
                 input_value: value,
                 tool_slots: tool_slots.clone(),

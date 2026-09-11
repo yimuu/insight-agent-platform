@@ -3,10 +3,10 @@ mod tests {
     use super::*;
     use insight_platform_api::resource::{deployment_etag, resource_etag, resource_version_etag};
     use insight_platform_contracts::{
-        operation_etag, ApiProblem, ApiProblemCode, AuthoringPackage,
-        CapabilityEndpointScheme, CanonicalHttpEndpoint, ClosedJsonValue, DataClassification,
-        ExactDeploymentRef, ExactVersionRef, PolicyKind, PolicyResourceSpec, SafeJobFailure,
-        SafeJobResult, SandboxNetworkMode, SandboxProvisioningLimitsV1, SandboxProviderKind,
+        operation_etag, ApiProblem, ApiProblemCode, AuthoringPackage, CanonicalHttpEndpoint,
+        CapabilityEndpointScheme, ClosedJsonValue, DataClassification, ExactDeploymentRef,
+        ExactVersionRef, PolicyKind, PolicyResourceSpec, ResourceDocument, SafeJobFailure,
+        SafeJobResult, SandboxNetworkMode, SandboxProviderKind, SandboxProvisioningLimitsV1,
         SandboxResourceLimitsV1, SandboxRuntimeContractV1, SandboxRuntimeResourceSpec, TraceId,
         ValidationSummary,
     };
@@ -300,6 +300,7 @@ mod tests {
             draft_generation: 1,
             version,
             draft: ResourceDraftPayload {
+                alias: None,
                 display_name: manifest.create.display_name.clone(),
                 document: manifest.create.document.clone(),
                 validation: None,
@@ -335,10 +336,7 @@ mod tests {
         }
     }
 
-    fn scripted_create(
-        manifest: &ApplyManifestV1,
-        resource_id: &ResourceId,
-    ) -> ScriptedResponse {
+    fn scripted_create(manifest: &ApplyManifestV1, resource_id: &ResourceId) -> ScriptedResponse {
         let body = created_policy(manifest, resource_id, 1);
         ScriptedResponse {
             method: "POST",
@@ -357,12 +355,8 @@ mod tests {
         resource_id: &ResourceId,
         operation_id: &ResourceId,
     ) -> ScriptedResponse {
-        let body = validation_operation(
-            tenant_id,
-            resource_id,
-            operation_id,
-            PublicJobState::Queued,
-        );
+        let body =
+            validation_operation(tenant_id, resource_id, operation_id, PublicJobState::Queued);
         ScriptedResponse {
             method: "POST",
             path: format!("/v1/policies/{resource_id}/draft:validate"),
@@ -381,6 +375,13 @@ mod tests {
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let parsed = parse_manifest(&bytes);
         assert!(parsed.is_ok(), "{parsed:?}");
+
+        let mut aliased = manifest.clone();
+        aliased["create"]["alias"] = serde_json::json!("primary-policy");
+        let (parsed, _) = parse_manifest(&serde_json::to_vec(&aliased).unwrap()).unwrap();
+        assert_eq!(parsed.create.alias.unwrap().as_str(), "primary-policy");
+        aliased["create"]["alias"] = serde_json::json!("Invalid Alias");
+        assert!(parse_manifest(&serde_json::to_vec(&aliased).unwrap()).is_err());
 
         let mut open = manifest;
         open.as_object_mut()
@@ -444,6 +445,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let created_draft = ResourceDraftPayload {
+            alias: None,
             display_name: manifest.create.display_name.clone(),
             document: manifest.create.document.clone(),
             validation: None,
@@ -589,10 +591,9 @@ mod tests {
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (head, _) = read_request(&mut stream);
-                assert!(head.starts_with(&format!(
-                    "{} {} HTTP/1.1",
-                    response.method, response.path
-                )));
+                assert!(
+                    head.starts_with(&format!("{} {} HTTP/1.1", response.method, response.path))
+                );
                 assert_eq!(
                     header_value(&head, "if-match"),
                     response.expected_if_match.as_deref()
@@ -663,6 +664,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let created_draft = ResourceDraftPayload {
+            alias: None,
             display_name: manifest.create.display_name.clone(),
             document: manifest.create.document.clone(),
             validation: None,
@@ -869,7 +871,7 @@ mod tests {
                 etag: activated_etag.clone(),
                 location: None,
                 body: serde_json::to_vec(&ResourceViewV1 {
-                    active_deployment_id: None,
+                    active_deployment_id: Some(deployment_id.clone()),
                     schema_version: 1,
                     resource_id: resource_id.clone(),
                     resource_kind: RegistryResourceKind::Policy,
@@ -877,11 +879,31 @@ mod tests {
                     gate_state: AdministrativeGate::Enabled,
                     draft_generation: 1,
                     version: 5,
-                    draft: validated_draft,
+                    draft: validated_draft.clone(),
                     etag: activated_etag.clone(),
                 })
                 .unwrap(),
                 assert_deployment_version: None,
+            },
+            ScriptedResponse {
+                method: "GET", path: format!("/v1/policies/{resource_id}"), expected_if_match: None,
+                status: "200 OK", etag: activated_etag.clone(), location: None,
+                body: serde_json::to_vec(&ResourceViewV1 {
+                    active_deployment_id: Some(deployment_id.clone()), schema_version:1, resource_id:resource_id.clone(), resource_kind:RegistryResourceKind::Policy,
+                    lifecycle_state:EntityLifecycle::Active, gate_state:AdministrativeGate::Enabled, draft_generation:1, version:5,
+                    draft:validated_draft.clone(), etag:activated_etag.clone(),
+                }).unwrap(), assert_deployment_version:None,
+            },
+            // The same deployment becoming active again after other mutations is newer authority,
+            // not a replay of this completed publication.
+            ScriptedResponse {
+                method: "GET", path: format!("/v1/policies/{resource_id}"), expected_if_match: None,
+                status: "200 OK", etag: resource_etag(&resource_id,7), location: None,
+                body: serde_json::to_vec(&ResourceViewV1 {
+                    active_deployment_id: Some(deployment_id.clone()), schema_version:1, resource_id:resource_id.clone(), resource_kind:RegistryResourceKind::Policy,
+                    lifecycle_state:EntityLifecycle::Active, gate_state:AdministrativeGate::Enabled, draft_generation:1, version:7,
+                    draft:validated_draft, etag:resource_etag(&resource_id,7),
+                }).unwrap(), assert_deployment_version:None,
             },
         ];
 
@@ -961,18 +983,13 @@ mod tests {
         assert_eq!(report.resource_id, resource_id.to_string());
         assert_eq!(report.validation_operation_id, operation_id.to_string());
         assert_eq!(report.deployment_id, Some(deployment_id.to_string()));
-        assert_eq!(
-            report.active_deployment_id,
-            Some(deployment_id.to_string())
-        );
+        assert_eq!(report.active_deployment_id, Some(deployment_id.to_string()));
         assert_eq!(report.final_resource_etag, activated_etag);
         assert_eq!(report.published_versions.len(), 1);
         assert_eq!(
             report.published_versions[0].resource_version_id,
             version_id.to_string()
         );
-        server.join().unwrap();
-
         let resumed = apply_manifest(
             &client,
             &tenant_id,
@@ -982,6 +999,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resumed, report);
+        assert!(matches!(apply_manifest(&client,&tenant_id,&manifest_bytes,Duration::from_secs(2),journals.path()),Err(ApplyError::InvalidResponse(_))));
+        server.join().unwrap();
     }
 
     #[test]
@@ -998,7 +1017,10 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let (head, _) = read_request(&mut stream);
                 assert!(head.starts_with("POST /v1/policies HTTP/1.1"));
-                assert_eq!(header_value(&head, "authorization"), Some("Bearer test-token"));
+                assert_eq!(
+                    header_value(&head, "authorization"),
+                    Some("Bearer test-token")
+                );
                 assert!(header_value(&head, "if-match").is_none());
                 let trace_id = request_trace_id(&head);
                 let response = problem(status, code, &trace_id);
@@ -1031,6 +1053,45 @@ mod tests {
     }
 
     #[test]
+    fn update_response_loss_reuses_original_cas_and_receipt_without_refreshing_the_head() {
+        let resource_id=id(ResourceKind::Policy);
+        let tenant=id(ResourceKind::Tenant);
+        let mut value=policy_manifest();
+        value["existing_resource"]=serde_json::json!({"resource_id":resource_id,"etag":resource_etag(&resource_id,7)});
+        let bytes=serde_json::to_vec(&value).unwrap();
+        let (manifest,_)=parse_manifest(&bytes).unwrap();
+        let mut updated=created_policy(&manifest,&resource_id,8);
+        updated.version=8;updated.draft_generation=3;updated.etag=resource_etag(&resource_id,8);
+        let listener=TcpListener::bind(("127.0.0.1",0)).unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();
+            let (original,body)=read_request(&mut stream);
+            assert!(original.starts_with(&format!("PUT /v1/policies/{resource_id}/draft HTTP/1.1")));
+            assert_eq!(header_value(&original,"if-match"),Some(resource_etag(&resource_id,7).as_str()));
+            let receipt=header_value(&original,"idempotency-key").unwrap().to_owned();
+            drop(stream); // The authority committed, but no response reached the client.
+            let (mut stream,_)=listener.accept().unwrap();
+            let (replay,replay_body)=read_request(&mut stream);
+            assert_eq!(replay.lines().next(),original.lines().next());
+            assert_eq!(replay_body,body);
+            assert_eq!(header_value(&replay,"idempotency-key"),Some(receipt.as_str()));
+            assert_eq!(header_value(&replay,"if-match"),header_value(&original,"if-match"));
+            write_response(&mut stream,&ScriptedResponse {method:"PUT",path:format!("/v1/policies/{resource_id}/draft"),expected_if_match:None,status:"200 OK",etag:updated.etag.clone(),location:None,body:serde_json::to_vec(&updated).unwrap(),assert_deployment_version:None},&request_trace_id(&replay));
+            let (mut stream,_)=listener.accept().unwrap();
+            let (head,_)=read_request(&mut stream);
+            assert!(head.starts_with(&format!("POST /v1/policies/{resource_id}/draft:validate HTTP/1.1")));
+            assert_eq!(header_value(&head,"if-match"),Some(updated.etag.as_str()));
+            write_problem(&mut stream,"409 Conflict",&problem(409,ApiProblemCode::IdempotencyConflict,&request_trace_id(&head)));
+        });
+        let client=PublicHttpClient::new(format!("http://127.0.0.1:{port}"),"private-test-session".into(),Duration::from_secs(2)).unwrap();
+        let state=TempDir::new().unwrap();
+        assert!(matches!(apply_manifest(&client,&tenant,&bytes,Duration::from_secs(2),state.path()),Err(ApplyError::Public(_))));
+        assert!(apply_manifest(&client,&tenant,&bytes,Duration::from_secs(2),state.path()).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
     fn apply_preserves_validation_precondition_failure_after_exact_create() {
         let manifest_bytes = serde_json::to_vec(&policy_manifest()).unwrap();
         let (manifest, _) = parse_manifest(&manifest_bytes).unwrap();
@@ -1052,7 +1113,10 @@ mod tests {
                 "POST /v1/policies/{resource_id}/draft:validate HTTP/1.1"
             )));
             assert!(body.is_empty());
-            assert_eq!(header_value(&head, "if-match"), Some(expected_etag.as_str()));
+            assert_eq!(
+                header_value(&head, "if-match"),
+                Some(expected_etag.as_str())
+            );
             assert!(header_value(&head, "idempotency-key")
                 .is_some_and(|value| value.ends_with("-validate")));
             let trace_id = request_trace_id(&head);
@@ -1284,10 +1348,7 @@ mod tests {
                 requirement_digest: digest('0'),
                 target: FrozenSlotTargetInputV1::Context {
                     binding: Box::new(ContextBindingInputV1 {
-                        context_deployment: exact_deployment(
-                            ResourceKind::ContextDeployment,
-                            '0',
-                        ),
+                        context_deployment: exact_deployment(ResourceKind::ContextDeployment, '0'),
                         consistency: ContextConsistencyPolicy::ExternalObservation,
                         allowed_projection: vec!["title".to_owned()],
                         authorization_policy: exact_version(ResourceKind::PolicyRevision, '0'),
@@ -1306,10 +1367,7 @@ mod tests {
         assert!(!wire.contains("binding_digest"));
         let deployment_id = id(ResourceKind::AgentDeployment);
         let materialized = resolved
-            .materialized(
-                &deployment_id,
-                vec![id(ResourceKind::ContextBinding)],
-            )
+            .materialized(&deployment_id, vec![id(ResourceKind::ContextBinding)])
             .unwrap();
         assert_eq!(
             resolved
@@ -1320,8 +1378,14 @@ mod tests {
         let CreateDeploymentClosureV1::Agent(closure) = resolved else {
             panic!("Agent closure resolved to another Resource kind");
         };
-        assert_eq!(closure.interface.revision_id, agent_interface.resource_version_id);
-        assert_eq!(closure.interface.semantic_digest, agent_interface.content_digest);
+        assert_eq!(
+            closure.interface.revision_id,
+            agent_interface.resource_version_id
+        );
+        assert_eq!(
+            closure.interface.semantic_digest,
+            agent_interface.content_digest
+        );
         assert_eq!(closure.plan.revision_id, agent_plan.resource_version_id);
         assert_eq!(closure.plan.semantic_digest, agent_plan.content_digest);
 
@@ -1336,17 +1400,19 @@ mod tests {
         let CreateDeploymentClosureV1::Skill(closure) = resolved else {
             panic!("Skill closure resolved to another Resource kind");
         };
-        assert_eq!(closure.skill_revision.revision_id, skill_revision.resource_version_id);
-        assert_eq!(closure.skill_revision.semantic_digest, skill_revision.content_digest);
+        assert_eq!(
+            closure.skill_revision.revision_id,
+            skill_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.skill_revision.semantic_digest,
+            skill_revision.content_digest
+        );
 
-        let capability_revision =
-            published(ResourceKind::CapabilityInterfaceRevision, '8');
-        let resolved = ApplyDeploymentClosure::CapabilityInterface(
-            ApplyCapabilityDeploymentBindings {
-                implementation: exact_version(
-                    ResourceKind::CapabilityImplementationRevision,
-                    '9',
-                ),
+        let capability_revision = published(ResourceKind::CapabilityInterfaceRevision, '8');
+        let resolved =
+            ApplyDeploymentClosure::CapabilityInterface(ApplyCapabilityDeploymentBindings {
+                implementation: exact_version(ResourceKind::CapabilityImplementationRevision, '9'),
                 backend: CapabilityBackendBinding::Native {
                     worker_manifest_digest: digest('a'),
                     adapter_module_digest: digest('b'),
@@ -1354,20 +1420,24 @@ mod tests {
                 secret_bindings: Vec::new(),
                 policies: Vec::new(),
                 conformance_evidence: evidence('c'),
-            },
-        )
-        .resolve(std::slice::from_ref(&capability_revision))
-        .unwrap();
+            })
+            .resolve(std::slice::from_ref(&capability_revision))
+            .unwrap();
         let CreateDeploymentClosureV1::CapabilityInterface(closure) = resolved else {
             panic!("Capability closure resolved to another Resource kind");
         };
-        assert_eq!(closure.interface.revision_id, capability_revision.resource_version_id);
-        assert_eq!(closure.interface.semantic_digest, capability_revision.content_digest);
+        assert_eq!(
+            closure.interface.revision_id,
+            capability_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.interface.semantic_digest,
+            capability_revision.content_digest
+        );
 
-        let context_revision =
-            published(ResourceKind::ContextSourceInterfaceRevision, 'd');
-        let resolved = ApplyDeploymentClosure::ContextSourceInterface(
-            ApplyContextDeploymentBindings {
+        let context_revision = published(ResourceKind::ContextSourceInterfaceRevision, 'd');
+        let resolved =
+            ApplyDeploymentClosure::ContextSourceInterface(ApplyContextDeploymentBindings {
                 implementation: exact_version(
                     ResourceKind::ContextSourceImplementationRevision,
                     'e',
@@ -1386,15 +1456,20 @@ mod tests {
                 ranking_policy: exact_version(ResourceKind::PolicyRevision, '4'),
                 data_policy: exact_version(ResourceKind::PolicyRevision, '5'),
                 conformance_evidence: evidence('6'),
-            },
-        )
-        .resolve(std::slice::from_ref(&context_revision))
-        .unwrap();
+            })
+            .resolve(std::slice::from_ref(&context_revision))
+            .unwrap();
         let CreateDeploymentClosureV1::ContextSourceInterface(closure) = resolved else {
             panic!("Context closure resolved to another Resource kind");
         };
-        assert_eq!(closure.interface.revision_id, context_revision.resource_version_id);
-        assert_eq!(closure.interface.semantic_digest, context_revision.content_digest);
+        assert_eq!(
+            closure.interface.revision_id,
+            context_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.interface.semantic_digest,
+            context_revision.content_digest
+        );
 
         let endpoint = CanonicalHttpEndpoint {
             scheme: CapabilityEndpointScheme::Https,
@@ -1422,12 +1497,18 @@ mod tests {
         let CreateDeploymentClosureV1::McpServer(closure) = resolved else {
             panic!("MCP closure resolved to another Resource kind");
         };
-        assert_eq!(closure.server_revision.revision_id, mcp_revision.resource_version_id);
-        assert_eq!(closure.server_revision.semantic_digest, mcp_revision.content_digest);
+        assert_eq!(
+            closure.server_revision.revision_id,
+            mcp_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.server_revision.semantic_digest,
+            mcp_revision.content_digest
+        );
 
         let provider_revision = published(ResourceKind::ModelProviderRevision, 'e');
-        let resolved = ApplyDeploymentClosure::ModelProvider(
-            ApplyModelProviderDeploymentBindings {
+        let resolved =
+            ApplyDeploymentClosure::ModelProvider(ApplyModelProviderDeploymentBindings {
                 endpoint_identity_digest: digest('f'),
                 secret_bindings: Vec::new(),
                 protocol_policy: exact_version(ResourceKind::PolicyRevision, '1'),
@@ -1436,11 +1517,13 @@ mod tests {
                 trust_policy: exact_version(ResourceKind::PolicyRevision, '4'),
                 data_policy: exact_version(ResourceKind::PolicyRevision, '5'),
                 region: "us-east-1".parse().unwrap(),
-                conformance_evidence: evidence('6'),
-            },
-        )
-        .resolve(std::slice::from_ref(&provider_revision))
-        .unwrap();
+                admission_evidence: insight_platform_contracts::ModelAdmissionEvidence {
+                    basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
+                    artifact: evidence('6'),
+                },
+            })
+            .resolve(std::slice::from_ref(&provider_revision))
+            .unwrap();
         let CreateDeploymentClosureV1::ModelProvider(closure) = resolved else {
             panic!("Model Provider closure resolved to another Resource kind");
         };
@@ -1455,10 +1538,7 @@ mod tests {
 
         let model_revision = published(ResourceKind::ModelProfileRevision, 'e');
         let resolved = ApplyDeploymentClosure::ModelProfile(ApplyModelDeploymentBindings {
-            provider_deployment: exact_deployment(
-                ResourceKind::ModelProviderDeployment,
-                'f',
-            ),
+            provider_deployment: exact_deployment(ResourceKind::ModelProviderDeployment, 'f'),
             data_policy: exact_version(ResourceKind::PolicyRevision, '1'),
             safety_policy: exact_version(ResourceKind::PolicyRevision, '2'),
             budget_policy: exact_version(ResourceKind::PolicyRevision, '3'),
@@ -1474,8 +1554,14 @@ mod tests {
         let CreateDeploymentClosureV1::ModelProfile(closure) = resolved else {
             panic!("Model closure resolved to another Resource kind");
         };
-        assert_eq!(closure.profile_revision.revision_id, model_revision.resource_version_id);
-        assert_eq!(closure.profile_revision.semantic_digest, model_revision.content_digest);
+        assert_eq!(
+            closure.profile_revision.revision_id,
+            model_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.profile_revision.semantic_digest,
+            model_revision.content_digest
+        );
 
         let policy_revision = published(ResourceKind::PolicyRevision, '6');
         let resolved = ApplyDeploymentClosure::Policy(ApplyPolicyDeploymentBindings {
@@ -1487,8 +1573,14 @@ mod tests {
         let CreateDeploymentClosureV1::Policy(closure) = resolved else {
             panic!("Policy closure resolved to another Resource kind");
         };
-        assert_eq!(closure.policy_revision.revision_id, policy_revision.resource_version_id);
-        assert_eq!(closure.policy_revision.semantic_digest, policy_revision.content_digest);
+        assert_eq!(
+            closure.policy_revision.revision_id,
+            policy_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.policy_revision.semantic_digest,
+            policy_revision.content_digest
+        );
 
         let sandbox_revision = published(ResourceKind::SandboxProfileRevision, '9');
         let resolved = ApplyDeploymentClosure::SandboxProfile(ApplySandboxDeploymentBindings {
@@ -1522,8 +1614,14 @@ mod tests {
         let CreateDeploymentClosureV1::SandboxProfile(closure) = resolved else {
             panic!("Sandbox closure resolved to another Resource kind");
         };
-        assert_eq!(closure.profile_revision.revision_id, sandbox_revision.resource_version_id);
-        assert_eq!(closure.profile_revision.semantic_digest, sandbox_revision.content_digest);
+        assert_eq!(
+            closure.profile_revision.revision_id,
+            sandbox_revision.resource_version_id
+        );
+        assert_eq!(
+            closure.profile_revision.semantic_digest,
+            sandbox_revision.content_digest
+        );
 
         let error = ApplyDeploymentClosure::Policy(ApplyPolicyDeploymentBindings {
             applicability_digest: digest('c'),

@@ -134,10 +134,14 @@ for key, value in (("RUNTIME_DIGEST", "${{ steps.native.outputs.runtime_digest }
     if not bindings or any(binding != value for binding in bindings):
         failures.append("downstream image evidence must bind the verified native merge outputs")
 console_dockerfile = (ROOT / "deploy/images/console.Dockerfile").read_text()
-if (re.findall(r"^([A-Z]+)\b", console_dockerfile, re.MULTILINE) != ["FROM", "COPY", "LABEL", "LABEL"]
-        or not console_dockerfile.startswith("FROM scratch\nCOPY dist/ /console/\n")
+if (re.findall(r"^([A-Z]+)\b", console_dockerfile, re.MULTILINE) != ["FROM", "COPY", "COPY", "USER", "WORKDIR", "ENTRYPOINT", "CMD", "LABEL", "LABEL"]
+        or not re.match(r"^FROM node:24\.11\.1-bookworm-slim@sha256:[0-9a-f]{64}\n", console_dockerfile)
+        or "\nCOPY dist/ /console/dist/\n" not in console_dockerfile
+        or "\nCOPY server/config.mjs server/gateway-server.mjs server/main.mjs server/process.mjs /console/server/\n" not in console_dockerfile
+        or "\nUSER 1000:1000\nWORKDIR /console\n" not in console_dockerfile
+        or '\nENTRYPOINT ["/usr/local/bin/node", "/console/server/main.mjs"]\nCMD ["--config", "/config/console.json"]\n' not in console_dockerfile
         or "# syntax" in console_dockerfile or "#syntax" in console_dockerfile):
-    failures.append("Console must remain a scratch asset copy without target-architecture execution")
+    failures.append("Console must use a pinned Node runtime, exact transport files, unprivileged fixed entrypoint and no target-architecture build execution")
 expected_budgets = {"cli_build": 1200, "console_build": 300, "runtime_build_push": 3600,
                     "sandbox_runner_build_push": 1800, "console_image_build_push": 300,
                     "sbom": 1200, "provenance": 300, "cosign": 600, "cold_pull": 300, "warm_reuse": 60}

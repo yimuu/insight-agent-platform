@@ -6,6 +6,74 @@
 #![allow(async_fn_in_trait)]
 
 use async_trait::async_trait;
+
+/// Metadata-only authorization for an authenticated Egress request. The implementation reads the
+/// owning ModelTurn/Job and frozen Provider closure, and returns no business payload or credential.
+#[async_trait]
+pub trait ModelDispatchAuthority: Send + Sync {
+    async fn authorize_model_dispatch(
+        &self,
+        request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    >;
+}
+/// Current metadata-only authorization for a Remote Context Query and its stable Job lease.
+#[async_trait]
+pub trait ContextDispatchAuthority: Send + Sync {
+    async fn authorize_context_dispatch(
+        &self,
+        request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ContextDispatchPermitV1,
+        insight_platform_contracts::ContextDispatchAuthorizationError,
+    >;
+}
+/// Current management authorization, deliberately independent of ModelTurn/Job execution.
+#[async_trait]
+pub trait ModelConnectionProbeAuthority: Send + Sync {
+    async fn authorize_model_connection_probe(
+        &self,
+        request: &insight_platform_contracts::ModelConnectionProbeAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelConnectionProbePermitV1,
+        insight_platform_contracts::ModelConnectionError,
+    >;
+}
+#[async_trait]
+pub trait ModelConnectionProbe: Send + Sync {
+    async fn probe_model_connection(
+        &self,
+        request: insight_platform_contracts::ModelConnectionProbeAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelConnectionObservationV1,
+        insight_platform_contracts::ModelConnectionError,
+    >;
+}
+/// Current tenant membership authorization before externally preparing an imported credential.
+#[async_trait]
+pub trait ModelCredentialImportAuthority: Send + Sync {
+    async fn authorize_model_credential_import(
+        &self,
+        request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelCredentialImportPermitV1,
+        insight_platform_contracts::ModelCredentialImportError,
+    >;
+}
+/// Trusted Egress preparation orchestration; the key is transient and has no metadata digest.
+#[async_trait]
+pub trait ModelCredentialImporter: Send + Sync {
+    async fn import_model_credential(
+        &self,
+        request: insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+        key: insight_platform_contracts::SensitiveModelApiKey,
+    ) -> Result<
+        insight_platform_contracts::ExactSecretBindingRef,
+        insight_platform_contracts::ModelCredentialImportError,
+    >;
+}
 use chrono::{DateTime, Utc};
 use insight_platform_contracts::{
     canonical_digest, CommandAudit, CommandOutcome, ExactDeploymentRef, ExactSecretBindingRef,
@@ -127,12 +195,14 @@ pub struct RegisterPreparedSecretBinding {
     pub reference_digest: Sha256Digest,
     pub opaque_version_identity_digest: Sha256Digest,
     pub provider_storage_evidence_digest: Sha256Digest,
+    pub delegated_import: Option<insight_platform_contracts::ModelCredentialImportIdentityV1>,
 }
 
 impl RegisterPreparedSecretBinding {
     pub fn semantic_request_digest(&self) -> Result<Sha256Digest, SecurityCommandError> {
         canonical_digest(&serde_json::json!({
             "domain": "prepared_secret_binding_registration_v1",
+            "delegated_import": self.delegated_import,
             "opaque_version_identity_digest": self.opaque_version_identity_digest,
             "preparation_digest": self.preparation_digest,
             "provider_id": self.provider_id,
@@ -159,6 +229,17 @@ impl RegisterPreparedSecretBinding {
             || self.semantic_request_digest()? != self.audit.request_digest
         {
             return Err(SecurityCommandError::InvalidSecretBinding);
+        }
+        if let Some(identity) = &self.delegated_import {
+            if !identity.validate()
+                || identity.tenant_id != self.audit.tenant_id
+                || identity.provider_id != self.provider_id
+                || identity.purpose != self.purpose
+                || identity.preparation_digest().ok().as_ref() != Some(&self.preparation_digest)
+                || identity.secret_binding_id().ok().as_ref() != Some(&self.secret_binding_id)
+            {
+                return Err(SecurityCommandError::InvalidSecretBinding);
+            }
         }
         SecretBindingPayload {
             provider_id: self.provider_id.clone(),

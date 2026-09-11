@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/adapters/platform-openbao",
+    "tools/rust/platform-deployment-tooling",
+    "tools/rust/platform-installation-tooling",
     "apps/services/platform-maintenance-worker",
     "crates/adapters/platform-mcp-transport",
     "crates/application/platform-mcp-runtime",
@@ -120,7 +123,10 @@ x509-parser = { version = "0.18.1", default-features = false }
 url = "2"
 yaml-rust2 = { version = "0.11", default-features = false }
 yaml_serde = "0.10.4"
+zeroize = "1"
+getrandom = "0.4"
 
+insight-platform-openbao = { path = "crates/adapters/platform-openbao" }
 insight-platform-artifact-broker = { path = "crates/adapters/platform-artifact-broker" }
 insight-platform-artifact-rpc = { path = "crates/protocols/platform-artifact-rpc" }
 insight-platform-artifact-service = { path = "apps/services/platform-artifact-service" }
@@ -176,3 +182,5 @@ insight-platform-storage-tooling = { path = "tools/rust/platform-storage-tooling
 insight-platform-opensandbox-executor = { path = "crates/adapters/platform-opensandbox-executor" }
 
 insight-platform-outbox-worker = { path = "apps/services/platform-outbox-worker" }
+
+insight-platform-deployment-tooling = { path = "tools/rust/platform-deployment-tooling" }

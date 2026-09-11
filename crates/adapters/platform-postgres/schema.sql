@@ -487,6 +487,7 @@ CREATE TABLE insight_platform.resources (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT resources_active_deployment_id_ck CHECK (((active_deployment_id IS NULL) OR insight_platform.is_platform_id(active_deployment_id))),
+    CONSTRAINT resources_alias_ck CHECK ((NOT (payload ? 'alias') OR payload -> 'alias' = 'null'::jsonb OR (jsonb_typeof(payload -> 'alias') = 'string' AND octet_length(payload ->> 'alias') <= 64 AND (payload ->> 'alias') ~ '^[a-z][a-z0-9._-]{0,63}$'))),
     CONSTRAINT resources_active_target_ck CHECK (((active_version_id IS NULL) OR (active_deployment_id IS NULL))),
     CONSTRAINT resources_active_version_id_ck CHECK (((active_version_id IS NULL) OR insight_platform.is_platform_id(active_version_id))),
     CONSTRAINT resources_draft_generation_ck CHECK ((draft_generation > 0)),
@@ -942,6 +943,7 @@ CREATE INDEX quota_ledger_correlation_idx ON insight_platform.quota_ledger USING
 CREATE INDEX receipts_expiry_idx ON insight_platform.receipts USING btree (expires_at, tenant_id, receipt_id);
 
 CREATE INDEX resources_registry_idx ON insight_platform.resources USING btree (tenant_id, resource_kind, lifecycle_state, resource_id);
+CREATE UNIQUE INDEX resources_alias_uq ON insight_platform.resources USING btree (tenant_id, resource_kind, (payload ->> 'alias')) WHERE (payload ->> 'alias') IS NOT NULL;
 
 CREATE UNIQUE INDEX run_nodes_child_run_uq ON insight_platform.run_nodes USING btree (tenant_id, related_run_id) WHERE ((record_kind = 'child_run_link'::text) AND (related_run_id IS NOT NULL));
 
@@ -1493,6 +1495,26 @@ BEGIN
  IF count_deleted<>cardinality(ids) THEN RAISE EXCEPTION 'cleanup chain changed' USING ERRCODE='40001'; END IF;
  RETURN count_deleted;
 END $retirement$;
+
+-- Physical serialization only. The caller owns current gate, digest and policy semantics.
+CREATE FUNCTION insight_platform.artifact_lock_scan_policy(p_tenant text, p_revision text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $artifact_lock$
+BEGIN
+    IF p_tenant IS NULL OR octet_length(p_tenant) <> 40
+       OR NOT insight_platform.is_platform_id(p_tenant) OR left(p_tenant, 4) <> 'ten_'
+       OR p_revision IS NULL OR octet_length(p_revision) <> 41
+       OR NOT insight_platform.is_platform_id(p_revision) OR left(p_revision, 5) <> 'prev_' THEN
+        RAISE EXCEPTION 'invalid Artifact policy lock identity' USING ERRCODE = '22023';
+    END IF;
+    PERFORM 1 FROM insight_platform.resource_versions AS version
+    JOIN insight_platform.resources AS resource
+      ON resource.tenant_id = version.tenant_id AND resource.resource_id = version.resource_id
+    WHERE version.tenant_id = p_tenant AND version.resource_version_id = p_revision
+      AND version.resource_version_kind = 'policy_revision' AND resource.resource_kind = 'policy'
+    FOR SHARE OF version, resource;
+    RETURN FOUND;
+END $artifact_lock$;
+REVOKE ALL ON FUNCTION insight_platform.artifact_lock_scan_policy(text, text) FROM PUBLIC;
 
 CREATE INDEX receipts_retirement_scope_idx ON insight_platform.receipts(tenant_id,scope_id,created_at,expires_at);
 CREATE INDEX receipts_retirement_response_idx ON insight_platform.receipts(tenant_id,response_reference_id,created_at,expires_at) WHERE response_reference_id IS NOT NULL;

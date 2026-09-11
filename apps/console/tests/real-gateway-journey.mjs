@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
-import { startGatewayConsoleServer } from './gateway-server.mjs'
+import { startGatewayConsoleServer } from '../server/native.mjs'
 import { BrowserProcessError, qualificationSignals, startHeadlessBrowser, withinSignal } from './browser-process.mjs'
 
 const required = (name) => {

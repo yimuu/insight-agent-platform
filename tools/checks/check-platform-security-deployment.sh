@@ -83,12 +83,16 @@ for name, manifest in (
 required_methods = {
     "rpc LoadSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
     "rpc RegisterPreparedSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
+    "rpc AuthorizeModelCredentialImport(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
+    "rpc AuthorizeModelConnectionProbe(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
+    "rpc AuthorizeModelDispatch(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
+    "rpc AuthorizeContextDispatch(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);",
 }
 for method in required_methods:
     if method not in proto:
         failures.append(f"Security internal RPC is missing exact method: {method}")
-if proto.count("  rpc ") != 2:
-    failures.append("Security internal RPC must expose exactly two methods")
+if proto.count("  rpc ") != len(required_methods):
+    failures.append("Security internal RPC must expose exactly the reviewed authority methods")
 
 for dependency in (
     "insight-platform-egress-rpc.workspace = true",
@@ -100,6 +104,8 @@ for dependency in (
 if "insight-platform-postgres" in egress or "sqlx" in egress:
     failures.append("deployable Egress Broker must not have a PostgreSQL dependency")
 required_egress_methods = {
+    "rpc ImportModelCredential(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
+    "rpc ProbeModelConnection(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc OpenModelProvider(ClosedEgressEnvelope) returns (stream ClosedEgressEnvelope);",
     "rpc CancelModelProvider(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
     "rpc RoundTripCapabilityHttp(ClosedEgressEnvelope) returns (ClosedEgressEnvelope);",
@@ -196,6 +202,17 @@ required_insert = {"secret_bindings", "receipts", "events", "outbox_events"}
 for table in required_select | required_insert:
     if f"insight_platform.{table}" not in grants:
         failures.append(f"Security Authority grant contract is missing {table}")
+expected_artifact_grants = [
+    "GRANT SELECT (tenant_id, artifact_id, blob_id, state, terminal_at, verified_media_type, classification) ON insight_platform.artifacts TO %I",
+    "GRANT SELECT (tenant_id, blob_id, state, deleted_at, content_digest, size_bytes) ON insight_platform.artifact_blobs TO %I",
+]
+actual_artifact_grants = [
+    statement
+    for statement in re.findall(r"'(GRANT [^']+ TO %I)'", grants)
+    if re.search(r"\binsight_platform\.artifact(?:s|_[a-z_]+)\b", statement)
+]
+if sorted(actual_artifact_grants) != sorted(expected_artifact_grants):
+    failures.append("Security Authority Artifact reads must use only the exact readiness metadata columns")
 for forbidden in (
     "GRANT UPDATE ON insight_platform.secret_bindings",
     "GRANT DELETE",
@@ -204,7 +221,6 @@ for forbidden in (
     "insight_platform.jobs TO %I",
     "insight_platform.tasks TO %I",
     "insight_platform.invocations TO %I",
-    "insight_platform.artifacts TO %I",
     "insight_platform.quota_accounts TO %I",
     "insight_platform.quota_ledger TO %I",
 ):

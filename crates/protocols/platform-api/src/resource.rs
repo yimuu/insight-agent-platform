@@ -1,3 +1,14 @@
+#[path = "model_quota.rs"]
+mod model_quota;
+pub use model_quota::{
+    ModelQuotaViewV1, ReadModelQuotaIntent, SetModelQuotaIntent, SetModelQuotaRequestV1,
+};
+#[path = "model_default.rs"]
+mod model_default;
+pub use model_default::{
+    ModelDefaultViewV1, ReadModelDefaultIntent, SetModelDefaultIntent, SetModelDefaultRequestV1,
+};
+
 use crate::authentication::AuthenticatedPrincipal;
 use async_trait::async_trait;
 use axum::{
@@ -42,6 +53,7 @@ const MAX_RESOURCE_REQUEST_BYTES: usize = 1_048_576;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateResourceRequestV1 {
+    pub alias: Option<insight_platform_contracts::ResourceAlias>,
     pub display_name: String,
     pub document: ResourceDocument,
 }
@@ -602,6 +614,32 @@ pub enum ResourceApplicationError {
 
 #[async_trait]
 pub trait ResourceApplication: Send + Sync {
+    async fn read_model_quota(
+        &self,
+        _intent: ReadModelQuotaIntent,
+    ) -> Result<ModelQuotaViewV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+    async fn set_model_quota(
+        &self,
+        _intent: SetModelQuotaIntent,
+    ) -> Result<ModelQuotaViewV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+
+    async fn read_model_default(
+        &self,
+        _intent: ReadModelDefaultIntent,
+    ) -> Result<ModelDefaultViewV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+    async fn set_model_default(
+        &self,
+        _intent: SetModelDefaultIntent,
+    ) -> Result<ModelDefaultViewV1, ResourceApplicationError> {
+        Err(ResourceApplicationError::Internal)
+    }
+
     async fn read_agent_authoring_profile(
         &self,
         _intent: ReadAgentAuthoringProfileIntent,
@@ -718,6 +756,14 @@ impl ResourceHttpState {
 
 pub fn build_resource_router(state: ResourceHttpState) -> Router {
     Router::new()
+        .route(
+            "/v1/model-default",
+            get(model_default::read_model_default).put(model_default::set_model_default),
+        )
+        .route(
+            "/v1/model-quotas/{model_deployment_id}",
+            get(model_quota::read_model_quota).put(model_quota::set_model_quota),
+        )
         .route(
             "/v1/agent-authoring-profile",
             get(read_agent_authoring_profile),
@@ -1574,6 +1620,7 @@ async fn update_resource_draft(
         Err(error) => return problem(error),
     };
     let draft = ResourceDraftPayload {
+        alias: body.alias,
         display_name: body.display_name,
         document: body.document,
         validation: None,
@@ -1692,6 +1739,7 @@ async fn create_resource_for_noun(
         Err(error) => return problem(error),
     };
     let draft = ResourceDraftPayload {
+        alias: body.alias,
         display_name: body.display_name,
         document: body.document,
         validation: None,
@@ -1817,7 +1865,7 @@ fn idempotency_key_digest(
     idempotency_key_digest_for_operation(headers, principal, resource_kind, "resource.create", None)
 }
 
-fn idempotency_key_digest_for_operation(
+pub(crate) fn idempotency_key_digest_for_operation(
     headers: &HeaderMap,
     principal: &AuthenticatedPrincipal,
     resource_kind: RegistryResourceKind,
@@ -1850,7 +1898,7 @@ fn idempotency_key_digest_for_operation(
     }))
 }
 
-fn expected_resource_version(
+pub(crate) fn expected_resource_version(
     headers: &HeaderMap,
     resource_id: &ResourceId,
 ) -> Result<u64, ResourceApplicationError> {
@@ -1958,7 +2006,7 @@ pub fn deployment_closure_digest(
         .map_err(|_| ResourceApplicationError::Internal)
 }
 
-fn problem(error: ResourceApplicationError) -> Response {
+pub(crate) fn problem(error: ResourceApplicationError) -> Response {
     let (status, code, title, retryable) = match error {
         ResourceApplicationError::Invalid => (
             StatusCode::BAD_REQUEST,
@@ -2143,6 +2191,7 @@ mod tests {
         )
         .unwrap();
         CreateResourceRequestV1 {
+            alias: None,
             display_name: "Runtime protocol policy".to_owned(),
             document: ResourceDocument::Policy(Box::new(PolicyResourceSpec {
                 authoring_package: AuthoringPackage {
@@ -2231,10 +2280,75 @@ mod tests {
 
     struct FixtureApplication {
         intents: Mutex<Vec<CreateResourceIntent>>,
+        default_intents: Mutex<Vec<SetModelDefaultIntent>>,
     }
 
     #[async_trait]
     impl ResourceApplication for FixtureApplication {
+        async fn read_model_quota(
+            &self,
+            intent: ReadModelQuotaIntent,
+        ) -> Result<ModelQuotaViewV1, ResourceApplicationError> {
+            Ok(quota_fixture_view(
+                intent.principal.tenant_id,
+                ExactDeploymentRef::new(intent.model_deployment_id, fixed_digest('a')).unwrap(),
+                None,
+            ))
+        }
+        async fn set_model_quota(
+            &self,
+            intent: SetModelQuotaIntent,
+        ) -> Result<ModelQuotaViewV1, ResourceApplicationError> {
+            assert_eq!(
+                intent.expected_etag,
+                format!("\"model-quota-{}\"", "b".repeat(64))
+            );
+            assert_eq!(intent.request.limits.requests, 20);
+            assert_eq!(
+                intent.request_digest,
+                insight_platform_registry::model_quota::model_quota_request_digest(
+                    &intent.principal.tenant_id,
+                    &intent.principal.principal_id,
+                    &intent.request,
+                    &intent.expected_etag,
+                    &intent.idempotency_key_digest
+                )
+                .unwrap()
+            );
+            Ok(quota_fixture_view(
+                intent.principal.tenant_id,
+                intent.request.model_deployment,
+                Some(intent.request.limits),
+            ))
+        }
+
+        async fn read_model_default(
+            &self,
+            intent: ReadModelDefaultIntent,
+        ) -> Result<ModelDefaultViewV1, ResourceApplicationError> {
+            Ok(ModelDefaultViewV1 {
+                schema_version: 1,
+                etag: resource_etag(&intent.principal.tenant_id, 3),
+                tenant_id: intent.principal.tenant_id,
+                version: 3,
+                default_model: None,
+            })
+        }
+        async fn set_model_default(
+            &self,
+            intent: SetModelDefaultIntent,
+        ) -> Result<ModelDefaultViewV1, ResourceApplicationError> {
+            self.default_intents.lock().unwrap().push(intent.clone());
+            let version = intent.expected_tenant_version + 1;
+            Ok(ModelDefaultViewV1 {
+                schema_version: 1,
+                etag: resource_etag(&intent.principal.tenant_id, version),
+                tenant_id: intent.principal.tenant_id,
+                version,
+                default_model: intent.default_model,
+            })
+        }
+
         async fn create_resource(
             &self,
             intent: CreateResourceIntent,
@@ -2260,6 +2374,7 @@ mod tests {
             intent: ReadResourceIntent,
         ) -> Result<ResourceViewV1, ResourceApplicationError> {
             let draft = ResourceDraftPayload {
+                alias: None,
                 display_name: request_body().display_name,
                 document: request_body().document,
                 validation: None,
@@ -2534,6 +2649,7 @@ mod tests {
         let router = build_resource_router(ResourceHttpState::new(
             Arc::new(FixtureApplication {
                 intents: Mutex::new(Vec::new()),
+                default_intents: Mutex::new(Vec::new()),
             }),
             Arc::new(FixedClock(now)),
         ));
@@ -2584,6 +2700,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -2629,6 +2746,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -2692,6 +2810,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application.clone(),
@@ -2734,6 +2853,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application.clone(),
@@ -2764,6 +2884,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -2806,6 +2927,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application.clone(),
@@ -2874,6 +2996,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -2921,6 +3044,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -2970,6 +3094,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -3026,6 +3151,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -3184,6 +3310,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -3247,6 +3374,7 @@ mod tests {
         let now = Utc::now();
         let application = Arc::new(FixtureApplication {
             intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
         });
         let router = build_resource_router(ResourceHttpState::new(
             application,
@@ -3348,6 +3476,7 @@ mod tests {
         let router = build_resource_router(ResourceHttpState::new(
             Arc::new(FixtureApplication {
                 intents: Mutex::new(Vec::new()),
+                default_intents: Mutex::new(Vec::new()),
             }),
             Arc::new(FixedClock(now)),
         ));
@@ -3628,5 +3757,296 @@ mod tests {
         let body = to_bytes(response.into_body(), 65_536).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("cursor_invalid"));
         assert_eq!(application.calls.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn model_default_routes_bind_tenant_cas_and_explicit_nullable_intent() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application.clone(),
+            Arc::new(FixedClock(now)),
+        ));
+        let tenant = principal(now).tenant_id;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/model-default")
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["etag"], resource_etag(&tenant, 3));
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        let view: ModelDefaultViewV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 2048).await.unwrap()).unwrap();
+        assert_eq!(view.default_model, None);
+        let model =
+            ExactDeploymentRef::new(id(ResourceKind::ModelDeployment, 66), fixed_digest('a'))
+                .unwrap();
+        for (version, value) in [
+            (3, serde_json::to_value(&model).unwrap()),
+            (4, serde_json::Value::Null),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/v1/model-default")
+                        .extension(principal(now))
+                        .header(IF_MATCH, resource_etag(&tenant, version))
+                        .header(IDEMPOTENCY_KEY, "default-intent")
+                        .body(axum::body::Body::from(
+                            serde_json::to_vec(
+                                &serde_json::json!({"schema_version":1,"default_model":value}),
+                            )
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["etag"],
+                resource_etag(&tenant, version + 1)
+            );
+            let view: ModelDefaultViewV1 =
+                serde_json::from_slice(&to_bytes(response.into_body(), 2048).await.unwrap())
+                    .unwrap();
+            assert_eq!(serde_json::to_value(view.default_model).unwrap(), value);
+        }
+        let intents = application.default_intents.lock().unwrap();
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0].expected_tenant_version, 3);
+        assert_eq!(intents[0].default_model, Some(model));
+        assert_eq!(
+            intents[0].idempotency_key_digest,
+            intents[1].idempotency_key_digest
+        );
+        assert_ne!(intents[0].request_digest, intents[1].request_digest);
+        assert_eq!(intents[0].deadline, now + Duration::seconds(5));
+    }
+
+    #[tokio::test]
+    async fn model_default_rejects_missing_intent_and_wrong_identities_before_application() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application.clone(),
+            Arc::new(FixedClock(now)),
+        ));
+        let tenant = principal(now).tenant_id;
+        let wrong =
+            ExactDeploymentRef::new(id(ResourceKind::AgentDeployment, 66), fixed_digest('a'))
+                .unwrap();
+        for body in [
+            "{}".to_owned(),
+            "{\"schema_version\":1}".to_owned(),
+            "{\"schema_version\":1,\"default_model\":null,\"extra\":1}".to_owned(),
+            "{\"schema_version\":1,\"default_model\":null,\"default_model\":null}".to_owned(),
+            serde_json::json!({"schema_version":1,"default_model":wrong}).to_string(),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/v1/model-default")
+                        .extension(principal(now))
+                        .header(IF_MATCH, resource_etag(&tenant, 3))
+                        .header(IDEMPOTENCY_KEY, "default-intent")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        for (etag, expected) in [
+            (None, StatusCode::PRECONDITION_REQUIRED),
+            (
+                Some(resource_etag(&id(ResourceKind::Tenant, 99), 3)),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Some(resource_etag(&tenant, i64::MAX as u64 + 1)),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method("PUT")
+                .uri("/v1/model-default")
+                .extension(principal(now))
+                .header(IDEMPOTENCY_KEY, "default-intent");
+            if let Some(etag) = etag {
+                request = request.header(IF_MATCH, etag);
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(
+                            "{\"schema_version\":1,\"default_model\":null}",
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/model-default")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(application.default_intents.lock().unwrap().is_empty());
+    }
+    fn quota_fixture_view(
+        tenant_id: ResourceId,
+        model_deployment: ExactDeploymentRef,
+        limits: Option<insight_platform_contracts::ModelQuotaLimitsV1>,
+    ) -> ModelQuotaViewV1 {
+        use insight_platform_contracts::{
+            ModelQuotaAllocationV1, ModelQuotaCounterV1, ModelQuotaLimitsV1,
+        };
+        let zero = ModelQuotaLimitsV1 {
+            requests: 0,
+            tokens: 0,
+            cost_microunits: 0,
+        };
+        ModelQuotaViewV1 {
+            schema_version: 1,
+            tenant_id,
+            model_deployment,
+            allocation: limits.map(|limits| ModelQuotaAllocationV1 {
+                limits,
+                reserved: zero,
+                used: zero,
+            }),
+            tenant_concurrency: ModelQuotaCounterV1 {
+                limit: 8,
+                reserved: 0,
+                used: 0,
+            },
+            etag: format!("\"model-quota-{}\"", "b".repeat(64)),
+        }
+    }
+    #[tokio::test]
+    async fn model_quota_routes_require_original_cas_closed_body_and_private_identity() {
+        let now = Utc::now();
+        let application = Arc::new(FixtureApplication {
+            intents: Mutex::new(Vec::new()),
+            default_intents: Mutex::new(Vec::new()),
+        });
+        let router = build_resource_router(ResourceHttpState::new(
+            application,
+            Arc::new(FixedClock(now)),
+        ));
+        let model =
+            ExactDeploymentRef::new(id(ResourceKind::ModelDeployment, 66), fixed_digest('a'))
+                .unwrap();
+        let path = format!("/v1/model-quotas/{}", model.deployment_id);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .extension(principal(now))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "no-store, private, max-age=0"
+        );
+        let view: ModelQuotaViewV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 2048).await.unwrap()).unwrap();
+        assert_eq!(view.tenant_id, principal(now).tenant_id);
+        assert_eq!(view.model_deployment, model);
+        assert!(view.allocation.is_none());
+        let good = serde_json::json!({"schema_version":1,"model_deployment":model,"limits":{"requests":20,"tokens":204800,"cost_microunits":20000000}});
+        for case in 0..11 {
+            let mut body = good.clone();
+            let mut request = Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .extension(principal(now))
+                .header(IDEMPOTENCY_KEY, "quota-original-intent");
+            if case != 1 {
+                request = request.header(IF_MATCH, if case == 2 { "*" } else { &etag });
+            }
+            match case {
+                3 => body["limits"]["requests"] = serde_json::json!(-1),
+                4 => body["limits"]["requests"] = serde_json::json!(1.5),
+                5 => body["limits"]["requests"] = serde_json::json!(9_007_199_254_740_992_u64),
+                6 => {
+                    body["model_deployment"]["deployment_id"] =
+                        serde_json::json!(id(ResourceKind::ModelDeployment, 67))
+                }
+                7 => body["extra"] = serde_json::Value::Null,
+                8 => {
+                    body.as_object_mut().unwrap().remove("limits");
+                }
+                9 => request = request.header(IF_MATCH, &etag),
+                10 => body["limits"]["requests"] = serde_json::json!(true),
+                _ => {}
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                match case {
+                    0 => StatusCode::OK,
+                    1 => StatusCode::PRECONDITION_REQUIRED,
+                    _ => StatusCode::BAD_REQUEST,
+                },
+                "case {case}"
+            );
+            assert_eq!(
+                response.headers()[CACHE_CONTROL],
+                "no-store, private, max-age=0"
+            );
+            assert!(response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json"));
+            if case == 0 {
+                assert_eq!(response.headers()["etag"], etag);
+                let view: ModelQuotaViewV1 =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 2048).await.unwrap())
+                        .unwrap();
+                assert_eq!(view.allocation.unwrap().limits.requests, 20);
+            }
+        }
     }
 }

@@ -38,6 +38,7 @@ EXPECTED_TABLES = [
     "tenants",
 ]
 EXPECTED_FUNCTIONS = sorted([
+    "artifact_lock_scan_policy(text, text)",
     "history_scan_records(text, timestamp with time zone, text, text, text, text, integer)",
     "history_lock_receipt(text, text)",
     "history_lock_owner(text, text)",
@@ -181,8 +182,8 @@ def main():
         errors.append("schema contract has missing or unknown top-level fields")
     if contract.get("contract") != "insight.platform/v1/postgres-baseline":
         errors.append("schema contract identity is invalid")
-    if contract.get("schema_contract_version") != 14:
-        errors.append("schema contract version must be 14")
+    if contract.get("schema_contract_version") != 15:
+        errors.append("schema contract version must be 15")
     if contract.get("postgres_major") != 16:
         errors.append("PostgreSQL major version must be 16")
     if contract.get("schema") != "insight_platform":
@@ -247,6 +248,7 @@ def main():
             )
         )
         if function_names != sorted([
+            "artifact_lock_scan_policy",
             "history_delete_prefix", "history_lock_event_prefix", "history_lock_run", "history_scan_runs",
             "history_scan_records", "history_lock_receipt", "history_lock_owner", "history_event_obligations", "history_lock_event", "history_delete_receipt", "history_delete_published_outbox", "history_delete_event", "history_lock_task_chain", "history_owner_delivery", "history_retire_oauth_chain",
             "is_bounded_object",

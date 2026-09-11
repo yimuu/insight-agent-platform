@@ -200,6 +200,9 @@ impl ModelResponseContract {
             schema
                 .validate()
                 .map_err(|_| ModelTurnError::InvalidSchema)?;
+            if schema.canonical_digest != self.output_schema_digest {
+                return Err(ModelTurnError::InvalidResponseContract);
+            }
             if !profile.structured_output.native && !profile.structured_output.textual_json_fallback
             {
                 return Err(ModelTurnError::InvalidResponseContract);
@@ -460,7 +463,6 @@ impl ModelUsage {
             || profile.usage.reports_reasoning_tokens != self.reasoning_tokens.is_some()
             || profile.usage.reports_cost != self.provider_reported_cost.is_some()
             || (self.accounting_quality == AccountingQuality::ProviderReported
-                && profile.usage.provider_reports_usage
                 && (self.input_tokens.is_none() || self.output_tokens.is_none()))
         {
             return Err(ModelTurnError::InvalidUsage);

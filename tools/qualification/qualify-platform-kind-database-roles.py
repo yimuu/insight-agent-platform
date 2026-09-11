@@ -81,7 +81,7 @@ def main():
                 provision(purpose)  # Exact owned re-provisioning remains idempotent.
             positive = {
                 'security-authority': 'SELECT * FROM insight_platform.secret_bindings LIMIT 0',
-                'artifact-gateway': 'SELECT * FROM insight_platform.artifacts LIMIT 0',
+                'artifact-gateway': 'SELECT d.resource_version_id FROM insight_platform.deployments d JOIN insight_platform.resources r ON r.tenant_id=d.tenant_id AND r.resource_id=d.resource_id JOIN insight_platform.resource_versions v ON v.tenant_id=d.tenant_id AND v.resource_version_id=d.resource_version_id LIMIT 0',
                 'artifact-data-reader': 'SELECT * FROM insight_platform.artifact_blobs LIMIT 0',
                 'artifact-data-worker': 'SELECT * FROM insight_platform.scheduler_state FOR UPDATE',
                 'artifact-maintenance': 'SELECT * FROM insight_platform.scheduler_tenant_state FOR UPDATE',
@@ -102,6 +102,9 @@ def main():
                 rejected = sql(negative[purpose], purpose, expected=False)
                 if rejected.returncode == 0 or 'permission denied' not in rejected.stderr:
                     raise RuntimeError('least-privilege negative did not reject for ' + purpose)
+            rejected = sql('UPDATE insight_platform.deployments SET tenant_id=tenant_id WHERE false', 'artifact-gateway', expected=False)
+            if rejected.returncode == 0 or 'permission denied' not in rejected.stderr:
+                raise RuntimeError('Artifact Gateway deployment mutation was not rejected')
 
             # Fail after preceding members have been visited; the whole cohort must roll back.
             sql("COMMENT ON ROLE insight_artifact_maintenance_dev IS 'unowned fixture identity'")

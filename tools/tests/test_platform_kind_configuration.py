@@ -101,8 +101,8 @@ class KindConfigurationTests(unittest.TestCase):
                    'bucket': 'platform-artifacts', 'force_path_style': True, 'kms_binding_digest': kms['kms_binding_digest'],
                    'connect_timeout_milliseconds': 1000, 'operation_timeout_milliseconds': 5000, 'maximum_object_bytes': 16 * 1024 * 1024}
         storage['storage_binding_digest'] = canonical_digest(dict(storage, backend='s3'))
-        catalog = {'schema_version': 1, 'write_storage_binding_digest': storage['storage_binding_digest'],
-                   'kms_key_bindings': [kms], 's3_storage_bindings': [storage]}
+        catalog = {'schema_version': 2, 'write_storage_binding_digest': storage['storage_binding_digest'],
+                   'reference_key_bindings': [{'kind': 'aws_kms', 'config': kms}], 's3_storage_bindings': [storage]}
         for name in ('artifact-gateway', 'artifact-data'):
             target = source / (name + '.json')
             config = json.loads(target.read_text()) if target.exists() else {}
@@ -110,7 +110,8 @@ class KindConfigurationTests(unittest.TestCase):
             target.write_text(json.dumps(config))
         other = {
             'security-authority': {},
-            'egress-broker': {'mcp_state_keys': {'keys': [{}]}, 'secret_provider_catalog': {'providers': [{}]}},
+            'egress-broker': {'mcp_state_keys': {'keys': [{}]}, 'secret_provider_catalog': {'schema_version': 2,
+                'providers': [{'kind': 'aws_secrets_manager', 'config': {}}]}},
             'mcp-host': {'egress': {}}, 'mcp-resource-host': {'egress': {}},
             'callback-api': {'oauth_state': {'keys': [{}]}},
             'gateway-management': {'artifact_gateway': {'endpoint': 'https://127.0.0.1:19010/'}},
@@ -502,7 +503,7 @@ class KindConfigurationTests(unittest.TestCase):
                     if mutation == 'claim-limit':
                         changed['worker']['claim_batch'] = 0
                     elif mutation == 'provider-shape':
-                        changed['artifact_provider_catalog']['kms_key_bindings'][0]['key_id'] = 'invalid-key'
+                        changed['artifact_provider_catalog']['reference_key_bindings'][0]['config']['key_id'] = 'invalid-key'
                     else:
                         changed['unexpected'] = True
                     rejected = decode(changed)

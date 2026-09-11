@@ -23,6 +23,10 @@ insight-platform-contracts.workspace = true
 insight-platform-agent-compiler.workspace = true
 insight-platform-artifacts.workspace = true
 insight-platform-context.workspace = true
+insight-platform-egress-rpc.workspace = true
+insight-platform-execution-context.workspace = true
+insight-platform-security.workspace = true
+tonic.workspace = true
 insight-platform-invocations.workspace = true
 insight-platform-jobs.workspace = true
 insight-platform-mcp-host.workspace = true
@@ -44,3 +48,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
+tokio-stream.workspace = true
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }

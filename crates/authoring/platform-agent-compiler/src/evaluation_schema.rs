@@ -35,6 +35,14 @@ fn exact(kind: ResourceKind) -> Value {
         &[id_key, "resource_kind", digest_key],
     )
 }
+fn paired_tool_budget_schema(mut schema: Value) -> Value {
+    schema["oneOf"] = json!([
+        {"properties":{"maximum_capability_calls":{"const":0},"maximum_parallel_calls_per_round":{"const":0}}},
+        {"properties":{"maximum_capability_calls":{"minimum":1},"maximum_parallel_calls_per_round":{"minimum":1}}}
+    ]);
+    schema
+}
+
 fn definitions() -> Map<String, Value> {
     let mut defs = Map::new();
     for name in ["ArtifactRef", "Digest"] {
@@ -226,13 +234,13 @@ fn definitions() -> Map<String, Value> {
                 ("execution_profile", reference("PolicyBinding")),
                 (
                     "model_loop",
-                    object(
+                    paired_tool_budget_schema(object(
                         &[
                             ("maximum_rounds", integer(1, u64::from(u16::MAX))),
-                            ("maximum_capability_calls", integer(1, u64::from(u32::MAX))),
+                            ("maximum_capability_calls", integer(0, u64::from(u32::MAX))),
                             (
                                 "maximum_parallel_calls_per_round",
-                                integer(1, u64::from(u16::MAX)),
+                                integer(0, u64::from(u16::MAX)),
                             ),
                             ("token_budget", positive),
                         ],
@@ -242,7 +250,7 @@ fn definitions() -> Map<String, Value> {
                             "maximum_parallel_calls_per_round",
                             "token_budget",
                         ],
-                    ),
+                    )),
                 ),
             ],
             &[

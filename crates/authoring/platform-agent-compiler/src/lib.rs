@@ -876,12 +876,15 @@ fn validate_profile(profile: &AgentCompilerProfile) -> Result<(), AgentCompilerE
         .validate()
         .map_err(|error| AgentCompilerError::binding(error.to_string()))?;
     if profile.model_loop.maximum_rounds == 0
-        || profile.model_loop.maximum_capability_calls == 0
-        || profile.model_loop.maximum_parallel_calls_per_round == 0
+        || insight_platform_plan::validate_model_loop_tool_budget(
+            profile.model_loop.maximum_capability_calls,
+            profile.model_loop.maximum_parallel_calls_per_round,
+        )
+        .is_err()
         || profile.model_loop.token_budget == 0
     {
         return Err(AgentCompilerError::binding(
-            "model loop profile limits must be positive",
+            "model loop rounds and tokens must be positive and tool budgets must be paired and bounded",
         ));
     }
     for policy in &profile.policy_versions {
@@ -1614,6 +1617,46 @@ spec:
         assert_eq!(plan["plan_version"], 6);
         assert_eq!(plan["nodes"]["finish"]["value"]["source"], "run_input");
         assert_eq!(first.lifecycle_plan.steps.len(), 9);
+    }
+
+    #[test]
+    fn model_chat_freezes_zero_and_positive_tool_budgets_without_substitution() {
+        for (total, parallel, accepted) in [
+            (0, 0, true),
+            (8, 2, true),
+            (0, 1, false),
+            (1, 0, false),
+            (1, 2, false),
+        ] {
+            let mut profile = profile();
+            profile.model_loop.maximum_capability_calls = total;
+            profile.model_loop.maximum_parallel_calls_per_round = parallel;
+            let compiled = compile_agent(AgentCompilerInput {
+                plan_bytes: None,
+                manifest_bytes: model_yaml(),
+                input_schema_bytes: SCHEMA.as_bytes().to_vec(),
+                output_schema_bytes: SCHEMA.as_bytes().to_vec(),
+                profile,
+                bindings: model_binding(),
+            });
+            assert_eq!(compiled.is_ok(), accepted);
+            if let Ok(compiled) = compiled {
+                let plan: Value = serde_json::from_slice(&compiled.typed_plan_bytes).unwrap();
+                assert_eq!(plan["nodes"]["model"]["maximum_capability_calls"], total);
+                assert_eq!(
+                    plan["nodes"]["model"]["maximum_parallel_calls_per_round"],
+                    parallel
+                );
+                assert_eq!(
+                    plan["nodes"]["model"]["skill_slot_ids"],
+                    serde_json::json!([])
+                );
+                assert_eq!(
+                    plan["nodes"]["model"]["capability_slot_ids"],
+                    serde_json::json!([])
+                );
+            }
+        }
     }
 
     #[test]

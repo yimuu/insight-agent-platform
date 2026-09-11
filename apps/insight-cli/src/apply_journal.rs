@@ -130,7 +130,7 @@ impl ApplyJournalV2 {
         if self.schema_version != 2
             || self.kind != JOURNAL_KIND
             || &self.manifest_digest != expected_manifest_digest
-            || !valid_intent(&self.create_intent, false)
+            || !valid_intent(&self.create_intent, self.create_intent.if_match.is_some())
             || self
                 .resource
                 .as_ref()

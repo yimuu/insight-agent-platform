@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -396,6 +397,10 @@ class NativeReleaseImageTests(unittest.TestCase):
             "lost-waiting": workflow.replace('"runtime_build_push", "duration_seconds": elapsed("runtime")', '"runtime_build_push", "duration_seconds": 0'),
             "runtime-budget": workflow,
             "console-run": workflow,
+            "console-floating-base": workflow,
+            "console-root": workflow,
+            "console-arbitrary-files": workflow,
+            "console-entrypoint": workflow,
         }
         files = ["Cargo.toml", "tools/checks/check-product-release.py", "tools/release/build-product-release.py",
                  "tools/development/build-development-profile-performance.py", "apps/console/scripts/build-agent-compiler.mjs",
@@ -415,6 +420,18 @@ class NativeReleaseImageTests(unittest.TestCase):
                 if name == "console-run":
                     path = root / "deploy/images/console.Dockerfile"
                     path.write_text(path.read_text() + "RUN true\n")
+                if name in {"console-floating-base", "console-root", "console-arbitrary-files", "console-entrypoint"}:
+                    path = root / "deploy/images/console.Dockerfile"
+                    dockerfile = path.read_text()
+                    if name == "console-floating-base":
+                        dockerfile = re.sub(r"@sha256:[0-9a-f]{64}", "", dockerfile)
+                    elif name == "console-root":
+                        dockerfile = dockerfile.replace("USER 1000:1000", "USER 0:0")
+                    elif name == "console-arbitrary-files":
+                        dockerfile = dockerfile.replace("COPY server/config.mjs server/gateway-server.mjs server/main.mjs server/process.mjs", "COPY server/")
+                    else:
+                        dockerfile = dockerfile.replace('/console/server/main.mjs"]', '/console/server/native.mjs"]')
+                    path.write_text(dockerfile)
                 result = subprocess.run([sys.executable, str(root / "tools/checks/check-product-release.py")],
                                         capture_output=True, timeout=5)
                 self.assertEqual(result.returncode == 0, name == "valid", result.stderr)

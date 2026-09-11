@@ -14,15 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, fmt};
 
-pub const OPENAI_RESPONSES_ADAPTER_NAME: &str = "openai.responses/v1";
-pub const ANTHROPIC_MESSAGES_ADAPTER_NAME: &str = "anthropic.messages/2023-06-01";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelProviderWireProtocol {
-    OpenAiResponses,
-    AnthropicMessages,
-}
+pub use insight_platform_contracts::{
+    ModelProviderWireProtocol, ANTHROPIC_MESSAGES_ADAPTER_NAME, OPENAI_RESPONSES_ADAPTER_NAME,
+};
 
 /// Exact physical request identity used only for bounded in-flight connection ownership.
 ///
@@ -40,22 +34,6 @@ pub struct ModelProviderRequestIdentity {
     pub provider_deployment_digest: Sha256Digest,
     pub attempt_no: u32,
     pub lease_generation: u64,
-}
-
-impl ModelProviderWireProtocol {
-    pub const fn endpoint_path(self) -> &'static str {
-        match self {
-            Self::OpenAiResponses => "/v1/responses",
-            Self::AnthropicMessages => "/v1/messages",
-        }
-    }
-
-    pub const fn protocol_version(self) -> &'static str {
-        match self {
-            Self::OpenAiResponses => "responses-v1",
-            Self::AnthropicMessages => "2023-06-01",
-        }
-    }
 }
 
 /// Credential-free request for the role-scoped Provider HTTP/Secret/Egress connector.
@@ -512,9 +490,11 @@ fn failure(
 
 pub(crate) fn validate_wire_descriptor(
     descriptor: &super::InstalledModelAdapterDescriptor,
-    expected_name: &str,
+    protocol: ModelProviderWireProtocol,
 ) -> Result<(), super::ModelAdapterHostError> {
-    if descriptor.qualified_name != expected_name {
+    if descriptor.qualified_name != protocol.qualified_name()
+        || descriptor.adapter_contract_digest != protocol.adapter_contract_digest()
+    {
         return Err(super::ModelAdapterHostError::InvalidInstalledAdapter);
     }
     insight_platform_contracts::InstalledModelAdapter {

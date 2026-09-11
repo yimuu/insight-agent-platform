@@ -1,6 +1,20 @@
 //! PostgreSQL model commands. Shared locks and atomicity remain in this adapter.
 use super::*;
 
+fn require_model_response_schema(
+    plan: &RuntimePlan,
+    node_key: &PlanNodeKey,
+    response: &insight_platform_models::ModelResponseContract,
+) -> Result<(), RepositoryError> {
+    let expected = plan.model_response_schema(node_key)?;
+    if response.output_schema_digest != expected.canonical_digest
+        || response.structured_schema.as_ref() != Some(&expected)
+    {
+        return Err(RepositoryError::Conflict("Model node response schema"));
+    }
+    Ok(())
+}
+
 impl PgSchedulerTransaction {
     pub async fn dispatch_model_tool_capabilities(
         &mut self,
@@ -709,6 +723,11 @@ impl PgSchedulerTransaction {
             self.scope_environment_limits,
         )
         .await?;
+        require_model_response_schema(
+            &command.plan,
+            &source_node.plan_node_key,
+            &command.request.request.response_contract,
+        )?;
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
@@ -1115,7 +1134,13 @@ impl PgSchedulerTransaction {
             &previous_turn.request_value_id,
         )
         .await?;
+        require_model_response_schema(
+            &command.plan,
+            &plan_node_key,
+            &command.request.request.response_contract,
+        )?;
         if next_round > *maximum_rounds
+            || command.request.request.response_contract != previous_request.response_contract
             || command.request.request.model_turn_id != command.model_turn_id
             || command
                 .request

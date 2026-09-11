@@ -70,7 +70,17 @@ impl PgRegistryTransaction {
         .bind(&payload.value)
         .bind(&payload.digest)
         .fetch_one(&mut *transaction)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error.as_database_error().is_some_and(|database| {
+                database.code().as_deref() == Some("23505")
+                    && database.constraint() == Some("resources_alias_uq")
+            }) {
+                RepositoryError::Conflict("resource alias")
+            } else {
+                error.into()
+            }
+        })?;
         let record = resource_from_row(row)?;
         append_command_event(
             &mut transaction,

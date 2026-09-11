@@ -32,7 +32,7 @@ async function fixture(t, options = {}) {
     setItem: (key, value) => memory.set(key, String(value)),
     removeItem: key => memory.delete(key),
   }
-  const receipts = new Map(), calls = [], artifacts = new Map(), uploads = new Map()
+  const receipts = new Map(), calls = [], artifacts = new Map(), uploads = new Map(), artifactStates = new Map()
   let counter = 10, resource = null, published = null, drop = options.drop ?? null
   let failPublish = options.failPublish ?? false
   const agentId = id('agt', 1)
@@ -130,19 +130,29 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise(resolve => server.close(resolve)))
   const client = Object.assign(new PlatformClient('http://127.0.0.1:' + server.address().port, ''), {
     prepareArtifactUpload: async (body, key) => {
-      if (uploads.has(key)) return uploads.get(key)
+      if (uploads.has(key)) {
+        const previous = uploads.get(key)
+        if (artifactStates.get(previous.data.artifact_id) !== 'staging') throw new Error('terminal prepare replay rejected')
+        return previous
+      }
       const artifactId = id('art', counter++)
+      artifactStates.set(artifactId, 'staging')
       artifacts.set(artifactId, { artifact_id: artifactId, content_digest: body.expected_digest,
         byte_length: body.expected_size_bytes, media_type: body.declared_media_type, classification: body.classification, display_name: body.display_name })
-      const result = { data: { artifact_id: artifactId, operation_id: id('job', counter++), artifact_etag: '"artifact-v1"',
+      const result = { data: { schema_version: 1, artifact_id: artifactId, operation_id: id('job', counter++), upload_grant_id: id('grt', counter++), artifact_etag: `"${artifactId}-1"`, upload_expires_at: new Date(Date.now() + 120_000).toISOString().replace(/(\.\d{3})Z$/, '$1000Z'),
         upload_target: { url: 'https://objects.example/upload', completion_proof: 'proof' } } }
+      result.purpose = body.purpose
       uploads.set(key, result)
       return result
     },
     putArtifactObject: async () => {},
-    completeArtifactUpload: async () => ({ data: {} }),
-    waitOperation: async () => ({ data: { state: 'succeeded', error: null } }),
-    getArtifact: async artifactId => ({ data: { state: 'ready', content: artifacts.get(artifactId) } }),
+    completeArtifactUpload: async artifactId => {
+      artifactStates.set(artifactId, 'ready')
+      if (options.dropUpload === 'complete') { options.dropUpload = null; throw new Error('completion response lost') }
+      return { data: {} }
+    },
+    waitOperation: async operation_id => ({ data: { operation_id, state: 'succeeded', error: null } }),
+    getArtifact: async artifactId => { const content = artifacts.get(artifactId); const state = artifactStates.get(artifactId); const version = state === 'staging' ? 1 : 4; const intent = [...uploads.values()].find(value => value.data.artifact_id === artifactId); return { etag: `"${artifactId}-${version}"`, data: { schema_version: 1, artifact_id: artifactId, version, etag: `"${artifactId}-${version}"`, purpose: intent.purpose, classification: content.classification, expected_size_bytes: content.byte_length, declared_media_type: content.media_type, state, content: state === 'ready' ? content : null } } },
   })
   return { client, memory, calls, observe, drift: () => { resource.active_deployment_id = id('adep', 999); advance() } }
 }
@@ -245,4 +255,31 @@ test('mismatched current HTTP and body ETags cannot clear recovery or report rea
   await assert.rejects(publishCompiledAgent(f.client, compiled, null, stage => stages.push(stage)), /ETag differs/)
   assert.equal(stages.includes('ready'), false)
   assert.ok(f.memory.has(handleKey))
+})
+
+
+test('Agent upload completion loss retains prepared metadata and never retries terminal prepare', async t => {
+  const compiled = await compilation(), f = await fixture(t, { dropUpload: 'complete' })
+  await assert.rejects(publishCompiledAgent(f.client, compiled, null, () => {}), /completion response lost/)
+  const saved = JSON.parse(f.memory.get(handleKey))
+  assert.equal(saved.schema_version, 4)
+  assert.ok(saved.authoring_upload)
+  assert.equal(saved.authoring_artifact, null)
+  assert.equal(JSON.stringify(saved).includes('https://objects.example/upload'), false)
+  assert.equal(JSON.stringify(saved).includes('"proof"'), false)
+  const result = await publishCompiledAgent(f.client, compiled, null, () => {})
+  assert.equal(result.resource.active_deployment_id, result.deploymentId)
+  assert.equal(f.memory.has(handleKey), false)
+})
+
+test('previous Agent handle remains visible and is rejected without any HTTP', async t => {
+  const compiled = await compilation(), f = await fixture(t, { failPublish: true })
+  await assert.rejects(publishCompiledAgent(f.client, compiled, null, () => {}))
+  const saved = JSON.parse(f.memory.get(handleKey)); saved.schema_version = 3
+  delete saved.authoring_upload; delete saved.plan_upload
+  f.memory.set(handleKey, JSON.stringify(saved))
+  const count = f.calls.length
+  await assert.rejects(publishCompiledAgent(f.client, compiled, null, () => {}), /conflict/)
+  assert.equal(f.calls.length, count)
+  assert.equal(f.memory.get(handleKey), JSON.stringify(saved))
 })

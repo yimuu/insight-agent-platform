@@ -1,4 +1,5 @@
 import { parseBindingResolution, parseDependencyPage } from '../agent/authoring-query.ts'
+import type { CompiledModelConfiguration, ExactModelCredential, ModelConfigurationCatalog, ModelConfigurationInput, ModelDeclaration, ModelDefault, ModelResourceKind, ModelResourceNoun, ModelResourcePage, ModelCredentialMetadata, ModelConnectionObservation, ModelQuotaLimits, ModelQuotaView } from '../model/types.ts'
 import type { BindingSelections, DependencyFilters } from '../agent/authoring-query.ts'
 import { followRunEventPages, readRunEventStream, RunEventTransportError } from './sse.ts'
 import type { RunEventFollowOptions, RunEventPageOptions } from './sse.ts'
@@ -9,6 +10,7 @@ import type {
   ArtifactView,
   AuthorityResponse,
   DeploymentView,
+  ExactDeploymentRef,
   JsonObject,
   ListPage,
   OperationView,
@@ -206,6 +208,57 @@ export class PlatformClient {
     return this.request<ResourceView>('/agents', {
       method: 'POST', headers: { 'Idempotency-Key': receipt }, body: JSON.stringify(body),
     })
+  }
+
+  getModelConfiguration(options: { signal?: AbortSignal } = {}) { return this.request<ModelConfigurationCatalog>('/model-configuration', options) }
+  listModelResources(kind: ModelResourceKind, after?: string, options: { signal?: AbortSignal } = {}) {
+    const query = new URLSearchParams({ kind })
+    if (after) query.set('after', after)
+    return this.request<ModelResourcePage>(`/model-configuration/resources?${query}`, options)
+  }
+  getModelQuota(deploymentId: string) { return this.request<ModelQuotaView>(`/model-quotas/${encodeURIComponent(deploymentId)}`) }
+  setModelQuota(model: ExactDeploymentRef, limits: ModelQuotaLimits, etag: string, receipt: string) {
+    return this.request<ModelQuotaView>(`/model-quotas/${encodeURIComponent(model.deployment_id)}`, { method: 'PUT', body: JSON.stringify({ schema_version: 1, model_deployment: model, limits }), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } })
+  }
+  getModelDefault(options: { signal?: AbortSignal } = {}) { return this.request<ModelDefault>('/model-default', options) }
+  probeModel(installationDigest: string, model: import('./types.ts').ExactDeploymentRef) {
+    return this.request<ModelConnectionObservation>('/model-configuration:probe', { method: 'POST', body: JSON.stringify({ schema_version: 1, installation_digest: installationDigest, model_deployment: model }) })
+  }
+  getModelCredential(id: string) { return this.request<ModelCredentialMetadata>(`/model-credentials/${encodeURIComponent(id)}`) }
+  revokeModelCredential(id: string, generation: number, etag: string, receipt: string) {
+    return this.request<ModelCredentialMetadata>(`/model-credentials/${encodeURIComponent(id)}:revoke`, { method: 'POST', body: JSON.stringify({ schema_version: 1, expected_generation: generation }), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } })
+  }
+  setModelDefault(body: JsonObject, etag: string, receipt: string) {
+    return this.request<ModelDefault>('/model-default', { method: 'PUT', body: JSON.stringify(body), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } })
+  }
+  importModelCredential(operationId: string, providerId: string, apiKey: string) {
+    return this.request<{ schema_version: 1; binding: ExactModelCredential }>('/model-credentials', {
+      method: 'POST', body: JSON.stringify({ schema_version: 1, operation_id: operationId, provider_id: providerId, api_key: apiKey }),
+    }, undefined, 200)
+  }
+  declareModelConfiguration(input: ModelConfigurationInput, installationDigest: string) {
+    return this.request<ModelDeclaration>('/model-configuration:declare', { method: 'POST', body: JSON.stringify({ schema_version: 1, installation_digest: installationDigest, input }) })
+  }
+  compileModelConfiguration(input: ModelConfigurationInput, installationDigest: string, artifact: import('./types.ts').ArtifactRef) {
+    return this.request<CompiledModelConfiguration>('/model-configuration:compile', { method: 'POST', body: JSON.stringify({ schema_version: 1, installation_digest: installationDigest, input, artifact }) })
+  }
+  createModelResource(noun: ModelResourceNoun, body: JsonObject, receipt: string) {
+    return this.request<ResourceView>(`/${noun}`, { method: 'POST', body: JSON.stringify(body), headers: { 'Idempotency-Key': receipt } }, undefined, 201)
+  }
+  updateModelResource(noun: ModelResourceNoun, id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<ResourceView>(`/${noun}/${encodeURIComponent(id)}/draft`, { method: 'PUT', body: JSON.stringify(body), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } }, undefined, 200)
+  }
+  validateModelResource(noun: ModelResourceNoun, id: string, etag: string, receipt: string) {
+    return this.request<OperationView>(`/${noun}/${encodeURIComponent(id)}/draft:validate`, { method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt } }, undefined, 202)
+  }
+  publishModelResource(noun: ModelResourceNoun, id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<PublishResourceResponse>(`/${noun}/${encodeURIComponent(id)}/draft:publish`, { method: 'POST', body: JSON.stringify(body), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } }, undefined, 201)
+  }
+  createModelDeployment(noun: ModelResourceNoun, id: string, body: JsonObject, etag: string, receipt: string) {
+    return this.request<DeploymentView>(`/${noun}/${encodeURIComponent(id)}/deployments`, { method: 'POST', body: JSON.stringify(body), headers: { 'If-Match': etag, 'Idempotency-Key': receipt } }, undefined, 201)
+  }
+  activateModelDeployment(noun: ModelResourceNoun, id: string, deploymentId: string, etag: string, receipt: string) {
+    return this.request<ResourceView>(`/${noun}/${encodeURIComponent(id)}/deployments/${encodeURIComponent(deploymentId)}:activate`, { method: 'POST', headers: { 'If-Match': etag, 'Idempotency-Key': receipt } }, undefined, 200)
   }
 
   updateAgent(id: string, body: JsonObject, etag: string, receipt: string) {

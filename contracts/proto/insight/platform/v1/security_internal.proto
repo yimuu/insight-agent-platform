@@ -7,6 +7,14 @@ package insight.platform.v1;
 service SecuritySecretAuthorityService {
   rpc LoadSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
   rpc RegisterPreparedSecretBinding(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+  // Metadata-only, current ModelTurn/Job/frozen-closure authorization before DNS or Secret IO.
+  // Current original-caller SecretBind authorization before imported credential IO.
+  rpc AuthorizeModelCredentialImport(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+  // Current ModelRead + SecretBind probe projection, independent of durable execution.
+  rpc AuthorizeModelConnectionProbe(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+  rpc AuthorizeModelDispatch(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
+  // Metadata-only current Context Query/Job/lease and exact closure authorization.
+  rpc AuthorizeContextDispatch(ClosedSecurityEnvelope) returns (ClosedSecurityEnvelope);
 }
 
 message ClosedSecurityEnvelope {

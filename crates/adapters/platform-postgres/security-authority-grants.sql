@@ -41,6 +41,25 @@ BEGIN
         target_role
     );
 
+    -- Metadata-only dispatch authorization reads the existing execution and Registry owners.
+    -- It never receives write/lock privileges on these relations and never reads RunValue bodies.
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT ON insight_platform.tenants, insight_platform.invocations, insight_platform.jobs, insight_platform.runs, insight_platform.run_nodes, insight_platform.resources, insight_platform.resource_versions, insight_platform.deployments TO %I',
+        target_role
+    );
+
+    -- Current Model connection authorization verifies the exact declaration Artifact is Ready.
+    -- These are only the columns used by require_ready_run_artifact: no object locator, Artifact
+    -- metadata/body, table-wide SELECT, DML, or row-lock privilege is required or granted.
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, artifact_id, blob_id, state, terminal_at, verified_media_type, classification) ON insight_platform.artifacts TO %I',
+        target_role
+    );
+    EXECUTE pg_catalog.format(
+        'GRANT SELECT (tenant_id, blob_id, state, deleted_at, content_digest, size_bytes) ON insight_platform.artifact_blobs TO %I',
+        target_role
+    );
+
     -- Prepared winner registration only. No UPDATE/DELETE and no write privilege on any other
     -- business table are granted. PostgreSQL FK checks remain owned by the table owner.
     EXECUTE pg_catalog.format(

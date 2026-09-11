@@ -29,6 +29,17 @@ use tokio::{sync::Semaphore, time::timeout};
 use uuid::Uuid;
 
 mod aws;
+mod catalog;
+mod model_credentials;
+mod openbao;
+mod prepared;
+mod provider_config;
+
+pub use catalog::{SecretProviderCatalog, SecretProviderReadinessError};
+pub use provider_config::{
+    OpenBaoSecretProviderConfigV1, OpenBaoSecretReadinessV1, SecretProviderCatalogConfigV2,
+    SecretProviderConfig, SecretProviderConfigError,
+};
 
 pub use aws::{
     AwsSecretProviderCatalog, AwsSecretProviderCatalogConfig, AwsSecretProviderConfig,
@@ -338,6 +349,15 @@ pub trait InstalledSecretProvider: Send + Sync {
         policy: &SecretResolutionPolicy,
     ) -> Result<SecretProviderDeleteDisposition, SecretProviderDeleteError>;
 
+    async fn prepare_or_load_model_credential(
+        &self,
+        _request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+        _permit: &insight_platform_contracts::ModelCredentialImportPermitV1,
+        _key: &insight_platform_contracts::SensitiveModelApiKey,
+    ) -> Result<ProviderPreparedSecretVersion, SecretProviderPrepareError> {
+        Err(SecretProviderPrepareError::Rejected)
+    }
+
     async fn prepare_or_load_mcp_oauth_transient(
         &self,
         _candidate: NewMcpOAuthTransientSecretBundle,
@@ -405,7 +425,8 @@ pub struct BrokeredSecretMaterialResolver {
 
 /// OAuth write composition. External provider state is the preparation winner; PostgreSQL
 /// registration is retried with the same digest until the existing SecretBinding is observable.
-pub struct BrokeredMcpOAuthSecretStore {
+pub struct BrokeredPreparedSecretStore {
+    import_authority: Option<Arc<dyn insight_platform_security::ModelCredentialImportAuthority>>,
     registration: Arc<dyn PreparedSecretBindingAuthority>,
     sealer: Arc<dyn SecretReferenceSealer>,
     providers: InstalledSecretProviderCatalog,
@@ -424,7 +445,7 @@ struct ProviderSecretRegistration<'a> {
     prepared: &'a ProviderPreparedSecretVersion,
 }
 
-impl BrokeredMcpOAuthSecretStore {
+impl BrokeredPreparedSecretStore {
     pub fn new(
         registration: Arc<dyn PreparedSecretBindingAuthority>,
         sealer: Arc<dyn SecretReferenceSealer>,
@@ -437,6 +458,7 @@ impl BrokeredMcpOAuthSecretStore {
             return Err(SecretBrokerConfigurationError::InvalidProvider);
         }
         Ok(Self {
+            import_authority: None,
             registration,
             sealer,
             providers,
@@ -444,6 +466,14 @@ impl BrokeredMcpOAuthSecretStore {
             limits,
             in_flight: Arc::new(Semaphore::new(limits.maximum_in_flight)),
         })
+    }
+
+    pub fn with_model_credential_authority(
+        mut self,
+        authority: Arc<dyn insight_platform_security::ModelCredentialImportAuthority>,
+    ) -> Self {
+        self.import_authority = Some(authority);
+        self
     }
 
     pub fn capacity_snapshot(&self) -> SecretBrokerCapacitySnapshot {
@@ -504,6 +534,7 @@ impl BrokeredMcpOAuthSecretStore {
             reference_digest: sealed.reference_digest,
             opaque_version_identity_digest: prepared.opaque_version_identity_digest.clone(),
             provider_storage_evidence_digest: prepared.storage_evidence_digest.clone(),
+            delegated_import: None,
         };
         command.audit.request_digest = command
             .semantic_request_digest()
@@ -641,7 +672,7 @@ impl BrokeredMcpOAuthSecretStore {
 }
 
 #[async_trait]
-impl McpOAuthTransientSecretStore for BrokeredMcpOAuthSecretStore {
+impl McpOAuthTransientSecretStore for BrokeredPreparedSecretStore {
     async fn prepare_or_load(
         &self,
         candidate: NewMcpOAuthTransientSecretBundle,
@@ -665,7 +696,7 @@ impl McpOAuthTransientSecretStore for BrokeredMcpOAuthSecretStore {
 }
 
 #[async_trait]
-impl McpOAuthTokenStore for BrokeredMcpOAuthSecretStore {
+impl McpOAuthTokenStore for BrokeredPreparedSecretStore {
     async fn load_prepared(
         &self,
         preparation: &McpOAuthTokenPreparation,

@@ -10,6 +10,11 @@ pub use expression::{
 
 pub mod execution;
 
+#[cfg(test)]
+mod model_loop_budget_tests;
+#[cfg(test)]
+mod model_response_schema_tests;
+
 #[cfg(all(test, feature = "runtime-validation"))]
 mod runtime_validation_tests;
 
@@ -386,6 +391,24 @@ pub struct RuntimePlan {
 }
 
 impl RuntimePlan {
+    /// The model responds to its own frozen output port, independently of the Agent's final output.
+    pub fn model_response_schema(
+        &self,
+        node_key: &PlanNodeKey,
+    ) -> Result<ClosedJsonSchema, PlanError> {
+        let RuntimeNode::ModelLoop { output, .. } = self.node(node_key)? else {
+            return Err(PlanError::InvalidPlan);
+        };
+        let schema = self
+            .schema_documents
+            .get(output.schema_digest())
+            .ok_or(PlanError::InvalidPlan)?;
+        if &schema.canonical_digest != output.schema_digest() {
+            return Err(PlanError::InvalidPlan);
+        }
+        ClosedJsonSchema::try_from(schema.clone()).map_err(|_| PlanError::InvalidPlan)
+    }
+
     pub fn validate(&self, limits: PlanLimits) -> Result<(), PlanError> {
         if self.plan_version != 6
             || limits.maximum_nodes == 0
@@ -483,8 +506,11 @@ impl RuntimePlan {
             }
         }
         let mut references = std::collections::BTreeSet::new();
-        for node in self.nodes.values() {
+        for (node_key, node) in &self.nodes {
             collect_node_schemas(node, &mut references);
+            if matches!(node, RuntimeNode::ModelLoop { .. }) {
+                self.model_response_schema(node_key)?;
+            }
             for expression in node_expressions(node) {
                 for instruction in &expression.instructions {
                     if let TypedInstruction::Literal { value } = instruction {
@@ -891,6 +917,30 @@ fn validate_human_task_definition(definition: &HumanTaskDefinition) -> Result<()
     }
 }
 
+/// Tool budgets are either both zero or both positive, with bounded parallelism.
+/// Profiles validate this pair before any concrete tool slots have been selected.
+pub fn validate_model_loop_tool_budget(total: u32, parallel: u16) -> Result<(), PlanError> {
+    if (total == 0) != (parallel == 0) || u32::from(parallel) > total {
+        Err(PlanError::InvalidPlan)
+    } else {
+        Ok(())
+    }
+}
+
+/// A selected Skill or Capability requires a positive tool budget.
+pub fn validate_model_loop_tool_budget_for_slots(
+    total: u32,
+    parallel: u16,
+    has_tool_slots: bool,
+) -> Result<(), PlanError> {
+    validate_model_loop_tool_budget(total, parallel)?;
+    if has_tool_slots && total == 0 {
+        Err(PlanError::InvalidPlan)
+    } else {
+        Ok(())
+    }
+}
+
 pub fn validate_node(
     node_key: &PlanNodeKey,
     node: &RuntimeNode,
@@ -1004,9 +1054,12 @@ pub fn validate_node(
             token_budget,
             ..
         } if *maximum_rounds == 0
-            || *maximum_capability_calls == 0
-            || *maximum_parallel_calls_per_round == 0
-            || *maximum_parallel_calls_per_round as u32 > *maximum_capability_calls
+            || validate_model_loop_tool_budget_for_slots(
+                *maximum_capability_calls,
+                *maximum_parallel_calls_per_round,
+                !skill_slot_ids.is_empty() || !capability_slot_ids.is_empty(),
+            )
+            .is_err()
             || *token_budget == 0
             || skill_slot_ids
                 .iter()

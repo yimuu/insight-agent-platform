@@ -1,3 +1,4 @@
+use super::structured_output::{parse_structured_output, use_native_structured_output};
 use super::{
     normalize_provider_stream, permanent, rejected, retryable_after_dispatch,
     validate_wire_descriptor, InstalledModelAdapterDescriptor, ModelAdapterCancelOutcome,
@@ -5,17 +6,19 @@ use super::{
     ModelAdapterHostError, ModelProviderAdapter, ModelProviderWireConnector,
     ModelProviderWireEvent, ModelProviderWireProtocol, ModelProviderWireRequest,
     NormalizedFrameBuilder, NormalizedModelStream, ProviderEventCodec,
-    OPENAI_RESPONSES_ADAPTER_NAME,
 };
 use async_trait::async_trait;
 use insight_platform_contracts::{canonical_digest, ClosedJsonValue, ValueRef};
 use insight_platform_models::{
     AccountingQuality, CanonicalAssistantMessage, CanonicalFinishReason, CanonicalMessagePart,
     CanonicalMessageRole, CanonicalModelResponse, ModelObservation, ModelToolIntent, ModelUsage,
-    NormalizedModelDelta, NormalizedModelFrame,
+    NormalizedModelDelta, NormalizedModelFrame, MAX_MODEL_SAFE_IDENTITY_BYTES,
 };
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
+
+// Local bound for the recognized text billing metadata profile, not a provider guarantee.
+const MAX_USAGE_DETAIL_ENTRIES: usize = 16;
 
 /// OpenAI Responses API adapter. HTTP, TLS, egress and credential handling stay in the connector.
 pub struct OpenAiResponsesAdapter {
@@ -28,7 +31,7 @@ impl OpenAiResponsesAdapter {
         descriptor: InstalledModelAdapterDescriptor,
         connector: Arc<dyn ModelProviderWireConnector>,
     ) -> Result<Self, ModelAdapterHostError> {
-        validate_wire_descriptor(&descriptor, OPENAI_RESPONSES_ADAPTER_NAME)?;
+        validate_wire_descriptor(&descriptor, ModelProviderWireProtocol::OpenAiResponses)?;
         Ok(Self {
             descriptor,
             connector,
@@ -73,17 +76,10 @@ impl ModelProviderAdapter for OpenAiResponsesAdapter {
 fn openai_request_body(
     request: &ModelAdapterExecutionRequest,
 ) -> Result<Value, ModelAdapterFailure> {
-    if request.profile.usage.reports_cost
-        || !request.profile.usage.provider_reports_usage
-        || (request
-            .request
-            .response_contract
-            .structured_schema
-            .is_some()
-            && !request.profile.structured_output.native)
-    {
+    if request.profile.usage.reports_cost {
         return Err(rejected("openai_responses_profile_not_supported"));
     }
+    let native_structured = use_native_structured_output(request)?;
 
     let mut input = Vec::new();
     for message in &request.request.messages {
@@ -167,7 +163,13 @@ fn openai_request_body(
         );
     }
 
-    if let Some(schema) = &request.request.response_contract.structured_schema {
+    if let Some(schema) = request
+        .request
+        .response_contract
+        .structured_schema
+        .as_ref()
+        .filter(|_| native_structured)
+    {
         body.insert(
             "text".to_owned(),
             serde_json::json!({
@@ -232,6 +234,9 @@ impl OpenAiResponsesCodec {
                 "id",
                 "object",
                 "created_at",
+                "completed_at",
+                "frequency_penalty",
+                "presence_penalty",
                 "status",
                 "background",
                 "error",
@@ -262,9 +267,12 @@ impl OpenAiResponsesCodec {
                 "metadata",
             ],
         )?;
+        if !crate::responses_metadata::valid_response_metadata(&response) {
+            return Err(permanent("openai_responses_invalid_response_metadata"));
+        }
         self.terminal = true;
         let response_digest = digest_value(&response)?;
-        let actual_model_identity = required_string(&response, "model")?.to_owned();
+        let actual_model_identity = required_identity(&response, "model")?.to_owned();
         let output = response
             .get("output")
             .and_then(Value::as_array)
@@ -287,7 +295,7 @@ impl OpenAiResponsesCodec {
                         match part.get("type").and_then(Value::as_str) {
                             Some("output_text") => {
                                 ensure_keys(part, &["type", "text", "annotations", "logprobs"])?;
-                                text.push_str(required_string(part, "text")?);
+                                text.push_str(required_text(part, "text")?);
                             }
                             Some("refusal") => {
                                 return Err(permanent("openai_responses_content_filtered"));
@@ -301,8 +309,8 @@ impl OpenAiResponsesCodec {
                         item,
                         &["id", "type", "status", "call_id", "name", "arguments"],
                     )?;
-                    let name = required_string(item, "name")?;
-                    let call_id = required_string(item, "call_id")?;
+                    let name = required_identity(item, "name")?;
+                    let call_id = required_identity(item, "call_id")?;
                     let projection = self
                         .request
                         .request
@@ -310,9 +318,8 @@ impl OpenAiResponsesCodec {
                         .iter()
                         .find(|tool| tool.projected_name == name)
                         .ok_or_else(|| permanent("openai_responses_unknown_tool"))?;
-                    let arguments: Value =
-                        serde_json::from_str(required_string(item, "arguments")?)
-                            .map_err(|_| permanent("openai_responses_invalid_tool_arguments"))?;
+                    let arguments: Value = serde_json::from_str(required_text(item, "arguments")?)
+                        .map_err(|_| permanent("openai_responses_invalid_tool_arguments"))?;
                     tool_intents.push(ModelToolIntent {
                         call_id: call_id.to_owned(),
                         projected_tool_name: name.to_owned(),
@@ -341,16 +348,11 @@ impl OpenAiResponsesCodec {
         }
 
         let structured_output = if tool_intents.is_empty() {
-            if let Some(schema) = &self.request.request.response_contract.structured_schema {
-                let value = serde_json::from_str(&text)
-                    .map_err(|_| permanent("openai_responses_invalid_structured_output"))?;
-                Some(
-                    ClosedJsonValue::build(schema.canonical_digest.clone(), value)
-                        .map_err(|_| permanent("openai_responses_invalid_structured_output"))?,
-                )
-            } else {
-                None
-            }
+            parse_structured_output(
+                &self.request,
+                &text,
+                "openai_responses_invalid_structured_output",
+            )?
         } else {
             None
         };
@@ -378,8 +380,10 @@ impl OpenAiResponsesCodec {
                 "output_tokens",
                 "output_tokens_details",
                 "total_tokens",
+                "x_details",
             ],
         )?;
+        validate_usage_details(usage)?;
         let input_tokens = required_u64(usage, "input_tokens")?;
         let output_tokens = required_u64(usage, "output_tokens")?;
         let cached_input_tokens = if self.request.profile.usage.reports_cached_input_tokens {
@@ -400,7 +404,7 @@ impl OpenAiResponsesCodec {
         } else {
             None
         };
-        let model_fingerprint = optional_string(&response, "system_fingerprint")?;
+        let model_fingerprint = optional_fingerprint(&response)?;
 
         self.frames.terminal(CanonicalModelResponse {
             schema_version: 1,
@@ -486,7 +490,7 @@ impl ProviderEventCodec for OpenAiResponsesCodec {
                             item,
                             &["id", "type", "status", "call_id", "name", "arguments"],
                         )?;
-                        let name = required_string(item, "name")?;
+                        let name = required_identity(item, "name")?;
                         if !self
                             .request
                             .request
@@ -497,9 +501,9 @@ impl ProviderEventCodec for OpenAiResponsesCodec {
                             return Err(permanent("openai_responses_unknown_tool"));
                         }
                         let previous = self.function_items.insert(
-                            required_string(item, "id")?.to_owned(),
+                            required_identity(item, "id")?.to_owned(),
                             (
-                                required_string(item, "call_id")?.to_owned(),
+                                required_identity(item, "call_id")?.to_owned(),
                                 name.to_owned(),
                             ),
                         );
@@ -525,9 +529,14 @@ impl ProviderEventCodec for OpenAiResponsesCodec {
                         "logprobs",
                     ],
                 )?;
-                Ok(Some(self.frames.live(NormalizedModelDelta::Text(
-                    required_string(&event.data, "delta")?.to_owned(),
-                ))?))
+                let text = required_text(&event.data, "delta")?;
+                if text.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    self.frames
+                        .live(NormalizedModelDelta::Text(text.to_owned()))?,
+                ))
             }
             "response.output_text.done" => {
                 ensure_keys(
@@ -570,16 +579,20 @@ impl ProviderEventCodec for OpenAiResponsesCodec {
                         "delta",
                     ],
                 )?;
-                let item_id = required_string(&event.data, "item_id")?;
+                let item_id = required_identity(&event.data, "item_id")?;
                 let (call_id, name) = self
                     .function_items
                     .get(item_id)
                     .ok_or_else(|| permanent("openai_responses_unknown_function_item"))?;
+                let fragment = required_text(&event.data, "delta")?;
+                if fragment.is_empty() {
+                    return Ok(None);
+                }
                 Ok(Some(self.frames.live(
                     NormalizedModelDelta::ToolArguments {
                         call_id: call_id.clone(),
                         projected_tool_name: name.clone(),
-                        fragment: required_string(&event.data, "delta")?.to_owned(),
+                        fragment: fragment.to_owned(),
                     },
                 )?))
             }
@@ -639,21 +652,33 @@ fn ensure_keys(value: &Value, allowed: &[&str]) -> Result<(), ModelAdapterFailur
     Ok(())
 }
 
-fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str, ModelAdapterFailure> {
+fn required_identity<'a>(value: &'a Value, name: &str) -> Result<&'a str, ModelAdapterFailure> {
     value
         .get(name)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && !value.contains('\0'))
-        .ok_or_else(|| permanent("openai_responses_invalid_field"))
+        .ok_or_else(|| permanent("openai_responses_invalid_identity"))
 }
 
-fn optional_string(value: &Value, name: &str) -> Result<Option<String>, ModelAdapterFailure> {
-    match value.get(name) {
+fn required_text<'a>(value: &'a Value, name: &str) -> Result<&'a str, ModelAdapterFailure> {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.contains('\0'))
+        .ok_or_else(|| permanent("openai_responses_invalid_text"))
+}
+
+fn optional_fingerprint(value: &Value) -> Result<Option<String>, ModelAdapterFailure> {
+    match value.get("system_fingerprint") {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() && !value.contains('\0') => {
+        Some(Value::String(value)) if value.is_empty() => Ok(None),
+        Some(Value::String(value))
+            if value.len() <= MAX_MODEL_SAFE_IDENTITY_BYTES
+                && !value.chars().any(char::is_control) =>
+        {
             Ok(Some(value.clone()))
         }
-        Some(_) => Err(permanent("openai_responses_invalid_field")),
+        Some(_) => Err(permanent("openai_responses_invalid_fingerprint")),
     }
 }
 
@@ -662,6 +687,55 @@ fn required_u64(value: &Value, name: &str) -> Result<u64, ModelAdapterFailure> {
         .get(name)
         .and_then(Value::as_u64)
         .ok_or_else(|| permanent("openai_responses_invalid_usage"))
+}
+
+/// Billing detail metadata never substitutes for or adds to the aggregate usage authority.
+fn validate_usage_details(usage: &Value) -> Result<(), ModelAdapterFailure> {
+    let Some(details) = usage.get("x_details") else {
+        return Ok(());
+    };
+    let invalid = || permanent("openai_responses_invalid_usage_details");
+    let entries = details
+        .as_array()
+        .filter(|entries| entries.len() <= MAX_USAGE_DETAIL_ENTRIES)
+        .ok_or_else(invalid)?;
+    for entry in entries {
+        let object = entry.as_object().ok_or_else(invalid)?;
+        if object.keys().any(|key| {
+            ![
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "x_billing_type",
+                "prompt_tokens_details",
+                "output_tokens_details",
+            ]
+            .contains(&key.as_str())
+        }) || ["input_tokens", "output_tokens", "total_tokens"]
+            .iter()
+            .any(|key| object.get(*key).and_then(Value::as_u64).is_none())
+            || object.get("x_billing_type").and_then(Value::as_str) != Some("response_api")
+            || !valid_optional_usage_counter(object.get("prompt_tokens_details"), "cached_tokens")
+            || !valid_optional_usage_counter(
+                object.get("output_tokens_details"),
+                "reasoning_tokens",
+            )
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn valid_optional_usage_counter(value: Option<&Value>, counter: &str) -> bool {
+    value.is_none_or(|value| {
+        value.as_object().is_some_and(|object| {
+            object.keys().all(|key| key == counter)
+                && object
+                    .get(counter)
+                    .is_none_or(|value| value.as_u64().is_some())
+        })
+    })
 }
 
 fn digest_value(

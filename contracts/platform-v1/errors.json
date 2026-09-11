@@ -29,6 +29,7 @@
       "operation_not_terminal",
       "deadline_exceeded",
       "temporarily_unavailable",
+      "credential_import_outcome_unknown",
       "internal_error"
     ],
     "media_type": "application/problem+json"

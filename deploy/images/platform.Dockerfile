@@ -20,6 +20,7 @@ COPY contracts/proto ./contracts/proto
 RUN cargo chef cook --locked --release --workspace --recipe-path recipe.json \
     --bin insight \
     --bin platform-schema \
+    --bin platform-installation \
     --bin platform-dev-bootstrap \
     --bin platform-callback-api \
     --bin platform-gateway \
@@ -59,6 +60,7 @@ COPY deploy ./deploy
 RUN cargo build --locked --release --workspace \
     --bin insight \
     --bin platform-schema \
+    --bin platform-installation \
     --bin platform-dev-bootstrap \
     --bin platform-callback-api \
     --bin platform-gateway \
@@ -123,6 +125,7 @@ WORKDIR /app
 FROM runtime-base AS runtime
 
 COPY --from=builder /workspace/target/release/insight /usr/local/bin/insight
+COPY --from=builder /workspace/target/release/platform-installation /usr/local/bin/platform-installation
 COPY --from=builder /workspace/target/release/platform-schema /usr/local/bin/platform-schema
 COPY --from=builder /workspace/target/release/platform-dev-bootstrap /usr/local/bin/platform-dev-bootstrap
 COPY --from=builder /workspace/target/release/platform-callback-api /usr/local/bin/platform-callback-api

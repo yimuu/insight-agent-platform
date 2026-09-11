@@ -3,6 +3,10 @@
 //! This module intentionally knows nothing about PostgreSQL or internal RPC. It validates the
 //! public response envelope before returning authority state to the command layer.
 
+mod credentials;
+mod model_configuration;
+mod trust;
+
 use insight_platform_contracts::{
     ApiProblem, OperationViewV1, ResourceId, ResourceKind, Sha256Digest, SpanId, TraceId,
     MAX_FIELD_ERRORS, MAX_OPAQUE_CURSOR_BYTES, MAX_SAFE_TEXT_BYTES,
@@ -82,11 +86,27 @@ impl fmt::Display for PublicClientError {
 
 impl std::error::Error for PublicClientError {}
 
-#[derive(Debug)]
 pub struct PublicHttpClient {
     client: Client,
     base_url: String,
     bearer_token: String,
+    additional_roots: Vec<reqwest::Certificate>,
+}
+
+impl fmt::Debug for PublicHttpClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublicHttpClient")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for PublicHttpClient {
+    fn drop(&mut self) {
+        let mut token = std::mem::take(&mut self.bearer_token).into_bytes();
+        token.fill(0);
+    }
 }
 
 #[derive(Debug)]
@@ -119,14 +139,67 @@ pub struct PublicSseFrame<T> {
 }
 
 impl PublicHttpClient {
+    pub(crate) fn from_connection_files(
+        endpoint: &str,
+        token_file: &std::path::Path,
+        ca_file: Option<&std::path::Path>,
+        expected_tenant: Option<&ResourceId>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        if !is_public_gateway_origin(endpoint) {
+            return Err(
+                "public endpoint must be an HTTPS origin or explicit HTTP loopback address".into(),
+            );
+        }
+        let roots = ca_file
+            .map(trust::read_bundle)
+            .transpose()?
+            .unwrap_or_default();
+        let mut token = credentials::read_private_token(token_file)?;
+        if let Some(tenant) = expected_tenant {
+            if let Err(error) = credentials::reject_obvious_session_mismatch(&token, tenant) {
+                // The signature remains Gateway authority. No unverified claim is persisted.
+                unsafe {
+                    token.as_bytes_mut().fill(0);
+                }
+                return Err(error);
+            }
+        }
+        Self::with_additional_roots(endpoint.to_owned(), token, timeout, roots)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn origin(&self) -> &str {
+        &self.base_url
+    }
+
+    #[cfg(test)]
     pub fn new(
         base_url: String,
         bearer_token: String,
         request_timeout: Duration,
     ) -> Result<Self, PublicClientError> {
-        if !is_loopback_http_base(&base_url) {
+        Self::with_additional_roots(base_url, bearer_token, request_timeout, Vec::new())
+    }
+
+    pub fn additional_roots(&self) -> &[reqwest::Certificate] {
+        &self.additional_roots
+    }
+
+    pub fn with_additional_roots(
+        base_url: String,
+        bearer_token: String,
+        request_timeout: Duration,
+        additional_roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, PublicClientError> {
+        if additional_roots.len() > 16 {
             return Err(PublicClientError::InvalidConfiguration(
-                "the local public API endpoint must be an HTTP loopback address",
+                "too many additional trust roots",
+            ));
+        }
+        if !is_public_gateway_origin(&base_url) {
+            return Err(PublicClientError::InvalidConfiguration(
+                "the public API endpoint must be an HTTPS origin or explicit HTTP loopback address",
             ));
         }
         if bearer_token.is_empty()
@@ -142,17 +215,22 @@ impl PublicHttpClient {
                 "the public API request timeout is outside its closed bounds",
             ));
         }
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
             .timeout(request_timeout)
-            .user_agent("insight-cli/0.1")
+            .user_agent("insight-cli/0.1");
+        for root in &additional_roots {
+            builder = builder.add_root_certificate(root.clone());
+        }
+        let client = builder
             .build()
             .map_err(|error| PublicClientError::Transport(error.to_string()))?;
         Ok(Self {
             client,
             base_url,
             bearer_token,
+            additional_roots,
         })
     }
 
@@ -816,6 +894,30 @@ fn is_loopback_http_base(value: &str) -> bool {
         && port.parse::<u16>().is_ok_and(|port| port > 0)
 }
 
+pub(crate) fn is_public_gateway_origin(value: &str) -> bool {
+    if value.len() > 2048
+        || !value.is_ascii()
+        || value.contains(['@', '?', '#', '\\'])
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+    if is_loopback_http_base(value) {
+        return true;
+    }
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && !value.ends_with('/')
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 fn decode_json_response<T: DeserializeOwned>(
     response: Response,
     expected_status: StatusCode,
@@ -1084,20 +1186,41 @@ mod tests {
     }
 
     #[test]
-    fn client_rejects_non_loopback_and_whitespace_token() {
-        assert!(matches!(
-            PublicHttpClient::new(
-                "https://example.invalid".to_owned(),
+    fn public_client_accepts_https_origins_and_rejects_unsafe_transport_inputs() {
+        for origin in [
+            "https://example.invalid",
+            "https://localhost:8443",
+            "http://127.0.0.1:8080",
+        ] {
+            assert!(PublicHttpClient::new(
+                origin.to_owned(),
                 "token".to_owned(),
-                Duration::from_secs(1),
-            ),
-            Err(PublicClientError::InvalidConfiguration(_))
-        ));
+                Duration::from_secs(1)
+            )
+            .is_ok());
+        }
+        for origin in [
+            "http://example.invalid",
+            "https://example.invalid/path",
+            "https://user:password@example.invalid",
+            "https://example.invalid?key=value",
+            "https://example.invalid#fragment",
+            "http://127.0.0.1",
+        ] {
+            assert!(matches!(
+                PublicHttpClient::new(
+                    origin.to_owned(),
+                    "token".to_owned(),
+                    Duration::from_secs(1)
+                ),
+                Err(PublicClientError::InvalidConfiguration(_))
+            ));
+        }
         assert!(matches!(
             PublicHttpClient::new(
                 "http://127.0.0.1:8080".to_owned(),
                 "bad token".to_owned(),
-                Duration::from_secs(1),
+                Duration::from_secs(1)
             ),
             Err(PublicClientError::InvalidConfiguration(_))
         ));

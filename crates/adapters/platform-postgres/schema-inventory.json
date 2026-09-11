@@ -5974,6 +5974,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((NOT (payload ? 'alias'::text)) OR ((payload -> 'alias'::text) = 'null'::jsonb) OR ((jsonb_typeof((payload -> 'alias'::text)) = 'string'::text) AND (octet_length((payload ->> 'alias'::text)) <= 64) AND ((payload ->> 'alias'::text) ~ '^[a-z][a-z0-9._-]{0,63}$'::text))))",
+      "initially_deferred": false,
+      "kind": "c",
+      "name": "resources_alias_ck",
+      "table": "resources",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK ((draft_generation > 0))",
       "initially_deferred": false,
       "kind": "c",
@@ -7307,6 +7316,10 @@
   ],
   "functions": [
     {
+      "definition": "CREATE OR REPLACE FUNCTION insight_platform.artifact_lock_scan_policy(p_tenant text, p_revision text)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\nBEGIN\n    IF p_tenant IS NULL OR octet_length(p_tenant) <> 40\n       OR NOT insight_platform.is_platform_id(p_tenant) OR left(p_tenant, 4) <> 'ten_'\n       OR p_revision IS NULL OR octet_length(p_revision) <> 41\n       OR NOT insight_platform.is_platform_id(p_revision) OR left(p_revision, 5) <> 'prev_' THEN\n        RAISE EXCEPTION 'invalid Artifact policy lock identity' USING ERRCODE = '22023';\n    END IF;\n    PERFORM 1 FROM insight_platform.resource_versions AS version\n    JOIN insight_platform.resources AS resource\n      ON resource.tenant_id = version.tenant_id AND resource.resource_id = version.resource_id\n    WHERE version.tenant_id = p_tenant AND version.resource_version_id = p_revision\n      AND version.resource_version_kind = 'policy_revision' AND resource.resource_kind = 'policy'\n    FOR SHARE OF version, resource;\n    RETURN FOUND;\nEND $function$\n",
+      "identity": "artifact_lock_scan_policy(text, text)"
+    },
+    {
       "definition": "CREATE OR REPLACE FUNCTION insight_platform.history_delete_event(p_tenant text, p_event text, p_digest text)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\nBEGIN\n IF p_tenant IS NULL OR p_event IS NULL OR p_digest IS NULL OR NOT insight_platform.is_platform_id(p_tenant) OR left(p_tenant,4)<>'ten_' OR NOT insight_platform.is_platform_id(p_event) OR left(p_event,4)<>'evt_' OR NOT insight_platform.is_sha256(p_digest) THEN RAISE EXCEPTION 'invalid event deletion' USING ERRCODE='22023'; END IF;\n PERFORM 1 FROM insight_platform.events WHERE tenant_id=p_tenant AND event_id=p_event FOR UPDATE NOWAIT;\n IF EXISTS(SELECT 1 FROM insight_platform.outbox_events WHERE tenant_id=p_tenant AND event_id=p_event) THEN RETURN false; END IF;\n DELETE FROM insight_platform.events WHERE tenant_id=p_tenant AND event_id=p_event AND run_id IS NULL AND public_sequence IS NULL AND payload_digest=p_digest;\n RETURN FOUND;\nEND $function$\n",
       "identity": "history_delete_event(text, text, text)"
     },
@@ -7753,6 +7766,13 @@
       "name": "resource_versions_revision_uq",
       "ready": true,
       "table": "resource_versions",
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX resources_alias_uq ON insight_platform.resources USING btree (tenant_id, resource_kind, ((payload ->> 'alias'::text))) WHERE ((payload ->> 'alias'::text) IS NOT NULL)",
+      "name": "resources_alias_uq",
+      "ready": true,
+      "table": "resources",
       "valid": true
     },
     {

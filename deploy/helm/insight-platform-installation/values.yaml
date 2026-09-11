@@ -1,0 +1,12 @@
+# Produced by tools/install/platform_helm.py from the shared Rust owner.
+plan: {}
+phase: prepare
+owner: ""
+namespaceUID: ""
+node: ""
+storageClass: ""
+operation: ""
+prepared: {}
+ready: {}
+providerStarted: {}
+providerReady: {}

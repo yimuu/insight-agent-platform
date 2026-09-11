@@ -25,6 +25,7 @@ hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
 insight-platform-contracts.workspace = true
+insight-platform-security.workspace = true
 insight-platform-context.workspace = true
 insight-platform-capability-adapters.workspace = true
 insight-platform-mcp-host.workspace = true
@@ -42,6 +43,7 @@ url.workspace = true
 
 [dev-dependencies]
 insight-platform-jobs.workspace = true
+libc.workspace = true
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustls.workspace = true
 tokio-rustls.workspace = true

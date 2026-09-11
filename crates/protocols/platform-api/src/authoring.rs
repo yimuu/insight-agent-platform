@@ -241,7 +241,9 @@ fn query_problem(error: AuthoringQueryError) -> Response {
     let (status, code) = match error {
         AuthoringQueryError::Invalid => (StatusCode::BAD_REQUEST, ApiProblemCode::InvalidRequest),
         AuthoringQueryError::Denied => (StatusCode::FORBIDDEN, ApiProblemCode::PermissionDenied),
-        AuthoringQueryError::NotFound => (StatusCode::NOT_FOUND, ApiProblemCode::ResourceNotFound),
+        AuthoringQueryError::NotFound | AuthoringQueryError::DefaultNotConfigured => {
+            (StatusCode::NOT_FOUND, ApiProblemCode::ResourceNotFound)
+        }
         AuthoringQueryError::Disabled | AuthoringQueryError::ContractMismatch => {
             (StatusCode::CONFLICT, ApiProblemCode::InvalidStateTransition)
         }

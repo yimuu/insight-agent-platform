@@ -21,6 +21,13 @@ pub enum AuthoringDeploymentSelectorV1 {
         resource_id: ResourceId,
         environment: String,
     },
+    Alias {
+        alias: insight_platform_contracts::ResourceAlias,
+        environment: String,
+    },
+    DefaultModel {
+        environment: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -164,6 +171,11 @@ impl ResolveAgentBindingsRequestV1 {
                         environment,
                     } if resource_id.kind() == resource_kind(slot.target.kind())
                         && valid_key(environment, 64) => {}
+                    AuthoringDeploymentSelectorV1::Alias { environment, .. }
+                        if valid_key(environment, 64) => {}
+                    AuthoringDeploymentSelectorV1::DefaultModel { environment }
+                        if slot.target.kind() == DependencySlotKind::Model
+                            && valid_key(environment, 64) => {}
                     _ => return Err(AuthoringQueryError::Invalid),
                 }
             }
@@ -186,7 +198,36 @@ pub enum AuthoringQueryError {
     NotFound,
     Disabled,
     ContractMismatch,
+    DefaultNotConfigured,
     Unavailable,
+}
+
+/// Changes only the existing Tenant configuration. Selection Policy remains an explicit authoring
+/// input, and already frozen Agent/Run bindings are not modified by this command.
+#[derive(Debug, Clone)]
+pub struct BindTenantModelDefault {
+    pub audit: insight_platform_contracts::CommandAudit,
+    pub expected_tenant_version: i64,
+    pub model: Option<ExactDeploymentRef>,
+}
+
+impl BindTenantModelDefault {
+    pub fn validate_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AuthoringQueryError> {
+        self.audit
+            .validate_at(now)
+            .map_err(|_| AuthoringQueryError::Invalid)?;
+        if self.expected_tenant_version <= 0
+            || self.model.as_ref().is_some_and(|model| {
+                model.resource_kind != ResourceKind::ModelDeployment || model.validate().is_err()
+            })
+        {
+            return Err(AuthoringQueryError::Invalid);
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

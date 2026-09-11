@@ -22,3 +22,9 @@ Task inbox 按已扫描位置分页，允许空 `items` 仍带下一页。默认
 续页保留原快照、过滤条件和到期时间，并重新检查当前权限。翻页不会刷新游标有效期；Task View/Form 的 HTTP ETag 与正文版本一致。
 
 SSE 的成功响应给出 public sequence 高水位、retention floor 与历史截断标记。签名 cursor 即使未过 TTL，若已低于 floor 仍返回明确 history gap；消费端不得自动丢弃 cursor 重试 Initial。持续跟随、表单和完整作者输入的产品行为见[Console](console.md)与[共享作者入口](agent-authoring.md)。
+
+Model 与 Run/Node 终态事件的公共投影修正已通过真实 PostgreSQL 回归，见
+[实现证据](../specs/unified-installation/model-public-event-review.md#recorded-local-evidence)。事件和 Run
+序号保留原事务，公共页只提供身份、版本和时间等安全元数据；结果正文仍需原内容读取授权。
+O 的真实公共 CLI Run 已取得完整事件及类型化结果，见[部署证据](../specs/unified-installation/deployment-review.md#o-current-delivery-evidence)。
+历史失败记录不回填，不能因旧事件缺失而重跑 provider 请求。

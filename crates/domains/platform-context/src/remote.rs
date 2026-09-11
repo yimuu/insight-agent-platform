@@ -7,30 +7,10 @@ use insight_platform_contracts::{
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
-pub const REMOTE_CONTEXT_PROTOCOL_VERSION: u32 = 1;
-/// The installed JSON protocol, independent of endpoints, tenant policies and builds.
-pub fn remote_context_protocol_contract_digest() -> Sha256Digest {
-    insight_platform_contracts::canonical_digest(&serde_json::json!({
-        "contract":"insight.context.remote_search.json", "version":1,
-        "method":"POST", "media_type":"application/json",
-        "request":"bounded_inline_query_projection_cursor_v1",
-        "response":"closed_items_cursor_revision_v1"
-    }))
-    .expect("closed remote Context protocol")
-    .parse()
-    .expect("canonical digest")
-}
-pub fn remote_context_result_mapping_digest() -> Sha256Digest {
-    insight_platform_contracts::canonical_digest(&serde_json::json!({
-        "contract":"insight.context.remote_search.result_mapping", "version":1,
-        "source_identity":"canonical_json_sha256", "locator":"canonical_json_sha256",
-        "content":"identity", "structured_fields":"identity", "score":"millionths",
-        "classification":"bounded_by_current_request", "unknown_fields":"reject"
-    }))
-    .expect("closed remote Context mapping")
-    .parse()
-    .expect("canonical digest")
-}
+pub use insight_platform_contracts::{
+    remote_context_protocol_contract_digest, remote_context_result_mapping_digest,
+    REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION, REMOTE_CONTEXT_PROTOCOL_VERSION,
+};
 pub const MAX_REMOTE_CONTEXT_ITEMS: usize = 1_000;
 pub const MAX_REMOTE_CONTEXT_PROJECTION_FIELDS: usize = 256;
 pub const MAX_REMOTE_CONTEXT_LABEL_BYTES: usize = 256;
@@ -44,8 +24,11 @@ pub struct RemoteContextSearchRequest {
     pub tenant_id: ResourceId,
     pub context_query_id: ResourceId,
     pub job_id: ResourceId,
+    pub worker_process_generation_id: ResourceId,
     pub physical_attempt: u32,
     pub lease_generation: u64,
+    pub lease_token_digest: Sha256Digest,
+    pub admission_digest: Sha256Digest,
     pub context_deployment: ExactDeploymentRef,
     pub implementation_revision: ExactVersionRef,
     pub protocol_contract_digest: Sha256Digest,
@@ -64,6 +47,7 @@ pub struct RemoteContextSearchRequest {
     pub maximum_classification: DataClassification,
     pub page_size: u32,
     pub cursor_digest: Option<Sha256Digest>,
+    pub maximum_request_bytes: u32,
     pub maximum_response_bytes: u32,
     pub deadline: DateTime<Utc>,
 }
@@ -79,10 +63,13 @@ impl RemoteContextSearchRequest {
         self.endpoint
             .validate()
             .map_err(|_| RemoteContextContractError::InvalidRequest)?;
-        if self.schema_version != REMOTE_CONTEXT_PROTOCOL_VERSION
+        if self.schema_version != REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION
             || self.tenant_id.kind() != ResourceKind::Tenant
             || self.context_query_id.kind() != ResourceKind::ContextQuery
             || self.job_id.kind() != ResourceKind::Job
+            || self.worker_process_generation_id.kind() != ResourceKind::WorkerProcessGeneration
+            || self.maximum_request_bytes == 0
+            || self.maximum_request_bytes > 64 * 1_048_576
             || self.physical_attempt == 0
             || self.lease_generation == 0
             || self.context_deployment.resource_kind != ResourceKind::ContextDeployment
@@ -200,6 +187,8 @@ pub enum RemoteContextFailureClass {
     RetryableBeforeDispatch,
     RetryableAfterDispatch,
     PermanentAfterDispatch,
+    /// The RPC was submitted; whether provider HTTP dispatch occurred is unknown.
+    UncertainDispatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,16 +208,17 @@ impl RemoteContextFailure {
                 .code
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-        let dispatched = matches!(
+        let has_dispatch_evidence = matches!(
             self.class,
             RemoteContextFailureClass::RetryableAfterDispatch
                 | RemoteContextFailureClass::PermanentAfterDispatch
+                | RemoteContextFailureClass::UncertainDispatch
         );
         if !code_valid
             || self.safe_message.is_empty()
             || self.safe_message.len() > MAX_REMOTE_CONTEXT_SAFE_MESSAGE_BYTES
             || self.safe_message.chars().any(char::is_control)
-            || dispatched != self.dispatch_evidence_digest.is_some()
+            || has_dispatch_evidence != self.dispatch_evidence_digest.is_some()
         {
             return Err(RemoteContextContractError::InvalidFailure);
         }
@@ -298,12 +288,15 @@ mod tests {
             base_path: "/v1/query".to_owned(),
         };
         RemoteContextSearchRequest {
-            schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
+            schema_version: REMOTE_CONTEXT_EXECUTION_SCHEMA_VERSION,
             tenant_id: id(ResourceKind::Tenant, 1),
             context_query_id: id(ResourceKind::ContextQuery, 2),
             job_id: id(ResourceKind::Job, 3),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration, 15),
             physical_attempt: 1,
             lease_generation: 1,
+            lease_token_digest: digest('d'),
+            admission_digest: digest('e'),
             context_deployment: ExactDeploymentRef::new(
                 id(ResourceKind::ContextDeployment, 4),
                 digest('4'),
@@ -332,6 +325,7 @@ mod tests {
             maximum_classification: DataClassification::Confidential,
             page_size: 10,
             cursor_digest: None,
+            maximum_request_bytes: 65_536,
             maximum_response_bytes: 65_536,
             deadline: Utc::now() + Duration::minutes(1),
         }
@@ -341,6 +335,32 @@ mod tests {
     fn remote_request_and_response_are_exact_and_fail_closed() {
         let request = request();
         request.validate_at(Utc::now()).unwrap();
+        let mut old = request.clone();
+        old.schema_version = 1;
+        assert_eq!(
+            old.validate_at(Utc::now()),
+            Err(RemoteContextContractError::InvalidRequest)
+        );
+        let before = request.dispatch_authorization().unwrap();
+        let mut changed = request.clone();
+        changed.query_input = ValueRef::Inline {
+            value: serde_json::json!({"query":"different"}),
+        };
+        let after = changed.dispatch_authorization().unwrap();
+        assert_eq!(
+            before.request_metadata_digest,
+            after.request_metadata_digest
+        );
+        assert_ne!(before.input_content_digest, after.input_content_digest);
+        assert_ne!(before.input_content_digest, request.normalized_query_digest);
+        let wire = serde_json::to_value(&before).unwrap();
+        assert!(wire.get("query_input").is_none());
+        changed = request.clone();
+        changed.maximum_request_bytes -= 1;
+        assert_ne!(
+            before.request_metadata_digest,
+            changed.metadata_digest().unwrap()
+        );
         let response = RemoteContextSearchResponse {
             schema_version: REMOTE_CONTEXT_PROTOCOL_VERSION,
             items: vec![],

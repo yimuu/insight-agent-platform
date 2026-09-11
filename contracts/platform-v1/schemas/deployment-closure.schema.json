@@ -689,15 +689,24 @@
       "additionalProperties": false,
       "properties": {
         "binding_generation": {
+          "maximum": 18446744073709551615,
           "minimum": 1,
           "type": "integer"
         },
         "provider_id": {
-          "$ref": "resource-id.schema.json"
+          "allOf": [
+            {
+              "$ref": "resource-id.schema.json"
+            },
+            {
+              "pattern": "^spr_"
+            }
+          ]
         },
         "purpose": {
           "maxLength": 128,
           "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.:]{0,127}$",
           "type": "string"
         },
         "resolution_policy": {
@@ -725,7 +734,14 @@
                   "const": "follow_provider_rotation"
                 },
                 "rotation_policy_revision_id": {
-                  "$ref": "resource-id.schema.json"
+                  "allOf": [
+                    {
+                      "$ref": "resource-id.schema.json"
+                    },
+                    {
+                      "pattern": "^prev_"
+                    }
+                  ]
                 }
               },
               "required": [
@@ -740,7 +756,14 @@
           "$ref": "nominal/digest.schema.json"
         },
         "secret_binding_id": {
-          "$ref": "resource-id.schema.json"
+          "allOf": [
+            {
+              "$ref": "resource-id.schema.json"
+            },
+            {
+              "pattern": "^sbd_"
+            }
+          ]
         }
       },
       "required": [
@@ -964,6 +987,9 @@
             },
             "public_projection_policy": {
               "$ref": "#/$defs/ExactVersionRef"
+            },
+            "safety_policy": {
+              "$ref": "#/$defs/ExactVersionRef"
             }
           },
           "required": [
@@ -972,7 +998,8 @@
             "generation_defaults",
             "profile_revision",
             "provider_deployment",
-            "public_projection_policy"
+            "public_projection_policy",
+            "safety_policy"
           ],
           "type": "object"
         },
@@ -992,8 +1019,26 @@
         "bindings": {
           "additionalProperties": false,
           "properties": {
-            "conformance_evidence": {
-              "$ref": "nominal/artifact-ref.schema.json"
+            "admission_evidence": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact": {
+                  "$ref": "nominal/artifact-ref.schema.json"
+                },
+                "basis": {
+                  "enum": [
+                    "operator_declaration",
+                    "protocol_observation",
+                    "qualification"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "basis",
+                "artifact"
+              ],
+              "type": "object"
             },
             "data_policy": {
               "$ref": "#/$defs/ExactVersionRef"
@@ -1030,7 +1075,7 @@
             }
           },
           "required": [
-            "conformance_evidence",
+            "admission_evidence",
             "data_policy",
             "endpoint_identity_digest",
             "network_policy",

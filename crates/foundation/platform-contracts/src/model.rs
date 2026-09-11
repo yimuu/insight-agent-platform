@@ -20,6 +20,23 @@ pub const MAX_MODEL_TOOLS: u32 = 512;
 pub const MAX_MODEL_TOOL_CALLS: u32 = 512;
 pub const MAX_MODEL_JSON_BYTES: usize = 1_048_576;
 
+const INLINE_MODEL_RESPONSE_ENVELOPE_RESERVE_BYTES: u64 = 65_536;
+
+/// Provider response capacity for the Inline-only Model output preflight.
+///
+/// The reserve is a pre-dispatch budget, not a proof that normalization preserves wire size.
+/// Consumers must still validate the complete normalized response and actual Inline value bytes.
+pub fn inline_model_provider_response_capacity(inline_hard_max: u64) -> Option<u32> {
+    let capacity = inline_hard_max
+        .checked_sub(INLINE_MODEL_RESPONSE_ENVELOPE_RESERVE_BYTES)?
+        .min(u64::from(MAX_MODEL_RESPONSE_BYTES));
+    if capacity == 0 {
+        None
+    } else {
+        u32::try_from(capacity).ok()
+    }
+}
+
 pub const MODEL_JSON_LIMITS: JsonLimits = JsonLimits {
     max_bytes: MAX_MODEL_JSON_BYTES,
     max_depth: 32,
@@ -69,6 +86,7 @@ impl<'de> Deserialize<'de> for DataRegion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderTrainingPolicy {
+    Unspecified,
     Prohibited,
     ContractualOptOut,
     ExplicitlyAllowed,
@@ -222,7 +240,8 @@ impl ModelModalities {
 pub struct ContextWindowContract {
     pub maximum_context_tokens: u32,
     pub maximum_output_tokens: u32,
-    pub tokenizer_contract_digest: Sha256Digest,
+    /// None means no tokenizer has been installed or qualified for this profile.
+    pub tokenizer_contract_digest: Option<Sha256Digest>,
     pub estimator_contract_digest: Sha256Digest,
 }
 
@@ -290,6 +309,8 @@ impl StructuredOutputContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelUsageContract {
+    /// Whether reporting is declared as a provider capability. False does not prohibit consuming
+    /// complete usage observed in a response, and never permits missing counts to imply zero.
     pub provider_reports_usage: bool,
     pub reports_cached_input_tokens: bool,
     pub reports_reasoning_tokens: bool,
@@ -314,20 +335,17 @@ impl ModelUsageContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderDataHandlingContract {
+    /// Operator-authorized outbound data ceiling, not a provider privacy guarantee.
     pub maximum_classification: DataClassification,
     pub allowed_regions: Vec<DataRegion>,
-    pub maximum_retention_milliseconds: u64,
+    pub maximum_retention_milliseconds: Option<u64>,
     pub training: ProviderTrainingPolicy,
-    pub subprocessor_set_digest: Sha256Digest,
+    pub subprocessor_set_digest: Option<Sha256Digest>,
 }
 
 impl ProviderDataHandlingContract {
     pub fn validate(&self) -> Result<(), ModelContractError> {
-        validate_sorted_unique(&self.allowed_regions, MAX_MODEL_REGIONS)?;
-        if self.maximum_retention_milliseconds == 0 {
-            return Err(ModelContractError::InvalidDataHandling);
-        }
-        Ok(())
+        validate_sorted_unique(&self.allowed_regions, MAX_MODEL_REGIONS)
     }
 }
 
@@ -372,11 +390,54 @@ impl ModelLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCatalogEvidence {
+    pub basis: ModelEvidenceBasis,
     pub artifact: ArtifactRef,
     pub source_digest: Sha256Digest,
     pub adapter_contract_digest: Sha256Digest,
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+/// What an Artifact actually establishes. Operator declarations are not provider qualification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvidenceBasis {
+    OperatorDeclaration,
+    ProtocolObservation,
+    Qualification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAdmissionEvidence {
+    pub basis: ModelEvidenceBasis,
+    pub artifact: ArtifactRef,
+}
+
+impl ModelAdmissionEvidence {
+    pub fn validate(&self) -> Result<(), ModelContractError> {
+        self.artifact
+            .validate()
+            .map_err(|_| ModelContractError::InvalidEvidence)
+    }
+}
+
+/// Identity of the estimator actually used by canonical assembly. This is not a tokenizer or
+/// proof of a token upper bound; the algorithm is an explicit admission estimate.
+pub fn utf8_quarter_token_estimator_digest() -> Sha256Digest {
+    canonical_digest(&serde_json::json!({
+        "schema_version": 1,
+        "algorithm": "max(1,ceil(utf8_bytes/4))",
+        "scope": "canonical_model_message_source",
+        "kind": "estimate",
+    }))
+    .expect("static estimator contract")
+    .parse()
+    .expect("canonical digest")
+}
+
+pub fn estimate_model_text_tokens(utf8_bytes: u32) -> Option<u32> {
+    utf8_bytes.checked_add(3).map(|bytes| (bytes / 4).max(1))
 }
 
 impl ModelCatalogEvidence {
@@ -425,6 +486,14 @@ pub fn validate_model_profile_contract(
     usage.validate()?;
     data_handling.validate()?;
     limits.validate(context, tools)?;
+    if catalog_evidence.basis == ModelEvidenceBasis::OperatorDeclaration
+        && (tools.supported
+            || structured_output.native
+            || modalities.input != [ModelModality::Text]
+            || modalities.output != [ModelModality::Text])
+    {
+        return Err(ModelContractError::InvalidEvidence);
+    }
     catalog_evidence.validate()
 }
 
@@ -441,6 +510,7 @@ fn validate_sorted_unique<T: Ord>(values: &[T], maximum: usize) -> Result<(), Mo
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelContractError {
+    InvalidProviderConfiguration,
     WrongResourceKind,
     InvalidAdapter,
     InvalidRegion,
@@ -460,6 +530,7 @@ pub enum ModelContractError {
 impl fmt::Display for ModelContractError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::InvalidProviderConfiguration => "model installation configuration is invalid",
             Self::WrongResourceKind => "model reference has the wrong resource kind",
             Self::InvalidAdapter => "installed model adapter is invalid",
             Self::InvalidRegion => "model data region is invalid",
@@ -500,6 +571,58 @@ mod tests {
         format!("sha256:{}", character.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn unknown_provider_facts_do_not_invent_an_operator_data_ceiling() {
+        let mut handling = ProviderDataHandlingContract {
+            maximum_classification: DataClassification::Public,
+            allowed_regions: vec!["cn-beijing".parse().unwrap()],
+            maximum_retention_milliseconds: None,
+            training: ProviderTrainingPolicy::Unspecified,
+            subprocessor_set_digest: None,
+        };
+        handling.validate().unwrap();
+        let encoded = serde_json::to_value(&handling).unwrap();
+        assert!(encoded["maximum_retention_milliseconds"].is_null());
+        assert!(encoded["subprocessor_set_digest"].is_null());
+        assert_eq!(encoded["training"], "unspecified");
+        handling.maximum_classification = DataClassification::Internal;
+        handling.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&handling).unwrap()["maximum_classification"],
+            "internal"
+        );
+        handling.maximum_retention_milliseconds = Some(0);
+        handling.training = ProviderTrainingPolicy::Prohibited;
+        handling.subprocessor_set_digest = Some(digest('1'));
+        handling.validate().unwrap();
+        for field in 0..3 {
+            let mut unknown = handling.clone();
+            match field {
+                0 => unknown.maximum_retention_milliseconds = None,
+                1 => unknown.training = ProviderTrainingPolicy::Unspecified,
+                _ => unknown.subprocessor_set_digest = None,
+            }
+            unknown.validate().unwrap();
+            assert_eq!(unknown.maximum_classification, DataClassification::Internal);
+        }
+    }
+
+    #[test]
+    fn token_estimation_has_one_executable_contract_and_no_implied_tokenizer() {
+        assert_eq!(estimate_model_text_tokens(0), Some(1));
+        assert_eq!(estimate_model_text_tokens(4), Some(1));
+        assert_eq!(estimate_model_text_tokens(5), Some(2));
+        assert_eq!(estimate_model_text_tokens(u32::MAX), None);
+        let context = ContextWindowContract {
+            maximum_context_tokens: 8192,
+            maximum_output_tokens: 1024,
+            tokenizer_contract_digest: None,
+            estimator_contract_digest: utf8_quarter_token_estimator_digest(),
+        };
+        context.validate().unwrap();
+        assert!(serde_json::to_value(context).unwrap()["tokenizer_contract_digest"].is_null());
     }
 
     #[test]
@@ -547,7 +670,7 @@ mod tests {
         let context = ContextWindowContract {
             maximum_context_tokens: 128_000,
             maximum_output_tokens: 8_192,
-            tokenizer_contract_digest: digest('3'),
+            tokenizer_contract_digest: Some(digest('3')),
             estimator_contract_digest: digest('4'),
         };
         let tools = ModelToolContract {
@@ -575,9 +698,9 @@ mod tests {
         let data_handling = ProviderDataHandlingContract {
             maximum_classification: DataClassification::Confidential,
             allowed_regions: vec!["us-east_1".parse().unwrap()],
-            maximum_retention_milliseconds: 86_400_000,
+            maximum_retention_milliseconds: Some(86_400_000),
             training: ProviderTrainingPolicy::Prohibited,
-            subprocessor_set_digest: digest('6'),
+            subprocessor_set_digest: Some(digest('6')),
         };
         let limits = ModelLimits {
             maximum_messages: 128,
@@ -591,6 +714,7 @@ mod tests {
         };
         let observed_at = Utc::now();
         let evidence = ModelCatalogEvidence {
+            basis: crate::ModelEvidenceBasis::Qualification,
             artifact: ArtifactRef::new(
                 id(ResourceKind::Artifact, 1),
                 digest('7'),
@@ -630,5 +754,38 @@ mod tests {
         );
         let canonical = canonical_digest(&json!({"model": "exact"})).unwrap();
         assert!(canonical.starts_with("sha256:"));
+    }
+}
+
+#[cfg(test)]
+mod inline_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn inline_capacity_is_positive_checked_and_bounded() {
+        for limit in [
+            0,
+            INLINE_MODEL_RESPONSE_ENVELOPE_RESERVE_BYTES - 1,
+            INLINE_MODEL_RESPONSE_ENVELOPE_RESERVE_BYTES,
+        ] {
+            assert_eq!(inline_model_provider_response_capacity(limit), None);
+        }
+        assert_eq!(
+            inline_model_provider_response_capacity(
+                INLINE_MODEL_RESPONSE_ENVELOPE_RESERVE_BYTES + 1
+            ),
+            Some(1)
+        );
+        let profile = crate::checked_in_hard_limit_profile();
+        assert_eq!(
+            inline_model_provider_response_capacity(
+                profile.run_scheduler.inline_value_bytes.hard_max
+            ),
+            Some(983_040)
+        );
+        assert_eq!(
+            inline_model_provider_response_capacity(u64::MAX),
+            Some(MAX_MODEL_RESPONSE_BYTES)
+        );
     }
 }

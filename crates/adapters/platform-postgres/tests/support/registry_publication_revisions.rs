@@ -253,6 +253,7 @@ async fn validate_compilation(
     assert_eq!(
         validation.validated_draft_digest,
         ResourceDraftPayload {
+            alias: None,
             display_name: "Repeated publication".to_owned(),
             document: document.clone(),
             validation: None,
@@ -347,6 +348,7 @@ pub(super) async fn verify(
             assert_eq!(source, sources[&'B']);
         }
         let draft = ResourceDraftPayload {
+            alias: None,
             display_name: "Repeated publication".to_owned(),
             document: document.clone(),
             validation: None,

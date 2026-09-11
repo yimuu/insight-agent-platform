@@ -6,6 +6,9 @@ from pathlib import Path
 
 
 INTERNAL_ROLES = {
+    "insight-platform-openbao": "openbao_adapter",
+    "insight-platform-deployment-tooling": "deployment_tooling",
+    "insight-platform-installation-tooling": "installation_tooling",
     "insight-platform-execution-context": "execution_context",
     "insight-platform-observability-http": "observability_http",
     "insight-platform-mcp-runtime": "mcp_runtime",
@@ -67,13 +70,16 @@ INTERNAL_ROLES = {
 }
 
 ALLOWED_INTERNAL = {
+    "openbao_adapter": {"contracts", "deployment_contracts"},
+    "installation_tooling": {"contracts", "deployment_contracts", "deployment_tooling", "artifact_broker", "registry_domain", "openbao_adapter"},
+    "deployment_tooling": {"contracts", "deployment_contracts", "plan_domain", "agent_compiler", "registry_domain", "context_domain", "artifacts_domain", "mcp_host"},
     "history_maintenance": {"contracts", "deployment_contracts", "orchestrator_domain", "platform_postgres", "observability", "observability_http", "platform_worker"},
     "execution_context": {"contracts"},
     "observability_http": {"observability"},
     "mcp_runtime": {"platform_worker", "artifacts_domain", "contracts", "context_domain", "jobs_domain", "mcp_host", "execution_context"},
     "mcp_transport": {"artifacts_domain", "contracts", "context_domain", "jobs_domain", "mcp_host"},
     # The client reuses public DTO validation and pure owner types; it receives no store adapter.
-    "cli": {"artifacts_domain", "context_domain", "mcp_host", "plan_domain", "contracts", "agent_compiler", "platform_api", "registry_domain", "deployment_contracts", "tasks_domain"},
+    "cli": {"deployment_tooling", "artifacts_domain", "context_domain", "mcp_host", "plan_domain", "contracts", "agent_compiler", "platform_api", "registry_domain", "deployment_contracts", "tasks_domain"},
     "plan_domain": {"contracts"},
     "agent_compiler": {"contracts", "plan_domain"},
     "agent_compiler_wasm": {"agent_compiler"},
@@ -84,14 +90,15 @@ ALLOWED_INTERNAL = {
     "opensandbox_executor": {"contracts", "sandbox_domain"},
     "outbox_worker": {"contracts", "deployment_contracts", "observability", "observability_http", "platform_postgres", "platform_worker"},
     "artifacts_domain": {"contracts", "jobs_domain"},
-    "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain"},
+    "artifact_broker": {"artifacts_domain", "contracts", "jobs_domain", "sandbox_domain", "openbao_adapter"},
     "artifact_rpc": {"artifacts_domain", "contracts", "execution_context", "jobs_domain", "models_domain", "rpc_trace", "sandbox_domain"},
     # The Artifact Gateway binary reuses the public Artifact HTTP DTO/authorization boundary;
     # data and maintenance workers still use their owner/RPC ports and never call public routes.
     "artifact_service": {"platform_worker", "artifact_broker", "artifact_rpc", "artifacts_domain", "contracts", "jobs_domain", "observability", "observability_http", "platform_api", "platform_postgres", "sandbox_domain"},
     # HTTP DTOs consume generated contracts plus safe Artifact/Task domain projections;
     # persistence and state transitions remain behind application ports.
-    "platform_api": {"artifacts_domain", "contracts", "mcp_host", "mcp_runtime", "tasks_domain", "plan_domain", "orchestrator_domain", "registry_domain"},
+    # Credential import shares the pure Security port; only Gateway owns the mTLS client.
+    "platform_api": {"artifacts_domain", "contracts", "mcp_host", "mcp_runtime", "tasks_domain", "plan_domain", "orchestrator_domain", "registry_domain", "security_domain"},
     "capability_adapters": {"contracts", "invocations_domain", "jobs_domain", "mcp_host"},
     # The remote Capability binary uses only the typed mTLS Egress RPC client; the native binary
     # remains network-client free and is checked independently by its deployment boundary test.
@@ -107,10 +114,10 @@ ALLOWED_INTERNAL = {
     "context_worker": {"plan_domain", "artifact_rpc", "artifacts_domain", "context_domain", "contracts", "egress_rpc", "execution_context", "jobs_domain", "mcp_rpc", "observability", "observability_http", "platform_postgres", "platform_worker", "rpc_trace"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
-    "public_gateway": {"agent_compiler", "artifacts_domain", "context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "observability_http", "orchestrator_domain", "plan_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain"},
-    "egress_core": {"capability_adapters", "context_domain", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain"},
+    "public_gateway": {"agent_compiler", "artifacts_domain", "context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "observability_http", "orchestrator_domain", "plan_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain", "security_domain", "egress_rpc", "execution_context"},
+    "egress_core": {"capability_adapters", "context_domain", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain", "security_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "observability", "observability_http", "secret_broker", "security_rpc"},
-    "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "execution_context", "mcp_host", "model_adapters", "rpc_trace", "sandbox_domain"},
+    "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "execution_context", "mcp_host", "model_adapters", "rpc_trace", "sandbox_domain", "security_domain"},
     "invocations_domain": {"contracts", "jobs_domain", "tasks_domain"},
     "jobs_domain": {"contracts"},
     "mcp_host": {"artifacts_domain", "context_domain", "contracts", "jobs_domain"},
@@ -127,7 +134,7 @@ ALLOWED_INTERNAL = {
     "registry_validation_worker": {"registry_domain", "jobs_domain", "agent_compiler", "artifacts_domain", "contracts", "observability", "observability_http", "platform_postgres", "platform_worker"},
     "rpc_trace": {"contracts", "execution_context"},
     "scheduler_domain": {"contracts"},
-    "secret_broker": {"contracts", "egress_core", "mcp_host", "security_domain"},
+    "secret_broker": {"contracts", "egress_core", "mcp_host", "security_domain", "openbao_adapter"},
     "security_domain": {"contracts"},
     "security_authority": {"contracts", "observability", "observability_http", "platform_postgres", "security_domain", "security_rpc"},
     "security_rpc": {"contracts", "execution_context", "rpc_trace", "security_domain"},
@@ -148,6 +155,8 @@ ALLOWED_INTERNAL = {
 # adding the same crate as a normal or build dependency remains a boundary failure.
 ALLOWED_DEV_INTERNAL = {
     "registry_domain": {"plan_domain"},
+    # The real basic-source producer must fit the production Inline materializer.
+    "model_worker": {"registry_domain"},
     "mcp_runtime": {"mcp_transport"},
     "opensandbox_executor": {"jobs_domain"},
     # The MCP service production-process fixture stands up the real Egress RPC service and must
@@ -198,6 +207,7 @@ ALLOWED_INTERNAL_FEATURES = {
 }
 
 FORBIDDEN_DIRECT = {
+    "openbao_adapter": {"axum", "sqlx", "dotenvy", "tracing-subscriber", "aws-config", "aws-sdk-kms", "aws-sdk-s3", "aws-sdk-secretsmanager"},
     "execution_context": {"axum", "tonic", "sqlx", "reqwest"},
     "observability_http": {"sqlx", "reqwest", "tonic"},
     "mcp_runtime": {"axum", "tonic", "sqlx", "reqwest", "ring"},
@@ -267,9 +277,15 @@ ALLOWED_FIXED_ASSET_LOCATORS = {
     # The contract owner embeds the versioned hard-limit profile once; all
     # consumers use its typed loader instead of reaching across the workspace.
     "crates/foundation/platform-contracts/src/limits.rs",
-    # The product CLI is the sole owner of the signed development feature registry and embeds its
-    # release schema so profile selection can fail before network or Docker I/O.
-    "apps/insight-cli/src/dev_profile.rs",
+    # The shared deployment producer embeds the signed feature registry and schema once for
+    # native CLI and direct installation consumers, before network or Docker I/O.
+    "tools/rust/platform-deployment-tooling/src/dev_profile.rs",
+    # The shared base profile packages the exact owning JetStream deployment asset.
+    "tools/rust/platform-deployment-tooling/src/base_profile.rs",
+    # Installation packages the same development dependency images and NATS ACL bytes. These
+    # physical assets remain deployment-owned; runtime services consume only rendered files.
+    "tools/rust/platform-deployment-tooling/src/kubernetes.rs",
+    "tools/rust/platform-deployment-tooling/src/role_output.rs",
     # The product CLI supervisor embeds the reviewed dependency Compose closure and copies those
     # exact bytes to project-local runtime state; no member crate reads it independently.
     "apps/insight-cli/src/lib.rs",

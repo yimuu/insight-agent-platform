@@ -16,6 +16,38 @@ BOOTSTRAP = ROOT / "tools/qualification/bootstrap-platform-kind-local.sh"
 
 
 class ProductizationJourneyRunnerTests(unittest.TestCase):
+    def test_aws_fixture_lifecycle_cannot_use_the_normal_installation_help_entry(self):
+        checker = ROOT / 'tools/checks/check-productization-ci.py'
+        targets = (
+            ('.github/workflows/productization-journey.yml', 'target/debug/insight qualification-aws ', 'target/debug/insight '),
+            ('tools/qualification/run-productization-journey.sh', '"$insight_bin" qualification-aws ', '"$insight_bin" \\\n  '),
+            ('tools/qualification/qualify-development-profile.sh', '"$insight_bin" qualification-aws ', '"$insight_bin" '),
+            ('tools/qualification/bootstrap-platform-kind-local.sh', '"$insight_bin" qualification-aws ', '"$insight_bin" '),
+            ('tools/qualification/fixture_project.py', '"qualification-aws", ', ''),
+            ('tools/qualification/qualify-fixture-cleanup.py', '"qualification-aws", ', ''),
+            ('tests/qualification/tests/productization/deterministic_first_run.rs', '"qualification-aws",', ''),
+            ('tests/qualification/tests/productization/native_artifact_cors.rs', '"qualification-aws",', ''),
+        )
+        program = '''import pathlib,runpy,sys
+target=pathlib.Path(sys.argv[1]); replacement=pathlib.Path(sys.argv[2]).read_text()
+original=pathlib.Path.read_text
+def read(self,*args,**kwargs):
+    return replacement if self==target else original(self,*args,**kwargs)
+pathlib.Path.read_text=read
+runpy.run_path(sys.argv[3],run_name="__main__")
+'''
+        for relative, old, new in targets:
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as directory:
+                target = ROOT / relative
+                source = target.read_text()
+                self.assertIn(old, source)
+                changed = pathlib.Path(directory) / 'changed.txt'
+                changed.write_text(source.replace(old, new, 1))
+                result = subprocess.run([sys.executable, '-c', program, str(target), str(changed), str(checker)],
+                    cwd=ROOT, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('namespace' if relative.endswith('.py') or relative.endswith('.rs') else 'ordinary lifecycle', result.stdout + result.stderr)
+
     def test_source_console_compiler_guard_rejects_missing_or_weakened_setup(self) -> None:
         source = WORKFLOW.read_text(encoding="utf-8")
         title = "      - name: Prepare the exact source Console compiler\n"
@@ -90,7 +122,7 @@ with patch.object(pathlib.Path, 'read_text', read):
                 fake_cli.write_text(f'#!{sys.executable}\n' +
                     'import json,os,sys\n' +
                     'with open(os.environ["SEED_TEST_CALLS"],"a") as log: log.write(json.dumps(sys.argv[1:])+"\\n")\n' +
-                    'sys.exit(1 if os.environ["SEED_TEST_FAILURE"] == sys.argv[1] else 0)\n')
+                    'sys.exit(1 if os.environ["SEED_TEST_FAILURE"] == sys.argv[2] else 0)\n')
                 fake_cli.chmod(0o700)
                 env_file = root / 'github-env'
                 env_file.write_text('EXISTING=retained\n')
@@ -111,9 +143,9 @@ with patch.object(pathlib.Path, 'read_text', read):
                 result = subprocess.run(['bash', '-e', '-c', release['run']], cwd=ROOT,
                     env=env, capture_output=True, text=True)
                 observed = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
-                expected = [] if failure in ('identity', 'name') else [['stop', '--path', str(project)]]
+                expected = [] if failure in ('identity', 'name') else [['qualification-aws', 'stop', '--path', str(project)]]
                 if failure in ('none', 'reset'):
-                    expected.append(['reset', '--path', str(project), '--confirm', 'productization-kind-seed'])
+                    expected.append(['qualification-aws', 'reset', '--path', str(project), '--confirm', 'productization-kind-seed'])
                 self.assertEqual(observed, expected)
                 if failure == 'none':
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -130,7 +162,7 @@ with patch.object(pathlib.Path, 'read_text', read):
                         self.assertEqual(retried.returncode, 0, retried.stderr)
                         self.assertFalse(project.exists())
                         self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()][-2:],
-                            [['stop', '--path', str(project)], ['reset', '--path', str(project), '--confirm', 'productization-kind-seed']])
+                            [['qualification-aws', 'stop', '--path', str(project)], ['qualification-aws', 'reset', '--path', str(project), '--confirm', 'productization-kind-seed']])
                         for name in ('productization-seed-consumed-logs', 'productization-seed-logs'):
                             self.assertEqual((root / name / 'seed.log').read_text(), 'bounded shutdown diagnostics\n')
                 self.assertEqual((sibling / 'keep').read_text(), 'unrelated')
@@ -649,7 +681,7 @@ kind_image_digest_by_reference node "$EXPECTED_REFERENCE"
         candidate_guard = 'if [[ -n "$platform_index_digest" ]]; then'
         refusal = "signed candidate seed runtime config is missing; refusing source fallback"
         source_build = (
-            '"$insight_bin" dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source'
+            '"$insight_bin" qualification-aws dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source'
         )
         self.assertIn(candidate_guard, seed_block)
         self.assertIn(refusal, seed_block)

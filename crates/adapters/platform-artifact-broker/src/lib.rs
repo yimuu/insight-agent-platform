@@ -25,10 +25,10 @@ use tokio::{sync::OwnedSemaphorePermit, sync::Semaphore, time::timeout};
 mod aws;
 
 pub use aws::{
-    AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactProviderConfigError,
-    AwsArtifactProviderReadinessError, AwsArtifactUploadError, AwsArtifactUploadProvider,
-    AwsArtifactUploadRequest, AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
-    CompletedAwsArtifactUploadEvidence, PreparedAwsArtifactUpload,
+    ArtifactProviderCatalog, ArtifactProviderConfigError, ArtifactProviderReadinessError,
+    ArtifactUploadProviderError, AwsKmsKeyBindingConfig, CompletedArtifactUploadEvidence,
+    PreparedArtifactUpload, S3ArtifactUploadProvider, S3ArtifactUploadRequest,
+    S3StorageBindingConfig, StagedArtifactObject,
 };
 
 pub const MAX_INSTALLED_ARTIFACT_STORAGE_BINDINGS: usize = 64;
@@ -1301,3 +1301,10 @@ fn map_scan_read_error(error: ArtifactBrokerReadError) -> ArtifactScanReadError 
 
 #[cfg(test)]
 mod tests;
+
+mod provider_config;
+mod reference_key;
+pub use provider_config::{
+    ArtifactProviderCatalogConfigV2, ArtifactReferenceKeyBindingConfig,
+    OpenBaoArtifactKeyBindingConfigV1,
+};

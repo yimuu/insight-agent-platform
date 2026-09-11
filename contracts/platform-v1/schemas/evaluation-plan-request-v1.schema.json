@@ -175,15 +175,37 @@
         },
         "model_loop": {
           "additionalProperties": false,
+          "oneOf": [
+            {
+              "properties": {
+                "maximum_capability_calls": {
+                  "const": 0
+                },
+                "maximum_parallel_calls_per_round": {
+                  "const": 0
+                }
+              }
+            },
+            {
+              "properties": {
+                "maximum_capability_calls": {
+                  "minimum": 1
+                },
+                "maximum_parallel_calls_per_round": {
+                  "minimum": 1
+                }
+              }
+            }
+          ],
           "properties": {
             "maximum_capability_calls": {
               "maximum": 4294967295,
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             },
             "maximum_parallel_calls_per_round": {
               "maximum": 65535,
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             },
             "maximum_rounds": {

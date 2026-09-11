@@ -11,6 +11,7 @@ name = "insight"
 path = "src/main.rs"
 
 [dependencies]
+insight-platform-deployment-tooling.workspace = true
 insight-platform-api.workspace = true
 insight-platform-tasks.workspace = true
 insight-platform-deployment-contracts.workspace = true

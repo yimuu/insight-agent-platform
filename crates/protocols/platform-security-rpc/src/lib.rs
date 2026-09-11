@@ -1,7 +1,7 @@
 //! Versioned internal gRPC boundary between the Egress Broker and SecretBinding authority.
 //!
-//! The client implements only the two security ports needed by the Secret Broker. The server
-//! delegates only those same ports. Production TLS configuration verifies the private CA; the
+//! The client implements the explicit Security ports needed by the Egress and Secret Broker. The
+//! server delegates those same ports. Production TLS configuration verifies the private CA; the
 //! interceptor below additionally authorizes exactly the Egress Broker URI SAN before decoding a
 //! request body.
 
@@ -17,7 +17,8 @@ use insight_platform_contracts::{
 use insight_platform_execution_context::{scope_trace, ExecutionTraceContext};
 use insight_platform_rpc_trace::{require_trace_interceptor, PropagateTrace};
 use insight_platform_security::{
-    EncryptedOpaqueReference, PreparedSecretBindingAuthority,
+    ContextDispatchAuthority, EncryptedOpaqueReference, ModelConnectionProbeAuthority,
+    ModelCredentialImportAuthority, ModelDispatchAuthority, PreparedSecretBindingAuthority,
     PreparedSecretBindingRegistrationDisposition, PreparedSecretBindingRegistrationError,
     PreparedSecretBindingRegistrationOutcome, RegisterPreparedSecretBinding,
     SecretBindingResolutionAuthority, SecretBindingResolutionError, SecretBindingResolutionRecord,
@@ -253,6 +254,7 @@ struct RegisterPreparedSecretBindingWire {
     reference_digest: Sha256Digest,
     opaque_version_identity_digest: Sha256Digest,
     provider_storage_evidence_digest: Sha256Digest,
+    delegated_import: Option<insight_platform_contracts::ModelCredentialImportIdentityV1>,
 }
 
 impl From<RegisterPreparedSecretBinding> for RegisterPreparedSecretBindingWire {
@@ -269,6 +271,7 @@ impl From<RegisterPreparedSecretBinding> for RegisterPreparedSecretBindingWire {
             reference_digest: value.reference_digest,
             opaque_version_identity_digest: value.opaque_version_identity_digest,
             provider_storage_evidence_digest: value.provider_storage_evidence_digest,
+            delegated_import: value.delegated_import,
         }
     }
 }
@@ -295,6 +298,7 @@ impl TryFrom<RegisterPreparedSecretBindingWire> for RegisterPreparedSecretBindin
             reference_digest: value.reference_digest,
             opaque_version_identity_digest: value.opaque_version_identity_digest,
             provider_storage_evidence_digest: value.provider_storage_evidence_digest,
+            delegated_import: value.delegated_import,
         })
     }
 }
@@ -367,6 +371,155 @@ impl SecuritySecretAuthorityGrpcClient {
                 .max_decoding_message_size(maximum),
             limits,
         }
+    }
+}
+
+#[async_trait]
+impl ModelDispatchAuthority for SecuritySecretAuthorityGrpcClient {
+    async fn authorize_model_dispatch(
+        &self,
+        request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchAuthorizationError,
+    > {
+        use insight_platform_contracts::ModelDispatchAuthorizationError as Failure;
+        if !request.validate_at(Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        let mut client = self.client.clone();
+        let response = client
+            .authorize_model_dispatch(Request::new(
+                encode(request, self.limits).map_err(|_| Failure::Rejected)?,
+            ))
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => Failure::Unavailable,
+                _ => Failure::Rejected,
+            })?;
+        let permit: insight_platform_contracts::ModelDispatchPermitV1 =
+            decode(response.into_inner(), self.limits).map_err(|_| Failure::Rejected)?;
+        if !permit.validate_for(request, Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        Ok(permit)
+    }
+}
+
+#[async_trait]
+impl ContextDispatchAuthority for SecuritySecretAuthorityGrpcClient {
+    async fn authorize_context_dispatch(
+        &self,
+        request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ContextDispatchPermitV1,
+        insight_platform_contracts::ContextDispatchAuthorizationError,
+    > {
+        use insight_platform_contracts::ContextDispatchAuthorizationError as Failure;
+        if !request.validate_at(Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        let mut client = self.client.clone();
+        let mut wire = Request::new(encode(request, self.limits).map_err(|_| Failure::Rejected)?);
+        wire.set_timeout(
+            (request.deadline - Utc::now())
+                .to_std()
+                .map_err(|_| Failure::Rejected)?,
+        );
+        let response =
+            client
+                .authorize_context_dispatch(wire)
+                .await
+                .map_err(|status| match status.code() {
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+                        Failure::Unavailable
+                    }
+                    _ => Failure::Rejected,
+                })?;
+        let permit: insight_platform_contracts::ContextDispatchPermitV1 =
+            decode(response.into_inner(), self.limits).map_err(|_| Failure::Rejected)?;
+        if !permit.validate_for(request, Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        Ok(permit)
+    }
+}
+
+#[async_trait]
+impl ModelConnectionProbeAuthority for SecuritySecretAuthorityGrpcClient {
+    async fn authorize_model_connection_probe(
+        &self,
+        request: &insight_platform_contracts::ModelConnectionProbeAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelConnectionProbePermitV1,
+        insight_platform_contracts::ModelConnectionError,
+    > {
+        use insight_platform_contracts::ModelConnectionError as Failure;
+        let now = Utc::now();
+        if !request.validate_at(now) {
+            return Err(Failure::Rejected);
+        }
+        let mut wire = Request::new(encode(request, self.limits).map_err(|_| Failure::Rejected)?);
+        wire.set_timeout(
+            (request.deadline_at() - now)
+                .to_std()
+                .map_err(|_| Failure::Rejected)?,
+        );
+        let response = self
+            .client
+            .clone()
+            .authorize_model_connection_probe(wire)
+            .await
+            .map_err(|s| match s.code() {
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => Failure::Unavailable,
+                _ => Failure::Rejected,
+            })?;
+        let permit: insight_platform_contracts::ModelConnectionProbePermitV1 =
+            decode(response.into_inner(), self.limits).map_err(|_| Failure::Rejected)?;
+        if !permit.validate_for(request, Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        Ok(permit)
+    }
+}
+
+#[async_trait]
+impl ModelCredentialImportAuthority for SecuritySecretAuthorityGrpcClient {
+    async fn authorize_model_credential_import(
+        &self,
+        request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+    ) -> Result<
+        insight_platform_contracts::ModelCredentialImportPermitV1,
+        insight_platform_contracts::ModelCredentialImportError,
+    > {
+        use insight_platform_contracts::ModelCredentialImportError as Failure;
+        let now = Utc::now();
+        if !request.validate_at(now) {
+            return Err(Failure::Rejected);
+        }
+        let mut wire = Request::new(encode(request, self.limits).map_err(|_| Failure::Rejected)?);
+        wire.set_timeout(
+            (request.deadline - now)
+                .to_std()
+                .map_err(|_| Failure::Rejected)?,
+        );
+        let response = self
+            .client
+            .clone()
+            .authorize_model_credential_import(wire)
+            .await
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+                    Failure::TemporarilyUnavailable
+                }
+                _ => Failure::Rejected,
+            })?;
+        let permit: insight_platform_contracts::ModelCredentialImportPermitV1 =
+            decode(response.into_inner(), self.limits).map_err(|_| Failure::Rejected)?;
+        if !permit.validate_for(request, Utc::now()) {
+            return Err(Failure::Rejected);
+        }
+        Ok(permit)
     }
 }
 
@@ -469,9 +622,136 @@ impl<R, W> SecuritySecretAuthorityGrpcService<R, W> {
 #[tonic::async_trait]
 impl<R, W> SecuritySecretAuthorityService for SecuritySecretAuthorityGrpcService<R, W>
 where
-    R: SecretBindingResolutionAuthority + 'static,
+    R: SecretBindingResolutionAuthority
+        + ModelDispatchAuthority
+        + ContextDispatchAuthority
+        + ModelCredentialImportAuthority
+        + ModelConnectionProbeAuthority
+        + 'static,
     W: PreparedSecretBindingAuthority + 'static,
 {
+    async fn authorize_model_connection_probe(
+        &self,
+        request: Request<ClosedSecurityEnvelope>,
+    ) -> Result<Response<ClosedSecurityEnvelope>, Status> {
+        use insight_platform_contracts::{
+            ModelConnectionError, ModelConnectionProbeAuthorizationV1,
+        };
+        let request: ModelConnectionProbeAuthorizationV1 =
+            decode(request.into_inner(), self.limits)?;
+        if !request.validate_at(Utc::now()) {
+            return Err(Status::invalid_argument(
+                "invalid model probe authorization",
+            ));
+        }
+        let permit = self
+            .resolution
+            .authorize_model_connection_probe(&request)
+            .await
+            .map_err(|e| match e {
+                ModelConnectionError::Unavailable => {
+                    Status::unavailable("model probe authority unavailable")
+                }
+                _ => Status::permission_denied("model probe rejected"),
+            })?;
+        if !permit.validate_for(&request, Utc::now()) {
+            return Err(Status::permission_denied("model probe rejected"));
+        }
+        Ok(Response::new(encode(&permit, self.limits)?))
+    }
+
+    async fn authorize_model_credential_import(
+        &self,
+        request: Request<ClosedSecurityEnvelope>,
+    ) -> Result<Response<ClosedSecurityEnvelope>, Status> {
+        use insight_platform_contracts::{
+            ModelCredentialImportAuthorizationV1, ModelCredentialImportError,
+        };
+        let request: ModelCredentialImportAuthorizationV1 =
+            decode(request.into_inner(), self.limits)?;
+        if !request.validate_at(Utc::now()) {
+            return Err(Status::invalid_argument(
+                "invalid credential import authorization",
+            ));
+        }
+        let permit = self
+            .resolution
+            .authorize_model_credential_import(&request)
+            .await
+            .map_err(|failure| match failure {
+                ModelCredentialImportError::Rejected => {
+                    Status::permission_denied("credential import rejected")
+                }
+                _ => Status::unavailable("credential import authority unavailable"),
+            })?;
+        if !permit.validate_for(&request, Utc::now()) {
+            return Err(Status::permission_denied("credential import rejected"));
+        }
+        Ok(Response::new(encode(&permit, self.limits)?))
+    }
+
+    async fn authorize_model_dispatch(
+        &self,
+        request: Request<ClosedSecurityEnvelope>,
+    ) -> Result<Response<ClosedSecurityEnvelope>, Status> {
+        use insight_platform_contracts::{
+            ModelDispatchAuthorizationError, ModelDispatchAuthorizationV1,
+        };
+        let request: ModelDispatchAuthorizationV1 = decode(request.into_inner(), self.limits)?;
+        if !request.validate_at(Utc::now()) {
+            return Err(Status::invalid_argument(
+                "invalid Model dispatch authorization",
+            ));
+        }
+        let permit = self
+            .resolution
+            .authorize_model_dispatch(&request)
+            .await
+            .map_err(|failure| match failure {
+                ModelDispatchAuthorizationError::Rejected => {
+                    Status::permission_denied("Model dispatch rejected")
+                }
+                ModelDispatchAuthorizationError::Unavailable => {
+                    Status::unavailable("Model dispatch authority unavailable")
+                }
+            })?;
+        if !permit.validate_for(&request, Utc::now()) {
+            return Err(Status::permission_denied("Model dispatch rejected"));
+        }
+        Ok(Response::new(encode(&permit, self.limits)?))
+    }
+
+    async fn authorize_context_dispatch(
+        &self,
+        request: Request<ClosedSecurityEnvelope>,
+    ) -> Result<Response<ClosedSecurityEnvelope>, Status> {
+        use insight_platform_contracts::{
+            ContextDispatchAuthorizationError, ContextDispatchAuthorizationV1,
+        };
+        let request: ContextDispatchAuthorizationV1 = decode(request.into_inner(), self.limits)?;
+        if !request.validate_at(Utc::now()) {
+            return Err(Status::invalid_argument(
+                "invalid Context dispatch authorization",
+            ));
+        }
+        let permit = self
+            .resolution
+            .authorize_context_dispatch(&request)
+            .await
+            .map_err(|failure| match failure {
+                ContextDispatchAuthorizationError::Rejected => {
+                    Status::permission_denied("Context dispatch rejected")
+                }
+                ContextDispatchAuthorizationError::Unavailable => {
+                    Status::unavailable("Context dispatch authority unavailable")
+                }
+            })?;
+        if !permit.validate_for(&request, Utc::now()) {
+            return Err(Status::permission_denied("Context dispatch rejected"));
+        }
+        Ok(Response::new(encode(&permit, self.limits)?))
+    }
+
     async fn load_secret_binding(
         &self,
         request: Request<ClosedSecurityEnvelope>,
@@ -715,6 +995,7 @@ mod tests {
             reference_digest: digest('d'),
             opaque_version_identity_digest: digest('e'),
             provider_storage_evidence_digest: digest('f'),
+            delegated_import: None,
         };
         command.audit.request_digest = command.semantic_request_digest().unwrap();
         command
@@ -724,7 +1005,75 @@ mod tests {
         record: SecretBindingResolutionRecord,
         resolution_calls: AtomicUsize,
         registration_calls: AtomicUsize,
+        context_calls: AtomicUsize,
         drift_registration_outcome: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ModelConnectionProbeAuthority for RecordingAuthority {
+        async fn authorize_model_connection_probe(
+            &self,
+            _: &insight_platform_contracts::ModelConnectionProbeAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ModelConnectionProbePermitV1,
+            insight_platform_contracts::ModelConnectionError,
+        > {
+            Err(insight_platform_contracts::ModelConnectionError::Rejected)
+        }
+    }
+
+    #[async_trait]
+    impl ModelCredentialImportAuthority for RecordingAuthority {
+        async fn authorize_model_credential_import(
+            &self,
+            _request: &insight_platform_contracts::ModelCredentialImportAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ModelCredentialImportPermitV1,
+            insight_platform_contracts::ModelCredentialImportError,
+        > {
+            Err(insight_platform_contracts::ModelCredentialImportError::Rejected)
+        }
+    }
+
+    #[async_trait]
+    impl ModelDispatchAuthority for RecordingAuthority {
+        async fn authorize_model_dispatch(
+            &self,
+            _request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ModelDispatchPermitV1,
+            insight_platform_contracts::ModelDispatchAuthorizationError,
+        > {
+            Err(insight_platform_contracts::ModelDispatchAuthorizationError::Rejected)
+        }
+    }
+
+    #[async_trait]
+    impl ContextDispatchAuthority for RecordingAuthority {
+        async fn authorize_context_dispatch(
+            &self,
+            request: &insight_platform_contracts::ContextDispatchAuthorizationV1,
+        ) -> Result<
+            insight_platform_contracts::ContextDispatchPermitV1,
+            insight_platform_contracts::ContextDispatchAuthorizationError,
+        > {
+            self.context_calls.fetch_add(1, Ordering::AcqRel);
+            if request.tenant_id != self.record.tenant_id {
+                return Err(
+                    insight_platform_contracts::ContextDispatchAuthorizationError::Rejected,
+                );
+            }
+            Ok(insight_platform_contracts::ContextDispatchPermitV1 {
+                schema_version: 1,
+                request_digest: insight_platform_contracts::canonical_digest(
+                    &serde_json::to_value(request).unwrap(),
+                )
+                .unwrap()
+                .parse()
+                .unwrap(),
+                valid_until: request.deadline,
+            })
+        }
     }
 
     #[async_trait]
@@ -886,6 +1235,7 @@ mod tests {
             ),
             resolution_calls: AtomicUsize::new(0),
             registration_calls: AtomicUsize::new(0),
+            context_calls: AtomicUsize::new(0),
             drift_registration_outcome: AtomicBool::new(false),
         });
         let limits = SecurityInternalRpcLimits::default();
@@ -959,6 +1309,40 @@ mod tests {
         assert_eq!(resolved.secret_binding_id, secret_binding_id);
         assert_eq!(authority.resolution_calls.load(Ordering::Acquire), 1);
 
+        let context_request = insight_platform_contracts::ContextDispatchAuthorizationV1 {
+            schema_version: 1,
+            tenant_id: tenant_id.clone(),
+            context_query_id: id(ResourceKind::ContextQuery),
+            job_id: id(ResourceKind::Job),
+            worker_process_generation_id: id(ResourceKind::WorkerProcessGeneration),
+            physical_attempt: 1,
+            lease_generation: 1,
+            lease_token_digest: digest('a'),
+            admission_digest: digest('b'),
+            request_metadata_digest: digest('c'),
+            input_content_digest: digest('d'),
+            deadline: Utc::now() + Duration::seconds(30),
+        };
+        let context_permit = scope_trace(
+            rpc_trace(),
+            client.authorize_context_dispatch(&context_request),
+        )
+        .await
+        .unwrap();
+        assert!(context_permit.validate_for(&context_request, Utc::now()));
+        assert_eq!(authority.context_calls.load(Ordering::Acquire), 1);
+        let mut invalid_context = context_request.clone();
+        invalid_context.schema_version = 0;
+        assert_eq!(
+            scope_trace(
+                rpc_trace(),
+                client.authorize_context_dispatch(&invalid_context)
+            )
+            .await,
+            Err(insight_platform_contracts::ContextDispatchAuthorizationError::Rejected)
+        );
+        assert_eq!(authority.context_calls.load(Ordering::Acquire), 1);
+
         let command = registration_command(
             tenant_id.clone(),
             id(ResourceKind::SecretBinding),
@@ -1015,6 +1399,22 @@ mod tests {
         assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
         assert_eq!(authority.resolution_calls.load(Ordering::Acquire), 1);
         assert_eq!(authority.registration_calls.load(Ordering::Acquire), 2);
+
+        let rejected_context = wrong_client
+            .authorize_context_dispatch(Request::new(encode(&context_request, limits).unwrap()))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected_context.code(), tonic::Code::PermissionDenied);
+        assert_eq!(authority.context_calls.load(Ordering::Acquire), 1);
+        let mut unknown = serde_json::to_value(&context_request).unwrap();
+        unknown["query_input"] = serde_json::json!({"secret": "body-canary"});
+        assert!(
+            decode::<insight_platform_contracts::ContextDispatchAuthorizationV1>(
+                encode(&unknown, limits).unwrap(),
+                limits
+            )
+            .is_err()
+        );
 
         drop(client);
         drop(missing_trace_client);

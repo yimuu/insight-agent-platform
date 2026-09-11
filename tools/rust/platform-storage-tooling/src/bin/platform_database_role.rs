@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "platform_database_role/installation.rs"]
+mod installation;
+
 struct Role {
     name: &'static str,
     marker: &'static str,
@@ -64,6 +67,9 @@ async fn main() {
 }
 async fn run() -> Result<(), &'static str> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--installation") {
+        return installation::run(&args[1..]).await;
+    }
     let (flag, purpose, credential_path, kind_port) = match args.as_slice() {
         [flag, purpose, credential_path] => (flag, purpose, credential_path, None),
         [profile, name, port, flag, purpose, credential_path] if profile == "--profile" && name == "kind-local" =>
@@ -169,9 +175,11 @@ fn check_private_path(path: &Path, directory: bool) -> Result<(), &'static str> 
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let expected = if directory { 0o700 } else { 0o600 };
-        if metadata.permissions().mode() & 0o777 != expected {
+        if metadata.permissions().mode() & 0o777 != expected
+            || (!directory && metadata.nlink() != 1)
+        {
             return Err("credential file permissions are not private");
         }
     }
@@ -180,9 +188,23 @@ fn check_private_path(path: &Path, directory: bool) -> Result<(), &'static str> 
 fn read_password(path: &Path) -> Result<String, &'static str> {
     check_private_path(path, false)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|_| "credential unreadable")?
-        .take(33)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| "credential unreadable")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata().map_err(|_| "credential unreadable")?;
+        if metadata.nlink() != 1 || metadata.mode() & 0o777 != 0o600 {
+            return Err("credential not private");
+        }
+    }
+    file.take(33)
         .read_to_end(&mut bytes)
         .map_err(|_| "credential unreadable")?;
     if bytes.len() != 32 || !bytes.iter().all(u8::is_ascii_hexdigit) {

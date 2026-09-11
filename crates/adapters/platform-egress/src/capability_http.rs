@@ -15,7 +15,7 @@ use insight_platform_capability_adapters::{
 use insight_platform_contracts::{
     canonical_digest, CanonicalHttpEndpoint, CapabilityBackendKind, CapabilityBackendLimits,
     CapabilityEndpointScheme, CapabilityIdempotencyKind, Effect, ExactDeploymentRef,
-    ExactSecretBindingRef, ExactVersionRef, HttpCapabilityMethod, SecretPurpose, Sha256Digest,
+    ExactSecretBindingRef, ExactVersionRef, HttpCapabilityMethod, Sha256Digest,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH},
@@ -67,53 +67,7 @@ impl Default for CapabilityHttpEgressLimits {
     }
 }
 
-/// Credential injection is installed with the trusted Deployment catalog, never supplied by a
-/// worker request or declarative protocol codec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum InstalledHttpCredentialInjection {
-    BearerAuthorization {
-        purpose: SecretPurpose,
-    },
-    Header {
-        purpose: SecretPurpose,
-        name: String,
-    },
-}
-
-impl InstalledHttpCredentialInjection {
-    pub(crate) fn purpose(&self) -> &SecretPurpose {
-        match self {
-            Self::BearerAuthorization { purpose } | Self::Header { purpose, .. } => purpose,
-        }
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), EgressConfigurationError> {
-        match self {
-            Self::BearerAuthorization { .. } => Ok(()),
-            Self::Header { name, .. } => {
-                let lower = name.to_ascii_lowercase();
-                if name != &lower
-                    || HeaderName::from_bytes(name.as_bytes()).is_err()
-                    || matches!(
-                        lower.as_str(),
-                        "authorization"
-                            | "connection"
-                            | "content-length"
-                            | "cookie"
-                            | "host"
-                            | "proxy-authorization"
-                            | "set-cookie"
-                            | "transfer-encoding"
-                    )
-                {
-                    return Err(EgressConfigurationError::InvalidEndpoint);
-                }
-                Ok(())
-            }
-        }
-    }
-}
+pub use insight_platform_contracts::InstalledHttpCredentialInjection;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,7 +145,9 @@ impl InstalledCapabilityHttpEndpoint {
         let mut purposes = BTreeSet::new();
         let mut names = BTreeSet::new();
         for injection in &self.credential_injections {
-            injection.validate()?;
+            if !injection.validate_shape() {
+                return Err(EgressConfigurationError::InvalidEndpoint);
+            }
             if !purposes.insert(injection.purpose().clone())
                 || !names.insert(match injection {
                     InstalledHttpCredentialInjection::BearerAuthorization { .. } => {
@@ -943,6 +899,7 @@ mod tests {
     use insight_platform_capability_adapters::{
         CapabilityTransportRequestIdentity, HttpIdempotencyBinding,
     };
+    use insight_platform_contracts::SecretPurpose;
     use insight_platform_contracts::{ResourceId, ResourceKind, SecretResolutionPolicy};
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
     use std::{

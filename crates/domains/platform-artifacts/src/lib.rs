@@ -97,44 +97,70 @@ impl ArtifactCommandLimits {
     }
 }
 
+/// Physical provenance of the bytes. Upload includes workload staging and its real verification Job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ArtifactOrigin {
+    Upload { operation_id: ResourceId },
+    Installation { request_id: ResourceId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactMetadataSnapshot {
     pub schema_version: u32,
     pub display_name: Option<String>,
-    pub operation_id: ResourceId,
+    pub origin: ArtifactOrigin,
     pub current_verification: Option<ArtifactCurrentVerification>,
 }
 
 impl ArtifactMetadataSnapshot {
-    pub fn new(
+    pub fn new_upload(
         display_name: Option<String>,
         operation_id: ResourceId,
     ) -> Result<Self, ArtifactCommandError> {
-        if operation_id.kind() != ResourceKind::Job
-            || display_name.as_deref().is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > MAX_DISPLAY_NAME_BYTES
-                    || value == "."
-                    || value == ".."
-                    || value
-                        .chars()
-                        .any(|character| character.is_control() || matches!(character, '/' | '\\'))
-            })
-        {
-            return Err(ArtifactCommandError::InvalidMetadata);
-        }
-        Ok(Self {
-            schema_version: 1,
+        Self::new(display_name, ArtifactOrigin::Upload { operation_id })
+    }
+
+    pub fn new_installation(
+        display_name: Option<String>,
+        request_id: ResourceId,
+    ) -> Result<Self, ArtifactCommandError> {
+        Self::new(display_name, ArtifactOrigin::Installation { request_id })
+    }
+
+    fn new(
+        display_name: Option<String>,
+        origin: ArtifactOrigin,
+    ) -> Result<Self, ArtifactCommandError> {
+        let metadata = Self {
+            schema_version: 2,
             display_name,
-            operation_id,
+            origin,
             current_verification: None,
-        })
+        };
+        metadata.validate()?;
+        Ok(metadata)
+    }
+
+    pub fn upload_operation_id(&self) -> Result<&ResourceId, ArtifactCommandError> {
+        self.validate()?;
+        match &self.origin {
+            ArtifactOrigin::Upload { operation_id } => Ok(operation_id),
+            ArtifactOrigin::Installation { .. } => Err(ArtifactCommandError::InvalidIdentity),
+        }
     }
 
     pub fn validate(&self) -> Result<(), ArtifactCommandError> {
-        if self.schema_version != 1
-            || self.operation_id.kind() != ResourceKind::Job
+        let identity_valid = match &self.origin {
+            ArtifactOrigin::Upload { operation_id } => operation_id.kind() == ResourceKind::Job,
+            ArtifactOrigin::Installation { request_id } => {
+                request_id.kind() == ResourceKind::ServerRequest
+                    && self.current_verification.is_none()
+            }
+        };
+        if self.schema_version != 2
+            || !identity_valid
             || self.display_name.as_deref().is_some_and(|value| {
                 value.is_empty()
                     || value.len() > MAX_DISPLAY_NAME_BYTES
@@ -158,6 +184,7 @@ impl ArtifactMetadataSnapshot {
         &self,
         evidence: ArtifactCurrentVerification,
     ) -> Result<Self, ArtifactCommandError> {
+        self.upload_operation_id()?;
         evidence.validate()?;
         let mut next = self.clone();
         next.current_verification = Some(evidence);
@@ -379,7 +406,7 @@ impl PrepareArtifact {
     }
 
     pub fn metadata_snapshot(&self) -> Result<ArtifactMetadataSnapshot, ArtifactCommandError> {
-        ArtifactMetadataSnapshot::new(self.display_name.clone(), self.operation_id.clone())
+        ArtifactMetadataSnapshot::new_upload(self.display_name.clone(), self.operation_id.clone())
     }
 
     pub fn operation_snapshot(&self) -> ArtifactUploadOperationSnapshot {
@@ -554,6 +581,9 @@ pub fn decide_complete_upload(
     command: &CompleteArtifactUpload,
     now: DateTime<Utc>,
 ) -> Result<UploadCompletionDecision, ArtifactCommandError> {
+    if artifact.metadata.upload_operation_id()? != &operation.operation_id {
+        return Err(ArtifactCommandError::InvalidIdentity);
+    }
     if artifact.tenant_id != command.audit.tenant_id
         || blob.tenant_id != command.audit.tenant_id
         || grant.tenant_id != command.audit.tenant_id
@@ -1934,6 +1964,9 @@ fn require_artifact_operation_identity(
     blob_id: &ResourceId,
     operation_id: &ResourceId,
 ) -> Result<(), ArtifactCommandError> {
+    if artifact.metadata.upload_operation_id()? != operation_id {
+        return Err(ArtifactCommandError::InvalidIdentity);
+    }
     if artifact.tenant_id != audit.tenant_id
         || blob.tenant_id != audit.tenant_id
         || operation.tenant_id != audit.tenant_id
@@ -1989,6 +2022,60 @@ mod tests {
         )
         .parse()
         .unwrap()
+    }
+
+    #[test]
+    fn metadata_origins_are_current_closed_and_cannot_impersonate_uploads() {
+        let operation = id(ResourceKind::Job, "f001");
+        let request = id(ResourceKind::ServerRequest, "f002");
+        let upload =
+            ArtifactMetadataSnapshot::new_upload(Some("source.json".into()), operation.clone())
+                .unwrap();
+        let installation =
+            ArtifactMetadataSnapshot::new_installation(None, request.clone()).unwrap();
+        assert_eq!(upload.upload_operation_id().unwrap(), &operation);
+        assert_eq!(
+            installation.upload_operation_id(),
+            Err(ArtifactCommandError::InvalidIdentity)
+        );
+        for value in [&upload, &installation] {
+            let bytes = serde_json::to_vec(value).unwrap();
+            let restored: ArtifactMetadataSnapshot = serde_json::from_slice(&bytes).unwrap();
+            restored.validate().unwrap();
+            assert_eq!(&restored, value);
+            assert_eq!(
+                restored.canonical_digest().unwrap(),
+                value.canonical_digest().unwrap()
+            );
+            assert_eq!(restored.schema_version, 2);
+        }
+        assert!(ArtifactMetadataSnapshot::new_installation(None, operation.clone()).is_err());
+        assert!(ArtifactMetadataSnapshot::new_upload(None, request).is_err());
+        let mut old = serde_json::to_value(&upload).unwrap();
+        old.as_object_mut().unwrap().remove("origin");
+        old["operation_id"] = serde_json::to_value(&operation).unwrap();
+        old["schema_version"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<ArtifactMetadataSnapshot>(old).is_err());
+        for origin in [
+            serde_json::json!({"kind":"upload","operation_id":operation,"request_id":operation}),
+            serde_json::json!({"kind":"installation","request_id":operation}),
+            serde_json::json!({"kind":"unknown"}),
+        ] {
+            let mut value = serde_json::to_value(&upload).unwrap();
+            value["origin"] = origin;
+            assert!(
+                match serde_json::from_value::<ArtifactMetadataSnapshot>(value) {
+                    Err(_) => true,
+                    Ok(m) => m.validate().is_err(),
+                }
+            );
+        }
+        let mut altered = upload.clone();
+        altered.origin = installation.origin;
+        assert_ne!(
+            altered.canonical_digest().unwrap(),
+            upload.canonical_digest().unwrap()
+        );
     }
 
     fn digest(character: char) -> Sha256Digest {
@@ -2096,6 +2183,33 @@ mod tests {
         completed.artifact.blob_id = Some(id(ResourceKind::InternalBlob, "abcd"));
         assert_eq!(
             validate_artifact_prepare_replay(&completed, &identity, now),
+            Err(ArtifactCommandError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn installation_origin_cannot_replay_or_complete_an_upload() {
+        let now = Utc::now();
+        let mut prepared = prepared_bundle(now);
+        prepared.artifact.metadata = ArtifactMetadataSnapshot::new_installation(
+            None,
+            id(ResourceKind::ServerRequest, "f010"),
+        )
+        .unwrap();
+        let identity = ArtifactUploadReplayIdentity::from_audit(&command(now).audit);
+        assert_eq!(
+            validate_artifact_prepare_replay(&prepared, &identity, now),
+            Err(ArtifactCommandError::InvalidIdentity)
+        );
+        assert_eq!(
+            decide_complete_upload(
+                &prepared.artifact,
+                &prepared.blob,
+                &prepared.grant,
+                &prepared.operation,
+                &completion(now),
+                now
+            ),
             Err(ArtifactCommandError::InvalidIdentity)
         );
     }

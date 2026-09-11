@@ -1,0 +1,106 @@
+{{- if has .Values.phase (list "dependencies" "provision" "serving") -}}
+{{- $root := . -}}
+{{- range $name, $port := dict "postgres" 5432 "nats" 4222 "s3" 8333 "openbao" 8200 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" $root | nindent 4 }}
+spec:
+  selector:
+    insight.platform/installation: {{ $root.Values.owner | quote }}
+    insight.platform/process: {{ $name }}
+  ports:
+    - {name: service, port: {{ $port }}, targetPort: {{ $port }}}
+{{- if or (ne $name "openbao") (has $root.Values.phase (list "provision" "serving")) (and (eq $root.Values.phase "dependencies") $root.Values.providerReady) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "installation.labels" $root | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      insight.platform/installation: {{ $root.Values.owner | quote }}
+      insight.platform/process: {{ $name }}
+  template:
+    metadata:
+      labels:
+        insight.platform/installation: {{ $root.Values.owner | quote }}
+        insight.platform/process: {{ $name }}
+    spec:
+      {{- if eq $name "s3" }}
+      terminationGracePeriodSeconds: {{ required "S3 shutdown grace must be produced by the shared owner" $root.Values.plan.dependency_stop_grace_seconds.s3 }}
+      {{- end }}
+      {{- include "installation.scheduling" $root | nindent 6 }}
+      containers:
+        - name: {{ $name }}
+          image: {{ index $root.Values.plan.dependencies $name | quote }}
+          {{- if eq $name "postgres" }}
+          env:
+            - {name: POSTGRES_DB, value: insight_platform}
+            - {name: POSTGRES_USER, value: insight_installation_admin}
+            - {name: POSTGRES_PASSWORD_FILE, value: /run/insight-postgres/admin-password}
+          {{- else }}
+          {{- if eq $name "nats" }}
+          args: [--config=/etc/nats/nats.conf]
+          {{- else if eq $name "s3" }}
+          command: [/usr/bin/weed]
+          args: {{ mustToJson $root.Values.plan.dependency_commands.s3 }}
+          {{- else }}
+          command: [/usr/bin/bao]
+          args: [server, -config=/run/insight-openbao/serve.json]
+          {{- end }}
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          {{- end }}
+          ports:
+            - {name: service, containerPort: {{ $port }}}
+          readinessProbe:
+            {{- if eq $name "postgres" }}
+            exec: {command: [pg_isready, -U, insight_installation_admin, -d, insight_platform]}
+            {{- else }}
+            tcpSocket: {port: service}
+            {{- end }}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - name: data
+              mountPath: {{ if eq $name "postgres" }}/var/lib/postgresql/data{{ else if eq $name "nats" }}/data/jetstream{{ else if eq $name "s3" }}/data{{ else }}/var/lib/openbao{{ end }}
+            - name: configuration
+              mountPath: {{ if eq $name "postgres" }}/run/insight-postgres{{ else if eq $name "nats" }}/etc/nats{{ else if eq $name "s3" }}/run/insight/s3{{ else }}/run/insight-openbao{{ end }}
+              readOnly: true
+            {{- if has $name (list "s3" "openbao") }}
+            - name: temporary
+              mountPath: /tmp
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{ $name }}-data}
+        - name: configuration
+          persistentVolumeClaim: {claimName: dependency-{{ $name }}, readOnly: true}
+        {{- if has $name (list "s3" "openbao") }}
+        - name: temporary
+          emptyDir: {medium: Memory, sizeLimit: 128Mi}
+        {{- end }}
+{{- end -}}
+{{- end -}}
+{{- end -}}

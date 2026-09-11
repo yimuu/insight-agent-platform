@@ -308,7 +308,7 @@ PY_TARGET
 )"
 if [[ -n "$orphaned_processes" ]]; then
   echo "repository-local Platform processes are already running (PIDs: ${orphaned_processes//$'\n'/, })" >&2
-  echo "stop their owning profile with 'insight stop --path <project>' before starting a fresh journey" >&2
+  echo "stop their owning profile with 'insight qualification-aws stop --path <project>' before starting a fresh journey" >&2
   exit 2
 fi
 
@@ -393,7 +393,7 @@ if [[ ! -x "$insight_bin" ]]; then
 fi
 
 "$insight_bin" doctor --json
-"$insight_bin" init --path "$project" --name "productization-${profile_label%%+*}"
+"$insight_bin" qualification-aws init --path "$project" --name "productization-${profile_label%%+*}"
 dev_arguments=(--path "$project")
 if [[ -n "$release_candidate" ]]; then
   candidate_identity="$(python3 - \
@@ -437,13 +437,13 @@ fi
 if [[ -n "$features" ]]; then
   dev_arguments+=(--features "$features")
 fi
-"$insight_bin" dev "${dev_arguments[@]}"
-"$insight_bin" status --path "$project"
+"$insight_bin" qualification-aws dev "${dev_arguments[@]}"
+"$insight_bin" qualification-aws status --path "$project"
 # A feature-rich profile can spend longer than the deliberately short local token TTL
 # compiling and starting every role. Rotate only after the runtime is ready so
 # the public journey receives a fresh credential. Never print the bearer token
 # into CI logs; the CLI persists it with the existing private-file permissions.
-"$insight_bin" token --path "$project" >/dev/null
+"$insight_bin" qualification-aws token --path "$project" >/dev/null
 
 source_revision="$(git rev-parse HEAD)"
 runtime_identity="$(python3 - \

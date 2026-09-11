@@ -222,9 +222,9 @@ if [[ ! -d "$seed_project/.insight/runtime/config" ]]; then
       "$seed_project" >&2
     exit 1
   fi
-  "$insight_bin" init --path "$seed_project" --name kind-local-seed
-  "$insight_bin" dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source
-  "$insight_bin" stop --path "$seed_project"
+  "$insight_bin" qualification-aws init --path "$seed_project" --name kind-local-seed
+  "$insight_bin" qualification-aws dev --path "$seed_project" --features context,mcp,model,remote-capability --from-source
+  "$insight_bin" qualification-aws stop --path "$seed_project"
 fi
 seed_runtime="$seed_project/.insight/runtime"
 for path in "$seed_runtime/config" "$seed_runtime/tls" "$seed_runtime/run-event-cursor-key"; do

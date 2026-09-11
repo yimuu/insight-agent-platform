@@ -285,17 +285,17 @@ const server = createServer(async (request, response) => {
     const body = JSON.parse(await readBody(request))
     const index = body.purpose === 'authoring_document' ? 1 : 2
     const artifactId = `art_0198f1c3-8f49-7c3e-b1f3-773c28367ba${index + 6}`
-    const operationId = `job_0198f1c3-8f49-7c3e-b1f3-773c28367ba${index + 8}`
+    const operationId = `job_0198f1c3-8f49-7c3e-b1f3-773c28367ba${(index + 8).toString(16)}`
     preparedArtifacts.set(artifactId, { ...body, operationId })
     sendJson(response, 201, {
       schema_version: 1,
       artifact_id: artifactId,
       operation_id: operationId,
       upload_grant_id: `grt_0198f1c3-8f49-7c3e-b1f3-773c28367bb${index}`,
-      artifact_etag: '"artifact-v1"',
+      artifact_etag: `"${artifactId}-1"`,
       upload_target: { url: `https://objects.example/${artifactId}`, completion_proof: `proof-${index}` },
-      upload_expires_at: '2030-01-01T00:00:00Z',
-    }, { etag: '"artifact-v1"' })
+      upload_expires_at: '2030-01-01T00:00:00.000000Z',
+    }, { etag: `"${artifactId}-1"` })
     return
   }
   const completeArtifact = url.pathname.match(/^\/v1\/artifacts\/(art_[^/]+):complete-upload$/)
@@ -303,7 +303,8 @@ const server = createServer(async (request, response) => {
     await readBody(request)
     const prepared = preparedArtifacts.get(completeArtifact[1])
     if (!prepared?.uploaded) return problem(response, 409, 'fixture_upload_missing', 'Actual object bytes must arrive before completion.')
-    sendJson(response, 202, { schema_version: 1, artifact_id: completeArtifact[1], artifact_etag: '"artifact-v2"', operation_id: prepared.operationId })
+    prepared.completed = true
+    sendJson(response, 202, { schema_version: 1, artifact_id: completeArtifact[1], artifact_etag: `"${completeArtifact[1]}-2"`, operation_id: prepared.operationId })
     return
   }
   const artifactContent = url.pathname.match(/^\/v1\/artifacts\/(art_[^/]+)\/content$/)
@@ -322,12 +323,12 @@ const server = createServer(async (request, response) => {
       artifact_id: readArtifact[1],
       purpose: prepared.purpose,
       classification: prepared.classification,
-      state: 'ready',
-      version: 2,
+      state: prepared.completed ? 'ready' : 'staging',
+      version: prepared.completed ? 2 : 1,
       expected_size_bytes: prepared.expected_size_bytes,
       declared_media_type: prepared.declared_media_type,
       verified_media_type: prepared.declared_media_type,
-      content: {
+      content: !prepared.completed ? null : {
         artifact_id: readArtifact[1],
         content_digest: prepared.expected_digest,
         byte_length: prepared.expected_size_bytes,
@@ -338,8 +339,8 @@ const server = createServer(async (request, response) => {
       retain_until: '2030-01-01T00:00:00Z',
       created_at: '2026-09-01T00:00:00Z',
       updated_at: '2026-09-01T00:00:01Z',
-      etag: '"artifact-v2"',
-    })
+      etag: `"${readArtifact[1]}-${prepared.completed ? 2 : 1}"`,
+    }, { etag: `"${readArtifact[1]}-${prepared.completed ? 2 : 1}"` })
     return
   }
   if (request.method === 'POST' && url.pathname === '/v1/agents') {

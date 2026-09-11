@@ -1,5 +1,17 @@
 #[path = "support/fixture_directory.rs"]
 mod fixture_directory;
+#[path = "support/model_connection.rs"]
+mod model_connection;
+#[path = "support/model_default.rs"]
+mod model_default;
+#[path = "support/model_public_events.rs"]
+mod model_public_events;
+#[path = "support/model_quota.rs"]
+mod model_quota;
+#[path = "support/model_security_role.rs"]
+mod model_security_role;
+#[path = "support/model_zero_tools.rs"]
+mod model_zero_tools;
 use fixture_directory::FixtureDirectory;
 #[path = "support/adapter_claims.rs"]
 mod adapter_claims;
@@ -11,6 +23,8 @@ mod control_convergence;
 mod leaf_convergence_isolation;
 #[path = "support/model_completion.rs"]
 mod model_completion;
+#[path = "support/model_dispatch_authorization.rs"]
+mod model_dispatch_authorization;
 #[path = "support/model_recovery_isolation.rs"]
 mod model_recovery_isolation;
 #[path = "support/process_guard.rs"]
@@ -18,8 +32,8 @@ mod process_guard;
 mod support;
 use chrono::{DateTime, Duration, Utc};
 use insight_platform_artifact_broker::{
-    AwsArtifactProviderCatalog, AwsArtifactProviderCatalogConfig, AwsArtifactUploadRequest,
-    AwsKmsKeyBindingConfig, AwsS3StorageBindingConfig,
+    ArtifactProviderCatalog, ArtifactProviderCatalogConfigV2, ArtifactReferenceKeyBindingConfig,
+    AwsKmsKeyBindingConfig, S3ArtifactUploadRequest, S3StorageBindingConfig,
 };
 use insight_platform_artifact_rpc::SCHEDULER_WORKLOAD_IDENTITY;
 use insight_platform_capability_adapters::{
@@ -189,11 +203,11 @@ impl ProductionArtifactFixture {
         }
     }
 
-    fn provider_config(&self) -> AwsArtifactProviderCatalogConfig {
-        AwsArtifactProviderCatalogConfig {
-            schema_version: 1,
+    fn provider_config(&self) -> ArtifactProviderCatalogConfigV2 {
+        ArtifactProviderCatalogConfigV2 {
+            schema_version: 2,
             write_storage_binding_digest: self.storage_binding_digest.clone(),
-            s3_storage_bindings: vec![AwsS3StorageBindingConfig {
+            s3_storage_bindings: vec![S3StorageBindingConfig {
                 schema_version: 1,
                 storage_binding_digest: self.storage_binding_digest.clone(),
                 endpoint: self.endpoint.clone(),
@@ -205,15 +219,17 @@ impl ProductionArtifactFixture {
                 operation_timeout_milliseconds: 5_000,
                 maximum_object_bytes: 67_108_864,
             }],
-            kms_key_bindings: vec![AwsKmsKeyBindingConfig {
-                schema_version: 1,
-                kms_binding_digest: self.kms_binding_digest.clone(),
-                endpoint: self.endpoint.clone(),
-                region: "us-east-1".to_owned(),
-                key_id: self.key_id.clone(),
-                connect_timeout_milliseconds: 1_000,
-                operation_timeout_milliseconds: 5_000,
-            }],
+            reference_key_bindings: vec![ArtifactReferenceKeyBindingConfig::AwsKms(
+                AwsKmsKeyBindingConfig {
+                    schema_version: 1,
+                    kms_binding_digest: self.kms_binding_digest.clone(),
+                    endpoint: self.endpoint.clone(),
+                    region: "us-east-1".to_owned(),
+                    key_id: self.key_id.clone(),
+                    connect_timeout_milliseconds: 1_000,
+                    operation_timeout_milliseconds: 5_000,
+                },
+            )],
         }
     }
 
@@ -307,10 +323,13 @@ fn production_model_worker_manifest() -> WorkerManifest {
     let mut execution_capabilities =
         insight_platform_plan::execution::program_execution_capabilities();
     for (name, contract) in [
-        (OPENAI_RESPONSES_ADAPTER_NAME, digest('3')),
+        (
+            OPENAI_RESPONSES_ADAPTER_NAME,
+            ModelProviderWireProtocol::OpenAiResponses.adapter_contract_digest(),
+        ),
         (
             ANTHROPIC_MESSAGES_ADAPTER_NAME,
-            named_digest("anthropic-production-adapter"),
+            ModelProviderWireProtocol::AnthropicMessages.adapter_contract_digest(),
         ),
     ] {
         execution_capabilities.capabilities.push(
@@ -649,12 +668,12 @@ fn model_tool_chain_worker_config(egress_endpoint: String, nats_url: String) -> 
             {
                 "qualified_name": OPENAI_RESPONSES_ADAPTER_NAME,
                 "worker_manifest_digest": manifest_digest,
-                "adapter_contract_digest": digest('3')
+                "adapter_contract_digest": ModelProviderWireProtocol::OpenAiResponses.adapter_contract_digest()
             },
             {
                 "qualified_name": ANTHROPIC_MESSAGES_ADAPTER_NAME,
                 "worker_manifest_digest": manifest_digest,
-                "adapter_contract_digest": named_digest("anthropic-production-adapter")
+                "adapter_contract_digest": ModelProviderWireProtocol::AnthropicMessages.adapter_contract_digest()
             }
         ],
         "database_max_connections": 4,
@@ -835,14 +854,14 @@ async fn install_production_artifact_object(
         *expected_digest, byte_digest,
         "Artifact bytes must bind the declared digest"
     );
-    let catalog = AwsArtifactProviderCatalog::install(artifact.provider_config())
+    let catalog = ArtifactProviderCatalog::install(artifact.provider_config())
         .await
         .unwrap();
     catalog.check_readiness().await.unwrap();
     let staged = catalog
         .into_gateway_provider()
         .stage_bytes(
-            AwsArtifactUploadRequest {
+            S3ArtifactUploadRequest {
                 tenant_id,
                 artifact_id,
                 blob_id: &blob_id,
@@ -1534,6 +1553,7 @@ async fn seed_production_artifact_run(
             Permission::ModelDeploy,
             Permission::ModelInvoke,
             Permission::RuntimeControl,
+            Permission::RuntimeRead,
             Permission::TenantManage,
         ])
         .unwrap(),
@@ -1963,6 +1983,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
                     Permission::ModelInvoke,
                     Permission::ModelDeploy,
                     Permission::RuntimeControl,
+                    Permission::RuntimeRead,
                     Permission::TenantManage,
                 ])
                 .unwrap(),
@@ -2027,7 +2048,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     let provider_revision = version(ResourceKind::ModelProviderRevision, 0x30, 'd');
     let provider_secret_binding_id = id(ResourceKind::SecretBinding, 0x31);
     let secret_provider_id = id(ResourceKind::SecretProvider, 0x31);
-    let provider_secret_purpose = "provider.api_key".parse::<SecretPurpose>().unwrap();
+    let provider_secret_purpose = "model_api_key".parse::<SecretPurpose>().unwrap();
     let secret_resolution_policy = SecretResolutionPolicy::Pinned {
         opaque_version_identity_digest: digest('0'),
     };
@@ -2065,10 +2086,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         installed_adapter: InstalledModelAdapter {
             qualified_name: OPENAI_RESPONSES_ADAPTER_NAME.to_owned(),
             worker_manifest_digest: production_model_worker_manifest_digest(),
-            adapter_contract_digest: digest('3'),
+            adapter_contract_digest: ModelProviderWireProtocol::OpenAiResponses
+                .adapter_contract_digest(),
         },
         protocol_policy: protocol_policy.clone(),
-        credential_requirements: vec!["provider.api_key".parse::<SecretPurpose>().unwrap()],
+        credential_requirements: vec!["model_api_key".parse::<SecretPurpose>().unwrap()],
         request_limits: ProviderRequestLimits {
             maximum_request_bytes: 1_048_576,
             // Leave bounded room for the canonical ModelOutputValue envelope inside
@@ -2138,7 +2160,10 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         trust_policy,
         data_policy: provider_data_policy,
         region: region.clone(),
-        conformance_evidence: provider_conformance,
+        admission_evidence: insight_platform_contracts::ModelAdmissionEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
+            artifact: provider_conformance,
+        },
     };
     let provider_payload = TypedPayload::new(
         1,
@@ -2180,7 +2205,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         context: ContextWindowContract {
             maximum_context_tokens: 4_096,
             maximum_output_tokens: 512,
-            tokenizer_contract_digest: digest('9'),
+            tokenizer_contract_digest: Some(digest('9')),
             estimator_contract_digest: digest('a'),
         },
         tools: ModelToolContract {
@@ -2210,9 +2235,9 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
         data_handling: ProviderDataHandlingContract {
             maximum_classification: DataClassification::Confidential,
             allowed_regions: vec![region],
-            maximum_retention_milliseconds: 86_400_000,
+            maximum_retention_milliseconds: Some(86_400_000),
             training: ProviderTrainingPolicy::Prohibited,
-            subprocessor_set_digest: digest('b'),
+            subprocessor_set_digest: Some(digest('b')),
         },
         limits: ModelLimits {
             maximum_messages: 16,
@@ -2225,9 +2250,11 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             maximum_output_tokens: 512,
         },
         catalog_evidence: ModelCatalogEvidence {
+            basis: insight_platform_contracts::ModelEvidenceBasis::Qualification,
             artifact: artifact(0xa3, 'c', "catalog"),
             source_digest: digest('d'),
-            adapter_contract_digest: digest('3'),
+            adapter_contract_digest: ModelProviderWireProtocol::OpenAiResponses
+                .adapter_contract_digest(),
             observed_at: Utc::now() - Duration::minutes(1),
             expires_at: Utc::now() + Duration::days(1),
         },
@@ -2669,36 +2696,13 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     )
     .await;
 
-    for (account_id, scope_kind, scope_id, metric, limit_value) in [
-        (
-            id(ResourceKind::QuotaAccount, 0x40),
-            "tenant",
-            tenant_id.clone(),
-            QuotaDimension::WorkClassConcurrentOperations,
-            16,
-        ),
-        (
-            id(ResourceKind::QuotaAccount, 0x41),
-            "model_deployment",
-            model_deployment.deployment_id.clone(),
-            QuotaDimension::ModelRequests,
-            16,
-        ),
-        (
-            id(ResourceKind::QuotaAccount, 0x42),
-            "model_deployment",
-            model_deployment.deployment_id.clone(),
-            QuotaDimension::ModelTokens,
-            16_384,
-        ),
-        (
-            id(ResourceKind::QuotaAccount, 0x43),
-            "model_deployment",
-            model_deployment.deployment_id.clone(),
-            QuotaDimension::ModelCostMicrounits,
-            2_000_000,
-        ),
-    ] {
+    for (account_id, scope_kind, scope_id, metric, limit_value) in [(
+        id(ResourceKind::QuotaAccount, 0x40),
+        "tenant",
+        tenant_id.clone(),
+        QuotaDimension::WorkClassConcurrentOperations,
+        16,
+    )] {
         repository
             .create_quota_account(NewQuotaAccount {
                 tenant_id: tenant_id.to_string(),
@@ -2713,6 +2717,8 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             .await
             .unwrap();
     }
+
+    model_quota::provision(repository, &tenant_id, &model_deployment).await;
 
     let run_id = id(ResourceKind::Run, 0x50);
     let scope_id = id(ResourceKind::ScopeInstance, 0x51);
@@ -2729,6 +2735,7 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
             Permission::ModelDeploy,
             Permission::ModelInvoke,
             Permission::RuntimeControl,
+            Permission::RuntimeRead,
             Permission::TenantManage,
         ])
         .unwrap(),
@@ -3183,7 +3190,7 @@ async fn seed_running_model_orchestration(
     .bind(fixture.run_id.to_string())
     .bind(worker_id.to_string())
     .bind(lease_token_digest.to_string())
-    .bind(now + Duration::minutes(10))
+    .bind((now + Duration::minutes(10)).min(fixture.deadline))
     .bind(now)
     .bind(fixture.deadline)
     .bind(named_digest("model-owner-source").to_string())
@@ -4352,12 +4359,12 @@ async fn run_model_worker_process_recovery(
             {
                 "qualified_name": OPENAI_RESPONSES_ADAPTER_NAME,
                 "worker_manifest_digest": manifest_digest,
-                "adapter_contract_digest": digest('3')
+                "adapter_contract_digest": ModelProviderWireProtocol::OpenAiResponses.adapter_contract_digest()
             },
             {
                 "qualified_name": ANTHROPIC_MESSAGES_ADAPTER_NAME,
                 "worker_manifest_digest": manifest_digest,
-                "adapter_contract_digest": named_digest("anthropic-production-adapter")
+                "adapter_contract_digest": ModelProviderWireProtocol::AnthropicMessages.adapter_contract_digest()
             }
         ],
         "database_max_connections": 4,
@@ -5184,6 +5191,34 @@ async fn wait_model_calls(calls: &AtomicUsize, expected: usize) {
 }
 
 #[test]
+#[ignore = "targeted controller diagnosis requires a fresh dedicated Model fixture database; also covered by the main Model test"]
+fn text_only_controller_admission_in_fresh_postgres() {
+    std::thread::Builder::new()
+        .name("zero-tool-controller-fixture".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let pool = PgPoolOptions::new()
+                        .max_connections(16)
+                        .connect(&model_test_database_url().unwrap())
+                        .await
+                        .unwrap();
+                    verify_schema(&pool).await.unwrap();
+                    let repository = PgRepository::new(pool.clone());
+                    let fixture = seed_fixture(&pool, &repository).await;
+                    model_zero_tools::verify(&pool, &repository, &fixture).await;
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn model_turn_is_exact_atomic_quota_accounted_and_first_winner() {
     std::thread::Builder::new()
         .name("phase3-model-turn-fixture".to_owned())
@@ -5232,6 +5267,8 @@ async fn model_turn_fixture(exercise_processes: bool) {
     verify_schema(&pool).await.unwrap();
     let repository = PgRepository::new(pool.clone());
     let fixture = seed_fixture(&pool, &repository).await;
+    model_default::assert_model_defaults(&repository, &fixture).await;
+    model_connection::verify(&repository, &fixture).await;
     let policy_facts = repository
         .load_exact_model_policy_facts(&fixture.tenant_id, &fixture.model_deployment)
         .await
@@ -5307,6 +5344,8 @@ async fn model_turn_fixture(exercise_processes: bool) {
         CommandOutcome::Applied(_)
     ));
     let first_claim = claim_one(&repository, 0x130).await;
+    model_public_events::assert_projection(&pool, &repository, &fixture, &["model.started"]).await;
+    model_quota::verify_reserved(&repository, &fixture).await;
     assert_eq!(
         first_claim.claimed.turn.model_turn_id,
         primary.model_turn_id
@@ -5346,6 +5385,12 @@ async fn model_turn_fixture(exercise_processes: bool) {
         adapter_job.execution.request_digest,
         first_claim.claimed.turn.payload.admission.request_digest
     );
+    model_dispatch_authorization::assert_current_dispatch_authorization(
+        &pool,
+        &fixture,
+        &adapter_job.execution,
+    )
+    .await;
     assert!(matches!(
         execute_create(&repository, primary.clone()).await.unwrap(),
         CommandOutcome::Replayed(record) if record == first_claim.claimed.turn
@@ -5510,11 +5555,23 @@ async fn model_turn_fixture(exercise_processes: bool) {
             .tool_intent_count,
         1
     );
+    let before_replay = model_public_events::snapshot(&pool, &fixture).await;
     assert!(matches!(
         execute_outcome(&repository, completed_command).await.unwrap(),
         CommandOutcome::Replayed(record) if record == completed
     ));
 
+    assert_eq!(
+        model_public_events::snapshot(&pool, &fixture).await,
+        before_replay
+    );
+    model_public_events::assert_projection(
+        &pool,
+        &repository,
+        &fixture,
+        &["model.started", "model.tool_intent"],
+    )
+    .await;
     let quota_totals: Vec<(String, i64, i64)> = sqlx::query_as(
         r#"
         SELECT metric, reserved_value, used_value
@@ -5540,6 +5597,7 @@ async fn model_turn_fixture(exercise_processes: bool) {
     assert!(quota_totals.iter().any(|(metric, _, used)| {
         metric == QuotaDimension::WorkClassConcurrentOperations.as_str() && *used == 0
     }));
+    model_quota::verify_usage(&repository, &fixture).await;
     let output_rows: (i64, i64) = sqlx::query_as(
         r#"
         SELECT
@@ -5591,7 +5649,12 @@ async fn model_turn_fixture(exercise_processes: bool) {
         failure_mutations: None,
         tool_continuation_mutations: None,
     };
+    let before_stale = model_public_events::snapshot(&pool, &fixture).await;
     assert!(execute_outcome(&repository, stale).await.is_err());
+    assert_eq!(
+        model_public_events::snapshot(&pool, &fixture).await,
+        before_stale
+    );
     let stale_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM insight_platform.receipts WHERE tenant_id = $1 AND receipt_id = $2",
     )
@@ -5637,10 +5700,15 @@ async fn model_turn_fixture(exercise_processes: bool) {
         quota_entry_ids: vec![],
         kind: ModelControlKind::Cancel,
     };
-    let (completion_result, control_result) = tokio::join!(
-        execute_outcome(&repository, completion_racer),
-        execute_control(&repository, control_racer),
-    );
+    let (completion_result, control_result) =
+        tokio::time::timeout(StdDuration::from_secs(10), async {
+            tokio::join!(
+                execute_outcome(&repository, completion_racer),
+                execute_control(&repository, control_racer),
+            )
+        })
+        .await
+        .expect("same-Run Model settlement/control must finish under the existing lock order");
     match (completion_result, control_result) {
         (Ok(CommandOutcome::Applied(record)), Err(_)) => {
             assert_eq!(record.turn.state, ModelTurnState::Succeeded);
@@ -5799,6 +5867,7 @@ async fn model_turn_fixture(exercise_processes: bool) {
         lease_generation: u64::try_from(owner_claim.job.lease_epoch).unwrap(),
         token_digest: owner_lease_token,
     };
+    let before_rollback = model_public_events::snapshot(&pool, &fixture).await;
     let mut tool_transaction = repository.begin_model_turn_transaction().await.unwrap();
     let tool_handoff = tool_transaction
         .commit_model_outcome(CommitModelOutcome {
@@ -5828,6 +5897,10 @@ async fn model_turn_fixture(exercise_processes: bool) {
         CommandOutcome::Applied(record) if record.turn.state == ModelTurnState::Succeeded
     ));
     tool_transaction.rollback().await.unwrap();
+    assert_eq!(
+        model_public_events::snapshot(&pool, &fixture).await,
+        before_rollback
+    );
     let owner_completed = execute_outcome(
         &repository,
         CommitModelOutcome {
@@ -6538,22 +6611,60 @@ async fn model_turn_fixture(exercise_processes: bool) {
         model_prepare_event_id: id(ResourceKind::Event, 0xb3f),
         model_prepare_outbox_id: id(ResourceKind::OutboxEvent, 0xb40),
     };
+    let next_command = ContinueModelToolResultsToModelTurn {
+        fence: result_fence,
+        plan: fixture.runtime_plan.clone(),
+        continuation: result_continuation,
+        model_turn_id: next_model_turn_id,
+        model_job_id: id(ResourceKind::Job, 0xb22),
+        request: next_request,
+        requested_attempt_limit: result_facts.requested_attempt_limit,
+        cost_ceiling_microunits: result_facts.cost_ceiling_microunits,
+        idempotency_key_digest: named_digest("model-tool-next-turn-idempotency"),
+        request_digest: named_digest("model-tool-next-turn-request"),
+        receipt_expires_at: fixture.deadline,
+        mutations: next_mutations,
+    };
+    let before_invalid = support::fixture_durable_counts(&pool, &fixture.tenant_id).await;
+    let quotas_before:serde_json::Value=sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY quota_account_id),'[]'::jsonb) FROM insight_platform.quota_accounts q WHERE tenant_id=$1")
+        .bind(fixture.tenant_id.to_string()).fetch_one(&pool).await.unwrap();
+    for missing_schema in [true, false] {
+        let mut invalid = next_command.clone();
+        if missing_schema {
+            invalid.request.request.response_contract.structured_schema = None;
+        } else {
+            invalid.request.request.response_contract.allow_tool_intents =
+                !invalid.request.request.response_contract.allow_tool_intents;
+        }
+        let value = serde_json::to_value(&invalid.request.request).unwrap();
+        invalid.request.content_digest = canonical_digest(&value).unwrap().parse().unwrap();
+        invalid.request.value = ValueRef::Inline { value };
+        let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
+        let failure = scheduler
+            .continue_model_tool_results_to_model_turn(invalid)
+            .await
+            .expect_err("continuation contract drift");
+        let expected = if missing_schema {
+            "Model node response schema"
+        } else {
+            "next Model request continuation"
+        };
+        assert!(
+            matches!(failure,RepositoryError::Conflict(reason) if reason==expected),
+            "{failure:?}"
+        );
+        scheduler.commit().await.unwrap();
+        assert_eq!(
+            support::fixture_durable_counts(&pool, &fixture.tenant_id).await,
+            before_invalid
+        );
+        let quotas_after:serde_json::Value=sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY quota_account_id),'[]'::jsonb) FROM insight_platform.quota_accounts q WHERE tenant_id=$1")
+            .bind(fixture.tenant_id.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(quotas_after, quotas_before);
+    }
     let mut scheduler = repository.begin_scheduler_transaction().await.unwrap();
     let continued = scheduler
-        .continue_model_tool_results_to_model_turn(ContinueModelToolResultsToModelTurn {
-            fence: result_fence,
-            plan: fixture.runtime_plan.clone(),
-            continuation: result_continuation,
-            model_turn_id: next_model_turn_id,
-            model_job_id: id(ResourceKind::Job, 0xb22),
-            request: next_request,
-            requested_attempt_limit: result_facts.requested_attempt_limit,
-            cost_ceiling_microunits: result_facts.cost_ceiling_microunits,
-            idempotency_key_digest: named_digest("model-tool-next-turn-idempotency"),
-            request_digest: named_digest("model-tool-next-turn-request"),
-            receipt_expires_at: fixture.deadline,
-            mutations: next_mutations,
-        })
+        .continue_model_tool_results_to_model_turn(next_command)
         .await
         .unwrap();
     scheduler.commit().await.unwrap();
@@ -6579,15 +6690,25 @@ async fn model_turn_fixture(exercise_processes: bool) {
                 .unwrap(),
             CommandOutcome::Applied(_)
         ));
+        model_public_events::assert_projection(&pool, &repository, &fixture, &["model.cancelled"])
+            .await;
+        let before_control_replay = model_public_events::snapshot(&pool, &fixture).await;
         assert!(matches!(
             execute_control(&repository, replay_control.clone())
                 .await
                 .unwrap(),
             CommandOutcome::Replayed(_)
         ));
+        assert_eq!(
+            model_public_events::snapshot(&pool, &fixture).await,
+            before_control_replay
+        );
         assert_model_run_cancellation_is_owned_and_accounted(&pool, &repository, &fixture).await;
         model_completion::assert_structured_completion_proof(&pool, &repository, &fixture).await;
+        model_public_events::verify_permanent_failure(&pool, &repository, &fixture).await;
+        model_public_events::verify_timeout(&pool, &repository, &fixture).await;
         model_recovery_isolation::verify(&pool, &repository, &fixture).await;
+        model_zero_tools::verify(&pool, &repository, &fixture).await;
         support::revoke_fixture_principal(
             &pool,
             &repository,
@@ -6596,6 +6717,7 @@ async fn model_turn_fixture(exercise_processes: bool) {
             PrincipalKind::AgentRunner,
         )
         .await;
+        model_public_events::assert_read_denied(&repository, &fixture).await;
         let before = support::fixture_durable_counts(&pool, &fixture.tenant_id).await;
         assert!(matches!(
             execute_create(&repository, replay_create).await,

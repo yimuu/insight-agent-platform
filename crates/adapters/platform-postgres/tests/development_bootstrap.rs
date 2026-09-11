@@ -1,3 +1,9 @@
+#[path = "support/artifact_prepare_role.rs"]
+mod artifact_prepare_role;
+#[path = "support/model_configuration_reads.rs"]
+mod model_configuration_reads;
+#[path = "support/model_policy_bootstrap.rs"]
+mod model_policy_bootstrap;
 mod support;
 
 use chrono::{Duration, Utc};
@@ -43,7 +49,11 @@ fn command() -> BootstrapDevelopmentProfile {
             principal_id: developer.principal_id.clone(),
             principal_kind: PrincipalKind::AgentAuthor,
             payload: TenantPrincipalPayload {
-                permissions: PermissionSet::new(vec![Permission::AgentRead]).unwrap(),
+                permissions: PermissionSet::new(vec![
+                    Permission::AgentRead,
+                    Permission::ArtifactWrite,
+                ])
+                .unwrap(),
             },
         }],
         developer,
@@ -127,6 +137,7 @@ async fn bootstrap_atomically_binds_scheduling_and_replay_preserves_current_auth
             .unwrap(),
         BootstrapOutcome::Created
     ));
+    Box::pin(artifact_prepare_role::verify(&pool, &url, &command)).await;
 
     let rows = sqlx::query("SELECT policy_version_id, rules_digest FROM insight_platform.scheduler_tenant_state WHERE tenant_id=$1")
         .bind(tenant.to_string()).fetch_all(&pool).await.unwrap();
@@ -255,6 +266,57 @@ async fn bootstrap_atomically_binds_scheduling_and_replay_preserves_current_auth
         BootstrapOutcome::Replayed
     ));
     assert_eq!(fairness(&pool, &tenant).await, rebound);
+
+    // The default is a mutable management setting, including a retained exact pointer whose
+    // Model may later become unavailable. Bootstrap must preserve the fact; resolution owns
+    // its current deployment/gate checks (covered by the Model default command fixture).
+    let mut config: serde_json::Value =
+        sqlx::query_scalar("SELECT config FROM insight_platform.tenants WHERE tenant_id=$1")
+            .bind(tenant.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        config.as_object_mut().unwrap().remove("schema_version"),
+        Some(serde_json::json!(1))
+    );
+    let mut config: insight_platform_contracts::TenantConfig =
+        serde_json::from_value(config).unwrap();
+    config.default_model = Some(
+        insight_platform_contracts::ExactDeploymentRef::new(
+            fresh(ResourceKind::ModelDeployment),
+            support::digest("retained-model-default"),
+        )
+        .unwrap(),
+    );
+    let payload = TypedPayload::with_limit(1, &config, 65_536).unwrap();
+    sqlx::query("UPDATE insight_platform.tenants SET config=$2,config_digest=$3,version=version+1 WHERE tenant_id=$1")
+        .bind(tenant.to_string()).bind(&payload.value).bind(&payload.digest).execute(&pool).await.unwrap();
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM insight_platform.tenants t WHERE tenant_id=$1")
+            .bind(tenant.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(matches!(
+        repository
+            .bootstrap_development_profile(command.clone())
+            .await
+            .unwrap(),
+        BootstrapOutcome::Replayed
+    ));
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(t) FROM insight_platform.tenants t WHERE tenant_id=$1")
+            .bind(tenant.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        before, after,
+        "bootstrap cannot rotate or erase the user's default pointer"
+    );
+
+    model_policy_bootstrap::verify(&pool, &repository, &command).await;
 
     // Administratively injected corruption is diagnosed, never repaired by replay.
     sqlx::query("UPDATE insight_platform.scheduler_tenant_state SET policy_version_id=NULL,policy_version_digest=NULL,rules_digest=NULL WHERE tenant_id=$1 AND work_class='artifact'")

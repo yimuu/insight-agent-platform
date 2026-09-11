@@ -1,0 +1,39 @@
+{{- if has .Values.phase (list "prepare" "dependencies" "provision" "serving") -}}
+{{- $root := . -}}
+{{- $names := list "installation-private" "postgres-data" "nats-data" "s3-data" "openbao-data" "dependency-postgres" "dependency-nats" "dependency-s3" "dependency-openbao" "role-console" -}}
+{{- range .Values.plan.processes -}}{{- $names = append $names (printf "role-%s" .name) -}}{{- end -}}
+{{- range $names }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ . }}
+  labels:
+    {{- include "installation.labels" $root | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    insight.platform/input-digest: {{ $root.Values.plan.input_digest | quote }}
+    insight.platform/namespace-uid: {{ $root.Values.namespaceUID | quote }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if $root.Values.storageClass }}
+  storageClassName: {{ $root.Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ if has . (list "postgres-data" "s3-data" "openbao-data" "nats-data") }}10Gi{{ else }}1Gi{{ end }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: installation-input
+  labels:
+    {{- include "installation.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    insight.platform/input-digest: {{ .Values.plan.input_digest | quote }}
+immutable: true
+data:
+  input.json: {{ mustToJson .Values.plan.input | quote }}
+{{- end }}

@@ -1,6 +1,7 @@
 # 公开文档检索与回答审核
 
-这个示例先提供可运行的文档检索服务。它检索随目录冻结的两份项目公开文档，返回匹配原文、来源 URI、版本和行范围；
+这个示例包含文档检索服务、完整 Agent 源码、普通 Registry 资源构造器和公开端点协议验收入口。
+它检索随目录冻结的两份项目公开文档，返回匹配原文、来源 URI、版本和行范围；
 没有匹配时返回空结果。固定来源与字节摘要见 [corpus manifest](corpus/manifest.json)，不是当前主干文档的实时镜像。
 
 [server.py](server.py) 只使用 Python 标准库，采用现有 Remote Context HTTP wire。查询是 `{"question":"…"}`；
@@ -22,12 +23,20 @@ TLS 握手前申请并发名额，满额直接关闭新连接；已接受请求�
 
 ## 接入完整 Agent
 
-目标流程为 Start → ContextQuery → ModelLoop → HumanTask → Return。发布前需要所在环境真实、可授权的 exact Context 和
-Model deployments，通过现有作者编译器与 Registry 验证，不能使用示意身份代替已安装的提供方证据。
+[agent/](agent/) 已包含可由共享编译器读取的 FullPlan、输入与输出 schema。流程是
+Start → ContextQuery → Compute → ModelLoop → HumanTask → Compute → Return。
+第一个 Compute 将原问题与实际检索观察一起交给模型；第二个保留模型草稿与人的明确决定，形成最终结果。
+模型工具预算为零。没有匹配时回答不得编造引用；人的 `approve` 或 `reject` 是实际 Task 输入，示例不会替人提交。
+默认只检索一段并最多输出一条引用，给完整观察元数据、问题、指令和输出 schema 留出模型输入空间；
+实际 prompt 仍受所选模型与策略预算约束，超过预算会拒绝，不隐藏截断检索结果。
+
+按 [PUBLICATION.md](PUBLICATION.md) 完成物理目的地声明、真实协议证据上传、Policy/Context 资源发布、
+公开依赖解析、Agent 发布和人工处理。构造器复用现有 owning types，输出文件不包含新造的业务 ID。
+发布仍要求所在环境真实、可授权的 exact Context 和 Model deployments，以及服务端返回的 feature evidence。
 
 生产 Egress 只允许受信任的公开 HTTPS 目的地址。上述本地监听用于服务开发和 TLS 测试；实际接入需要可达的公开 HTTPS
 部署及匹配其证书的信任配置。不要为了运行示例开放 loopback、私有地址或 DNS 绕过。
-模型凭证经现有 Secrets Manager/KMS opaque reference 与 SecretBinding 配置，不放进 Agent 文件或公开请求。
+模型凭证经已安装的 Secret provider、引用加密 adapter 与 SecretBinding 配置，不放进 Agent 文件或公开请求。
 
 Context 仍拥有观察结果和引用映射。这里的 URI、原文件 SHA256、行范围都是 provider 来源元数据，平台引用保持
 RemoteOpaque / ObservationOnly。原始文件摘要与 JSON 正文的 canonical digest 各有用途，不能互换。
@@ -37,11 +46,14 @@ RemoteOpaque / ObservationOnly。原始文件摘要与 JSON 正文的 canonical 
 
 ```bash
 python3 -m unittest tools/tests/test_document_review.py
-cargo test -p insight-platform-egress public_document_provider_uses_the_actual_encoder_and_result_mapping
+cargo test -p insight-platform-contract-tooling --bin document_review_source
+cargo run -p insight-platform-contract-tooling --bin document_review_source -- --check
+cargo test -p insight-platform-egress --lib remote_context::
 ```
 
 Python 测试用 OpenSSL 3 创建临时 TLS CA，使用实际 corpus 覆盖原文、中文、空结果、严格 JSON、文件篡改、证书/SAN、连接容量和期限。
 Rust 测试用生产 request encoder 生成输入，调用实际 Python `--query-stdin`，再由生产 normalizer 接收返回值并独立核对原文。
 `--query-stdin` 只检查本地协议互通，不证明生产 Egress 网络调用或完整 Context Run。
 
-目前尚未完成此示例的公开 HTTPS 部署、真实模型调用和人工确认；这些不能由本地协议或 TLS 测试替代。
+最后一条默认不执行显式 ignored 的公开端点验收。其实际调用方法、首次派发前的持久记录和失败保留规则见发布说明。
+当前源代码/编译器、本地 corpus 和 TLS 回归不能代替本示例尚待实际端点的完整 Context Run、模型回答与人工确认。

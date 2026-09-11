@@ -144,7 +144,11 @@ write_config = lambda do |name, value|
 end
 
 catalog = load_config(source, "artifact-gateway.json").fetch("artifact_provider_catalog")
-kms = catalog.fetch("kms_key_bindings").fetch(0)
+abort "Kind AWS qualification requires the current Artifact catalog" unless catalog.fetch("schema_version") == 2
+reference_keys = catalog.fetch("reference_key_bindings")
+abort "Kind AWS qualification requires exactly one AWS reference key" unless
+  reference_keys.length == 1 && reference_keys.fetch(0).fetch("kind") == "aws_kms"
+kms = reference_keys.fetch(0).fetch("config")
 kms["endpoint"] = localstack
 kms["key_id"] = options[:kms_key_arn]
 kms.delete("kms_binding_digest")
@@ -224,7 +228,12 @@ egress["observability_listen_address"] = "0.0.0.0:9090"
 egress["security_authority_endpoint"] = security_authority_endpoint
 egress.fetch("mcp_state_keys")["projected_secret_root"] = "/etc/insight/mcp-state-keys"
 egress.fetch("mcp_state_keys").fetch("keys").fetch(0)["key_material_path"] = "/etc/insight/mcp-state-keys/current"
-provider = egress.fetch("secret_provider_catalog").fetch("providers").fetch(0)
+secret_catalog = egress.fetch("secret_provider_catalog")
+abort "Kind AWS qualification requires the current Secret catalog" unless secret_catalog.fetch("schema_version") == 2
+providers = secret_catalog.fetch("providers")
+abort "Kind AWS qualification requires exactly one AWS Secret provider" unless
+  providers.length == 1 && providers.fetch(0).fetch("kind") == "aws_secrets_manager"
+provider = providers.fetch(0).fetch("config")
 provider["secrets_endpoint"] = localstack
 provider["kms_endpoint"] = localstack
 provider["kms_key_arn"] = options[:kms_key_arn]

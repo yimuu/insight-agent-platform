@@ -1,3 +1,4 @@
+use super::structured_output::{parse_structured_output, use_native_structured_output};
 use super::{
     merge_generation_parameters, normalize_provider_stream, permanent, rejected,
     retryable_after_dispatch, validate_wire_descriptor, InstalledModelAdapterDescriptor,
@@ -5,7 +6,6 @@ use super::{
     ModelAdapterFailure, ModelAdapterHostError, ModelProviderAdapter, ModelProviderWireConnector,
     ModelProviderWireEvent, ModelProviderWireProtocol, ModelProviderWireRequest,
     NormalizedFrameBuilder, NormalizedModelStream, ProviderEventCodec,
-    ANTHROPIC_MESSAGES_ADAPTER_NAME,
 };
 use async_trait::async_trait;
 use insight_platform_contracts::{canonical_digest, ClosedJsonValue, ValueRef};
@@ -28,7 +28,7 @@ impl AnthropicMessagesAdapter {
         descriptor: InstalledModelAdapterDescriptor,
         connector: Arc<dyn ModelProviderWireConnector>,
     ) -> Result<Self, ModelAdapterHostError> {
-        validate_wire_descriptor(&descriptor, ANTHROPIC_MESSAGES_ADAPTER_NAME)?;
+        validate_wire_descriptor(&descriptor, ModelProviderWireProtocol::AnthropicMessages)?;
         Ok(Self {
             descriptor,
             connector,
@@ -73,18 +73,10 @@ impl ModelProviderAdapter for AnthropicMessagesAdapter {
 fn anthropic_request_body(
     request: &ModelAdapterExecutionRequest,
 ) -> Result<Value, ModelAdapterFailure> {
-    if request.profile.usage.reports_cost
-        || request.profile.usage.reports_reasoning_tokens
-        || !request.profile.usage.provider_reports_usage
-        || (request
-            .request
-            .response_contract
-            .structured_schema
-            .is_some()
-            && !request.profile.structured_output.native)
-    {
+    if request.profile.usage.reports_cost || request.profile.usage.reports_reasoning_tokens {
         return Err(rejected("anthropic_messages_profile_not_supported"));
     }
+    let native_structured = use_native_structured_output(request)?;
 
     let mut system = Vec::new();
     let mut messages = Vec::new();
@@ -188,7 +180,13 @@ fn anthropic_request_body(
         );
     }
 
-    if let Some(schema) = &request.request.response_contract.structured_schema {
+    if let Some(schema) = request
+        .request
+        .response_contract
+        .structured_schema
+        .as_ref()
+        .filter(|_| native_structured)
+    {
         body.insert(
             "output_config".to_owned(),
             serde_json::json!({
@@ -568,16 +566,11 @@ impl AnthropicMessagesCodec {
         };
 
         let structured_output = if tool_intents.is_empty() {
-            if let Some(schema) = &self.request.request.response_contract.structured_schema {
-                let value = serde_json::from_str(&text)
-                    .map_err(|_| permanent("anthropic_messages_invalid_structured_output"))?;
-                Some(
-                    ClosedJsonValue::build(schema.canonical_digest.clone(), value)
-                        .map_err(|_| permanent("anthropic_messages_invalid_structured_output"))?,
-                )
-            } else {
-                None
-            }
+            parse_structured_output(
+                &self.request,
+                &text,
+                "anthropic_messages_invalid_structured_output",
+            )?
         } else {
             None
         };
