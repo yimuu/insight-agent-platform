@@ -122,6 +122,8 @@ class HelmTests(unittest.TestCase):
         job = next(item for item in documents if item['kind'] == 'Job')
         pod = job['spec']['template']['spec']
         self.assertIs(pod['automountServiceAccountToken'], False)
+        self.assertEqual(pod['dnsPolicy'], 'ClusterFirst')
+        self.assertEqual(pod['dnsConfig']['options'], [{'name': 'ndots', 'value': '1'}])
         self.assertEqual(job['spec']['backoffLimit'], 0)
         self.assertEqual(pod['containers'][0]['terminationMessagePath'], '/tmp/installation-result.json')
         self.assertIn({'name': 'installation-input', 'mountPath': '/installation-input/input.json', 'subPath': 'input.json', 'readOnly': True}, pod['containers'][0]['volumeMounts'])
@@ -144,6 +146,10 @@ class HelmTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         documents = self.documents(result.stdout)
         deployments = {item['metadata']['name']: item for item in documents if item['kind'] == 'Deployment'}
+        for deployment in deployments.values():
+            dns = deployment['spec']['template']['spec']
+            self.assertEqual(dns['dnsPolicy'], 'ClusterFirst')
+            self.assertEqual(dns['dnsConfig']['options'], [{'name': 'ndots', 'value': '1'}])
         for process in self.plan['processes']:
             spec = deployments[process['name']]['spec']['template']['spec']
             self.assertIs(spec['automountServiceAccountToken'], False)
