@@ -6,35 +6,47 @@ impl PgRunTransaction {
         &mut self,
         command: AdmitRun,
     ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
+        self.admit_run_inner(command, false).await
+    }
+
+    pub(super) async fn admit_run_inner(
+        &mut self,
+        command: AdmitRun,
+        receipt_claimed: bool,
+    ) -> Result<CommandOutcome<RunRecord>, RepositoryError> {
         command.validate_shape()?;
         let mut transaction = self.transaction.begin().await?;
         let principal =
             require_tenant_permission(&mut transaction, &command.audit, Permission::AgentRun)
                 .await?;
-        if let Some(record) = read_run_admission_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.admission_scope_id,
-        )
-        .await?
-        {
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(record));
-        }
-        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        command.validate_at(database_now)?;
-        // A concurrent command may have won after the empty locked read. Preserve its result.
-        if let Some(record) = claim_run_admission_receipt(
-            &mut transaction,
-            &command.audit,
-            &command.admission_scope_id,
-        )
-        .await?
-        {
-            transaction.commit().await?;
-            return Ok(CommandOutcome::Replayed(record));
+        if !receipt_claimed {
+            if let Some(record) = read_run_admission_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.admission_scope_id,
+            )
+            .await?
+            {
+                transaction.commit().await?;
+                return Ok(CommandOutcome::Replayed(record));
+            }
+            let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *transaction)
+                .await?;
+            command.validate_at(database_now)?;
+            // A concurrent command may have won after the empty locked read. Preserve its result.
+            if let Some(record) = claim_run_admission_receipt(
+                &mut transaction,
+                &command.audit,
+                &command.admission_scope_id,
+            )
+            .await?
+            {
+                transaction.commit().await?;
+                return Ok(CommandOutcome::Replayed(record));
+            }
+        } else {
+            command.validate_at(Utc::now())?;
         }
         if command.admission_scope_id.kind() == ResourceKind::Agent {
             let resolved = &command.bindings.agent;

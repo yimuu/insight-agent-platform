@@ -1,3 +1,5 @@
+import { ExecutionCanvas } from './ExecutionCanvas'
+import { Icon } from '../../shared/ui/Icon'
 import { RunInput } from './RunInput'
 import { displayState } from '../../shared/i18n/display'
 import sharedStyles from '../../shared/ui/Primitives.module.css'
@@ -47,6 +49,8 @@ export function Runs({
   const [run, setRun] = useState<RunView | null>(null)
   const [result, setResult] = useState<JsonObject | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
+  const [submittedInput, setSubmittedInput] = useState<JsonObject | null>(null)
+  const [detailTab, setDetailTab] = useState<'canvas' | 'diagnostics'>('canvas')
   const [cursor, setCursor] = useState('')
   const [followError, setFollowError] = useState<Notice | null>(null)
   const [history, setHistory] = useState<RunEventHistory | null>(null)
@@ -54,6 +58,9 @@ export function Runs({
   const refreshRun = useRef<() => void>(() => {})
   const selectionGeneration = useRef(0)
   const [busy, setBusy] = useState(false)
+  const [listLoaded, setListLoaded] = useState(false)
+  const [listFailed, setListFailed] = useState(false)
+  const [agentOptions, setAgentOptions] = useState<AgentSummary[]>([])
   const [summaries, setSummaries] = useState<RunSummary[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [stateFilter, setStateFilter] = useState('')
@@ -70,6 +77,9 @@ export function Runs({
     const controller = new AbortController()
     queueMicrotask(() => {
       if (!controller.signal.aborted) {
+        setSubmittedInput(null)
+        setRunAgent(launchAgent)
+        clearSelection()
         setRunDefaults(null)
         createIntent.current = null
       }
@@ -91,6 +101,7 @@ export function Runs({
     const { signal } = controller
     followController.current = controller
     const clear = () => {
+      setSubmittedInput(null)
       setRun(null)
       setResult(null)
       setEvents([])
@@ -218,6 +229,7 @@ export function Runs({
   const loadList = async (pageCursor?: string) => {
     if (!client) return report({ tone: 'error', text: '请先连接工作空间。' })
     setBusy(true)
+    setListFailed(false)
     report(null)
     try {
       const response = await client.listRuns({
@@ -226,8 +238,10 @@ export function Runs({
         cursor: pageCursor,
       })
       setSummaries(response.data.items)
+      setListLoaded(true)
       setNextCursor(response.data.next_cursor)
     } catch (error) {
+      setListFailed(true)
       report(errorNotice(error))
     } finally {
       setBusy(false)
@@ -238,15 +252,26 @@ export function Runs({
     if (!client) return
     let active = true
     void client
+      .listAgents()
+      .then((response) => {
+        if (active) setAgentOptions(response.data.items)
+      })
+      .catch(() => {})
+    void client
       .listRuns({})
       .then((response) => {
         if (active) {
           setSummaries(response.data.items)
+          setListLoaded(true)
+          setListFailed(false)
           setNextCursor(response.data.next_cursor)
         }
       })
       .catch((error) => {
-        if (active) report(errorNotice(error))
+        if (active) {
+          setListFailed(true)
+          report(errorNotice(error))
+        }
       })
     return () => {
       active = false
@@ -261,6 +286,7 @@ export function Runs({
       return
     }
     clearSelection()
+    setSubmittedInput(null)
     setId(selectedId)
     setActiveRunId(selectedId)
     setBusy(true)
@@ -301,8 +327,7 @@ export function Runs({
       )
       if (generation !== selectionGeneration.current) return
       createIntent.current = null
-      setRunAgent(null)
-      setRunDefaults(null)
+      setSubmittedInput(value)
       setId(response.data.run_id)
       clearSelection()
       setActiveRunId(response.data.run_id)
@@ -343,121 +368,285 @@ export function Runs({
 
   return (
     <section className={cx('stack')}>
-      {result && client && (
-        <article data-ui="panel" className={cx('panel')}>
-          <p data-ui="kicker" className={cx('kicker')}>
-            运行结果
-          </p>
-          <h2>结果</h2>
-          <AuthorizedContent
-            client={client}
-            content={result}
-            onError={(error) => {
-              setResult(null)
-              report(errorNotice(error))
+      {(activeRunId || runAgent) && (
+        <div className={cx('page-toolbar')}>
+          <button
+            className={cx('button')}
+            onClick={() => {
+              clearSelection()
+              setRunAgent(null)
+              setRunDefaults(null)
+              setSubmittedInput(null)
+              void loadList()
             }}
-          />
-        </article>
+          >
+            ← 返回运行记录
+          </button>
+          {run && <Status value={run.state} />}
+        </div>
       )}
-      {runAgent && (
+      {(activeRunId || runAgent) && (
+        <div className={cx('debug-workspace')}>
+          <article className={cx('debug-preview')}>
+            <header className={cx('debug-heading')}>
+              <div>
+                <h2>{runAgent?.display_name ?? '运行预览'}</h2>
+                <span>单次调试</span>
+              </div>
+              {activeRunId && runAgent && TERMINAL_RUNS.has(run?.state ?? '') && (
+                <button
+                  className={cx('button')}
+                  onClick={() => {
+                    clearSelection()
+                    setSubmittedInput(null)
+                  }}
+                >
+                  重新调试
+                </button>
+              )}
+            </header>
+            <div className={cx('debug-messages')}>
+              {submittedInput && (
+                <div className={cx('debug-user')}>
+                  <small>你</small>
+                  <pre>
+                    {Object.keys(submittedInput).length === 1 &&
+                    typeof Object.values(submittedInput)[0] === 'string'
+                      ? String(Object.values(submittedInput)[0])
+                      : JSON.stringify(submittedInput, null, 2)}
+                  </pre>
+                </div>
+              )}
+              {result && client ? (
+                <div className={cx('debug-assistant')}>
+                  <small>Agent</small>
+                  <AuthorizedContent
+                    client={client}
+                    content={result}
+                    onError={(error) => {
+                      setResult(null)
+                      report(errorNotice(error))
+                    }}
+                  />
+                </div>
+              ) : activeRunId ? (
+                <div className={cx('debug-assistant')} role="status">
+                  <small>Agent</small>
+                  <p>
+                    {run && TERMINAL_RUNS.has(run.state)
+                      ? run.state === 'succeeded'
+                        ? '运行已完成，没有可显示的输出。'
+                        : `运行${displayState(run.state)}，请查看右侧执行详情。`
+                      : '正在执行，可在右侧查看进度…'}
+                  </p>
+                </div>
+              ) : (
+                <div className={cx('debug-welcome')}>
+                  <h3>试一试你的 Agent</h3>
+                  <p>输入任务，查看回答和每一步执行过程。</p>
+                </div>
+              )}
+            </div>
+            {!activeRunId && runAgent && (
+              <div className={cx('debug-composer')}>
+                {runDefaults ? (
+                  <RunInput schema={runDefaults.inputSchema} disabled={busy} onSubmit={create} />
+                ) : (
+                  <p role="status">正在准备输入…</p>
+                )}
+              </div>
+            )}
+            {run && !TERMINAL_RUNS.has(run.state) && (
+              <div className={cx('debug-composer')}>
+                <button
+                  className={cx('button button--danger')}
+                  onClick={() => act('cancel')}
+                  disabled={busy || run.state === 'cancelling'}
+                >
+                  {run.state === 'cancelling' ? '正在停止…' : '停止运行'}
+                </button>
+              </div>
+            )}
+          </article>
+          <section className={cx('debug-detail')}>
+            <div className={cx('debug-tabs')} role="tablist" aria-label="调试详情">
+              <button
+                role="tab"
+                id="execution-canvas-tab"
+                aria-controls="execution-canvas-panel"
+                aria-selected={detailTab === 'canvas'}
+                onClick={() => setDetailTab('canvas')}
+              >
+                执行画布
+              </button>
+              <button
+                role="tab"
+                id="execution-diagnostics-tab"
+                aria-controls="execution-diagnostics-panel"
+                aria-selected={detailTab === 'diagnostics'}
+                onClick={() => setDetailTab('diagnostics')}
+              >
+                运行信息
+              </button>
+            </div>
+            <div
+              role="tabpanel"
+              id="execution-canvas-panel"
+              aria-labelledby="execution-canvas-tab"
+              hidden={detailTab !== 'canvas'}
+            >
+              <ExecutionCanvas
+                key={activeRunId || 'draft'}
+                events={events}
+                client={client}
+                runId={activeRunId ?? undefined}
+              />
+            </div>
+            <div
+              role="tabpanel"
+              id="execution-diagnostics-panel"
+              aria-labelledby="execution-diagnostics-tab"
+              hidden={detailTab !== 'diagnostics'}
+            >
+              {run ? (
+                <dl className={cx('metrics')}>
+                  <Metric label="状态" value={displayState(run.state)} />
+                  <Metric label="开始时间" value={formatTime(run.started_at)} />
+                  <Metric label="更新时间" value={formatTime(run.updated_at)} />
+                  <Metric label="运行 ID" value={run.run_id} mono />
+                </dl>
+              ) : (
+                <p>发送任务后查看本次运行的信息。</p>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+      {!activeRunId && !runAgent && (
         <article data-ui="panel" className={cx('panel')}>
-          <p data-ui="kicker" className={cx('kicker')}>
-            发起运行
-          </p>
-          <h2>运行 {runAgent.display_name}</h2>
-          <p className={cx('body-copy')}>
-            输入结构来自所选已发布版本。如部署已切换，请刷新智能体列表后重新选择。
-          </p>
-          {runDefaults ? (
-            <RunInput schema={runDefaults.inputSchema} disabled={busy} onSubmit={create} />
-          ) : (
-            <p role="status">正在读取已发布的输入结构…</p>
+          <div data-ui="panel__heading" className={cx('panel__heading')}>
+            <div>
+              <h2>最近运行</h2>
+            </div>
+            <button className={cx('button')} onClick={() => loadList()} disabled={busy}>
+              刷新
+            </button>
+          </div>
+          <form
+            className={cx('filter-bar')}
+            onSubmit={(event) => {
+              event.preventDefault()
+              void loadList()
+            }}
+          >
+            <label>
+              <span>智能体</span>
+              <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}>
+                <option value="">全部智能体</option>
+                {agentOptions.map((agent) => (
+                  <option key={agent.agent_id} value={agent.agent_id}>
+                    {agent.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>状态</span>
+              <select value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}>
+                <option value="">全部状态</option>
+                {[
+                  'queued',
+                  'running',
+                  'waiting',
+                  'cancelling',
+                  'succeeded',
+                  'failed',
+                  'cancelled',
+                  'timed_out',
+                ].map((state) => (
+                  <option key={state} value={state}>
+                    {displayState(state)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className={cx('button')} disabled={busy}>
+              筛选
+            </button>
+          </form>
+          {!listLoaded && !listFailed && (
+            <p role="status" className={cx('empty-content')}>
+              正在加载运行记录…
+            </p>
+          )}
+          {listFailed && (
+            <div className={cx('empty-content')} role="alert">
+              <h3>运行记录加载失败</h3>
+              <button className={cx('button')} onClick={() => loadList()}>
+                重新加载
+              </button>
+            </div>
+          )}
+          {listLoaded && !listFailed && summaries.length === 0 && (
+            <div className={cx('empty-content')}>
+              <Icon name="runs" />
+              <h3>暂无运行记录</h3>
+              <p>
+                {agentFilter || stateFilter
+                  ? '试试其他筛选条件。'
+                  : '从智能体页面选择一个已发布的智能体，点击“运行”。'}
+              </p>
+            </div>
+          )}
+          {summaries.map((summary) => (
+            <button
+              className={cx('run-row')}
+              key={summary.run_id}
+              onClick={() => load(summary.run_id)}
+            >
+              <span>
+                <strong>{summary.agent_name}</strong>
+                <small>{formatTime(summary.started_at)}</small>
+              </span>
+              <Status value={summary.state} />
+              <span>
+                {summary.waiting_task_count
+                  ? `${summary.waiting_task_count} 项待办`
+                  : summary.result_available
+                    ? '结果已就绪'
+                    : TERMINAL_RUNS.has(summary.state)
+                      ? '查看详情'
+                      : '进行中'}
+              </span>
+            </button>
+          ))}
+          {nextCursor && (
+            <button className={cx('button')} onClick={() => loadList(nextCursor)}>
+              下一页
+            </button>
           )}
         </article>
       )}
-      <article data-ui="panel" className={cx('panel')}>
-        <div data-ui="panel__heading" className={cx('panel__heading')}>
-          <div>
-            <p data-ui="kicker" className={cx('kicker')}>
-              最近运行
-            </p>
-            <h2>运行历史</h2>
-          </div>
-          <button className={cx('button')} onClick={() => loadList()} disabled={busy}>
-            刷新
-          </button>
-        </div>
-        <div className={cx('filters')}>
-          <label>
-            <span>智能体 ID</span>
-            <input
-              value={agentFilter}
-              onChange={(event) => setAgentFilter(event.target.value)}
-              placeholder="可选"
-            />
-          </label>
-          <label>
-            <span>状态</span>
-            <select value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}>
-              <option value="">全部状态</option>
-              {[
-                'queued',
-                'running',
-                'waiting',
-                'cancelling',
-                'succeeded',
-                'failed',
-                'cancelled',
-                'timed_out',
-              ].map((state) => (
-                <option key={state} value={state}>
-                  {displayState(state)}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        {summaries.map((summary) => (
-          <button
-            className={cx('run-row')}
-            key={summary.run_id}
-            onClick={() => load(summary.run_id)}
-          >
-            <span>
-              <strong>{summary.agent_name}</strong>
-              <small>{formatTime(summary.started_at)}</small>
-            </span>
-            <Status value={summary.state} />
-            <span>
-              {summary.waiting_task_count
-                ? `${summary.waiting_task_count} waiting tasks`
-                : summary.result_available
-                  ? '结果已就绪'
-                  : '进行中'}
-            </span>
-          </button>
-        ))}
-        {nextCursor && (
-          <button className={cx('button')} onClick={() => loadList(nextCursor)}>
-            下一页
-          </button>
-        )}
-      </article>
-      <article data-ui="panel" className={cx('panel')}>
-        <SearchForm
-          label="通过 ID 打开运行"
-          placeholder="run_…"
-          value={id}
-          onChange={(value) => {
-            clearSelection()
-            setId(value)
-          }}
-          onSubmit={() => load()}
-          busy={busy}
-        />
-      </article>
+      {!activeRunId && !runAgent && (
+        <details className={cx('list-tools')}>
+          <summary>通过运行 ID 查找</summary>
+          <SearchForm
+            label="通过 ID 打开运行"
+            placeholder="run_…"
+            value={id}
+            onChange={(value) => {
+              clearSelection()
+              setId(value)
+            }}
+            onSubmit={() => load()}
+            busy={busy}
+          />
+        </details>
+      )}
+      {activeRunId && !run && !followError && <p role="status">正在加载运行详情…</p>}
       {run && (
-        <article data-ui="panel" className={cx('panel')}>
+        <details data-ui="panel" className={cx('panel')}>
+          <summary>更多运行控制与元数据</summary>
           <div data-ui="panel__heading" className={cx('panel__heading')}>
             <div>
               <p data-ui="kicker" className={cx('kicker')}>
@@ -473,19 +662,31 @@ export function Runs({
             <Metric label="截止时间" value={formatTime(run.deadline)} />
           </dl>
           <div className={cx('actions')}>
-            <button className={cx('button')} onClick={() => act('pause')} disabled={busy}>
-              暂停
-            </button>
-            <button className={cx('button')} onClick={() => act('resume')} disabled={busy}>
-              继续
-            </button>
-            <button
-              className={cx('button button--danger')}
-              onClick={() => act('cancel')}
-              disabled={busy}
-            >
-              取消
-            </button>
+            {!TERMINAL_RUNS.has(run.state) && (
+              <>
+                <button
+                  className={cx('button')}
+                  onClick={() => act('pause')}
+                  disabled={busy || run.state === 'cancelling'}
+                >
+                  暂停
+                </button>
+                <button
+                  className={cx('button')}
+                  onClick={() => act('resume')}
+                  disabled={busy || run.state === 'cancelling'}
+                >
+                  继续
+                </button>
+                <button
+                  className={cx('button button--danger')}
+                  onClick={() => act('cancel')}
+                  disabled={busy}
+                >
+                  取消
+                </button>
+              </>
+            )}
             <button className={cx('button')} onClick={() => load()} disabled={busy}>
               刷新
             </button>
@@ -500,7 +701,7 @@ export function Runs({
               <Metric label="游标" value={cursor || 'origin'} mono />
             </dl>
           </details>
-        </article>
+        </details>
       )}
       {history?.truncated && (
         <div className={cx('notice notice--info')} role="status">
@@ -509,19 +710,6 @@ export function Runs({
         </div>
       )}
       <NoticeBox notice={followError} />
-      {run && events.length === 0 && (
-        <article data-ui="panel empty-state" className={cx('panel empty-state')} role="status">
-          <p data-ui="kicker" className={cx('kicker')}>
-            执行时间线
-          </p>
-          <h2>暂未收到运行事件</h2>
-          <p className={cx('body-copy')}>
-            {followError
-              ? '事件跟踪已停止。当前运行状态仍可单独刷新。'
-              : '正在自动跟踪执行进度，恢复游标仅保存在本次会话内存中。'}
-          </p>
-        </article>
-      )}
       {events.length > 0 && (
         <article data-ui="panel" className={cx('panel')}>
           <div data-ui="panel__heading" className={cx('panel__heading')}>
@@ -529,26 +717,29 @@ export function Runs({
               <p data-ui="kicker" className={cx('kicker')}>
                 执行时间线
               </p>
-              <h2>{events.length} 条执行事件</h2>
+              <h2>诊断与任务</h2>
             </div>
           </div>
-          <ol data-ui="timeline" className={cx('timeline')}>
-            {events.map((event) => (
-              <li key={String(event.data.event_id)}>
-                <span className={cx('timeline__dot')} />
-                <div>
-                  <div className={cx('timeline__header')}>
-                    <strong>{displayState(event.event)}</strong>
+          <details>
+            <summary>原始事件（{events.length} 条）</summary>
+            <ol data-ui="timeline" className={cx('timeline')}>
+              {events.map((event) => (
+                <li key={String(event.data.event_id)}>
+                  <span className={cx('timeline__dot')} />
+                  <div>
+                    <div className={cx('timeline__header')}>
+                      <strong>{displayState(event.event)}</strong>
+                    </div>
+                    <details>
+                      <summary>事件详情</summary>
+                      <pre>{safeJson(event.data)}</pre>
+                      <code>{event.id}</code>
+                    </details>
                   </div>
-                  <details>
-                    <summary>事件详情</summary>
-                    <pre>{safeJson(event.data)}</pre>
-                    <code>{event.id}</code>
-                  </details>
-                </div>
-              </li>
-            ))}
-          </ol>
+                </li>
+              ))}
+            </ol>
+          </details>
           {taskIds.length > 0 && (
             <div data-ui="linked-tasks" className={cx('linked-tasks')}>
               <strong>待处理任务</strong>
@@ -561,20 +752,22 @@ export function Runs({
           )}
         </article>
       )}
-      <details data-ui="panel" className={cx('panel')}>
-        <summary>高级运行诊断</summary>
-        {run && client && (
-          <RunSignal
-            key={`signal:${run.run_id}`}
-            client={client}
-            runId={run.run_id}
-            onAccepted={() => refreshRun.current()}
-            onPermissionLost={clearSelection}
-          />
-        )}
-        {run && client && <RunValues key={run.run_id} client={client} runId={run.run_id} />}
-        {run && client && <RunSources key={`sources:${run.run_id}`} client={client} run={run} />}
-      </details>
+      {run && (
+        <details data-ui="panel" className={cx('panel')}>
+          <summary>高级运行诊断</summary>
+          {run && client && (
+            <RunSignal
+              key={`signal:${run.run_id}`}
+              client={client}
+              runId={run.run_id}
+              onAccepted={() => refreshRun.current()}
+              onPermissionLost={clearSelection}
+            />
+          )}
+          {run && client && <RunValues key={run.run_id} client={client} runId={run.run_id} />}
+          {run && client && <RunSources key={`sources:${run.run_id}`} client={client} run={run} />}
+        </details>
+      )}
     </section>
   )
 }

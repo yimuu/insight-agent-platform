@@ -16,10 +16,14 @@ EXPECTED_TABLES = [
     "artifact_blobs",
     "artifact_links",
     "artifacts",
+    "conversation_turns",
+    "conversations",
     "deployments",
     "events",
     "invocations",
     "jobs",
+    "local_console_owner",
+    "local_console_sessions",
     "outbox_events",
     "principals",
     "quota_accounts",
@@ -182,16 +186,16 @@ def main():
         errors.append("schema contract has missing or unknown top-level fields")
     if contract.get("contract") != "insight.platform/v1/postgres-baseline":
         errors.append("schema contract identity is invalid")
-    if contract.get("schema_contract_version") != 15:
-        errors.append("schema contract version must be 15")
+    if contract.get("schema_contract_version") != 17:
+        errors.append("schema contract version must be 17")
     if contract.get("postgres_major") != 16:
         errors.append("PostgreSQL major version must be 16")
     if contract.get("schema") != "insight_platform":
         errors.append("authority schema must be insight_platform")
-    if contract.get("table_count") != 23:
-        errors.append("baseline table count must be exactly 23")
+    if contract.get("table_count") != 27:
+        errors.append("baseline table count must be exactly 27")
     if contract.get("tables") != EXPECTED_TABLES:
-        errors.append("schema contract table set/order differs from ADR-0001")
+        errors.append("schema contract table set/order differs from the accepted baseline and ADR-0015/0017")
     if contract.get("functions") != EXPECTED_FUNCTIONS:
         errors.append("schema contract helper function set differs")
 
@@ -236,7 +240,7 @@ def main():
             table_bodies = {}
         observed_tables = sorted(table_bodies)
         if observed_tables != EXPECTED_TABLES:
-            errors.append("SQL CREATE TABLE set differs from the 23-table contract")
+            errors.append("SQL CREATE TABLE set differs from the 27-table contract")
         rejected = sorted(REJECTED_PHYSICAL_NAMES.intersection(table_bodies))
         if rejected:
             errors.append(f"rejected physical tables returned: {rejected}")
@@ -262,6 +266,8 @@ def main():
             columns = table_columns(body)
             if table not in {
                 "principals",
+                "local_console_owner",
+                "local_console_sessions",
                 "scheduler_state",
                 "scheduler_tenant_state",
             } and "tenant_id" not in columns:
@@ -270,7 +276,48 @@ def main():
                 for companion in ("payload_schema_version", "payload_digest"):
                     if companion not in columns:
                         errors.append(f"{table}.payload lacks {companion}")
+        # ADR-0015: these are installation credentials/sessions, not tenant business
+        # ownership. Their exact closed shape prevents this exception from admitting
+        # a second membership authority or plaintext credential storage.
+        local_columns = {
+            "local_console_owner": {"singleton", "principal_id", "email", "display_name", "password_salt", "password_hash", "failed_attempts", "locked_until", "created_at"},
+            "local_console_sessions": {"session_digest", "owner", "created_at", "expires_at"},
+        }
+        for table, expected in local_columns.items():
+            if table_columns(table_bodies.get(table, "")) != expected:
+                errors.append(f"{table} credential/session columns differ from ADR-0015")
+        required_constraints = {
+            "local_console_owner": [
+                "singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton)",
+                "principal_id text NOT NULL UNIQUE REFERENCES insight_platform.principals(principal_id)",
+                "CHECK (octet_length(password_salt) = 32)",
+                "CHECK (octet_length(password_hash) = 64)",
+            ],
+            "local_console_sessions": [
+                "session_digest text PRIMARY KEY CHECK (session_digest ~ '^[0-9a-f]{64}$')",
+                "owner boolean NOT NULL DEFAULT true REFERENCES insight_platform.local_console_owner(singleton)",
+                "CHECK (expires_at > created_at AND expires_at <= created_at + interval '8 hours')",
+            ],
+            "conversations": [
+                "PRIMARY KEY (tenant_id, conversation_id)",
+                "FOREIGN KEY (tenant_id, agent_id) REFERENCES insight_platform.resources(tenant_id, resource_id)",
+                "FOREIGN KEY (tenant_id, agent_deployment_id) REFERENCES insight_platform.deployments(tenant_id, deployment_id)",
+            ],
+            "conversation_turns": [
+                "PRIMARY KEY (tenant_id, conversation_id, ordinal)",
+                "UNIQUE (tenant_id, run_id)",
+                "FOREIGN KEY (tenant_id, conversation_id) REFERENCES insight_platform.conversations(tenant_id, conversation_id)",
+                "FOREIGN KEY (tenant_id, run_id) REFERENCES insight_platform.runs(tenant_id, run_id)",
+            ],
+        }
+        for table, constraints in required_constraints.items():
+            normalized = re.sub(r"\s+", " ", table_bodies.get(table, "")).lower()
+            for constraint in constraints:
+                if constraint.lower() not in normalized:
+                    errors.append(f"{table} lacks required identity/retention constraint: {constraint}")
         required_columns = {
+            "conversations": {"tenant_id", "conversation_id", "agent_id", "agent_deployment_id", "deployment_digest", "input_field", "input_schema_digest", "title", "created_by", "version", "turn_count"},
+            "conversation_turns": {"tenant_id", "conversation_id", "ordinal", "run_id", "history_through", "conversation_version"},
             "resources": {"resource_kind", "lifecycle_state", "gate_state", "version"},
             "runs": {"state", "version", "public_sequence", "bindings", "public_replay_floor", "history_holds", "execution_requirement"},
             "jobs": {

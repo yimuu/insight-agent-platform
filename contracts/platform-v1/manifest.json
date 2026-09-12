@@ -1,18 +1,18 @@
 {
-  "contract_digest": "sha256:dc4d3a15800e78c7e3eae48e1667c3d465d6b8c3f57eb506df2c6b1d1c596556",
+  "contract_digest": "sha256:b5c1b042f059a62983ab6d92b1cf0b41c9d1d27ae1e6c79a39d07662993900cb",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
-      "bytes": 155653,
+      "bytes": 170078,
       "media_type": "application/yaml",
       "path": "contracts/platform-v1/openapi.yaml",
-      "sha256": "fe7fa60581421bf71941f46b3eaee19e95637b9bcfacd986954467b8a090d8aa"
+      "sha256": "9a3bfae906f043c6652f6b80fc6530312d7a25a5f0a7f7752afa98e6098fd59f"
     },
     {
-      "bytes": 33885,
+      "bytes": 33978,
       "media_type": "application/json",
       "path": "contracts/platform-v1/registries.json",
-      "sha256": "c0f0fd9151819d55b1276d9433e03d3e16867876f11bffeb7514f13fd04b3595"
+      "sha256": "1d844aab59e78940a0c639c3b28751e275bf230631f1d8eb7f6664a9ea432561"
     },
     {
       "bytes": 2110,
@@ -39,10 +39,10 @@
       "sha256": "b3992a4633c1feb8f8c532457e16a2312c43e9bc1572221446c824131e0c95f3"
     },
     {
-      "bytes": 742,
+      "bytes": 746,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/resource-id.schema.json",
-      "sha256": "9b9a7fa8041f48c4adb1e8bb971beaf28a48665b44a66923ff45cf350c478fe7"
+      "sha256": "50af0b9d1123723d3919316afe413c2f27af5411d91e7b95b24c537504cdd863"
     },
     {
       "bytes": 27050,
@@ -54,7 +54,7 @@
       "bytes": 4511,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal-types.json",
-      "sha256": "c4169f45d19d73e728bf9257531502b698212adad8b9f6cbf66065d1efd6977e"
+      "sha256": "237073fdf07eba77ed9762b93ba46693852bb5168b02172e2eae04cf6a900e6d"
     },
     {
       "bytes": 24280,
@@ -63,16 +63,16 @@
       "sha256": "47baa322cbd057e1cb1dcedb51925522f8bdd332f5a2c4c5e8ee1e31035ab1d7"
     },
     {
-      "bytes": 37790,
+      "bytes": 38661,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/deployment-closure.schema.json",
-      "sha256": "3b311f3e79c90e5ff0872a7442b9ec82d559a07f24ddc759e2c220fa0b72ed9a"
+      "sha256": "98c49e32ca994e6936444b48e562a5f583ca8c777fb5c3869ed5817b9b2ef081"
     },
     {
-      "bytes": 26205,
+      "bytes": 27698,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/model-configuration.schema.json",
-      "sha256": "93fd7ad27745c41f6e6299032dcec3392f4d921400068bb2103749176d63af55"
+      "sha256": "516177130c6cdffab332fe832864f0ae396d416bd49413e0349b9265d1fe73c6"
     },
     {
       "bytes": 4435,
@@ -285,10 +285,10 @@
       "sha256": "33ad3b836e6eef72cd7dedee974a0a6f7eccd385cf7d5f2a9e78d7b1c6940f88"
     },
     {
-      "bytes": 742,
+      "bytes": 746,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/nominal/uuid-v7-id.schema.json",
-      "sha256": "07b6e2c63a85370be60b4783f7735ac77af5bb4ae16dfeb7d254cb9b32062ed3"
+      "sha256": "c965ff0b711ef33957b809b95879091add41104672124e5592963210a49450b0"
     },
     {
       "bytes": 418,

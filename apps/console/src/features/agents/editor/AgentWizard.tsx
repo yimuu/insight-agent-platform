@@ -63,16 +63,7 @@ export function AgentWizard({
         <h3>给智能体一个名字</h3>
         <div className={cx('form-grid')}>
           <label>
-            <span>名称</span>
-            <input
-              value={name}
-              disabled={Boolean(existing)}
-              onChange={(event) => onChange({ name: event.target.value })}
-              placeholder="例如 research-assistant"
-            />
-          </label>
-          <label>
-            <span>显示名称</span>
+            <span>智能体名称</span>
             <input
               value={displayName}
               onChange={(event) => onChange({ displayName: event.target.value })}
@@ -90,11 +81,24 @@ export function AgentWizard({
             >
               <option value="model_chat">模型对话</option>
               <option value="deterministic">确定性回显</option>
-              <option value="full_plan">完整 Plan（高级）</option>
-              <option value="framework_graph">框架图（高级）</option>
+              <option value="full_plan">多步骤工作流</option>
+              <option value="framework_graph">框架工作流</option>
             </select>
           </label>
         </div>
+        <details>
+          <summary>高级设置</summary>
+          <label>
+            <span>资源标识</span>
+            <input
+              value={name}
+              disabled={existing}
+              onChange={(event) => onChange({ name: event.target.value })}
+              placeholder="例如 research-assistant"
+            />
+            <small>已自动生成，用于 API 和源码引用。</small>
+          </label>
+        </details>
       </div>
       <div hidden={step !== 1} className={cx('wizard-step')}>
         <h3>告诉智能体要做什么</h3>
@@ -120,11 +124,13 @@ export function AgentWizard({
                 ))}
               </select>
               {profile && profile.models.length === 0 && (
-                <p role="status">暂无可用模型，请先到“模型配置”添加并启用模型。</p>
+                <p role="status">
+                  暂无可用模型。<a href="#models">连接模型服务</a>后返回即可继续填写。
+                </p>
               )}
             </label>
           )}
-          {executionKind !== 'deterministic' ? (
+          {executionKind === 'model_chat' ? (
             <label className={cx('field--wide')}>
               <span>任务指令</span>
               <textarea
@@ -135,12 +141,22 @@ export function AgentWizard({
               />
             </label>
           ) : (
-            <p>将输入按约定结构直接返回，适合检查工作流是否连通。</p>
+            <p>
+              {executionKind === 'deterministic'
+                ? '将输入按约定结构直接返回，适合检查工作流是否连通。'
+                : '在下方画布中添加步骤，点击节点编辑配置。'}
+            </p>
           )}
         </div>
       </div>
       <div hidden={step !== 2} className={cx('wizard-step stack')}>
         <h3>定义输入与输出</h3>
+        {executionKind === 'model_chat' && (
+          <p className={cx('body-copy')}>
+            回答超过字段长度会校验失败。长文写作请保留足够的输出长度；实际生成长度还受模型的输出
+            Token 和上下文额度限制。
+          </p>
+        )}
         <SchemaFields
           label="输入字段"
           source={inputSchema}

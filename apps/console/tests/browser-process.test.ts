@@ -156,15 +156,29 @@ test('detached cleanup waits for the group after its leader exits', async (t) =>
           }
           assert.deepEqual(signals, [])
         } finally {
-          // This fallback also makes the expected RED run leave no surviving test group.
-          if (descendant && pidExists(descendant)) process.kill(-owner.child.pid, 'SIGKILL')
-          await withinTestDeadline(owner.completed)
-          if (descendant) {
-            for (let attempt = 0; attempt < 200 && pidExists(descendant); attempt++) await delay(10)
-            assert.equal(pidExists(descendant), false)
+          // A failed assertion or leader-close deadline must not skip the other owned group.
+          try {
+            if (descendant && pidExists(descendant)) {
+              try {
+                // The leader may already be reaped; only this recorded fixture PID is needed.
+                process.kill(descendant, 'SIGKILL')
+              } catch (error) {
+                if (error.code !== 'ESRCH') throw error
+              }
+            }
+            await withinTestDeadline(owner.completed)
+            if (descendant) {
+              for (let attempt = 0; attempt < 200 && pidExists(descendant); attempt++)
+                await delay(10)
+              assert.equal(pidExists(descendant), false)
+            }
+          } finally {
+            try {
+              await unrelated.terminate({ graceMs: 20, killMs: 1000 })
+            } finally {
+              await rm(directory, { recursive: true })
+            }
           }
-          await unrelated.terminate({ graceMs: 20, killMs: 1000 })
-          await rm(directory, { recursive: true })
         }
       },
     )

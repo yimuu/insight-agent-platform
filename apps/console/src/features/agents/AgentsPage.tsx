@@ -19,6 +19,7 @@ import { PlatformClient } from '../../shared/api/client'
 import {
   inspectAgentSources,
   compileCapturedAgentSources,
+  compileAgentManifest,
   compileFrozenSourceBundle,
   inspectAgentManifest,
   verifyAgentAuthoringProfile,
@@ -48,31 +49,24 @@ import type {
   ResourceView,
 } from '../../shared/api/types'
 
+import { Icon } from '../../shared/ui/Icon'
 import { Status, Metric } from '../../shared/ui/console-ui'
 import { errorNotice, formatTime } from '../../shared/ui/feedback'
 import type { Notice } from '../../shared/ui/feedback'
-const DEFAULT_SCHEMA = JSON.stringify(
-  {
-    $schema: 'https://json-schema.org/draft/2020-12/schema',
-    type: 'object',
-    properties: {
-      message: { type: 'string', minLength: 1, maxLength: 128, 'x-platform-max-bytes': 512 },
-    },
-    required: ['message'],
-    additionalProperties: false,
-  },
-  null,
-  2,
-)
+import { DEFAULT_INPUT_SCHEMA, DEFAULT_OUTPUT_SCHEMA } from './default-schemas'
 
 export function Agents({
   client,
+  active = true,
   report,
   onRun,
+  onChat,
 }: {
   client: PlatformClient | null
+  active?: boolean
   report: (notice: Notice | null) => void
   onRun: (agent: AgentSummary) => void
+  onChat?: (agent: AgentSummary) => void
 }) {
   const editorElement = useRef<HTMLElement>(null)
   const ensureValidFields = () => {
@@ -82,6 +76,8 @@ export function Agents({
       throw new Error('请修正字段表格中的错误后再继续。')
     }
   }
+  const [search, setSearch] = useState('')
+  const [pageNumber, setPageNumber] = useState(1)
   const [agents, setAgents] = useState<AgentSummary[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -101,8 +97,8 @@ export function Agents({
   const [classification, setClassification] = useState('internal')
   const [deadline, setDeadline] = useState('')
   const [environment, setEnvironment] = useState('')
-  const [inputSchema, setInputSchema] = useState(DEFAULT_SCHEMA)
-  const [outputSchema, setOutputSchema] = useState(DEFAULT_SCHEMA)
+  const [inputSchema, setInputSchema] = useState(DEFAULT_INPUT_SCHEMA)
+  const [outputSchema, setOutputSchema] = useState(DEFAULT_OUTPUT_SCHEMA)
   const [yaml, setYaml] = useState('')
   const [inputSchemaPath, setInputSchemaPath] = useState('input.schema.json')
   const [outputSchemaPath, setOutputSchemaPath] = useState('output.schema.json')
@@ -127,7 +123,7 @@ export function Agents({
   const [authoringScope, setAuthoringScope] = useState(0)
   const [profile, setProfile] = useState<AgentAuthoringProfile | null>(null)
   useEffect(() => {
-    if (!client || !editor) return
+    if (!client || !editor || !active) return
     const controller = new AbortController()
     void client
       .getAgentAuthoringProfile({ signal: controller.signal })
@@ -142,7 +138,7 @@ export function Agents({
         }
       })
     return () => controller.abort()
-  }, [client, editor, report])
+  }, [client, editor, active, report])
 
   const loadPage = async (next?: string) => {
     if (!client) return report({ tone: 'error', text: '请先连接工作空间。' })
@@ -151,16 +147,10 @@ export function Agents({
     try {
       const response = await client.listAgents(next)
       setAgents(response.data.items)
+      setPageNumber(next ? pageNumber + 1 : 1)
       setLoaded(true)
       setListFailed(false)
       setCursor(response.data.next_cursor)
-      report({
-        tone: 'success',
-        text: response.data.items.length
-          ? `已加载 ${response.data.items.length} 个智能体。`
-          : '当前工作空间还没有智能体。',
-        traceId: response.traceId,
-      })
     } catch (error) {
       setListFailed(true)
       report(errorNotice(error))
@@ -250,7 +240,7 @@ export function Agents({
     setSourceProfileDigest(null)
     setRecoveredCompilation(null)
     applyFields({
-      name: 'hello-agent',
+      name: `agent-${crypto.randomUUID()}`,
       displayName: '我的智能体',
       executionKind: 'model_chat',
       instructions: '请根据用户输入，用简洁的中文回答。将回答放在 answer 字段中。',
@@ -263,8 +253,8 @@ export function Agents({
       planPath: 'plan.json',
     })
     setStep(0)
-    setInputSchema(DEFAULT_SCHEMA)
-    setOutputSchema(DEFAULT_SCHEMA.replaceAll('message', 'answer'))
+    setInputSchema(DEFAULT_INPUT_SCHEMA)
+    setOutputSchema(DEFAULT_OUTPUT_SCHEMA)
     setPlan('')
     setSlotBindings('[]')
     setYaml('')
@@ -508,6 +498,30 @@ export function Agents({
       setBusy(false)
     }
   }
+  const createWorkflow = async () => {
+    if (!client || busy) return
+    setBusy(true)
+    try {
+      const authoring = await client.getAgentAuthoringProfile()
+      await verifyAgentAuthoringProfile(authoring.data)
+      const seed = await compileAgentManifest({
+        manifest: updateFormManifest('', { ...formFields(), executionKind: 'deterministic' }),
+        inputSchema,
+        outputSchema: inputSchema,
+        profile: authoring.data,
+        bindings: { model: null, slots: [] },
+      })
+      invalidate()
+      setOutputSchema(inputSchema)
+      setPlan(seed.typedPlan)
+      setSlotBindings('[]')
+      report(null)
+    } catch (error) {
+      report(errorNotice(error))
+    } finally {
+      setBusy(false)
+    }
+  }
   const useValidatedPlan = async () => {
     if (!compiled || compiled.executionKind !== 'deterministic') return
     setBusy(true)
@@ -525,83 +539,60 @@ export function Agents({
       setBusy(false)
     }
   }
+  const visibleAgents = agents.filter((agent) =>
+    `${agent.display_name} ${agent.name}`
+      .toLocaleLowerCase()
+      .includes(search.trim().toLocaleLowerCase()),
+  )
   const outline = useMemo(() => planNodeOutline(plan), [plan])
 
   return (
     <section className={cx('stack')}>
-      <article data-ui="panel" className={cx('panel toolbar')}>
-        <div>
-          <p data-ui="kicker" className={cx('kicker')}>
-            我的智能体
-          </p>
-          <h2>让智能体开始工作</h2>
+      {!editor && (
+        <div className={cx('page-toolbar')}>
+          <label className={cx('agent-search')}>
+            <Icon name="search" size={16} />
+            <input
+              aria-label="搜索当前页智能体"
+              placeholder="搜索当前页智能体…"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </label>
+          <div className={cx('actions')}>
+            <button className={cx('button')} onClick={() => loadPage()} disabled={busy}>
+              刷新
+            </button>
+            <details className={cx('import-menu')}>
+              <summary className={cx('button')}>导入</summary>
+              <div>
+                {' '}
+                <label className={cx('button file-button')}>
+                  导入 YAML
+                  <input
+                    type="file"
+                    accept=".yaml,.yml,text/yaml"
+                    disabled={busy}
+                    onChange={(event) => importYaml(event.target.files?.[0])}
+                  />
+                </label>
+                <label className={cx('button file-button')}>
+                  导入源码包
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    disabled={busy}
+                    onChange={(event) => importBundle(event.target.files?.[0])}
+                  />
+                </label>
+              </div>
+            </details>
+            <button className={cx('button button--primary')} onClick={openNew} disabled={busy}>
+              ＋ 创建智能体
+            </button>
+          </div>
         </div>
-        <div className={cx('actions')}>
-          <button className={cx('button')} onClick={() => loadPage()} disabled={busy}>
-            刷新
-          </button>
-          <label className={cx('button file-button')}>
-            导入 YAML
-            <input
-              type="file"
-              accept=".yaml,.yml,text/yaml"
-              disabled={busy}
-              onChange={(event) => importYaml(event.target.files?.[0])}
-            />
-          </label>
-          <label className={cx('button file-button')}>
-            导入源码包
-            <input
-              type="file"
-              accept=".json,application/json"
-              disabled={busy}
-              onChange={(event) => importBundle(event.target.files?.[0])}
-            />
-          </label>
-          <button className={cx('button button--primary')} onClick={openNew} disabled={busy}>
-            创建智能体
-          </button>
-        </div>
-      </article>
-      <details data-ui="panel" className={cx('panel')}>
-        <summary>恢复已发布版本（高级）</summary>
-        <form
-          className={cx('form-grid')}
-          onSubmit={(event) => {
-            event.preventDefault()
-            void restorePublished()
-          }}
-        >
-          <label>
-            <span>已发布智能体 ID</span>
-            <input
-              value={restoreAgentId}
-              onChange={(event) => setRestoreAgentId(event.target.value)}
-              maxLength={64}
-              placeholder="agt_…"
-              required
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>已发布版本 ID</span>
-            <input
-              value={restoreVersionId}
-              onChange={(event) => setRestoreVersionId(event.target.value)}
-              maxLength={64}
-              placeholder="aif_… 或 arev_…"
-              required
-              disabled={busy}
-            />
-          </label>
-          <button className={cx('button')} disabled={busy || !client}>
-            恢复已发布源码
-          </button>
-        </form>
-        <p className={cx('body-copy')}>
-          读取所选版本及当前有权访问的源码。内容核验与编译全部通过后才替换编辑器。
-        </p>
-      </details>
+      )}
       {!editor && !loaded && !listFailed && (
         <article data-ui="panel" className={cx('panel')} role="status">
           正在加载智能体…
@@ -613,20 +604,19 @@ export function Agents({
         </article>
       )}
       {!editor && loaded && !listFailed && agents.length === 0 && (
-        <article data-ui="panel empty-state" className={cx('panel empty-state')} role="status">
-          <p data-ui="kicker" className={cx('kicker')}>
-            从第一个智能体开始
-          </p>
+        <article data-ui="panel empty-state" className={cx('panel empty-content')} role="status">
+          <Icon name="agents" size={32} />
           <h2>还没有智能体</h2>
-          <p className={cx('body-copy')}>
-            点击“创建智能体”，选择模型、填写任务指令，然后发布运行。
-          </p>
+          <p className={cx('body-copy')}>创建一个助手，选择模型并写下任务指令。</p>
+          <button className={cx('button button--primary')} onClick={openNew}>
+            创建第一个智能体
+          </button>
         </article>
       )}
       {!editor && agents.length > 0 && (
-        <article data-ui="panel" className={cx('panel')}>
+        <div>
           <div className={cx('agent-list')} role="list">
-            {agents.map((agent) => (
+            {visibleAgents.map((agent) => (
               <div
                 data-ui="agent-row"
                 className={cx('agent-row')}
@@ -634,13 +624,22 @@ export function Agents({
                 key={agent.agent_id}
                 data-agent-id={agent.agent_id}
               >
-                <div>
+                <div className={cx('agent-card-title')}>
+                  <span className={cx('agent-avatar')}>
+                    <Icon name="agents" size={21} />
+                  </span>
                   <strong>{agent.display_name}</strong>
                   <span>{agent.name}</span>
                 </div>
                 <Status value={agent.state} />
-                <span>{agent.environment ?? '尚未部署'}</span>
-                <span>{formatTime(agent.published_at)}</span>
+                <span className={cx('agent-meta')}>
+                  {agent.environment ? `环境 · ${agent.environment}` : '尚未发布'}
+                </span>
+                <span className={cx('agent-meta')}>
+                  {agent.published_at
+                    ? `发布于 ${formatTime(agent.published_at)}`
+                    : '发布后即可运行'}
+                </span>
                 <div className={cx('actions')}>
                   <button
                     className={cx('button')}
@@ -649,6 +648,15 @@ export function Agents({
                   >
                     编辑
                   </button>
+                  {onChat && (
+                    <button
+                      className={cx('button')}
+                      disabled={busy || !agent.active_deployment}
+                      onClick={() => onChat(agent)}
+                    >
+                      对话
+                    </button>
+                  )}
                   <button
                     className={cx('button button--primary')}
                     disabled={agent.state !== 'ready'}
@@ -660,12 +668,76 @@ export function Agents({
               </div>
             ))}
           </div>
-          {cursor && (
-            <button className={cx('button')} onClick={() => loadPage(cursor)} disabled={busy}>
-              下一页
-            </button>
+          {visibleAgents.length === 0 && (
+            <div className={cx('empty-content')}>
+              <Icon name="search" />
+              <h3>没有找到匹配的智能体</h3>
+              <button className={cx('button')} onClick={() => setSearch('')}>
+                清除搜索
+              </button>
+            </div>
           )}
-        </article>
+          {(cursor || pageNumber > 1) && (
+            <div className={cx('pagination')}>
+              <span>第 {pageNumber} 页</span>
+              <button
+                className={cx('button')}
+                disabled={busy || pageNumber === 1}
+                onClick={() => loadPage()}
+              >
+                返回首页
+              </button>
+              <button
+                className={cx('button')}
+                disabled={busy || !cursor}
+                onClick={() => cursor && loadPage(cursor)}
+              >
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {!editor && (
+        <details data-ui="panel" className={cx('list-tools')}>
+          <summary>恢复已发布版本（高级）</summary>
+          <form
+            className={cx('form-grid')}
+            onSubmit={(event) => {
+              event.preventDefault()
+              void restorePublished()
+            }}
+          >
+            <label>
+              <span>已发布智能体 ID</span>
+              <input
+                value={restoreAgentId}
+                onChange={(event) => setRestoreAgentId(event.target.value)}
+                maxLength={64}
+                placeholder="agt_…"
+                required
+                disabled={busy}
+              />
+            </label>
+            <label>
+              <span>已发布版本 ID</span>
+              <input
+                value={restoreVersionId}
+                onChange={(event) => setRestoreVersionId(event.target.value)}
+                maxLength={64}
+                placeholder="aif_… 或 arev_…"
+                required
+                disabled={busy}
+              />
+            </label>
+            <button className={cx('button')} disabled={busy || !client}>
+              恢复已发布源码
+            </button>
+          </form>
+          <p className={cx('body-copy')}>
+            读取所选版本及当前有权访问的源码。内容核验与编译全部通过后才替换编辑器。
+          </p>
+        </details>
       )}
       {editor && (
         <article
@@ -771,68 +843,83 @@ export function Agents({
             )}
             {(executionKind === 'full_plan' ||
               executionKind === 'framework_graph' ||
-              mode === 'yaml') && (
-              <div className={cx('stack')}>
-                <PlanEditor
-                  source={plan}
-                  onChange={(next) => {
-                    invalidate()
-                    setPlan(next)
-                  }}
-                  compiled={compiled}
-                  disabled={busy}
-                />
-                <CodeEditor
-                  language="json"
-                  label="Plan JSON"
-                  value={plan}
-                  onChange={(next) => {
-                    invalidate()
-                    setPlan(next)
-                  }}
-                  disabled={busy}
-                />
-                <p className={cx('body-copy')}>
-                  填写完整 Plan 或包含 Platform 节点的静态框架图，同时提供 Schema
-                  与依赖绑定。发布前会校验完整源码；不执行导入的程序。
-                </p>
-                {outline && (
+              mode === 'yaml') &&
+              (mode === 'yaml' || step === 1 || step === 3) && (
+                <div className={cx('stack')}>
+                  {!plan.trim() && executionKind === 'full_plan' ? (
+                    <div className={cx('empty-state')}>
+                      <h3>创建你的第一个工作流</h3>
+                      <p>从开始和输出节点创建，然后添加步骤并配置连接。</p>
+                      <button
+                        className={cx('button button--primary')}
+                        disabled={busy}
+                        onClick={() => void createWorkflow()}
+                      >
+                        创建工作流
+                      </button>
+                    </div>
+                  ) : (
+                    <PlanEditor
+                      source={plan}
+                      onChange={(next) => {
+                        invalidate()
+                        setPlan(next)
+                      }}
+                      compiled={compiled}
+                      disabled={busy}
+                    />
+                  )}
                   <details>
-                    <summary>
-                      节点概览 · {outline.nodes.length}
-                      {outline.truncated ? '+' : ''} 个节点
-                    </summary>
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>节点</th>
-                          <th>类型</th>
-                          <th>入口</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {outline.nodes.map((node) => (
-                          <tr key={node.id}>
-                            <td>{node.id}</td>
-                            <td>{node.kind}</td>
-                            <td>{node.entry ? '入口' : ''}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <p className={cx('body-copy')}>
-                      {outline.truncated ? '仅显示前 128 个节点。' : ''}
-                      此概览来自当前源码，请通过校验检查完整配置。
-                    </p>
+                    <summary>高级：编辑工作流源码</summary>
+                    <CodeEditor
+                      language="json"
+                      label="Plan JSON"
+                      value={plan}
+                      onChange={(next) => {
+                        invalidate()
+                        setPlan(next)
+                      }}
+                      disabled={busy}
+                    />
                   </details>
-                )}
-              </div>
-            )}
+                  {outline && (
+                    <details>
+                      <summary>
+                        节点概览 · {outline.nodes.length}
+                        {outline.truncated ? '+' : ''} 个节点
+                      </summary>
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>节点</th>
+                            <th>类型</th>
+                            <th>入口</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {outline.nodes.map((node) => (
+                            <tr key={node.id}>
+                              <td>{node.id}</td>
+                              <td>{node.kind}</td>
+                              <td>{node.entry ? '入口' : ''}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className={cx('body-copy')}>
+                        {outline.truncated ? '仅显示前 128 个节点。' : ''}
+                        此概览来自当前源码，请通过校验检查完整配置。
+                      </p>
+                    </details>
+                  )}
+                </div>
+              )}
             {(executionKind === 'full_plan' ||
               executionKind === 'framework_graph' ||
               mode === 'yaml' ||
               slotBindings.trim() !== '[]') && (
-              <div>
+              <details>
+                <summary>高级：工作流依赖绑定</summary>
                 <CodeEditor
                   language="json"
                   label="精确依赖绑定 JSON"
@@ -844,7 +931,7 @@ export function Agents({
                   disabled={busy}
                 />
                 <p className={cx('body-copy')}>没有依赖时使用 []；编译器会验证并冻结精确绑定。</p>
-              </div>
+              </details>
             )}
 
             {(executionKind === 'full_plan' || executionKind === 'framework_graph') && (
@@ -875,13 +962,15 @@ export function Agents({
                   disabled={busy}
                   onClick={() => {
                     try {
-                      if (step === 0 && !name.trim()) throw new Error('请填写智能体名称。')
+                      if (step === 0 && !displayName.trim()) throw new Error('请填写智能体名称。')
                       if (
                         step === 1 &&
                         executionKind === 'model_chat' &&
                         (!modelAlias || !instructions.trim())
                       )
                         throw new Error('请选择模型并填写任务指令。')
+                      if (step === 1 && executionKind === 'full_plan' && !plan.trim())
+                        throw new Error('请先创建工作流。')
                       if (step === 2) {
                         ensureValidFields()
                         parseSchema(inputSchema)

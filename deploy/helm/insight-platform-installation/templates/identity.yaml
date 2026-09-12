@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-identity
+  labels:
+    {{- include "installation.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      insight.platform/installation: {{ .Values.plan.input.name | quote }}
+      insight.platform/process: local-identity
+  template:
+    metadata:
+      labels:
+        insight.platform/installation: {{ .Values.plan.input.name | quote }}
+        insight.platform/process: local-identity
+    spec:
+      {{- include "installation.scheduling" . | nindent 6 }}
+      initContainers:
+        {{- include "installation.gateContainer" (dict "root" . "phase" "ready") | nindent 8 }}
+      containers:
+        - name: local-identity
+          image: {{ .Values.plan.console_image | quote }}
+          command: [/usr/local/bin/node, /console/server-dist/identity-main.js]
+          args: [--config, /run/insight/identity/config.json]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: http, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: http}
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          volumeMounts:
+            - {name: configuration, mountPath: /run/insight/identity, readOnly: true}
+      volumes:
+        {{- include "installation.gateVolumes" . | nindent 8 }}
+        - name: configuration
+          persistentVolumeClaim: {claimName: role-local-identity, readOnly: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: local-identity
+  labels:
+    {{- include "installation.labels" . | nindent 4 }}
+spec:
+  selector:
+    insight.platform/installation: {{ .Values.plan.input.name | quote }}
+    insight.platform/process: local-identity
+  ports:
+    - {name: http, port: 8081, targetPort: http}

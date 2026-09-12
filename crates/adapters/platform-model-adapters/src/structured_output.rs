@@ -41,7 +41,6 @@ pub(crate) fn use_native_structured_output(
 pub(crate) fn parse_structured_output(
     request: &ModelAdapterExecutionRequest,
     text: &str,
-    safe_code: &'static str,
 ) -> Result<Option<ClosedJsonValue>, ModelAdapterFailure> {
     let Some(schema) = &request.request.response_contract.structured_schema else {
         return Ok(None);
@@ -50,11 +49,18 @@ pub(crate) fn parse_structured_output(
     limits.max_bytes = limits
         .max_bytes
         .min(request.profile.structured_output.maximum_output_bytes as usize);
-    let value = parse_strict_json(text.as_bytes(), limits).map_err(|_| permanent(safe_code))?;
+    let value = parse_strict_json(text.as_bytes(), limits).map_err(|error| {
+        permanent(match error {
+            insight_platform_contracts::StrictJsonError::DocumentTooLarge { .. } => {
+                "model_structured_output_too_large"
+            }
+            _ => "model_structured_output_invalid_json",
+        })
+    })?;
     schema
         .validate_instance(&value)
-        .map_err(|_| permanent(safe_code))?;
+        .map_err(|_| permanent("model_structured_output_schema_mismatch"))?;
     ClosedJsonValue::build(schema.canonical_digest.clone(), value)
         .map(Some)
-        .map_err(|_| permanent(safe_code))
+        .map_err(|_| permanent("model_structured_output_schema_mismatch"))
 }

@@ -4,6 +4,7 @@ import { classNames } from './class-names.ts'
 const cx = classNames(sharedStyles)
 
 import type { Notice } from './feedback'
+import { Icon } from './Icon'
 
 export function Status({ value }: { value: string }) {
   const tone = ['ready', 'enabled', 'succeeded', 'approved', 'responded'].includes(value)
@@ -26,8 +27,14 @@ export function Status({ value }: { value: string }) {
   )
 }
 
-export function NoticeBox({ notice }: { notice: Notice | null }) {
-  if (!notice) return <div role="status" aria-live="polite" aria-atomic="true" />
+export function NoticeBox({
+  notice,
+  onDismiss,
+}: {
+  notice: Notice | null
+  onDismiss?: () => void
+}) {
+  if (!notice) return null
   return (
     <div
       data-ui={`notice notice--${notice.tone}`}
@@ -36,14 +43,30 @@ export function NoticeBox({ notice }: { notice: Notice | null }) {
       aria-live="polite"
       aria-atomic="true"
     >
-      <span>{notice.text}</span>
-      {notice.detail && (
-        <details>
-          <summary>诊断详情</summary>
-          <pre>{notice.detail}</pre>
-        </details>
+      <Icon
+        name={notice.tone === 'success' ? 'check' : 'info'}
+        style={{ flexShrink: 0, marginTop: 1 }}
+      />
+      <div className={cx('notice__body')}>
+        <span>{notice.text}</span>
+        {(notice.detail || notice.traceId) && (
+          <details>
+            <summary>诊断详情</summary>
+            {notice.detail && <pre>{notice.detail}</pre>}
+            {notice.traceId && <code>追踪 ID {notice.traceId}</code>}
+          </details>
+        )}
+      </div>
+      {onDismiss && (
+        <button
+          type="button"
+          className={cx('icon-button')}
+          aria-label="关闭提示"
+          onClick={onDismiss}
+        >
+          <Icon name="close" size={16} />
+        </button>
       )}
-      {notice.traceId && <code>追踪 ID {notice.traceId}</code>}
     </div>
   )
 }

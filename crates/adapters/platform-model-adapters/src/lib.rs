@@ -268,7 +268,12 @@ impl ModelAdapterCancelRequest {
 
 #[async_trait]
 pub trait ModelLiveDeltaSink: Send + Sync {
-    async fn publish(&self, execution: &ModelAdapterExecutionRequest, frame: &NormalizedModelFrame);
+    async fn publish(
+        &self,
+        execution: &ModelAdapterExecutionRequest,
+        frame: &NormalizedModelFrame,
+        text_sequence: u64,
+    );
 }
 
 #[derive(Default)]
@@ -280,6 +285,7 @@ impl ModelLiveDeltaSink for DropModelLiveDeltas {
         &self,
         _execution: &ModelAdapterExecutionRequest,
         _frame: &NormalizedModelFrame,
+        _text_sequence: u64,
     ) {
     }
 }
@@ -453,6 +459,7 @@ impl ModelAdapterHost {
         );
         let idle = Duration::from_millis(request.provider.request_limits.idle_timeout_milliseconds);
         let mut next_timeout = first_byte;
+        let mut text_sequence = 0u64;
         loop {
             let item = match tokio::time::timeout(next_timeout, stream.next()).await {
                 Ok(Some(item)) => item,
@@ -493,7 +500,17 @@ impl ModelAdapterHost {
                 .map_err(|_| ModelAdapterHostError::InvalidNormalizedStream)?
             {
                 ModelStreamAcceptance::Live { .. } => {
-                    self.live_sink.publish(request, &live_frame).await
+                    if matches!(
+                        live_frame.delta,
+                        insight_platform_models::NormalizedModelDelta::Text(_)
+                    ) {
+                        text_sequence = text_sequence
+                            .checked_add(1)
+                            .ok_or(ModelAdapterHostError::InvalidNormalizedStream)?;
+                    }
+                    self.live_sink
+                        .publish(request, &live_frame, text_sequence)
+                        .await
                 }
                 ModelStreamAcceptance::Terminal { response, evidence } => {
                     response

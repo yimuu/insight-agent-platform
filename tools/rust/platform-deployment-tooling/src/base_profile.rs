@@ -33,7 +33,7 @@ pub struct BaseConfigInputs<'a> {
     pub oidc: &'a Value,
     pub artifact_provider_catalog: &'a Value,
     pub artifact_bootstrap: &'a DevelopmentArtifactAuthorityConfigV1,
-    pub model_installation: Option<&'a insight_platform_contracts::ModelInstallationCatalogV1>,
+    pub model_installation: Option<&'a insight_platform_contracts::ModelInstallationCatalogV2>,
 }
 pub fn configurations(
     inputs: BaseConfigInputs<'_>,
@@ -127,6 +127,7 @@ pub fn configurations(
                     "artifact_gateway": {"endpoint": network.endpoint(Process::ArtifactGateway)?},
                     "model_credential_egress": null,
                     "model_installation": null,
+                    "live_text": {"servers":[format!("tls://{}:{}", network.nats_host, network.nats_port)], "namespace":"local", "connect_timeout_milliseconds":3000},
                 }),
             ),
         ),

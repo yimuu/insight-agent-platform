@@ -2,7 +2,7 @@
   margin: 0;
   color: #657068;
   font: 650 12px/1.2 var(--sans);
-  letter-spacing: 0.15em;
+  letter-spacing: 0.02em;
 }
 
 .page-grid {
@@ -20,7 +20,7 @@
   min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
-  padding: 24px;
+  padding: 20px;
   border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
@@ -30,9 +30,9 @@
 }
 
 .panel h2 {
-  margin: 5px 0 20px;
+  margin: 0 0 14px;
   color: #17231b;
-  font: 650 20px/1.2 var(--heading);
+  font: 600 17px/1.4 var(--heading);
   letter-spacing: -0.02em;
 }
 
@@ -44,7 +44,7 @@
 }
 
 .panel__heading h2 {
-  margin-bottom: 22px;
+  margin-bottom: 14px;
   overflow-wrap: anywhere;
 }
 
@@ -66,10 +66,10 @@
 }
 
 .button {
-  min-height: 39px;
+  min-height: 36px;
   border: 1px solid #bfc6bd;
   border-radius: 7px;
-  padding: 9px 15px;
+  padding: 7px 12px;
   background: #fff;
   color: #27342c;
   font: 550 13px/1.4 var(--sans);
@@ -88,13 +88,13 @@
 
 .button:disabled {
   opacity: 0.5;
-  cursor: wait;
+  cursor: not-allowed;
 }
 
 .button--primary {
-  color: #101713;
-  background: #c7f2da;
-  border-color: #9ed5b7;
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .button--danger {
@@ -107,40 +107,81 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 22px;
+  margin-top: 16px;
 }
 
 .notice {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  margin: 0 0 16px;
-  padding: 12px 15px;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
   border: 1px solid;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.notice__body {
+  flex: 1;
+  min-width: 0;
+}
+.notice__icon {
+  flex: 0 0 18px;
+  margin-top: 1px;
+}
+.notice details {
+  margin-top: 4px;
   font-size: 12px;
 }
-
+.notice summary {
+  padding: 2px 0;
+}
+.notice pre {
+  margin: 6px 0 0;
+  padding: 10px;
+  font-size: 12px;
+  max-height: 160px;
+  background: transparent;
+  color: inherit;
+}
 .notice code {
-  white-space: nowrap;
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
 }
-
 .notice--error {
-  color: #7e2d26;
-  background: #fff1ee;
-  border-color: #dfb8b2;
+  color: #a33328;
+  background: #fff8f6;
+  border-color: #f1d2cd;
 }
-
 .notice--success {
-  color: #23523a;
-  background: #ecf8ef;
-  border-color: #b7d8bf;
+  color: #18744c;
+  background: #f0faf4;
+  border-color: #cde8d6;
 }
-
 .notice--info {
-  color: #344b66;
-  background: #edf5fb;
-  border-color: #bfd2e1;
+  color: #344fa4;
+  background: #f3f6ff;
+  border-color: #d9e2ff;
+}
+.button--primary:hover:not(:disabled) {
+  color: #fff;
+  background: #264ddb;
+  border-color: #264ddb;
+}
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+}
+.icon-button:hover {
+  background: rgb(0 0 0 / 5%);
 }
 
 .status {
@@ -148,9 +189,9 @@
   align-items: center;
   border: 1px solid;
   border-radius: 999px;
-  padding: 5px 9px;
+  padding: 4px 8px;
   font: 700 12px/1 var(--sans);
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -192,7 +233,7 @@
   color: #778078;
   font: 600 12px/1 var(--sans);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 
 .metric dd {
@@ -337,7 +378,7 @@
   background: #c7f2da;
   color: #101713;
   font: 800 13px/1 var(--sans);
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
 }
 
 .file-button {
@@ -364,4 +405,152 @@
 .button--primary:hover:not(:disabled) {
   background: #b4e7ca;
   border-color: #66ac85;
+}
+
+.notice details {
+  width: 100%;
+  font-size: 12px;
+}
+.notice details pre {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 120px;
+  background: transparent;
+  color: inherit;
+  border-color: currentColor;
+}
+.notice > code {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.page-toolbar .actions {
+  margin: 0;
+}
+.filter-bar {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.filter-bar > label {
+  flex: 1 1 160px;
+  max-width: 280px;
+}
+.filter-bar .actions {
+  margin: 0;
+}
+.filter-bar label > span {
+  font-size: 12px;
+}
+.list-tools {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.list-tools[open] > summary {
+  margin-bottom: 12px;
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.empty-content {
+  padding: 44px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+.empty-content h2,
+.empty-content h3,
+.empty-content p {
+  margin: 0;
+}
+.empty-content h3 {
+  font-size: 16px;
+}
+.empty-content p {
+  color: var(--muted);
+  max-width: 46ch;
+}
+.empty-content > svg {
+  color: #98a2b3;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 6px;
+}
+.empty-content .button {
+  margin-top: 6px;
+}
+.settings-content {
+  max-width: 880px;
+}
+.settings-row {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child {
+  border: 0;
+}
+.settings-row input {
+  max-width: 360px;
+}
+.settings-row p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+@media (max-width: 620px) {
+  .settings-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .filter-bar > label {
+    max-width: none;
+  }
+}
+.task-inbox-list {
+  margin-top: 20px;
+}
+.task-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.task-row p {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.task-row strong {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 620px) {
+  .task-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .task-row > .button {
+    grid-column: 1 / -1;
+  }
 }

@@ -1,4 +1,6 @@
 //! Deployable public Gateway for the clean-cut Platform `/v1` contract.
+mod conversation;
+use insight_platform_gateway::live_text;
 mod authoring_profile;
 mod model_configuration;
 mod model_connection;
@@ -283,7 +285,9 @@ impl ProcessRole {
                         | "sandbox-packages"
                         | "sandboxes"
                 ),
-                Self::RuntimeApi => matches!(noun, "runs" | "tasks" | "artifacts"),
+                Self::RuntimeApi => {
+                    matches!(noun, "runs" | "tasks" | "artifacts" | "conversations")
+                }
             }
     }
 }
@@ -302,7 +306,8 @@ struct ProcessConfig {
     oidc: InstalledOidcVerifierConfig,
     artifact_gateway: Option<ArtifactGatewayConfig>,
     model_credential_egress: Option<model_credentials::GatewayEgressConfig>,
-    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV2>,
+    live_text: Option<live_text::LiveTextConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -367,6 +372,13 @@ impl ProcessConfig {
         match (self.role, self.model_credential_egress.as_ref()) {
             (ProcessRole::ManagementApi, Some(egress)) => egress.validate()?,
             (ProcessRole::RuntimeApi, None) => {}
+            _ => return Err(ProcessError::InvalidConfiguration),
+        }
+        match (self.role, self.live_text.as_ref()) {
+            (ProcessRole::RuntimeApi, Some(config)) => config
+                .validate()
+                .map_err(|_| ProcessError::InvalidConfiguration)?,
+            (ProcessRole::ManagementApi, None) => {}
             _ => return Err(ProcessError::InvalidConfiguration),
         }
         match (self.role, self.artifact_gateway.as_ref()) {
@@ -525,6 +537,95 @@ impl insight_platform_api::authoring::AuthoringApplication for PgAuthoring {
         .await
         .map_err(|_| insight_platform_registry::authoring::AuthoringQueryError::Unavailable)?
     }
+}
+
+async fn prepare_root_run_command(
+    repository: &PgRepository,
+    intent: CreateRunIntent,
+) -> Result<AdmitRun, RunApplicationError> {
+    let now = chrono::Utc::now();
+    let requested_deadline = chrono::DateTime::parse_from_rfc3339(intent.request.deadline.as_str())
+        .map_err(|_| RunApplicationError::Invalid)?
+        .with_timezone(&chrono::Utc);
+    if requested_deadline <= now {
+        return Err(RunApplicationError::Invalid);
+    }
+    let target = repository
+        .resolve_root_run_target(&intent.principal.tenant_id, &intent.request.agent_id)
+        .await
+        .map_err(map_run_repository_error)?;
+    let principal = PrincipalSnapshot::build(
+        intent.principal.tenant_id.clone(),
+        intent.principal.principal_id.clone(),
+        intent.principal.principal_kind,
+        intent.principal.permissions.clone(),
+        intent.principal.principal_version,
+        intent.principal.binding_generation,
+        intent.principal.binding_version,
+    )
+    .map_err(|_| RunApplicationError::Internal)?;
+    let bindings = RunBindingsSnapshot::build_with_context_dataset_views(
+        target.agent.clone(),
+        principal,
+        &target.closure,
+        target.context_dataset_views,
+    )
+    .map_err(|_| RunApplicationError::Internal)?;
+    let content_digest = match &intent.request.input.value {
+        ValueRef::Inline { value } => canonical_digest(value)
+            .map_err(|_| RunApplicationError::Invalid)?
+            .parse()
+            .map_err(|_| RunApplicationError::Internal)?,
+        ValueRef::Artifact { artifact }
+            if artifact.classification() == intent.request.input.classification =>
+        {
+            artifact.content_digest().clone()
+        }
+        ValueRef::Artifact { .. } => return Err(RunApplicationError::Invalid),
+    };
+    let make_id = |kind| {
+        ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
+            .map_err(|_| RunApplicationError::Internal)
+    };
+    let audit = CommandAudit {
+        trace: intent.principal.trace,
+        tenant_id: intent.principal.tenant_id,
+        principal_id: intent.principal.principal_id,
+        principal_kind: intent.principal.principal_kind,
+        receipt_id: make_id(ResourceKind::Receipt)?,
+        event_id: make_id(ResourceKind::Event)?,
+        outbox_id: make_id(ResourceKind::OutboxEvent)?,
+        idempotency_key_digest: intent.idempotency_key_digest,
+        request_digest: intent.request_digest,
+        receipt_expires_at: now + chrono::Duration::hours(24),
+    };
+    let run_id = make_id(ResourceKind::Run)?;
+    let command = AdmitRun {
+        expected_agent_deployment: intent.request.expected_agent_deployment,
+        audit,
+        admission_scope_id: intent.request.agent_id,
+        run_id,
+        agent_deployment_id: target.agent.deployment_id,
+        root_scope_id: make_id(ResourceKind::ScopeInstance)?,
+        entry_node_execution_id: make_id(ResourceKind::NodeExecution)?,
+        orchestration_job_id: make_id(ResourceKind::Job)?,
+        entry_plan_node_key: PlanNodeKey::new(target.closure.entry_node_id)
+            .map_err(|_| RunApplicationError::Internal)?,
+        entry_node_kind: target.closure.entry_node_kind,
+        bindings,
+        input: RunInputValue {
+            value_id: make_id(ResourceKind::RunValue)?,
+            classification: intent.request.input.classification,
+            schema_digest: intent.request.input.schema_digest,
+            content_digest,
+            value: intent.request.input.value,
+        },
+        deadline: requested_deadline,
+        inline_limits: JsonLimits::CONTRACT_FIXTURE,
+        attempt_limit: 3,
+        retry_backoff_milliseconds: 100,
+    };
+    Ok(command)
 }
 
 struct PgRuns(Arc<PgRepository>);
@@ -2015,89 +2116,7 @@ impl RunApplication for PgRuns {
         {
             return run_view_from_record(record);
         }
-        let requested_deadline =
-            chrono::DateTime::parse_from_rfc3339(intent.request.deadline.as_str())
-                .map_err(|_| RunApplicationError::Invalid)?
-                .with_timezone(&chrono::Utc);
-        if requested_deadline <= now {
-            return Err(RunApplicationError::Invalid);
-        }
-        let target = self
-            .0
-            .resolve_root_run_target(&intent.principal.tenant_id, &intent.request.agent_id)
-            .await
-            .map_err(map_run_repository_error)?;
-        let principal = PrincipalSnapshot::build(
-            intent.principal.tenant_id.clone(),
-            intent.principal.principal_id.clone(),
-            intent.principal.principal_kind,
-            intent.principal.permissions.clone(),
-            intent.principal.principal_version,
-            intent.principal.binding_generation,
-            intent.principal.binding_version,
-        )
-        .map_err(|_| RunApplicationError::Internal)?;
-        let bindings = RunBindingsSnapshot::build_with_context_dataset_views(
-            target.agent.clone(),
-            principal,
-            &target.closure,
-            target.context_dataset_views,
-        )
-        .map_err(|_| RunApplicationError::Internal)?;
-        let content_digest = match &intent.request.input.value {
-            ValueRef::Inline { value } => canonical_digest(value)
-                .map_err(|_| RunApplicationError::Invalid)?
-                .parse()
-                .map_err(|_| RunApplicationError::Internal)?,
-            ValueRef::Artifact { artifact }
-                if artifact.classification() == intent.request.input.classification =>
-            {
-                artifact.content_digest().clone()
-            }
-            ValueRef::Artifact { .. } => return Err(RunApplicationError::Invalid),
-        };
-        let make_id = |kind| {
-            ResourceId::from_uuid_v7(kind, uuid::Uuid::now_v7())
-                .map_err(|_| RunApplicationError::Internal)
-        };
-        let audit = CommandAudit {
-            trace: intent.principal.trace,
-            tenant_id: intent.principal.tenant_id,
-            principal_id: intent.principal.principal_id,
-            principal_kind: intent.principal.principal_kind,
-            receipt_id: make_id(ResourceKind::Receipt)?,
-            event_id: make_id(ResourceKind::Event)?,
-            outbox_id: make_id(ResourceKind::OutboxEvent)?,
-            idempotency_key_digest: intent.idempotency_key_digest,
-            request_digest: intent.request_digest,
-            receipt_expires_at: now + chrono::Duration::hours(24),
-        };
-        let run_id = make_id(ResourceKind::Run)?;
-        let command = AdmitRun {
-            expected_agent_deployment: intent.request.expected_agent_deployment,
-            audit,
-            admission_scope_id: intent.request.agent_id,
-            run_id,
-            agent_deployment_id: target.agent.deployment_id,
-            root_scope_id: make_id(ResourceKind::ScopeInstance)?,
-            entry_node_execution_id: make_id(ResourceKind::NodeExecution)?,
-            orchestration_job_id: make_id(ResourceKind::Job)?,
-            entry_plan_node_key: PlanNodeKey::new(target.closure.entry_node_id)
-                .map_err(|_| RunApplicationError::Internal)?,
-            entry_node_kind: target.closure.entry_node_kind,
-            bindings,
-            input: RunInputValue {
-                value_id: make_id(ResourceKind::RunValue)?,
-                classification: intent.request.input.classification,
-                schema_digest: intent.request.input.schema_digest,
-                content_digest,
-                value: intent.request.input.value,
-            },
-            deadline: requested_deadline,
-            inline_limits: JsonLimits::CONTRACT_FIXTURE,
-            attempt_limit: 3,
-            retry_backoff_milliseconds: 100,
-        };
+        let command = prepare_root_run_command(&self.0, intent).await?;
         let mut transaction = self
             .0
             .begin_run_transaction()
@@ -2264,6 +2283,55 @@ impl RunApplication for PgRuns {
         run_view_from_record(record)
     }
 
+    async fn read_run_execution(
+        &self,
+        intent: insight_platform_api::run_execution::ReadRunExecutionIntent,
+    ) -> Result<insight_platform_api::run_execution::RunExecutionDetailV1, RunApplicationError>
+    {
+        let v = self
+            .0
+            .read_run_execution_for_principal(
+                &intent.principal.tenant_id,
+                &intent.principal.principal_id,
+                intent.principal.principal_kind,
+                &intent.run_id,
+                intent.source_kind,
+                &intent.source_id,
+            )
+            .await
+            .map_err(map_run_repository_error)?;
+        Ok(insight_platform_api::run_execution::RunExecutionDetailV1 {
+            schema_version: 1,
+            run_id: v.run_id,
+            source_kind: v.source_kind,
+            source_id: v.source_id,
+            version: v.version,
+            state: v.state,
+            node_execution_id: v.node_execution_id,
+            plan_node_key: v.plan_node_key,
+            node_kind: v.node_kind,
+            started_at: v.started_at.map(UtcTimestamp::from_datetime),
+            terminal_at: v.terminal_at.map(UtcTimestamp::from_datetime),
+            input_value_id: v.input_value_id,
+            output_value_id: v.output_value_id,
+            values: v
+                .values
+                .into_iter()
+                .map(|x| RunValueMetadataV1 {
+                    schema_version: 1,
+                    run_id: x.run_id,
+                    node_id: x.node_id,
+                    value_id: x.value_id,
+                    classification: x.classification,
+                    schema_digest: x.schema_digest,
+                    content_digest: x.content_digest,
+                    storage_kind: x.storage_kind,
+                })
+                .collect(),
+            values_truncated: v.values_truncated,
+        })
+    }
+
     async fn read_run_definition(
         &self,
         intent: ReadRunIntent,
@@ -2361,6 +2429,7 @@ impl RunApplication for PgRuns {
                     source_kind,
                     source_id: event.source_id,
                     source_projection_version: event.source_projection_version,
+                    safe_summary: event.safe_summary,
                     occurred_at: event.occurred_at,
                 })
             })
@@ -2501,7 +2570,7 @@ fn run_view_from_record(
 
 #[derive(Clone)]
 struct PgResources {
-    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV2>,
     artifacts: Arc<dyn ArtifactMutationForwarder>,
     repository: Arc<PgRepository>,
     validator_digest: Sha256Digest,
@@ -3767,13 +3836,14 @@ struct RouterDependencies {
     repository: Arc<PgRepository>,
     artifact_mutation_forwarder: Option<Arc<dyn ArtifactMutationForwarder>>,
     model_credential_importer: Option<Arc<dyn model_credentials::ModelManagementEgress>>,
-    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
+    model_installation: Option<insight_platform_contracts::ModelInstallationCatalogV2>,
     verifier: insight_platform_api::oidc::InstalledOidcVerifier,
     validator_digest: Sha256Digest,
     validation_profile_digest: Sha256Digest,
     run_event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
     list_cursor_codec: Arc<dyn ListCursorCodec>,
     metrics: Arc<ProcessHttpMetrics>,
+    live_text: Option<Arc<dyn insight_platform_api::run_live::RunLiveApplication>>,
 }
 
 fn build_router(
@@ -3781,6 +3851,7 @@ fn build_router(
     dependencies: RouterDependencies,
 ) -> Result<Router, ProcessError> {
     let RouterDependencies {
+        live_text,
         repository,
         artifact_mutation_forwarder,
         model_credential_importer,
@@ -3853,6 +3924,10 @@ fn build_router(
             let artifact_mutation_forwarder =
                 artifact_mutation_forwarder.ok_or(ProcessError::InvalidConfiguration)?;
             operation
+                .merge(insight_platform_api::run_live::build_run_live_router(live_text.ok_or(ProcessError::InvalidConfiguration)?))
+                .merge(insight_platform_api::conversation::build_conversation_router(insight_platform_api::conversation::ConversationHttpState {
+                    application: Arc::new(conversation::PgConversations(repository.clone())), cursors: list_cursor_codec.clone(),
+                }))
                 .merge(build_run_router(
                     RunHttpState::new(
                         Arc::new(PgRuns(repository.clone())),
@@ -4146,6 +4221,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     verify_schema(&pool).await.map_err(ProcessError::Schema)?;
     let database_health_pool = pool.clone();
     let repository = Arc::new(PgRepository::new(pool.clone()));
+    let live_text = config
+        .live_text
+        .map(|live| {
+            live_text::PgLiveText::install(repository.clone(), live)
+                .map(|v| Arc::new(v) as Arc<dyn insight_platform_api::run_live::RunLiveApplication>)
+        })
+        .transpose()?;
     let listener = tokio::net::TcpListener::bind(&config.listen_address).await?;
     let (dependency_metrics, postgres_observer) =
         install_postgres_dependency_metrics().map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -4163,6 +4245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         build_router(
             config.role,
             RouterDependencies {
+                live_text,
                 repository,
                 artifact_mutation_forwarder,
                 model_credential_importer,
@@ -4351,6 +4434,17 @@ mod tests {
         Arc::new(HmacListCursorCodec::install(&[7_u8; 32]).unwrap())
     }
 
+    struct UnavailableLive;
+    #[async_trait]
+    impl insight_platform_api::run_live::RunLiveApplication for UnavailableLive {
+        async fn open(
+            &self,
+            _: insight_platform_api::authentication::AuthenticatedPrincipal,
+            _: ResourceId,
+        ) -> Result<insight_platform_api::run_live::LiveTextStream, RunApplicationError> {
+            Err(RunApplicationError::Unavailable)
+        }
+    }
     #[test]
     fn process_config_rejects_unbounded_or_ambiguous_values() {
         let mut config = ProcessConfig {
@@ -4365,6 +4459,11 @@ mod tests {
             oidc: oidc_config(),
             model_credential_egress: None,
             model_installation: None,
+            live_text: Some(live_text::LiveTextConfig {
+                servers: vec!["tls://localhost:4222".into()],
+                namespace: "local".into(),
+                connect_timeout_milliseconds: 3000,
+            }),
             artifact_gateway: Some(ArtifactGatewayConfig {
                 endpoint: "https://localhost:8081/".to_owned(),
             }),
@@ -4391,6 +4490,11 @@ mod tests {
             oidc: oidc_config(),
             model_credential_egress: None,
             model_installation: None,
+            live_text: Some(live_text::LiveTextConfig {
+                servers: vec!["tls://localhost:4222".into()],
+                namespace: "local".into(),
+                connect_timeout_milliseconds: 3000,
+            }),
             artifact_gateway: Some(ArtifactGatewayConfig {
                 endpoint: "https://localhost:8081/".to_owned(),
             }),
@@ -4416,6 +4520,11 @@ mod tests {
         runtime.artifact_gateway = Some(ArtifactGatewayConfig {
             endpoint: "https://localhost:8081/".to_owned(),
         });
+        assert!(
+            runtime.validate().is_err(),
+            "management must not install a live subscriber"
+        );
+        runtime.live_text = None;
         assert!(runtime.validate().is_ok());
     }
 
@@ -4454,6 +4563,7 @@ mod tests {
         let router = build_router(
             ProcessRole::RuntimeApi,
             RouterDependencies {
+                live_text: Some(Arc::new(UnavailableLive)),
                 repository: Arc::new(PgRepository::new(pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
                 model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),
@@ -4527,6 +4637,7 @@ mod tests {
         let management = build_router(
             ProcessRole::ManagementApi,
             RouterDependencies {
+                live_text: Some(Arc::new(UnavailableLive)),
                 repository: Arc::new(PgRepository::new(management_pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
                 model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),
@@ -4547,6 +4658,7 @@ mod tests {
         let runtime = build_router(
             ProcessRole::RuntimeApi,
             RouterDependencies {
+                live_text: Some(Arc::new(UnavailableLive)),
                 repository: Arc::new(PgRepository::new(runtime_pool)),
                 artifact_mutation_forwarder: Some(unavailable_artifact_forwarder()),
                 model_credential_importer: Some(Arc::new(model_credentials::UnavailableImporter)),

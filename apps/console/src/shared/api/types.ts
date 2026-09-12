@@ -289,3 +289,21 @@ export interface RunValueMetadata {
   content_digest: string
   storage_kind: 'inline' | 'artifact'
 }
+
+export interface ExecutionDetail {
+  schema_version: 1
+  run_id: string
+  source_kind: 'node_execution' | 'model_turn'
+  source_id: string
+  version: number
+  state: string
+  node_execution_id: string
+  plan_node_key: string
+  node_kind: string
+  started_at: string | null
+  terminal_at: string | null
+  input_value_id: string | null
+  output_value_id: string | null
+  values: RunValueMetadata[]
+  values_truncated: boolean
+}

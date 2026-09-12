@@ -2,6 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PlatformClient, PlatformProblem } from './client.ts'
 
+test('browser session mode uses same-origin cookies without exposing a bearer to JavaScript', async (context) => {
+  let request
+  context.mock.method(globalThis, 'fetch', async (_url, init) => {
+    request = init
+    return new Response('{"schema_version":1,"items":[],"next_cursor":null}', { status: 200 })
+  })
+  const client = new PlatformClient('https://platform.example', '', 'cookie')
+  await client.listAgents()
+  assert.equal(request.credentials, 'same-origin')
+  assert.equal(request.headers.has('Authorization'), false)
+})
+
 test('Run signal uses its exact 204 public port with stable Receipt and AbortSignal', async (context) => {
   const requests = []
   let status = 204
@@ -43,7 +55,7 @@ test('Run signal uses its exact 204 public port with stable Receipt and AbortSig
   status = 200
   await assert.rejects(
     client.signalRun('run_exact', 'approval', { payload: null }, 'same-receipt'),
-    /success status/,
+    /expected 204, received 200/,
   )
 })
 
@@ -176,9 +188,11 @@ test('Task inbox/form use exact filters, preserve empty-page continuation and pa
   assert.equal(JSON.parse(calls[3].init.body).value.value.accepted, false)
 })
 
-test('signed Artifact upload omits bearer authority and rejects insecure targets', async (context) => {
+test('signed Artifact upload uses the Console origin without bearer authority and rejects insecure targets', async (context) => {
   let init
-  context.mock.method(globalThis, 'fetch', async (_url, requestInit) => {
+  let calledUrl
+  context.mock.method(globalThis, 'fetch', async (url, requestInit) => {
+    calledUrl = url
     init = requestInit
     return new Response('', { status: 200 })
   })
@@ -189,6 +203,11 @@ test('signed Artifact upload omits bearer authority and rejects insecure targets
     'application/json',
   )
   assert.equal(new Headers(init.headers).has('authorization'), false)
+  assert.equal(calledUrl, 'https://platform.example/_console/v1/object-upload')
+  assert.equal(
+    new Headers(init.headers).get('x-insight-upload-target'),
+    'https://objects.example/upload?signature=secret',
+  )
   assert.equal(init.credentials, 'omit')
   await assert.rejects(
     client.putArtifactObject(
@@ -218,4 +237,65 @@ test('disposing a session cancels requests even when the caller has its own abor
   await assert.rejects(pending, { name: 'AbortError' })
   assert.equal(observed!.aborted, true)
   assert.equal(caller.signal.aborted, false)
+})
+
+test('object network failure is actionable and does not expose signed credentials', async (context) => {
+  const target = 'https://storage.example/upload?signature=private-capability'
+  context.mock.method(globalThis, 'fetch', async () => {
+    throw new TypeError(`Failed to fetch ${target}`)
+  })
+  const client = new PlatformClient('https://platform.example', 'token')
+  await assert.rejects(
+    client.putArtifactObject(target, new Uint8Array([1]), 'application/json'),
+    (error) => {
+      assert.ok(error instanceof Error)
+      assert.equal(error.message, 'artifact_upload_unreachable')
+      assert.ok(!error.message.includes('private-capability'))
+      return true
+    },
+  )
+})
+
+test('cancelling an object upload remains cancellation instead of a network diagnosis', async (context) => {
+  const client = new PlatformClient('https://platform.example', 'token')
+  context.mock.method(globalThis, 'fetch', async () => {
+    client.dispose()
+    throw new TypeError('Failed to fetch')
+  })
+  await assert.rejects(
+    client.putArtifactObject(
+      'https://storage.example/upload',
+      new Uint8Array([1]),
+      'application/json',
+    ),
+    { name: 'AbortError' },
+  )
+})
+
+test('conversation send retries preserve receipt, version, deadline and text with exact 201 response', async (context) => {
+  const calls = []
+  context.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls.push({ url, init })
+    return new Response('{"schema_version":1}', { status: 201 })
+  })
+  const client = new PlatformClient('https://platform.example', '', 'cookie')
+  for (let attempt = 0; attempt < 2; attempt++)
+    await client.sendConversationMessage(
+      'cnv_exact',
+      3,
+      '继续解释',
+      '2026-09-12T10:00:00Z',
+      'same-intent',
+    )
+  assert.equal(calls[0].url, 'https://platform.example/v1/conversations/cnv_exact/turns')
+  assert.equal(calls[0].init.headers.get('if-match'), '"cnv_exact-v3"')
+  assert.equal(calls[0].init.headers.get('idempotency-key'), 'same-intent')
+  assert.equal(calls[0].init.body, calls[1].init.body)
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    schema_version: 1,
+    message: '继续解释',
+    deadline: '2026-09-12T10:00:00Z',
+  })
+  assert.equal(calls[0].init.credentials, 'same-origin')
+  assert.equal(calls[0].init.headers.has('Authorization'), false)
 })

@@ -119,7 +119,7 @@ test('the compiled production entrypoint forwards trusted HTTPS, rejects unknown
     for (const mode of ['trusted', 'untrusted', 'wrong-name']) {
       await t.test(mode, async (childTest) => {
         const config = {
-          schema_version: 1,
+          schema_version: 3,
           topology: 'compose',
           listen_host: '127.0.0.1',
           listen_port: await temporaryPort(),

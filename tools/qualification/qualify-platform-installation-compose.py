@@ -21,25 +21,16 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/install'))
 from provider_lifecycle import LifecycleFailure, composition_snapshot
 import public_trust as TRUST
-WRAPPER = ROOT / 'tools/install/platform_compose.py'
-SPEC = importlib.util.spec_from_file_location('bounded_installation_commands', ROOT / 'tools/install/platform_helm.py')
-OWNER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(OWNER)
+sys.path.insert(0, str(ROOT / 'tools/qualification'))
+import installation_support as OWNER
 
 
 def command(arguments, timeout=300, stage='docker_command'):
     return bounded_command(arguments, stage, timeout=timeout)
 
 
-def wrapper_command(base, operation, timeout=300):
-    """Retain only closed owner errors; raw process output never enters qualification evidence."""
-    if operation not in ('render', 'up', 'verify', 'public-trust'):
-        raise OWNER.InstallationFailure('invalid qualification owner operation')
-    return bounded_command([*base, operation], operation, timeout=timeout)
-
-
 def bounded_command(arguments, operation, timeout=300):
-    if operation not in ('render', 'up', 'verify', 'public-trust', 'prepare', 'public-trust-before-ready', 'docker_command'):
+    if operation not in ('up', 'verify', 'prepare', 'public-trust-before-ready', 'docker_command'):
         raise OWNER.InstallationFailure('invalid qualification command stage')
     allowed = {'InvalidInput', 'InvalidEndpoint', 'InvalidRoleClosure', 'InvalidPath',
         'UnsupportedTopology', 'IdentityDrift', 'ConfigurationDrift', 'ForeignState',
@@ -138,18 +129,15 @@ def declaration_command(runtime_image, project, remote_context_file=None):
 
 
 def qualification_input(value, console_port):
-    """An installed destination exercises internal Policy Artifact bytes, with no model calls."""
-    if value['network']['providers']['backend'] != 's3_open_bao' or value['model_destinations']:
+    """Provisioned model policies exercise internal Artifact bytes, with no model calls."""
+    if value['network']['providers']['backend'] != 's3_open_bao':
         raise OWNER.InstallationFailure('qualification provider input differs')
     value['network']['console_origin'] = 'http://127.0.0.1:'+str(console_port)
-    value['model_destinations'] = [{'protocol': 'open_ai_responses',
-        'endpoint': {'scheme': 'https', 'host': 'api.openai.com', 'port': 443, 'base_path': '/'},
-        'region': 'global'}]
     return value
 
 
 def snapshot(project, runtime):
-    # Only hashes of bounded owner JSON are observed; no credential bytes leave the volume.
+    # Only hashes of owner JSON are observed; no credential bytes leave the volume.
     output = command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '0:0', '--cap-drop', 'ALL',
         '--mount', 'type=volume,source='+project+'_installation-private,target=/installation,readonly',
         '--entrypoint', '/bin/sh', runtime, '-ec',
@@ -185,26 +173,21 @@ def public_trust_rejects_before_ready(project, runtime, declaration):
         raise OWNER.InstallationFailure('pre-Ready public trust export changed private state')
 
 
-def public_trust_readonly_export(project, runtime, compose, directory, document, base):
-    """Actual O_RDONLY lock, unique public envelope and immutable host-file delivery."""
+def public_trust_readonly_export(project, runtime, compose, directory, document):
     input_digest = document['services']['openbao']['labels']['insight.installation.input']
-    identity = TRUST.ready_identity(directory, input_digest=input_digest)
+    proof = OWNER.decode(command([*compose, 'run', '--rm', '--no-deps', 'installation-verify']))
     before = trust_state_snapshot(project, runtime)
     output = command([*compose, 'run', '--rm', '--no-deps', 'installation-public-trust'], timeout=30)
-    pem, digest = TRUST.certificate(output, input_digest=input_digest, identity_digest=identity)
+    pem, digest = TRUST.certificate(output, input_digest=input_digest, identity_digest=proof['identity_digest'])
     path = directory/'public-ca.pem'
-    if TRUST.read_private(path, TRUST.MAX_CERTIFICATE_BYTES) != pem:
-        raise OWNER.InstallationFailure('delivered public CA differs from the read-only owner')
-    metadata = path.stat()
-    wrapper_command(base, 'public-trust', timeout=60)
-    if ((path.stat().st_ino, path.stat().st_mtime_ns) != (metadata.st_ino, metadata.st_mtime_ns)
-            or TRUST.read_private(path, TRUST.MAX_CERTIFICATE_BYTES) != pem
-            or trust_state_snapshot(project, runtime) != before):
-        raise OWNER.InstallationFailure('public trust export changed installed or delivered files')
+    OWNER.persist_bytes(path, pem, immutable=True)
+    repeated = command([*compose, 'run', '--rm', '--no-deps', 'installation-public-trust'], timeout=30)
+    if repeated != output or trust_state_snapshot(project, runtime) != before:
+        raise OWNER.InstallationFailure('public trust export changed installed state')
     return digest
 
 
-def verify_rejects_configuration_drift(project, runtime, base):
+def verify_rejects_configuration_drift(project, runtime, compose):
     """Change only this new fixture's public Console config; always restore its exact bytes."""
     mounted = ['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '0:0',
         '--mount', 'type=volume,source='+project+'_role-console,target=/fixture',
@@ -216,7 +199,7 @@ def verify_rejects_configuration_drift(project, runtime, base):
         if changed == original:
             raise OWNER.InstallationFailure('fixture did not change configuration')
         try:
-            wrapper_command(base, 'verify', timeout=180)
+            command([*compose, 'run', '--rm', '--no-deps', 'installation-verify'], timeout=180, stage='verify')
         except OWNER.InstallationFailure:
             pass
         else:
@@ -246,7 +229,7 @@ def cleanup(project, compose, document):
         name = labels.get('com.docker.compose.volume')
         if labels.get('com.docker.compose.project') != project or name not in document['volumes'] or labels.get('insight.installation.input') != document['volumes'][name]['labels']['insight.installation.input']:
             raise OWNER.InstallationFailure('fixture volume ownership differs')
-    command([*compose, '--profile', 'initialize', 'down', '--volumes'], timeout=180)
+    command([*compose, '--profile', 'operations', 'down', '--volumes'], timeout=180)
     for arguments in (
         ['docker', 'ps', '--all', '--quiet', '--filter', 'label=com.docker.compose.project='+project],
         ['docker', 'volume', 'ls', '--quiet', '--filter', 'label=com.docker.compose.project='+project],
@@ -254,15 +237,6 @@ def cleanup(project, compose, document):
     ):
         if command(arguments).strip():
             raise OWNER.InstallationFailure('fixture resources remain after cleanup')
-    for role in ('runtime', 'console'):
-        tag = 'insight-installation-retained/'+project+':'+role
-        selected = document['services']['installation-prepare' if role == 'runtime' else 'console']['image']
-        identity = command(['docker', 'image', 'inspect', selected, '--format', '{{.Id}}']).strip()
-        present = command(['docker', 'image', 'ls', '--no-trunc', '--filter', 'reference='+tag, '--format', '{{.ID}}']).strip()
-        if present:
-            if present != identity:
-                raise OWNER.InstallationFailure('fixture image reference differs')
-            command(['docker', 'image', 'rm', tag])
 
 
 def stop_and_remove_current_containers(document):
@@ -270,7 +244,7 @@ def stop_and_remove_current_containers(document):
     services = document['services']
     dependencies = ('nats', 's3', 'openbao', 'postgres')
     serving = [name for name in services if not name.startswith('installation-')
-               and name not in (*dependencies, 'openbao-initialize')]
+               and name not in dependencies]
     if (not serving or services['s3'].get('stop_grace_period') != '45s'
             or services['nats'].get('stop_signal') != 'SIGINT'):
         raise OWNER.InstallationFailure('shared dependency shutdown protocol differs')
@@ -306,6 +280,7 @@ def main():
     parser.add_argument('--runtime-image', type=selected_image, required=True)
     parser.add_argument('--console-image', type=selected_image, required=True)
     parser.add_argument('--remote-context-destinations', type=Path)
+    parser.add_argument('--subnet', help='Explicit non-overlapping subnet for this disposable fixture')
     args = parser.parse_args()
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -332,29 +307,53 @@ def main():
         declaration = directory/'input.json'
         declaration.write_text(json.dumps(value, sort_keys=True)+'\n')
         os.chmod(declaration, 0o600)
-        base = [sys.executable, str(WRAPPER), '--input', str(declaration), '--directory', str(directory/'host'),
-                '--runtime-image', args.runtime_image, '--console-image', args.console_image]
-        wrapper_command(base, 'render')
-        document = json.loads((directory/'host/compose.json').read_bytes())
-        compose = ['docker', 'compose', '--file', str(directory/'host/compose.json'), '--project-name', project]
+        document = OWNER.decode(command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
+            '--user', f'{os.geteuid()}:{os.getegid()}', '--cap-drop', 'ALL',
+            '--mount', f'type=bind,source={declaration},target={declaration},readonly',
+            '--entrypoint', '/usr/local/bin/platform-installation', args.runtime_image,
+            'compose', '--input', str(declaration), '--runtime-image', args.runtime_image,
+            '--console-image', args.console_image]))
+        if args.subnet:
+            import ipaddress
+            subnet = ipaddress.ip_network(args.subnet, strict=True)
+            if subnet.version != 4 or not subnet.is_private:
+                raise OWNER.InstallationFailure('private fixture subnet required')
+            document['networks']['default']['ipam'] = {'config': [{'subnet': str(subnet)}]}
+        OWNER.persist(directory/'compose.json', document, immutable=True)
+        compose = ['docker', 'compose', '--file', str(directory/'compose.json'), '--project-name', project]
         command([*compose, 'run', '--rm', '--no-deps', 'installation-prepare'], stage='prepare')
-        public_trust_rejects_before_ready(project, args.runtime_image, directory/'host/input.json')
+        public_trust_rejects_before_ready(project, args.runtime_image, declaration)
         print('Checking fresh one-shot initialization and all serving readiness', flush=True)
-        wrapper_command(base, 'up', timeout=600)
-        public_ca_digest = public_trust_readonly_export(project, args.runtime_image, compose, directory/'host', document, base)
+        command([*compose, 'up', '-d'], timeout=600, stage='up')
+        command([*compose, 'run', '--rm', '--no-deps', 'installation-ready'], timeout=180)
+        public_ca_digest = public_trust_readonly_export(project, args.runtime_image, compose, directory, document)
         before = snapshot(project, args.runtime_image)
-        wrapper_command(base, 'verify', timeout=180)
+        command([*compose, 'run', '--rm', '--no-deps', 'installation-verify'], timeout=180, stage='verify')
         if snapshot(project, args.runtime_image) != before:
             raise OWNER.InstallationFailure('readonly verify changed installation evidence')
         print('Checking configuration drift rejection without repair', flush=True)
-        verify_rejects_configuration_drift(project, args.runtime_image, base)
-        wrapper_command(base, 'verify', timeout=180)
+        verify_rejects_configuration_drift(project, args.runtime_image, compose)
+        command([*compose, 'run', '--rm', '--no-deps', 'installation-verify'], timeout=180, stage='verify')
         print('Checking controlled dependency and serving container recreation with frozen identity', flush=True)
         stop_and_remove_current_containers(document)
-        wrapper_command(base, 'up', timeout=300)
+        command([*compose, 'up', '-d'], timeout=300, stage='up')
+        command([*compose, 'run', '--rm', '--no-deps', 'installation-ready'], timeout=180)
         if snapshot(project, args.runtime_image) != before:
             raise OWNER.InstallationFailure('restart changed frozen installation evidence')
-        report = {'schema_version':1, 'result':'passed', 'runtime_image':args.runtime_image,
+        print('Checking explicit session delivery after ordinary startup', flush=True)
+        command(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--user', '0:0', '--cap-drop', 'ALL',
+            '--mount', 'type=volume,source='+project+'_installation-private,target=/installation,readonly',
+            '--entrypoint', '/usr/bin/test', args.runtime_image, '!', '-e', '/installation/private/session-token'])
+        session_container = project+'-session'
+        delivery = OWNER.decode(command([*compose, 'run', '--no-deps', '--name', session_container, 'installation-session']))
+        command(['docker', 'cp', session_container+':/installation/private/session-token', str(directory/'session-token')])
+        token = OWNER.read_file(directory/'session-token', private=True, maximum=16384)
+        if (delivery['schema_version'] != 1 or not delivery['tenant_id'].startswith('ten_')
+                or delivery['input_digest'] != document['services']['openbao']['labels']['insight.installation.input']
+                or token.count(b'.') != 2 or not token.endswith(b'\n')):
+            raise OWNER.InstallationFailure('explicit session delivery differs')
+        command(['docker', 'rm', session_container])
+        report = {'schema_version':1, 'result':'passed', 'runtime_image':args.runtime_image, 'direct_compose_up':True, 'explicit_session_only':True,
             'console_image':args.console_image, 'all_roles_and_console_ready':True,
             'readonly_verify':True, 'drift_rejected_without_repair':True,
             'public_trust_rejected_before_ready':True,
@@ -383,7 +382,7 @@ def main():
         print('Private fixture evidence directory: '+str(directory), flush=True)
     OWNER.persist(directory/'report.json', report, immutable=True)
     print(json.dumps(report), flush=True)
-    print('PASS only task-owned containers, volumes and image retention references removed', flush=True)
+    print('PASS only task-owned containers, volumes and network removed', flush=True)
 
 
 if __name__ == '__main__':

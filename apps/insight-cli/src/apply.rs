@@ -325,6 +325,7 @@ impl ApplyDeploymentClosure {
             Self::ModelProvider(bindings) => {
                 CreateDeploymentClosureV1::ModelProvider(ModelProviderDeploymentClosure {
                     provider_revision: exact(ResourceKind::ModelProviderRevision)?,
+                    endpoint: bindings.endpoint,
                     endpoint_identity_digest: bindings.endpoint_identity_digest,
                     secret_bindings: bindings.secret_bindings,
                     protocol_policy: bindings.protocol_policy,
@@ -691,6 +692,7 @@ struct ApplyMcpDeploymentBindings {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyModelProviderDeploymentBindings {
+    endpoint: insight_platform_contracts::CanonicalHttpEndpoint,
     endpoint_identity_digest: Sha256Digest,
     secret_bindings: Vec<ExactSecretBindingRef>,
     protocol_policy: ExactVersionRef,

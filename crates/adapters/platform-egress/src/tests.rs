@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::sync::Notify;
 
-struct FixtureDispatchAuthority;
+struct FixtureDispatchAuthority(insight_platform_contracts::CanonicalHttpEndpoint);
 
 struct DeniedDispatchAuthority(insight_platform_contracts::ModelDispatchAuthorizationError);
 
@@ -24,7 +24,7 @@ impl insight_platform_security::ModelDispatchAuthority for DeniedDispatchAuthori
         &self,
         _request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     > {
         Err(self.0)
@@ -62,7 +62,7 @@ async fn denied_or_unavailable_dispatch_has_no_dns_secret_or_http_effect_even_if
             let secrets = successful_secrets();
             let transport = Arc::new(FixtureTransport::complete(vec![]));
             let broker = ReqwestModelProviderEgressBroker::with_transport(
-                InstalledModelDestinationCatalog::new(vec![fixture.entry]).unwrap(),
+                InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap(),
                 secrets.clone(),
                 Arc::new(UnexpectedDns),
                 transport.clone(),
@@ -82,7 +82,7 @@ async fn denied_or_unavailable_dispatch_has_no_dns_secret_or_http_effect_even_if
     }
 }
 
-struct ExpiringDispatchAuthority;
+struct ExpiringDispatchAuthority(insight_platform_contracts::CanonicalHttpEndpoint);
 
 #[async_trait]
 impl insight_platform_security::ModelDispatchAuthority for ExpiringDispatchAuthority {
@@ -90,11 +90,12 @@ impl insight_platform_security::ModelDispatchAuthority for ExpiringDispatchAutho
         &self,
         request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     > {
-        Ok(insight_platform_contracts::ModelDispatchPermitV1 {
-            schema_version: 1,
+        Ok(insight_platform_contracts::ModelDispatchPermitV2 {
+            schema_version: 2,
+            endpoint: self.0.clone(),
             request_digest: canonical_digest(&serde_json::to_value(request).unwrap())
                 .unwrap()
                 .parse()
@@ -123,11 +124,11 @@ async fn permit_expiring_during_dns_cannot_resolve_credentials_or_open_http() {
     let secrets = successful_secrets();
     let transport = Arc::new(FixtureTransport::complete(vec![]));
     let broker = ReqwestModelProviderEgressBroker::with_transport(
-        InstalledModelDestinationCatalog::new(vec![fixture.entry]).unwrap(),
+        InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap(),
         secrets.clone(),
         Arc::new(DelayedDns),
         transport.clone(),
-        Arc::new(ExpiringDispatchAuthority),
+        Arc::new(ExpiringDispatchAuthority(fixture.entry.endpoint.clone())),
         ModelProviderEgressLimits::default(),
     )
     .unwrap();
@@ -143,12 +144,13 @@ impl insight_platform_security::ModelDispatchAuthority for FixtureDispatchAuthor
         &self,
         request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     > {
         assert!(request.validate_at(Utc::now()));
-        Ok(insight_platform_contracts::ModelDispatchPermitV1 {
-            schema_version: 1,
+        Ok(insight_platform_contracts::ModelDispatchPermitV2 {
+            schema_version: 2,
+            endpoint: self.0.clone(),
             request_digest: canonical_digest(&serde_json::to_value(request).unwrap())
                 .unwrap()
                 .parse()
@@ -422,7 +424,7 @@ fn broker(
             secrets,
             dns,
             transport,
-            Arc::new(FixtureDispatchAuthority),
+            Arc::new(FixtureDispatchAuthority(fixture.entry.endpoint.clone())),
             ModelProviderEgressLimits {
                 maximum_in_flight: 2,
                 maximum_dns_answers: 4,
@@ -443,12 +445,14 @@ fn pinned_fixture() -> Fixture {
 fn one_destination_grant_matches_two_accounts_but_keeps_exact_policy_and_purpose_constraints() {
     let fixture = pinned_fixture();
     let catalog = InstalledModelDestinationCatalog::new(vec![fixture.entry.clone()]).unwrap();
-    assert!(catalog.resolve(&fixture.request).is_ok());
+    assert!(catalog
+        .resolve(&fixture.request, &fixture.entry.endpoint)
+        .is_ok());
     let mut other = fixture.request.clone();
     other.provider_deployment = exact_deployment(ResourceKind::ModelProviderDeployment, 40, '4');
     other.provider_revision = exact_version(ResourceKind::ModelProviderRevision, 41, '5');
     other.secret_bindings[0].secret_binding_id = id(ResourceKind::SecretBinding, 42);
-    assert!(catalog.resolve(&other).is_ok());
+    assert!(catalog.resolve(&other, &fixture.entry.endpoint).is_ok());
     // Resolving a physical grant is not account authorization: the broker must still submit
     // these exact identities to the current database authority on each open.
     assert_ne!(
@@ -456,10 +460,10 @@ fn one_destination_grant_matches_two_accounts_but_keeps_exact_policy_and_purpose
         dispatch_authorization(&fixture.request)
     );
     other.network_policy.semantic_digest = digest('0');
-    assert!(catalog.resolve(&other).is_err());
+    assert!(catalog.resolve(&other, &fixture.entry.endpoint).is_err());
     other.network_policy = fixture.request.network_policy.clone();
     other.secret_bindings[0].purpose = "wrong_key".parse().unwrap();
-    assert!(catalog.resolve(&other).is_err());
+    assert!(catalog.resolve(&other, &fixture.entry.endpoint).is_err());
 
     let mut ambiguous = fixture.entry.clone();
     ambiguous.credential_purpose = "other_key".parse().unwrap();
@@ -604,7 +608,7 @@ async fn explicit_development_endpoint_allows_only_root_bound_localhost() {
             addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
         }),
         transport.clone(),
-        Arc::new(FixtureDispatchAuthority),
+        Arc::new(FixtureDispatchAuthority(fixture.entry.endpoint.clone())),
         ModelProviderEgressLimits {
             maximum_in_flight: 2,
             maximum_dns_answers: 4,
@@ -654,7 +658,7 @@ async fn explicit_anonymous_development_endpoint_skips_secret_resolution() {
             addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
         }),
         transport.clone(),
-        Arc::new(FixtureDispatchAuthority),
+        Arc::new(FixtureDispatchAuthority(fixture.entry.endpoint.clone())),
         ModelProviderEgressLimits {
             maximum_in_flight: 2,
             maximum_dns_answers: 4,
@@ -683,7 +687,7 @@ async fn exact_endpoint_policy_mismatch_fails_before_dns_or_secret() {
     let transport = Arc::new(FixtureTransport::complete(vec![]));
     let broker = broker(&fixture, secrets.clone(), public_dns(), transport.clone());
     let failure = expect_failure(broker.open(fixture.request).await);
-    assert_eq!(failure.safe_code, "model_egress_endpoint_not_installed");
+    assert_eq!(failure.safe_code, "model_egress_endpoint_not_authorized");
     assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
     assert!(!transport.validated.load(Ordering::SeqCst));
 }
@@ -887,3 +891,52 @@ fn empty_installed_catalogs_are_explicit_deny_all_closures() {
 
 #[path = "model_connection_tests.rs"]
 mod model_connection_tests;
+
+#[tokio::test]
+async fn public_registry_endpoint_requires_exact_policies_and_public_dns_before_secrets() {
+    use insight_platform_contracts::{InstalledModelPublicEgressV1, ModelEgressRoutingV1};
+    let fixture = pinned_fixture();
+    let entry = &fixture.entry;
+    let catalog =
+        InstalledModelDestinationCatalog::from_routing(ModelEgressRoutingV1::PublicHttps {
+            grant: InstalledModelPublicEgressV1 {
+                schema_version: 1,
+                protocols: vec![entry.protocol],
+                credential_purpose: insight_platform_contracts::MODEL_API_KEY_PURPOSE
+                    .parse()
+                    .unwrap(),
+                network_policy: entry.network_policy.clone(),
+                tls_policy: entry.tls_policy.clone(),
+                trust_policy: entry.trust_policy.clone(),
+                data_policy: entry.data_policy.clone(),
+            },
+        })
+        .unwrap();
+    let mut request = fixture.request.clone();
+    request.secret_bindings[0].purpose = insight_platform_contracts::MODEL_API_KEY_PURPOSE
+        .parse()
+        .unwrap();
+    assert!(catalog.resolve(&request, &entry.endpoint).is_ok());
+    let mut changed = request.clone();
+    changed.network_policy = exact_version(ResourceKind::PolicyRevision, 99, '7');
+    assert!(catalog.resolve(&changed, &entry.endpoint).is_err());
+    let mut other_endpoint = entry.endpoint.clone();
+    other_endpoint.host = "other.example.com".into();
+    assert!(catalog.resolve(&request, &other_endpoint).is_err());
+    let secrets = successful_secrets();
+    let transport = Arc::new(FixtureTransport::complete(vec![]));
+    let broker = ReqwestModelProviderEgressBroker::with_transport(
+        catalog,
+        secrets.clone(),
+        Arc::new(FixtureDnsResolver {
+            addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 443)],
+        }),
+        transport.clone(),
+        Arc::new(FixtureDispatchAuthority(entry.endpoint.clone())),
+        ModelProviderEgressLimits::default(),
+    )
+    .unwrap();
+    assert!(broker.open(request).await.is_err());
+    assert_eq!(secrets.calls.load(Ordering::SeqCst), 0);
+    assert!(!transport.validated.load(Ordering::SeqCst));
+}

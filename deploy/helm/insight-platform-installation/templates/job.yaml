@@ -1,14 +1,13 @@
-{{- if has .Values.phase (list "prepare" "provider-start" "provider-observe" "provision" "verify") }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: installation-{{ .Values.phase }}-{{ .Values.operation }}
+  name: installation-{{ .Release.Revision }}
   labels:
     {{- include "installation.labels" . | nindent 4 }}
   annotations:
     helm.sh/resource-policy: keep
     insight.platform/input-digest: {{ .Values.plan.input_digest | quote }}
-    insight.platform/phase: {{ .Values.phase | quote }}
+    insight.platform/phase: install
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 900
@@ -24,7 +23,7 @@ spec:
           image: {{ .Values.plan.runtime_image | quote }}
           command: [/bin/sh, -ec]
           args:
-            - {{ include "installation.command" .Values.phase | quote }}
+            - "exec /usr/local/bin/platform-installation install --input /installation-input/input.json --state /installation/private --output /output --binaries /usr/local/bin > /tmp/installation-result.json"
           terminationMessagePath: /tmp/installation-result.json
           terminationMessagePolicy: File
           securityContext:
@@ -34,30 +33,17 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
-              {{- if not (has .Values.phase (list "provider-start" "provider-observe")) }}
               add: [CHOWN, DAC_OVERRIDE, FOWNER]
-              {{- end }}
           env:
-            {{- if not (has .Values.phase (list "provider-start" "provider-observe")) }}
             - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
             - {name: AWS_CONFIG_FILE, value: /dev/null}
             - {name: AWS_SHARED_CREDENTIALS_FILE, value: /installation/private/s3-artifact-gateway-credentials}
-            {{- end }}
             - {name: SSL_CERT_FILE, value: /installation/private/ca.pem}
             - {name: SSL_CERT_DIR, value: /etc/ssl/certs}
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "2", memory: 1Gi}
           volumeMounts:
-            {{- if has .Values.phase (list "provider-start" "provider-observe") }}
-            {{- include "installation.providerMounts" . | nindent 12 }}
-            {{- else }}
             {{- include "installation.outputMounts" . | nindent 12 }}
-            {{- end }}
       volumes:
-        {{- if has .Values.phase (list "provider-start" "provider-observe") }}
-        {{- include "installation.providerVolumes" . | nindent 8 }}
-        {{- else }}
         {{- include "installation.outputVolumes" . | nindent 8 }}
-        {{- end }}
-{{- end }}

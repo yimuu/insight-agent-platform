@@ -2,13 +2,17 @@ import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
 import { isIP } from 'node:net'
 import { isAbsolute } from 'node:path'
 
-export interface ConsoleTransportConfigV1 {
-  schema_version: 1
+export interface ConsoleTransportConfigV3 {
+  schema_version: 3
   topology: 'native' | 'compose' | 'kubernetes_local'
   listen_host: string
   listen_port: number
+  upload_origin: string
+  upload_path_prefix: string
+  upload_ca_pem: string
   runtime_origin: string
   management_origin: string
+  identity_origin: string
   max_request_bytes: number
   max_buffered_request_bytes: number
   request_timeout_ms: number
@@ -20,6 +24,10 @@ export interface ConsoleTransportConfigV1 {
 
 export const maximumConfigBytes = 32 * 1024
 export const nativeTransportLimits = Object.freeze({
+  identity_origin: '',
+  upload_origin: '',
+  upload_path_prefix: '',
+  upload_ca_pem: '',
   max_request_bytes: 1024 * 1024,
   max_buffered_request_bytes: 8 * 1024 * 1024,
   request_timeout_ms: 30_000,
@@ -35,6 +43,9 @@ const fields = new Set([
   'listen_port',
   'runtime_origin',
   'management_origin',
+  'upload_origin',
+  'upload_path_prefix',
+  'upload_ca_pem',
   ...Object.keys(nativeTransportLimits),
 ])
 const loopbackHosts = new Set(['127.0.0.1', '[::1]', 'localhost'])
@@ -43,7 +54,7 @@ function invalid(): never {
   throw new Error('Invalid Console transport configuration')
 }
 
-function checkedOrigin(value: unknown, topology: ConsoleTransportConfigV1['topology']) {
+function checkedOrigin(value: unknown, topology: ConsoleTransportConfigV3['topology']) {
   if (
     typeof value !== 'string' ||
     value.length > 2048 ||
@@ -83,7 +94,7 @@ function checkedOrigin(value: unknown, topology: ConsoleTransportConfigV1['topol
   return origin.origin
 }
 
-export function checkedTransportConfig(value: unknown): Readonly<ConsoleTransportConfigV1> {
+export function checkedTransportConfig(value: unknown): Readonly<ConsoleTransportConfigV3> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
   const input = value as Record<string, unknown>
   if (
@@ -91,7 +102,7 @@ export function checkedTransportConfig(value: unknown): Readonly<ConsoleTranspor
     Object.keys(input).some((key) => !fields.has(key))
   )
     invalid()
-  if (input.schema_version !== 1) invalid()
+  if (input.schema_version !== 3) invalid()
   const topology = input.topology
   if (topology !== 'native' && topology !== 'compose' && topology !== 'kubernetes_local') invalid()
   const listen_host = input.listen_host
@@ -103,14 +114,40 @@ export function checkedTransportConfig(value: unknown): Readonly<ConsoleTranspor
       invalid()
     return item
   }
+  const upload_origin = input.upload_origin
+  const upload_path_prefix = input.upload_path_prefix
+  const upload_ca_pem = input.upload_ca_pem
+  if (
+    typeof upload_origin !== 'string' ||
+    typeof upload_path_prefix !== 'string' ||
+    typeof upload_ca_pem !== 'string'
+  )
+    invalid()
+  if (upload_origin === '') {
+    if (upload_path_prefix !== '' || upload_ca_pem !== '') invalid()
+  } else {
+    if (
+      !upload_origin.startsWith('https://') ||
+      checkedOrigin(upload_origin, 'compose') !== upload_origin
+    )
+      invalid()
+    if (!/^\/[a-z0-9][a-z0-9.-]{1,62}\/$/.test(upload_path_prefix)) invalid()
+    if (upload_ca_pem.length > 16384 || !upload_ca_pem.startsWith('-----BEGIN CERTIFICATE-----'))
+      invalid()
+  }
   const max_request_bytes = bounded('max_request_bytes', 1, 16 * 1024 * 1024)
   return Object.freeze({
-    schema_version: 1,
+    schema_version: 3,
     topology,
+    upload_origin,
+    upload_path_prefix,
+    upload_ca_pem,
     listen_host,
     listen_port: bounded('listen_port', topology === 'native' ? 0 : 1, 65535),
     runtime_origin: checkedOrigin(input.runtime_origin, topology),
     management_origin: checkedOrigin(input.management_origin, topology),
+    identity_origin:
+      input.identity_origin === '' ? '' : checkedOrigin(input.identity_origin, topology),
     max_request_bytes,
     max_buffered_request_bytes: bounded(
       'max_buffered_request_bytes',

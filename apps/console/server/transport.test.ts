@@ -12,6 +12,73 @@ import { startConsoleServer } from './gateway-server.ts'
 
 const listen = (server) => new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
 const wait = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+test('browser cookies are exchanged privately and never reach Gateway; mutations require same origin', async (t) => {
+  const exchanged: string[] = []
+  const identity = createServer((req, res) => {
+    exchanged.push(req.url!)
+    if (req.url === '/internal/token') {
+      assert.equal(req.headers.cookie, 'insight_session=opaque')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ access_token: 'header.claims.signature' }))
+    } else {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'set-cookie': 'insight_session=opaque; HttpOnly; SameSite=Strict; Path=/',
+      })
+      res.end(JSON.stringify({ schema_version: 1 }))
+    }
+  })
+  await listen(identity)
+  t.after(async () => {
+    identity.closeAllConnections()
+    await new Promise((resolve) => identity.close(resolve))
+  })
+  let gatewayCalls = 0
+  const proxy = await fixture(
+    t,
+    (req, res) => {
+      gatewayCalls++
+      assert.equal(req.headers.cookie, undefined)
+      assert.equal(req.headers.authorization, 'Bearer header.claims.signature')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    },
+    { identity_origin: `http://127.0.0.1:${tcpPort(identity)}` },
+  )
+  assert.equal(
+    (await send(proxy.origin, { method: 'GET', headers: { cookie: 'insight_session=opaque' } }))
+      .status,
+    200,
+  )
+  assert.equal(
+    (
+      await send(proxy.origin, {
+        headers: { cookie: 'insight_session=opaque', origin: 'https://foreign.example' },
+      })
+    ).status,
+    403,
+  )
+  assert.equal(gatewayCalls, 1)
+  assert.equal(
+    (
+      await send(proxy.origin, {
+        headers: { cookie: 'insight_session=opaque', origin: proxy.origin },
+      })
+    ).status,
+    200,
+  )
+  const login = await send(proxy.origin, {
+    path: '/_console/v1/auth/login',
+    headers: { origin: proxy.origin },
+  })
+  assert.match(String(login.headers['set-cookie']), /HttpOnly/)
+  assert.equal(
+    (await send(proxy.origin, { path: '/_console/v1/auth/internal/token', method: 'GET' })).status,
+    404,
+  )
+  assert.deepEqual(exchanged, ['/internal/token', '/internal/token', '/_console/v1/auth/login'])
+})
 async function fixture(t, handler, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'insight-console-transport-'))
   writeFileSync(join(root, 'index.html'), '<!doctype html><title>actual bundle</title>')
@@ -21,7 +88,7 @@ async function fixture(t, handler, overrides = {}) {
   const proxy = await startConsoleServer({
     bundleRoot: root,
     config: {
-      schema_version: 1,
+      schema_version: 3,
       topology: 'native',
       listen_host: '127.0.0.1',
       listen_port: 0,

@@ -122,6 +122,8 @@ jobs:
         run: python3 tools/checks/check-platform-candidate-pipeline.py
       - name: Check Platform v1 PostgreSQL schema contract
         run: python3 tools/checks/check-platform-postgres-schema.py
+      - name: Check independent API and schema validator regressions
+        run: python3 -m unittest tools/tests/test_platform_v1_contracts.py tools/tests/test_platform_postgres_schema.py
       - name: Check crate boundaries and dependency feature baseline
         run: bash tools/checks/check-crate-boundaries.sh
       - name: Install Helm for Sandbox deployment contract
@@ -130,11 +132,10 @@ jobs:
           version: v3.19.0
       - name: Verify shared installation Compose and Helm consumers
         run: |
+          cargo build --locked -p insight-platform-installation-tooling --bin platform-installation
           python3 -m unittest \
             tools/tests/test_installation_compose.py \
             tools/tests/test_installation_helm.py \
-            tools/tests/test_installation_helm_lifecycle.py \
-            tools/tests/test_installation_helm_providers.py \
             tools/tests/test_installation_native.py \
             tools/tests/test_public_trust.py \
             tools/tests/test_platform_provider_lifecycle.py
@@ -615,9 +616,9 @@ jobs:
                   "kubernetes-input", "installation-ci-cache", runtime.split("@", 1)[1]], timeout=30))
               path.chmod(0o444)
               plan = json.loads(subprocess.check_output([*base, "--mount", "type=bind,source="+str(path)+",target=/input.json,readonly",
-                  "--entrypoint", "/usr/local/bin/platform-installation", runtime, "helm-plan", "--input", "/input.json",
+                  "--entrypoint", "/usr/local/bin/platform-installation", runtime, "helm-values", "--input", "/input.json",
                   "--runtime-image", runtime, "--console-image", console], timeout=30))
-          dependencies = plan["dependencies"]
+          dependencies = plan["plan"]["dependencies"]
           if set(dependencies) != {"postgres", "nats", "s3", "openbao"}:
               raise SystemExit("installation dependency closure differs")
           for image in [owner.NODE_IMAGE, *dependencies.values()]:

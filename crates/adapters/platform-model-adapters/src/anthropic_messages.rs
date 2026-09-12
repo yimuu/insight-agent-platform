@@ -566,11 +566,7 @@ impl AnthropicMessagesCodec {
         };
 
         let structured_output = if tool_intents.is_empty() {
-            parse_structured_output(
-                &self.request,
-                &text,
-                "anthropic_messages_invalid_structured_output",
-            )?
+            parse_structured_output(&self.request, &text)?
         } else {
             None
         };

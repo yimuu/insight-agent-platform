@@ -144,9 +144,6 @@ pub fn prepare_seed(
     mode: Mode,
 ) -> Result<ModelPolicyBootstrapSeedV1, Error> {
     artifact.validate_for(input, identity)?;
-    if input.model_destinations.is_empty() {
-        return Err(Error::InvalidInput);
-    }
     let seed: ModelPolicyBootstrapSeedV1 =
         match private.read(SEED_FILE, MAX_MODEL_POLICY_DECLARATION_BYTES)? {
             Some(bytes) => parse(&bytes)?,
@@ -573,23 +570,11 @@ mod tests {
     fn seed_freezes_actual_policy_refs_and_catalog_uses_the_same_built_worker_manifest() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        let mut input = compose_input(
+        let input = compose_input(
             "model-seed-test",
             format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
         )
         .unwrap();
-        input.model_destinations.push(
-            insight_platform_deployment_contracts::installation::InstallationModelDestinationV1 {
-                protocol: ModelProviderWireProtocol::OpenAiResponses,
-                endpoint: CanonicalHttpEndpoint {
-                    scheme: CapabilityEndpointScheme::Https,
-                    host: "api.example.com".into(),
-                    port: 443,
-                    base_path: "/compatible-mode".into(),
-                },
-                region: "us-east-1".parse().unwrap(),
-            },
-        );
         let prepared = PreparedInstallation::prepare(&input, &root.join("private")).unwrap();
         let artifact = InstallationModelPolicyArtifactInputsV1 {
             schema_version: 1,
@@ -679,7 +664,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(
-            catalog.destinations[0].adapter.worker_manifest_digest,
+            catalog.adapters[0].worker_manifest_digest,
             canonical(
                 &insight_platform_deployment_tooling::worker_profile::model_manifest(&builds)
                     .unwrap()
@@ -687,11 +672,11 @@ mod tests {
             .unwrap()
         );
         assert_eq!(
-            catalog.destinations[0].adapter.adapter_contract_digest,
+            catalog.adapters[0].adapter_contract_digest,
             ModelProviderWireProtocol::OpenAiResponses.adapter_contract_digest()
         );
         assert_eq!(
-            catalog.destinations[0].grant.network_policy,
+            catalog.policies.network,
             built
                 .policy(ModelBootstrapPolicyRole::Network)
                 .exact
@@ -701,7 +686,7 @@ mod tests {
             catalog.secret_provider_id,
             prepared.identity().secret_provider_id
         );
-        assert!(!catalog.destinations[0].grant.development_anonymous);
+        assert_eq!(catalog.public_egress().protocols.len(), 2);
         // A completed setup may not invent a new quota identity when persisted input is damaged.
         // Both recovery and read-only verification reject before any provider or PG command.
         let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

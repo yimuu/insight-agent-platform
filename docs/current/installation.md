@@ -1,16 +1,13 @@
 # Local installation
 
 The complete local entry point runs the platform and Console as separate Compose containers.
-The host needs Docker with Compose and Python 3; consuming built images requires neither Cargo nor
-Node. Native host processes use the shared installation launcher below. Sandbox execution uses its
+The host needs Docker with Compose; consuming built images requires no host Python, Cargo or Node. Native host processes use the shared installation launcher below. Sandbox execution uses its
 separate Kubernetes/OpenSandbox installation.
 
-The current O artifacts passed image and offline consumer checks, and its separately frozen Native
-package passed a real public CLI ModelLoop with typed result, complete durable events and controlled
-business restart on the same input/package. Current-image physical Compose/Kind, actual retrieval
-and browser signed-object transport remain separate acceptance work. The
-[evidence index](../specs/unified-installation/deployment-review.md#o-current-delivery-evidence)
-retains the earlier physical recovery results and their original failures without transferring them.
+The declarative Compose and local Kind/Helm paths have passed physical installation and recovery
+checks for the images in the [local qualification reports](../qualifications/README.md).
+Earlier Native ModelLoop results remain separate package evidence. External model and retrieval
+dispatch, browser signed-object transport and release qualification are not implied by startup.
 
 The configuration owner is
 [`InstallationInputV1`](../../crates/deployment/platform-deployment-contracts/src/installation.rs).
@@ -24,106 +21,71 @@ change TLS identities or add retries to installation operations.
 
 ## Start with Compose
 
-Select the runtime and Console images by immutable digest. Compose also accepts an exact image ID
-from `docker image inspect` for a locally built image. The runtime's package digest is the digest
-in that selected image reference. The source build commands are:
+From the repository root:
 
 ```sh
-docker build --target runtime -f deploy/images/platform.Dockerfile -t insight-runtime:local .
-pnpm --dir apps/console build
-docker build -f deploy/images/console.Dockerfile -t insight-console:local apps/console
-RUNTIME_IMAGE=$(docker image inspect --format '{{.Id}}' insight-runtime:local)
-CONSOLE_IMAGE=$(docker image inspect --format '{{.Id}}' insight-console:local)
-RUNTIME_DIGEST=$RUNTIME_IMAGE
+docker compose up -d --build
 ```
 
-The source Console build needs the pinned Rust/WASM and `wasm-bindgen` tooling described in
-[Console engineering](../../apps/console/README.md). These tools are not needed by an installed
-Console container.
+Open **http://127.0.0.1:8088**. Create the first administrator with a name, email and password.
+Subsequent visits use the same login. A browser session lasts eight hours and survives process
+restarts. Log out to revoke that session. No token file or browser CA installation is needed.
 
-Generate the public installation declaration with the selected runtime image:
+The root `compose.yaml` is checked against the Rust topology producer. Docker builds the runtime
+and Console, including the pinned WASM compiler. The host needs Docker with Compose; it does not
+need Python, Cargo, Node or a separate configuration-generation command. First compilation may
+take several minutes. Subsequent unchanged starts reuse the built images and installed volumes.
+
+The optional [.env.example](../../.env.example) documents installation name, public loopback port
+and image overrides. Defaults are `my-platform` and `8088`. A prepared installation freezes these
+inputs and actual executable identities; changing those is a deployment change, not an ordinary
+restart. Existing installations are not silently migrated or reset.
+
+For the explicitly supported schema 16 installation, the conversation release has a separate
+preserving-data upgrade under [ADR-0017](../adr/0017-conversation-live-debugging-and-release-upgrade.md).
+Build the new images first. Stop serving processes, including Console, local identity, gateways and
+workers; keep PostgreSQL, NATS, S3 and OpenBao running. Then run:
 
 ```sh
-docker run --rm --network none --read-only --cap-drop ALL \
-  --entrypoint /usr/local/bin/platform-installation "$RUNTIME_IMAGE" \
-  compose-input my-platform "$RUNTIME_DIGEST" > input.json
+docker compose run --rm --no-deps installation-prepare compose-upgrade --serving-stopped
+docker compose restart nats
+docker compose up -d
 ```
 
-The declaration contains no passwords or private keys. Add any intended model destinations to its
-`model_destinations` input before installation; this is a deployment allowlist, not a configured
-model account. Each destination supplies the owning protocol, canonical HTTPS endpoint prefix and
-region. An empty list starts the base platform but leaves model configuration and its Agent
-authoring profile unavailable. See [model configuration](model-configuration.md) for the distinction
-between deployment destinations, sources, credentials and model profiles.
+The upgrade validates the exact installed source schema, package and role outputs. PostgreSQL
+commits the additive schema and deployment receipt atomically; a retry of the same upgrade resumes
+file publication. It preserves the bootstrap identity, accounts, model configuration and Run data.
+Unknown schemas or edited role outputs are rejected. Serving processes still perform no DDL, and
+ordinary startup neither upgrades nor erases data. Fresh installations continue to use the one-command
+startup above. This release-specific upgrade is not a general historical migration chain.
 
-Remote Context uses the same separation. `remote_context_destinations` selects physical HTTPS
-addresses, public trust roots, regions, byte ceilings and optional credential-purpose/header
-mappings before the first installation. Its default empty list denies remote search. The shared
-renderer enables the ContextRemote role for an installed destination; it does not create Context
-resources, Policy revisions or conformance Artifacts. Those are published through the ordinary
-Registry lifecycle. A destination contains no tenant, Context deployment or SecretBinding IDs.
-See the [document-review example](../../examples/productization/document-review) for source and
-publication steps; a local protocol test is not evidence of a deployed public provider.
-The `compose-input`, `kubernetes-input` and `native-input` factories accept an optional trailing
-`--remote-context-destinations FILE` containing the same owning array. They derive the worker,
-network, role paths and credentials together; do not edit only the array after generating an input.
-The file contains public trust material and DNS endpoints, not tenant or SecretBinding identities.
-For a containerized factory, mount that public file read-only at the supplied absolute path.
+Models are configured in the browser. Select a provider or enter a custom compatible HTTPS URL,
+then save a key and model ID. Installation always provisions the configuration policies and
+actual adapters; no deployment address allowlist must be populated before the page is usable.
+The Registry freezes each source endpoint and credentials. Egress still enforces authorization,
+public DNS addresses, TLS hostname verification and redirect/body/time limits.
 
-Every remote dispatch still needs a current Security decision over the actual Context Query,
-Run, Job lease, principal and frozen dependencies. The installed destination only constrains the
-physical route. Credential mappings must match the currently authorized exact Secret purposes;
-an empty mapping permits an anonymous provider without weakening authenticated providers.
-Changing a destination requires a new reviewed deployment input, not a Registry request or
-editing an already prepared installation.
-
-For the Beijing DashScope Responses endpoint, replace the generated empty array before the first
-`up` with this input fragment. Keep the other generated fields unchanged:
-
-```json
-"model_destinations": [{
-  "protocol": "open_ai_responses",
-  "endpoint": {
-    "scheme": "https",
-    "host": "dashscope.aliyuncs.com",
-    "port": 443,
-    "base_path": "/compatible-mode"
-  },
-  "region": "cn-beijing"
-}]
-```
-
-This declares the permitted destination; it does not contain a key or create a model account.
-
-Run the host wrapper with absolute paths and a new private directory:
+Common commands:
 
 ```sh
-python3 tools/install/platform_compose.py up \
-  --input /absolute/path/input.json \
-  --directory /absolute/path/private-installation \
-  --runtime-image "$RUNTIME_IMAGE" --console-image "$CONSOLE_IMAGE"
+docker compose ps
+docker compose logs --tail 100 console local-identity installation-provision
+docker compose run --rm --no-deps installation-ready
+docker compose stop
+docker compose up -d
 ```
 
-The wrapper prepares identity and dependency files, starts the local dependencies, runs the
-one-shot initializer, starts each selected role directly, and checks every role plus Console's
-Gateway transport. It delivers `public-ca.pem` and prints safe certificate-file and session metadata. Open the reported Console endpoint
-and use the token from the reported private file to establish the administrator session. The same
-file is accepted by the public [model CLI](model-configuration.md).
+`stop` preserves containers and data. `docker compose down` removes containers and the network,
+while preserving named volumes. `docker compose down --volumes` deliberately removes this
+installation's data; it is not part of normal startup.
 
-The default Console binds `127.0.0.1:8088`. The durable local S3 endpoint binds `127.0.0.1:8333`
-for browser-issued Artifact uploads; signed URLs retain the `s3.localhost` HTTPS hostname. Other process and database endpoints
-remain inside the Compose network. Local S3 CORS permits PUT from the exact declared Console
-origin; short-lived upload grants still require current server authorization. The generated S3
-certificate uses the installation's private CA. Browser uploads require explicit trust in that
-public CA; the installer never modifies OS trust or disables certificate/SAN checks. The CLI can
-use the explicit public `--ca-file` option. Ordinary same-origin Console reads do not prove that
-browser S3 uploads have been qualified.
+The browser uploads through the Console origin. The Console verifies the internal object-store
+CA and forwards only the exact signed upload request. Browser certificate exceptions and direct
+cross-origin access to S3 are unnecessary. External model service certificates are still verified.
 
-Controlled container reconstruction stops serving processes before NATS, S3, OpenBao and PostgreSQL,
-then verifies the original containers exited cleanly before removing them while retaining volumes.
-The shared local dependency profile gives SeaweedFS 45 seconds to stop and uses the fixed NATS
-image's normal SIGINT shutdown protocol for Compose and Native. Helm consumes the same S3 grace
-period; it does not depend on optional Kubernetes container stop-signal support.
+Advanced immutable-image deployments may use the typed `compose-input` and `compose` producers.
+Remote Context destinations retain their separately reviewed installation policy; the default
+empty remote-context list denies remote search. They are not model account configuration.
 
 ## Start native processes
 
@@ -151,7 +113,7 @@ native=(python3 tools/install/platform_native.py \
 "${native[@]}" up
 ```
 
-Set any model destinations in the public input before `render`. `up` remains in the foreground;
+`up` remains in the foreground;
 Ctrl-C stops and reaps the host processes it started while preserving dependency containers, data,
 private identity and recovery journals. Native roles share the host user's trust boundary; separate
 processes do not provide the distinct OS identities used by the container deployment. A second
@@ -167,14 +129,20 @@ The model Policy declaration is written to S3 and read back at its exact object 
 the owning PostgreSQL transaction installs its references. An uncertain external effect is resolved
 only by the same persisted identity and exact observation.
 
-The local physical provider is persistent S3 plus OpenBao Transit/KV v2. Initial self-initialization
-has a one-time durable start permission and no automatic container/Pod restart. If that step fails,
-keep the original volumes and files: the tools report incomplete or unknown outcome and do not
-repeat initialization. ProviderReady requires actual certificate authentication and exact cluster,
-mount, key and canary checks. Later starts use a separate serving configuration without self-init.
-Read-only verification may acquire short authentication tokens and cause the provider's own audit
-or authentication-lease records; it does not alter provider configuration, secrets or objects.
-This is a local private-volume trust model, not production HSM isolation or a power-loss/HA claim.
+The local physical provider is persistent S3 plus OpenBao Transit/KV v2. OpenBao uses one ordinary
+server configuration for both first installation and later starts. The finite Rust bootstrap
+records its one-time intent, initializes through the API, retains recovery material privately,
+waits for the active server and installs the fixed authentication policies and keys. It revokes
+the temporary root token before provider readiness can be committed.
+
+If initialization is interrupted, retain the original volumes and input. A later bootstrap may
+observe the existing provider and finish root-token revocation. It never repeats uncertain
+initialization or configuration writes. Lost initialization responses without persisted recovery
+material remain `ExternalOutcomeUnknown`; missing state does not authorize a replacement identity.
+Provider readiness requires actual certificate authentication and exact cluster, mount, key and
+canary checks. Read-only verification may create short authentication leases and provider audit
+records; it does not change provider configuration, secrets or objects. The static seal and local
+private volumes are a development trust model, not production HSM isolation or an HA claim.
 
 An installation with model destinations also freezes the tenant Model concurrency account identity.
 Its initial finite limit is a local deployment setting, not a provider rate guarantee. Each exact
@@ -188,80 +156,90 @@ role membership, DDL or temporary-table permission. This development login is no
 production least-privilege qualification. The initializer's database credential and CA/JWT issuer
 private keys are not mounted into serving containers. No container mounts a Docker socket.
 
-Repeated `up` verifies a completed installation before starting services; it does not reset schema,
-regrant permissions, refresh frozen policy deadlines or regenerate credentials. `verify` performs
-installation checks and readiness observations, and issues no new session. A successful owner
-result may create the host's immutable `ready-owner-proof.json` binding; it does not change provider
-configuration or business state:
+Repeated `docker compose up -d` runs the installation dependencies against the existing identity.
+An already completed provision verifies the installed schema, grants, policies, objects and role
+files; it does not reset, regrant or regenerate them. Compose may leave already running workloads
+running during this check. To run explicit checks without changing workload lifecycle:
 
 ```sh
-python3 tools/install/platform_compose.py verify \
-  --input /absolute/path/input.json --directory /absolute/path/private-installation \
-  --runtime-image "$RUNTIME_IMAGE" --console-image "$CONSOLE_IMAGE"
+docker compose -f compose.json run --rm --no-deps installation-verify
+docker compose -f compose.json run --rm --no-deps installation-ready
 ```
 
-Use the same arguments with `session` for explicit renewal. Sessions use the existing OIDC verifier,
-last 900 seconds and are delivered as a raw token plus one newline in a caller-owned `0600` file.
-Token bytes are never printed in command metadata. New installations explicitly bind a tenant
-administrator; this does not increase the permissions of existing native developer identities.
+Explicit CLI bearer sessions use the existing OIDC verifier and last 900 seconds. Compose and Helm browser login instead use the local identity service and an eight-hour HttpOnly session cookie. Explicit issuance writes a raw token
+plus one newline in a private file; token bytes never appear in logs. New installations bind the
+tenant administrator without changing existing identities' permissions.
 
 ## Obtain the public CA
 
-Initial `up` delivers the exact installation CA to `public-ca.pem` in the host `--directory`, with
-mode `0600`. The explicit `public-trust` operation reads the installed Ready identity and exports
-only this public certificate, without contacting providers or renewing a session:
+The `public-trust` operation reads the installed Ready identity and exports only its public
+certificate, without contacting providers or renewing a session. Copy from its read-only container:
 
 ```sh
-python3 tools/install/platform_compose.py public-trust \
-  --input /absolute/path/input.json --directory /absolute/path/private-installation \
-  --runtime-image "$RUNTIME_IMAGE" --console-image "$CONSOLE_IMAGE"
-PUBLIC_CA_FILE=/absolute/path/private-installation/public-ca.pem
+umask 077
+docker compose -f compose.json run --no-deps --name my-platform-trust \
+  installation-public-trust > public-trust.json
+docker cp my-platform-trust:/installation/private/ca.pem ./public-ca.pem
+docker rm my-platform-trust
+PUBLIC_CA_FILE="$(pwd)/public-ca.pem"
 shasum -a 256 "$PUBLIC_CA_FILE"
 ```
 
-Use the same operation and installation arguments with the Native or Helm wrapper. An installation
-created before host Ready evidence was retained must first run explicit `verify`; export does not
-infer its identity from a certificate or rerun provisioning. A different existing destination file
-is rejected and retained. Keep the original private installation files and the Ready binding.
+Native retains its `public-trust` operation. The Helm chart provides an explicit suspended
+`installation-public-trust` Job template, using the file delivery procedure in its README.
 
 The reported `certificate_sha256` is the SHA-256 of the original PEM **file bytes**; compare its
 hexadecimal part with `shasum`. It is different from the DER certificate fingerprint displayed by
 browsers or `openssl x509 -fingerprint`. Export proves the frozen installation binding, not the
-reachability or TLS name of a service. Pass this file to the CLI's `--ca-file`. Browser trust must
-be installed explicitly by the operator in their chosen browser trust store; the tools never
-modify OS trust, bypass TLS validation or route Kubernetes service names automatically.
+reachability or TLS name of a service. Pass this file to the CLI's `--ca-file`. Console object uploads
+use the CA in the server's deployment configuration; the tools never modify OS/browser trust or
+bypass TLS validation.
 
-Input, file, role, provider or object drift fails closed. The wrapper retains resources and evidence
-on failure; it does not delete volumes or repair foreign state. Keep the original private directory
-and declaration to resume the same installation. Replacing a package is a separate deployment
-operation, not an edit that an installation verification command silently accepts.
+Input, file, role, provider or object drift fails closed. Failed installation jobs and data volumes
+are retained; no normal command repairs foreign state or deletes volumes. Keep the original
+input and private volumes. Replacing the package is a separate deployment operation.
 
 ## Local Kubernetes
 
-The [installation Helm chart and wrapper](../../deploy/helm/insight-platform-installation/README.md)
-consume the same owner. The host operator controls the cluster; Pods have no Kubernetes API token.
-Prepare and provision results are checked against actual Job/Pod identities before serving is
-allowed. Every role has a separate volume; installation private state is confined to one-shot
-operations. Existing per-role production charts and their qualification gates remain separate.
+Prepare a Kubernetes input with the selected runtime's `kubernetes-input NAME PACKAGE_DIGEST`
+command, then generate Helm values using `helm-values --input FILE --runtime-image IMAGE
+--console-image IMAGE`. Both product image references must use repository digests accessible to
+the cluster. See the [chart guide](../../deploy/helm/insight-platform-installation/README.md) for
+complete commands. With values prepared, startup is one native Helm command:
 
-After the original OpenBao initializer stops, `up/resume` checks the ordinary provider through
-actual authentication and provider reads before platform provision. TCP readiness alone does not
-satisfy this check. An interrupted observation keeps its original Job; resolving that old result
-does not replace the fresh observation required for this invocation. The original initialization
-proof and any pending platform provision request remain unchanged.
+```sh
+helm upgrade --install installation deploy/helm/insight-platform-installation \
+  --namespace my-platform --create-namespace -f values.json \
+  --set node="$NODE_NAME" --wait --wait-for-jobs --timeout 15m
+```
 
-Helm `up/resume` reuses a previously delivered session instead of renewing it implicitly. If only
-that session has expired, the installation can finish its Ready checks and return `SessionExpired`
-with an explicit renewal instruction. Use the same arguments with `session`; do not repeat
-provisioning or replace the installation identity. Changed or unknown session material remains a
-separate failure and is not treated as ordinary expiry.
+Helm submits the complete resource set. One installation Job publishes prepared configuration,
+initializes dependencies, provisions the platform and publishes completion. Dependency init
+containers wait for preparation; serving init containers wait for completion. These bounded,
+input-bound gate files live on a separate read-only publication volume and confer no platform
+permissions. Serving processes still check their own configuration and installed schema.
+No Pod receives a Kubernetes API token or a Docker socket. Installation private state is visible
+only to administrative Jobs; each role receives only its own configuration and credentials.
 
-Local Kubernetes object access also requires routing the exact signed S3 service hostname
-and trusting the installation's public CA in the browser. A Console port-forward alone does not
-provide object transport. The tools neither install trust into the user's OS nor weaken TLS.
+Repeating the Helm command creates a new finite verification-capable installation Job against the
+same PVCs. Existing deployments retain their normal Kubernetes lifecycle. Interrupted or failed
+initialization remains subject to the same one-time write guard. The chart keeps PVCs and Job
+evidence across uninstall; data removal is an explicit operator action. This chart remains a
+single-node development topology with node-bound ReadWriteOnce volumes, not a multi-node HA chart.
 
-For offline restarts, keep the exact selected images locally. The Compose wrapper validates and
-creates an installation-specific retention tag for each selected image so rebuilding an unrelated
-local build tag does not discard its last cache reference. Execution still uses the original
-immutable digest. A pre-existing retention tag pointing to different bytes is rejected, and the
-wrapper does not remove images or retarget another installation's reference.
+Console can be port-forwarded to its configured loopback origin. The chart deploys the same password login service and owner/session tables, and model addresses are configured in the browser. No model destination declaration is needed in Helm values. With the V3 Console transport, object uploads
+use that same port-forward; the Console pod resolves the installed S3 service hostname and validates
+its installation CA. Direct CLI object access still needs an explicit route and `--ca-file`.
+This transport change does not by itself claim a new Kubernetes qualification run.
+
+Keep the selected digest-pinned images available in your registry or local cache for restarts.
+The deployment does not create host-side image retention tags or change another image reference.
+
+For a package-only patch after the explicit conversation schema upgrade, stop serving roles and
+keep dependencies running. Using the same installation/output mounts, obtain the canonical
+release digest with `platform-installation compose-release-digest`, then invoke the new package's
+`platform-installation compose-rollout --serving-stopped --expected-release sha256:…`.
+This verifies the unchanged current schema and advances deployment evidence without changing
+business data or bootstrap identities. Restart serving only after it succeeds. For interrupted
+rollout, repeat the same package and original expected digest; unknown output edits are rejected.
+The expected digest is the command's canonical digest, not a hash of formatted `release.json`.

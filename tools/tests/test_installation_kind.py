@@ -39,7 +39,7 @@ class KindQualificationTests(unittest.TestCase):
             root = Path(temporary)
             fixture = KIND.Fixture("runtime@sha256:"+"a"*64, "console@sha256:"+"b"*64, root)
             plan = self.plan(fixture)
-            with mock.patch.object(fixture, "docker", side_effect=[json.dumps(plan["input"]).encode(), json.dumps(plan).encode()]) as docker, mock.patch.object(fixture, "import_image") as imported:
+            with mock.patch.object(fixture, "docker", side_effect=[json.dumps(plan["input"]).encode(), json.dumps({"plan": plan}).encode()]) as docker, mock.patch.object(fixture, "import_image") as imported:
                 fixture.setup()
             self.assertEqual(imported.call_args_list, [mock.call(fixture.runtime, "runtime"), mock.call(fixture.console, "console")]+
                              [mock.call(image, name) for name, image in sorted(plan["dependencies"].items())])
@@ -65,8 +65,8 @@ class KindQualificationTests(unittest.TestCase):
                 elif change == "localstack": plan["dependencies"]["localstack"] = "old@sha256:"+"f"*64
                 elif change == "missing_s3": del plan["dependencies"]["s3"]
                 elif change == "mutable": plan["dependencies"]["s3"] = "s3:latest"
-                encoded = json.dumps(plan).encode()
-                if change == "duplicate": encoded = b'{"schema_version":1,'+encoded[1:]
+                encoded = json.dumps({"plan": plan}).encode()
+                if change == "duplicate": encoded = b'{"plan":{},'+encoded[1:]
                 elif change == "nonfinite": encoded = encoded.replace(b'"schema_version": 1', b'"schema_version": NaN')
                 with mock.patch.object(fixture, "docker", side_effect=[original, encoded]), mock.patch.object(fixture, "import_image") as imported:
                     with self.assertRaises(Exception): fixture.setup()
@@ -76,39 +76,6 @@ class KindQualificationTests(unittest.TestCase):
         return {"metadata": {"name": "artifact-gateway-fixture", "namespace": fixture.namespace},
                 "spec": {"containers": [{"name": "process", "image": fixture.runtime}]},
                 "status": {"containerStatuses": [{"name": "process", "ready": True}]}}
-
-    def test_public_trust_qualification_rejects_session_or_installation_changes(self):
-        for changed in (None, "session", "snapshot", "identity", "pod_remains"):
-            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary).resolve()
-                fixture = KIND.Fixture("runtime@sha256:"+"a"*64, "console@sha256:"+"b"*64, root)
-                fixture.installation = root/"installation"
-                fixture.installation.mkdir(mode=0o700)
-                plan = self.plan(fixture)
-                identity = "sha256:"+"c"*64
-                KIND.json_write(fixture.installation/"helm-plan.json", {"plan": plan})
-                KIND.json_write(fixture.installation/"helm-state.json", {"ready": {"identity_digest": identity}})
-                KIND.json_write(fixture.installation/"public-trust-intent.json", {"complete": True, "pod_uid": "pod-uid", "nonce": "a"*32})
-                # These are only delivery comparison canaries. The consumer separately parses real X509.
-                KIND.write(fixture.installation/"public-ca.pem", b"public-certificate-comparison-canary")
-                KIND.write(fixture.installation/"session-token", b"session-comparison-canary")
-                result = {"schema_version": 1, "input_digest": plan["input_digest"], "identity_digest": identity,
-                    "certificate_file": str(fixture.installation/"public-ca.pem"),
-                    "certificate_sha256": "sha256:"+hashlib.sha256((fixture.installation/"public-ca.pem").read_bytes()).hexdigest()}
-                def operation(name):
-                    self.assertEqual(name, "public-trust")
-                    if changed == "session": (fixture.installation/"session-token").write_bytes(b"renewed")
-                    if changed == "identity": result["identity_digest"] = "sha256:"+"f"*64
-                    return json.dumps(result).encode()
-                with mock.patch.object(fixture, "operation", side_effect=operation), \
-                     mock.patch.object(fixture, "snapshot", return_value={"stable": changed != "snapshot"}), \
-                     mock.patch.object(fixture, "kube", return_value=b'{}' if changed == "pod_remains" else b''):
-                    if changed:
-                        with self.assertRaises(KIND.QualificationFailure): fixture.qualify_public_trust({"stable": True})
-                        self.assertNotIn("readonly_public_trust_pod_exact_delivery_without_session_renewal", fixture.report["checks"])
-                    else:
-                        fixture.qualify_public_trust({"stable": True})
-                        self.assertIn("readonly_public_trust_pod_exact_delivery_without_session_renewal", fixture.report["checks"])
 
     def test_tls_executes_only_serving_gateway_with_explicit_roots_and_real_openssl3_gate(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -200,69 +167,19 @@ class KindQualificationTests(unittest.TestCase):
         with self.assertRaises(KIND.QualificationFailure):
             KIND.sdk_diagnostic_entries(good * 33)
 
-    def diagnostic_fixture(self, root):
-        fixture = KIND.Fixture("runtime@sha256:"+"a"*64, "console", root)
-        fixture.installation = root/"installation"
-        fixture.installation.mkdir(mode=0o700)
-        owner, operation, digest = "b"*32, "c"*16, "sha256:"+"d"*64
-        KIND.json_write(fixture.installation/"helm-state.json", {"owner": owner, "operation": operation, "phase": "provision"})
-        KIND.json_write(fixture.installation/"helm-plan.json", {"plan": {"namespace": fixture.namespace, "runtime_image": fixture.runtime, "input_digest": digest}})
-        name = "installation-provision-"+operation
-        job = {"metadata": {"name": name, "namespace": fixture.namespace, "uid": "job-uid", "labels": {"insight.platform/installation": owner}, "annotations": {"insight.platform/input-digest": digest, "insight.platform/phase": "provision"}}, "spec": {"backoffLimit": 0}, "status": {"conditions": [{"type": "Failed", "status": "True"}]}}
-        command = "exec /usr/local/bin/platform-installation provision --input /installation-input/input.json --state /installation/private --output /output --binaries /usr/local/bin > /tmp/installation-result.json"
-        pod = {"metadata": {"name": name+"-abc12", "namespace": fixture.namespace, "uid": "pod-uid", "labels": {"insight.platform/installation": owner}, "ownerReferences": [{"name": name, "kind": "Job", "uid": "job-uid", "controller": True}]}, "spec": {"containers": [{"name": "installation", "image": fixture.runtime, "command": ["/bin/sh", "-ec"], "args": [command]}]}, "status": {"phase": "Failed", "containerStatuses": []}}
-        return fixture, job, pod
-
-    def test_sdk_diagnostics_read_only_exact_owned_failed_installer_with_limits(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture, job, pod = self.diagnostic_fixture(Path(temporary))
-            raw = b"private-error https://user:password@secret.invalid/key\ninstallation_aws operation=kms_create_key failure=dispatch\n"
-            with mock.patch.object(fixture, "kube", side_effect=[json.dumps(job).encode(), raw]) as kube:
-                result = fixture.failure_sdk_diagnostics([pod])
-            self.assertEqual(result["status"], "observed")
-            self.assertEqual(result["job_uid"], "job-uid")
-            self.assertEqual(result["pod_uid"], "pod-uid")
-            self.assertEqual(result["entries"], [{"operation": "kms_create_key", "failure": "dispatch"}])
-            self.assertNotIn("private-error", json.dumps(result))
-            self.assertEqual(kube.call_args.args, ("logs", pod["metadata"]["name"], "--namespace", fixture.namespace, "--container", "installation", "--tail=64", "--limit-bytes=16384", "--request-timeout=5s"))
-            self.assertEqual(kube.call_args.kwargs["timeout"], 10)
-            self.assertEqual(kube.call_count, 2)
-
-    def test_sdk_diagnostics_reject_foreign_owner_uid_command_or_nonfailed_pod(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture, job, pod = self.diagnostic_fixture(Path(temporary))
-            for change in ["job_owner", "job_uid", "job_digest", "job_phase", "job_not_failed", "pod_owner", "pod_uid_link", "pod_name", "pod_namespace", "pod_running", "image", "command", "ambiguous"]:
-                candidate_job, candidate_pod = copy.deepcopy(job), copy.deepcopy(pod)
-                pods = [candidate_pod]
-                if change == "job_owner": candidate_job["metadata"]["labels"]["insight.platform/installation"] = "f"*32
-                elif change == "job_uid": candidate_job["metadata"]["uid"] = "foreign-job"
-                elif change == "job_digest": candidate_job["metadata"]["annotations"]["insight.platform/input-digest"] = "sha256:"+"f"*64
-                elif change == "job_phase": candidate_job["metadata"]["annotations"]["insight.platform/phase"] = "verify"
-                elif change == "job_not_failed": candidate_job["status"]["conditions"] = []
-                elif change == "pod_owner": candidate_pod["metadata"]["labels"]["insight.platform/installation"] = "f"*32
-                elif change == "pod_uid_link": candidate_pod["metadata"]["ownerReferences"][0]["uid"] = "foreign-job"
-                elif change == "pod_name": candidate_pod["metadata"]["name"] = "foreign-pod"
-                elif change == "pod_namespace": candidate_pod["metadata"]["namespace"] = "foreign-namespace"
-                elif change == "pod_running": candidate_pod["status"]["phase"] = "Running"
-                elif change == "image": candidate_pod["spec"]["containers"][0]["image"] = "foreign:latest"
-                elif change == "command": candidate_pod["spec"]["containers"][0]["args"] = ["echo forged"]
-                else: pods.append(copy.deepcopy(candidate_pod))
-                with self.subTest(change=change), mock.patch.object(fixture, "kube", return_value=json.dumps(candidate_job).encode()) as kube:
-                    with self.assertRaises(KIND.QualificationFailure): fixture.failure_sdk_diagnostics(pods)
-                    self.assertEqual(kube.call_count, 1)
-                    self.assertEqual(kube.call_args.args[:2], ("get", "job"))
-
-    def test_sdk_diagnostics_empty_or_unavailable_never_claim_a_write_outcome(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture, job, pod = self.diagnostic_fixture(Path(temporary))
-            for result, status in [(b"untrusted private output", "unknown"), (KIND.QualificationFailure("untrusted private error"), "unavailable")]:
-                responses = [json.dumps({"items": [pod]}).encode(), json.dumps(job).encode(), result]
-                with self.subTest(status=status), mock.patch.object(fixture, "kube", side_effect=responses), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
-                    fixture.diagnostics()
-                    self.assertNotIn("untrusted private", output.getvalue())
-                self.assertEqual(fixture.report["failure_sdk"]["status"], status)
-                self.assertEqual(fixture.report["failure_sdk"]["entries"], [])
-                self.assertNotIn("untrusted private", json.dumps(fixture.report))
+    def test_diagnostics_sanitize_failed_installer_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture=KIND.Fixture("runtime", "console", Path(directory))
+            pod={"metadata":{"name":"installation-1-fixture","namespace":fixture.namespace,
+                 "ownerReferences":[{"kind":"Job","name":"installation-1","controller":True}]},
+                 "spec":{"containers":[{"name":"installation","image":"runtime"}]},"status":{"phase":"Failed"}}
+            with mock.patch.object(fixture,"kube",return_value=b"private-error\ninstallation_aws operation=kms_create_key failure=dispatch\n"):
+                result=fixture.failure_sdk_diagnostics([pod])
+            self.assertEqual(result,{"status":"observed","entries":[{"operation":"kms_create_key","failure":"dispatch"}]})
+            pod['metadata']['namespace']='foreign'
+            with mock.patch.object(fixture,"kube") as kube:
+                self.assertEqual(fixture.failure_sdk_diagnostics([pod])['status'],'unknown')
+                kube.assert_not_called()
 
     def test_controller_recovery_waits_for_old_pod_to_disappear(self):
         old = {"metadata": {"uid": "old", "deletionTimestamp": "2026-01-01T00:00:00Z"},

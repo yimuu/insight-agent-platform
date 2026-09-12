@@ -1,15 +1,23 @@
+#[path = "support/execution_detail.rs"]
+mod execution_detail;
 #[path = "support/fixture_directory.rs"]
 mod fixture_directory;
 #[path = "support/model_connection.rs"]
 mod model_connection;
 #[path = "support/model_default.rs"]
 mod model_default;
+#[path = "support/model_failure_diagnostics.rs"]
+mod model_failure_diagnostics;
+#[path = "support/model_live_text.rs"]
+mod model_live_text;
 #[path = "support/model_public_events.rs"]
 mod model_public_events;
 #[path = "support/model_quota.rs"]
 mod model_quota;
 #[path = "support/model_security_role.rs"]
 mod model_security_role;
+#[path = "support/model_worker_upgrade.rs"]
+mod model_worker_upgrade;
 #[path = "support/model_zero_tools.rs"]
 mod model_zero_tools;
 use fixture_directory::FixtureDirectory;
@@ -2152,7 +2160,16 @@ async fn seed_fixture(pool: &PgPool, repository: &PgRepository) -> Fixture {
     .await;
     let provider_closure = ModelProviderDeploymentClosure {
         provider_revision: provider_revision.clone(),
-        endpoint_identity_digest: digest('4'),
+        endpoint: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap(),
+        endpoint_identity_digest: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap()
+        .canonical_digest()
+        .unwrap(),
         secret_bindings: vec![provider_secret_binding],
         protocol_policy: protocol_policy.clone(),
         network_policy,
@@ -6736,4 +6753,82 @@ async fn model_turn_fixture(exercise_processes: bool) {
             before
         );
     }
+}
+
+#[path = "support/conversations.rs"]
+mod conversations;
+#[test]
+#[ignore = "requires an explicitly isolated fresh Model fixture database"]
+fn persistent_conversation_transactions_in_fresh_postgres() {
+    std::thread::Builder::new()
+        .name("conversation-fixture".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let pool = PgPoolOptions::new()
+                        .max_connections(16)
+                        .connect(&model_test_database_url().unwrap())
+                        .await
+                        .unwrap();
+                    verify_schema(&pool).await.unwrap();
+                    let repository = PgRepository::new(pool.clone());
+                    let fixture = seed_fixture(&pool, &repository).await;
+                    conversations::verify(&pool, &repository, &fixture).await;
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires an explicitly fresh live fixture PostgreSQL database and TLS NATS"]
+fn public_live_text_observes_current_postgres_fences() {
+    std::thread::Builder::new()
+        .name("public-live-text-fixture".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(model_live_text::verify());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires a fresh isolated PostgreSQL database"]
+fn model_worker_admits_old_provider_with_current_attempt_build() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(model_worker_upgrade::verify());
+}
+
+#[test]
+#[ignore = "requires a fresh isolated PostgreSQL database"]
+fn public_model_failure_diagnostics_are_static_and_exact() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(model_failure_diagnostics::verify());
+}
+
+#[test]
+#[ignore = "requires isolated fresh PostgreSQL"]
+fn current_execution_details_are_exact_and_authorized() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(execution_detail::verify());
 }

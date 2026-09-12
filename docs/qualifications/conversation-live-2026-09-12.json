@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-12",
+  "scope": "Local development: persistent conversation, live text, preserving-data release and package rollout",
+  "runtime_image": "sha256:b20fb1ee55999dd37af069a47ba094220db9efc62452131fcd407b305a1f002f",
+  "console_image": "sha256:a3afaa25529b31786c47e21acdc355b652ba9771ad9aa7f79aa32d9f7da8cb6c",
+  "actual_installation": {
+    "name": "my-platform",
+    "schema_from": 16,
+    "schema_to": 17,
+    "original_counts_before": {
+      "owners": 1,
+      "resources": 16,
+      "deployments": 16,
+      "runs": 4
+    },
+    "original_counts_after_schema_upgrade": {
+      "owners": 1,
+      "resources": 16,
+      "deployments": 16,
+      "runs": 4
+    },
+    "bootstrap_identity_retained": true,
+    "schema_upgrade": "passed",
+    "same_schema_package_rollout": "passed",
+    "readiness": "passed",
+    "final_counts": {
+      "owners": 1,
+      "resources": 16,
+      "deployments": 16,
+      "runs": 7,
+      "conversations": 2,
+      "turns": 3
+    },
+    "added_records": "One failed diagnostic turn plus two successful validation turns in two explicitly named test conversations; original runs retained."
+  },
+  "actual_model_conversation": {
+    "status": "passed",
+    "transport": "Authenticated HTTP to actual Compose Runtime Gateway; production workers and configured external provider",
+    "conversation_id": "cnv_01a0936d-2d84-7913-9346-ca7da505f918",
+    "turns": [
+      {
+        "run_id": "run_01a0936d-2d98-7dd3-a54b-95f40705609b",
+        "state": "succeeded",
+        "observed_text_frames": 5,
+        "text_before_observed_terminal": true
+      },
+      {
+        "run_id": "run_01a0936d-3d92-7251-929d-b89b4d91031b",
+        "state": "succeeded",
+        "observed_text_frames": 3,
+        "text_before_observed_terminal": true
+      }
+    ],
+    "second_answer_recalled_first_message": true,
+    "same_command_replay_preserved_run_id": true,
+    "gateway_and_console_restart_retained_two_turns_and_answers": true,
+    "test_input_contains_sensitive_data": false
+  },
+  "isolated_evidence": {
+    "conversation_pg_transactions": "passed",
+    "history_artifact_current_authorization_and_negative_boundaries": "passed",
+    "two_round_production_assembly_and_adapter_wire_capture": "passed (fixture persists terminal result; separate actual worker evidence above)",
+    "pg_tls_nats_production_sse_fences_and_idle_revocation": "passed",
+    "old_provider_new_worker_production_driver_and_cancellation": "passed",
+    "schema_upgrade_and_successive_package_rollout_recovery": "passed",
+    "role_output_recovery_and_unknown_edits": "17 passed",
+    "conversation_http_contract_and_timeout": "5 passed",
+    "worker_unit": "15 passed",
+    "worker_process": "3 passed",
+    "console_typecheck": "passed",
+    "console_client_live_parser": "17 passed",
+    "structured_live_answer_preview": "2 passed",
+    "generated_contracts_and_schema_contract": "current",
+    "docker_source_builds": "passed"
+  },
+  "limitations": [
+    "Browser automation was unavailable; no browser click-through or screenshot qualification claimed.",
+    "Not a signed release or production capacity qualification."
+  ],
+  "initial_real_probe": {
+    "run_id": "run_01a09358-7f12-7e31-9720-5df81e8afa43",
+    "state": "failed",
+    "cause": "Worker used frozen provider manifest as current attempt identity; fixed to validate durable Job attempt build, then independently reviewed and requalified."
+  },
+  "temporary_fixture_containers_removed": true
+}

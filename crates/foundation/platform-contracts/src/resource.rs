@@ -2773,6 +2773,7 @@ impl McpDeploymentClosure {
 #[serde(deny_unknown_fields)]
 pub struct ModelProviderDeploymentClosure {
     pub provider_revision: ExactVersionRef,
+    pub endpoint: crate::CanonicalHttpEndpoint,
     pub endpoint_identity_digest: Sha256Digest,
     pub secret_bindings: Vec<crate::ExactSecretBindingRef>,
     pub protocol_policy: ExactVersionRef,
@@ -2786,6 +2787,14 @@ pub struct ModelProviderDeploymentClosure {
 
 impl ModelProviderDeploymentClosure {
     fn validate(&self) -> Result<(), ResourceContractError> {
+        self.endpoint
+            .validate()
+            .map_err(|_| ResourceContractError::InvalidArtifact)?;
+        if self.endpoint.scheme != crate::CapabilityEndpointScheme::Https
+            || self.endpoint.canonical_digest().as_ref() != Ok(&self.endpoint_identity_digest)
+        {
+            return Err(ResourceContractError::InvalidArtifact);
+        }
         require_kind(
             &self.provider_revision.revision_id,
             ResourceKind::ModelProviderRevision,

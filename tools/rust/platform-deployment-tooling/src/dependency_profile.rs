@@ -130,14 +130,8 @@ pub fn composition(
         s3.as_object_mut().unwrap().remove("networks");
     }
     services.insert("s3".into(), s3);
-    for (name, configuration) in [
-        ("openbao-initialize", "initialize.json"),
-        ("openbao", "serve.json"),
-    ] {
-        let mut service = json!({"image":images["openbao"],"user":user,"entrypoint":["/usr/bin/bao"],"command":["server",format!("-config={}/{configuration}",crate::openbao_profile::OPENBAO_DIRECTORY)],"volumes":[bao_config,bao_data],"read_only":true,"tmpfs":[format!("/tmp:uid={},gid={},mode=0700",user.split(':').next().unwrap(),user.split(':').nth(1).unwrap())],"cap_drop":["ALL"],"security_opt":["no-new-privileges:true"],"restart":if name=="openbao-initialize"{"no"}else{"unless-stopped"},"networks":{"default":{"aliases":[input.network.providers.openbao()?.host()?]}}});
-        if name == "openbao-initialize" {
-            service["profiles"] = json!(["initialize"]);
-        }
+    for (name, configuration) in [("openbao", "serve.json")] {
+        let mut service = json!({"image":images["openbao"],"user":user,"entrypoint":["/usr/bin/bao"],"command":["server",format!("-config={}/{configuration}",crate::openbao_profile::OPENBAO_DIRECTORY)],"volumes":[bao_config,bao_data],"read_only":true,"tmpfs":[format!("/tmp:uid={},gid={},mode=0700",user.split(':').next().unwrap(),user.split(':').nth(1).unwrap())],"cap_drop":["ALL"],"security_opt":["no-new-privileges:true"],"restart":"unless-stopped","networks":{"default":{"aliases":[input.network.providers.openbao()?.host()?]}}});
         if output.is_some() {
             service["ports"] = json!([format!(
                 "127.0.0.1:{}:8200",

@@ -29,3 +29,4 @@ x509-parser = { workspace = true, features = ["verify-aws"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+yaml_serde.workspace = true

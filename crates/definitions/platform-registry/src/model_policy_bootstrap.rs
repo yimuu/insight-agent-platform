@@ -27,15 +27,19 @@ impl ModelPolicyBootstrapMaterial {
             .find(|item| item.identity.role == role)
             .expect("builder emits exact roles")
     }
-    pub fn configuration_policies(&self) -> ModelConfigurationPoliciesV1 {
+    pub fn configuration_policies(&self) -> ModelConfigurationPoliciesV2 {
         use ModelBootstrapPolicyRole::*;
-        ModelConfigurationPoliciesV1 {
+        ModelConfigurationPoliciesV2 {
             protocol: self.policy(Protocol).exact.revision.clone(),
             safety: self.policy(Safety).exact.revision.clone(),
             budget: self.policy(Budget).exact.revision.clone(),
             public_projection: self.policy(PublicProjection).exact.revision.clone(),
             selection: self.policy(Selection).exact.clone(),
             execution: self.policy(Execution).exact.clone(),
+            network: self.policy(Network).exact.revision.clone(),
+            tls: self.policy(Tls).exact.revision.clone(),
+            trust: self.policy(Trust).exact.revision.clone(),
+            data: self.policy(Data).exact.revision.clone(),
         }
     }
 }
@@ -64,16 +68,16 @@ fn rules(role: ModelBootstrapPolicyRole) -> Result<Value, ModelPolicyBootstrapEr
         Protocol => json!({"schema_version":1,"authority":"installed_model_adapter",
             "protocols":[ModelProviderWireProtocol::OpenAiResponses,ModelProviderWireProtocol::AnthropicMessages],
             "protocol_versions":["responses-v1","2023-06-01"]}),
-        Network => json!({"schema_version":1,"authority":"installed_destination_grant",
+        Network => json!({"schema_version":2,"authority":"authorized_provider_deployment",
             "require_exact_endpoint":true,"authorize_current_dispatch_before_dns":true,"redirects":false,
             "public_dns_only":true,"development_loopback_requires_explicit_grant":true}),
-        Tls => json!({"schema_version":1,"https_required":true,"verify_server_identity":true,
-            "trust_roots":"installed_destination_grant_or_system"}),
+        Tls => json!({"schema_version":2,"https_required":true,"verify_server_identity":true,
+            "trust_roots":"system"}),
         Trust => json!({"schema_version":1,"authority":"current_security_dispatch",
             "require_exact_frozen_closure":true,"require_active_principal":true,
             "credential_purpose":MODEL_API_KEY_PURPOSE}),
         Data => json!({"schema_version":1,"maximum_classification":DataClassification::Internal,
-            "allowed_regions":"installed_destination_grant","training":"unspecified",
+            "allowed_regions":"provider_deployment_declaration","training":"unspecified",
             "provider_retention":"unknown","require_current_data_authorization":true}),
         Safety => serde_json::to_value(ModelSafetyPolicyDocument {
             schema_version: 1,

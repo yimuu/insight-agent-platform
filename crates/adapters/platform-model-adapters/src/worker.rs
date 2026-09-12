@@ -233,7 +233,8 @@ fn safe_model_failure(failure: &ModelAdapterFailure, retryable: bool) -> SafeMod
             Retryability::Never
         },
     );
-    safe.failure.safe_message = Some(failure.safe_message.clone());
+    safe.failure.safe_message =
+        Some(insight_platform_models::model_failure_safe_message(&failure.safe_code).to_owned());
     safe.safe_code.clone_from(&failure.safe_code);
     safe.evidence_digest.clone_from(&failure.evidence_digest);
     safe
@@ -372,5 +373,31 @@ impl<E: Error + 'static> Error for ModelAdapterWorkerError<E> {}
 impl From<insight_platform_models::ModelTurnError> for ModelAdapterWorkerContractError {
     fn from(_: insight_platform_models::ModelTurnError) -> Self {
         Self::InvalidCommand
+    }
+}
+
+#[cfg(test)]
+mod safe_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn provider_messages_never_become_durable_failure_text() {
+        for code in ["model_connect_timeout", "provider_unknown_code"] {
+            let failure = ModelAdapterFailure {
+                class: ModelAdapterFailureClass::Permanent,
+                safe_code: code.to_owned(),
+                safe_message: "secret-provider-canary".to_owned(),
+                evidence_digest: static_digest("test_failure"),
+                request_sent: true,
+                retry_at: None,
+            };
+            let durable = safe_model_failure(&failure, false);
+            assert_eq!(
+                durable.failure.safe_message.as_deref(),
+                Some(insight_platform_models::model_failure_safe_message(code))
+            );
+            assert!(!serde_json::to_string(&durable)
+                .unwrap()
+                .contains("secret-provider-canary"));
+        }
     }
 }
