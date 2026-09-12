@@ -20,7 +20,7 @@ async fn fresh_authority_is_provisioned_once_and_then_verified() {
     let provisioned = provision_schema(&pool).await.unwrap();
     let verified = verify_schema(&pool).await.unwrap();
     assert_eq!(provisioned, verified);
-    assert_eq!(provisioned.table_count, 23);
+    assert_eq!(provisioned.table_count, 27);
 
     assert!(matches!(
         provision_schema(&pool).await,
@@ -33,5 +33,5 @@ async fn fresh_authority_is_provisioned_once_and_then_verified() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(rows.get::<i64, _>("tables"), 23);
+    assert_eq!(rows.get::<i64, _>("tables"), 27);
 }
