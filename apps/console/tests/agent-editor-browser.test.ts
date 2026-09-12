@@ -248,8 +248,11 @@ test(
         await browser.click('返回列表')
         await browser.upload('input[type="file"][accept=".json,application/json"]', inputPath)
         await browser.wait(
-          `document.body.innerText.includes('已导入源码与精确依赖')`,
-          'complete source bundle import',
+          `document.body.innerText.includes('已导入源码与精确依赖') &&
+           ${fieldValue('Plan JSON')} === ${JSON.stringify(seed.typedPlan)} &&
+           ${fieldValue('输入 Schema JSON')} === ${JSON.stringify(input.inputSchema)} &&
+           ${fieldValue('输出 Schema JSON')} === ${JSON.stringify(input.outputSchema)}`,
+          'complete source bundle import and mounted source editors',
         )
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), seed.typedPlan)
         assert.equal(await browser.evaluate(fieldValue('输入 Schema JSON')), input.inputSchema)
