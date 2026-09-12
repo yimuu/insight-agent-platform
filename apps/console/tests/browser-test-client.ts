@@ -119,12 +119,17 @@ export async function withConsoleBrowser(
           )
         }
       },
-      click: (text) =>
-        evaluate(
+      async click(text) {
+        const control =
           text === '创建智能体'
-            ? `document.querySelector('[data-ui~=agent-create]:not(:disabled)').click()`
-            : `[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(text)}).click()`,
-        ),
+            ? `document.querySelector('[data-ui~=agent-create]')`
+            : `[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(text)})`
+        await driver.wait(
+          `(${control}) instanceof HTMLButtonElement && !(${control}).disabled`,
+          'enabled control ' + text,
+        )
+        await evaluate(`(${control}).click()`)
+      },
       async connect(token: string) {
         const previous = await evaluate(
           `document.querySelector('nav [aria-current="page"]')?.textContent`,

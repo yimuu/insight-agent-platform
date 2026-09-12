@@ -59,6 +59,8 @@ test(
     writeFileSync(inputPath, full.sourceBundle)
     let mutationCalls = 0
     let denyContent = false
+    let holdNextList = false
+    let releaseList: (() => void) | undefined
     const sourceId = 'art_01950000-0000-7000-8000-000000000003'
     const planId = 'art_01950000-0000-7000-8000-000000000004'
     const agentId = 'agt_01950000-0000-7000-8000-000000000001'
@@ -94,28 +96,33 @@ test(
         return
       }
       if (request.url.startsWith('/v1/agents?')) {
-        send(200, {
-          schema_version: 1,
-          next_cursor: null,
-          items: [
-            {
-              agent_id: agentId,
-              name: 'editable',
-              display_name: 'Complete source Agent',
-              state: 'draft',
-              environment: null,
-              published_at: null,
-            },
-            {
-              agent_id: 'agt_missing',
-              name: 'missing',
-              display_name: 'Missing source Agent',
-              state: 'draft',
-              environment: null,
-              published_at: null,
-            },
-          ],
-        })
+        const respond = () =>
+          send(200, {
+            schema_version: 1,
+            next_cursor: null,
+            items: [
+              {
+                agent_id: agentId,
+                name: 'editable',
+                display_name: 'Complete source Agent',
+                state: 'draft',
+                environment: null,
+                published_at: null,
+              },
+              {
+                agent_id: 'agt_missing',
+                name: 'missing',
+                display_name: 'Missing source Agent',
+                state: 'draft',
+                environment: null,
+                published_at: null,
+              },
+            ],
+          })
+        if (holdNextList) {
+          holdNextList = false
+          releaseList = respond
+        } else respond()
         return
       }
       if (request.url === `/v1/agents/${agentId}`) {
@@ -462,10 +469,20 @@ test(
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), 'def graph(): pass')
 
         await browser.click('返回列表')
+        holdNextList = true
         await browser.click('刷新')
+        await eventually(() => releaseList, 'held Agent list refresh')
+        const editButton = `[...document.querySelectorAll('[data-ui~=agent-row]')].find(row => row.textContent.includes('Complete source Agent'))?.querySelector('button')`
+        assert.equal(
+          await browser.evaluate(`(${editButton})?.disabled`),
+          true,
+          'a retained row is not actionable while its list is refreshing',
+        )
+        releaseList!()
+        releaseList = undefined
         await browser.wait(
-          `document.body.innerText.includes('Complete source Agent')`,
-          'editable Agent list',
+          `(${editButton}) instanceof HTMLButtonElement && !(${editButton}).disabled`,
+          'refreshed Agent list with an enabled editor action',
         )
         await browser.evaluate(
           `[...document.querySelectorAll('[data-ui~=agent-row]')].find(row => row.textContent.includes('Complete source Agent')).querySelector('button').click()`,
