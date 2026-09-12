@@ -167,15 +167,28 @@ class KindQualificationTests(unittest.TestCase):
         with self.assertRaises(KIND.QualificationFailure):
             KIND.sdk_diagnostic_entries(good * 33)
 
+    def test_installer_diagnostics_are_exact_closed_owner_errors(self):
+        for error in KIND.INSTALLATION_ERRORS:
+            self.assertEqual(KIND.installation_diagnostic_entries(f"installation {error}\n".encode()), [error])
+        for data in [b"installation secret\n", b"prefix installation Incomplete\n",
+                     b"installation Incomplete secret=canary\n", b"installation Incomplete\r\n"]:
+            self.assertEqual(KIND.installation_diagnostic_entries(data), [])
+        for data in [b"x" * 16_385, b"installation Incomplete\n" * 33]:
+            with self.assertRaises(KIND.QualificationFailure):
+                KIND.installation_diagnostic_entries(data)
+        owner = (ROOT/"crates/deployment/platform-deployment-contracts/src/installation.rs").read_text()
+        variants = owner.split("pub enum InstallationError {", 1)[1].split("}", 1)[0]
+        self.assertEqual({line.strip().rstrip(",") for line in variants.splitlines() if line.strip()}, KIND.INSTALLATION_ERRORS)
+
     def test_diagnostics_sanitize_failed_installer_logs(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture=KIND.Fixture("runtime", "console", Path(directory))
             pod={"metadata":{"name":"installation-1-fixture","namespace":fixture.namespace,
                  "ownerReferences":[{"kind":"Job","name":"installation-1","controller":True}]},
                  "spec":{"containers":[{"name":"installation","image":"runtime"}]},"status":{"phase":"Failed"}}
-            with mock.patch.object(fixture,"kube",return_value=b"private-error\ninstallation_aws operation=kms_create_key failure=dispatch\n"):
+            with mock.patch.object(fixture,"kube",return_value=b"private-error\ninstallation_aws operation=kms_create_key failure=dispatch\ninstallation CredentialInvalid\n"):
                 result=fixture.failure_sdk_diagnostics([pod])
-            self.assertEqual(result,{"status":"observed","entries":[{"operation":"kms_create_key","failure":"dispatch"}]})
+            self.assertEqual(result,{"status":"observed","entries":[{"operation":"kms_create_key","failure":"dispatch"}],"installation_errors":["CredentialInvalid"]})
             pod['metadata']['namespace']='foreign'
             with mock.patch.object(fixture,"kube") as kube:
                 self.assertEqual(fixture.failure_sdk_diagnostics([pod])['status'],'unknown')

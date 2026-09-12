@@ -52,6 +52,13 @@ class HelmTests(unittest.TestCase):
         self.assertEqual(len(jobs),1)
         job = jobs[0]['spec']['template']['spec']
         self.assertIn('platform-installation install',job['containers'][0]['args'][0])
+        environment = {item['name']: item['value'] for item in job['containers'][0]['env']}
+        self.assertEqual(environment, {
+            'AWS_EC2_METADATA_DISABLED': 'true', 'AWS_PROFILE': 'default',
+            'AWS_CONFIG_FILE': '/dev/null',
+            'AWS_SHARED_CREDENTIALS_FILE': '/installation/private/s3-artifact-gateway-credentials',
+            'SSL_CERT_FILE': '/installation/private/ca.pem', 'SSL_CERT_DIR': '/etc/ssl/certs',
+        })
         for document in documents:
             if not document or document.get('kind') != 'Deployment': continue
             name=document['metadata']['name']; pod=document['spec']['template']['spec']

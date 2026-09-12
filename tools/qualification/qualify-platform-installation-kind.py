@@ -98,6 +98,28 @@ def sdk_diagnostic_entries(data):
     return entries
 
 
+# Exact owning InstallationError variants; raw stderr is never report evidence.
+INSTALLATION_ERRORS = frozenset({
+    "InvalidInput", "InvalidEndpoint", "InvalidRoleClosure", "InvalidPath",
+    "UnsupportedTopology", "IdentityDrift", "ConfigurationDrift", "ForeignState",
+    "CredentialInvalid", "PrerequisiteUnavailable", "SchemaMismatch",
+    "ExternalOutcomeUnknown", "Conflict", "Incomplete",
+})
+
+
+def installation_diagnostic_entries(data):
+    if len(data) > 16_384:
+        raise QualificationFailure("installation_diagnostic_bytes_exceeded")
+    entries = []
+    for line in data.split(b"\n"):
+        match = re.fullmatch(rb"installation ([A-Za-z]+)", line)
+        if match is not None and match[1].decode("ascii") in INSTALLATION_ERRORS:
+            if len(entries) == 32:
+                raise QualificationFailure("installation_diagnostic_count_exceeded")
+            entries.append(match[1].decode("ascii"))
+    return entries
+
+
 def completed_controller_replacement(pods, previous_uid):
     """A replacement is complete after the old Pod's termination grace period.
 
@@ -549,6 +571,7 @@ class Fixture:
 
     def failure_sdk_diagnostics(self, items):
         entries = []
+        owner_errors = []
         for pod in items:
             metadata = pod.get("metadata", {})
             if (metadata.get("namespace") != self.namespace or pod.get("status", {}).get("phase") != "Failed"
@@ -561,7 +584,9 @@ class Fixture:
             data = self.kube("logs", metadata["name"], "-n", self.namespace, "-c", "installation",
                              "--tail=64", "--limit-bytes=16384", "--request-timeout=5s", timeout=10)
             entries.extend(sdk_diagnostic_entries(data))
-        return {"status": "observed" if entries else "unknown", "entries": entries}
+            owner_errors.extend(installation_diagnostic_entries(data))
+        return {"status": "observed" if entries or owner_errors else "unknown", "entries": entries,
+                "installation_errors": owner_errors}
 
     def diagnostics(self):
         try:

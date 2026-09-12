@@ -37,6 +37,7 @@ spec:
           env:
             - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
             - {name: AWS_CONFIG_FILE, value: /dev/null}
+            - {name: AWS_PROFILE, value: default}
             - {name: AWS_SHARED_CREDENTIALS_FILE, value: /installation/private/s3-artifact-gateway-credentials}
             - {name: SSL_CERT_FILE, value: /installation/private/ca.pem}
             - {name: SSL_CERT_DIR, value: /etc/ssl/certs}
