@@ -304,9 +304,7 @@ test(
     })()`)
       const connect = async (token: string) => {
         if (!(await evaluate(`!!document.querySelector('input[type="password"]')`))) {
-          await evaluate(
-            `[...document.querySelectorAll('summary')].find(node => node.textContent === '工作空间会话').click()`,
-          )
+          await evaluate(`document.querySelector('header details > summary').click()`)
           await evaluate(
             `[...document.querySelectorAll('button')].find(node => node.textContent === '更换连接').click()`,
           )
@@ -316,12 +314,24 @@ test(
         await evaluate(`document.querySelector('[data-ui~=connection-form]').requestSubmit()`)
         await waitDom(`!!document.querySelector('nav')`, 'authenticated workspace')
         await evaluate(
-          `[...document.querySelectorAll('nav button')].find(node => node.textContent.includes('运行记录')).click()`,
+          `[...document.querySelectorAll('nav a')].find(node => node.textContent.includes('运行记录')).click()`,
         )
         await waitDom(`!!document.querySelector('input[placeholder="run_…"]')`, 'Runs page')
       }
-      const openRun = async (id) => {
+      const selectRunInput = async (id) => {
+        if (!(await evaluate(`!!document.querySelector('input[placeholder="run_…"]')`))) {
+          await evaluate(
+            `[...document.querySelectorAll('button')].find(button => button.textContent.includes('返回运行记录')).click()`,
+          )
+        }
+        await waitDom(`!!document.querySelector('input[placeholder="run_…"]')`, 'Run lookup')
+        await evaluate(
+          `document.querySelector('input[placeholder="run_…"]').closest('details:not([open])')?.querySelector(':scope > summary')?.click()`,
+        )
         await input('input[placeholder="run_…"]', id)
+      }
+      const openRun = async (id) => {
+        await selectRunInput(id)
         await evaluate(
           `document.querySelector('input[placeholder="run_…"]').closest('form').requestSubmit()`,
         )
@@ -329,7 +339,7 @@ test(
       await waitDom(`!!document.querySelector('input[type="password"]')`, 'Console mount')
       await connect('principal-one-fixture-token')
       await evaluate(
-        `[...document.querySelectorAll('nav button')].find(button => button.textContent.includes('运行记录')).click()`,
+        `[...document.querySelectorAll('nav a')].find(button => button.textContent.includes('运行记录')).click()`,
       )
       await openRun(runA)
       await waitDom(
@@ -381,9 +391,14 @@ test(
         `[...document.querySelectorAll('button')].filter(button => button.textContent === '刷新').at(-1).click()`,
       )
       await waitDom(
-        `document.body.innerText.includes('content_unavailable')`,
+        `[...document.querySelectorAll('[role=alert]')].some(node => node.textContent.includes('content_unavailable'))`,
         'current result failure',
       )
+      await evaluate(`(() => {
+        const notice = [...document.querySelectorAll('[role=alert]')].find(node => node.textContent.includes('content_unavailable'));
+        notice.querySelector('details:not([open]) > summary')?.click();
+      })()`)
+      assert.equal(await evaluate(`document.body.innerText.includes('content_unavailable')`), true)
       assert.equal(
         await evaluate(`document.body.innerText.includes('authorized-result-canary')`),
         false,
@@ -414,7 +429,7 @@ test(
         false,
       )
 
-      await input('input[placeholder="run_…"]', runB)
+      await selectRunInput(runB)
       assert.equal(
         await evaluate(
           `document.body.innerText.includes('authorized-result-canary') || document.querySelectorAll('[data-ui~=timeline] li').length > 0`,
@@ -464,7 +479,7 @@ test(
       )
 
       await evaluate(
-        `[...document.querySelectorAll('nav button')].find(button => button.textContent.includes('待办任务')).click()`,
+        `[...document.querySelectorAll('nav a')].find(button => button.textContent.includes('待办任务')).click()`,
       )
       await waitDom(`!!document.querySelector('input[placeholder="int_… 或 apv_…"]')`, 'Tasks page')
       await input('input[placeholder="int_… 或 apv_…"]', 'int_old')

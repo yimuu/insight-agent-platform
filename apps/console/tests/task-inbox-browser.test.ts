@@ -204,12 +204,21 @@ test(
     await withConsoleBrowser(api, async (browser) => {
       const text = () => browser.evaluate('document.body.innerText')
       const open = async (id) => {
+        if (
+          await browser.evaluate(
+            `!![...document.querySelectorAll('button')].find(node => node.textContent.includes('返回待办任务'))`,
+          )
+        )
+          await browser.click('← 返回待办任务')
+        await browser.evaluate(
+          `document.querySelector('summary') && [...document.querySelectorAll('summary')].find(node => node.textContent === '通过任务 ID 查找')?.click()`,
+        )
         await browser.field('任务 ID', id)
         await browser.click('打开')
       }
       await browser.connect('actor-one-fixture')
       await browser.evaluate(
-        `[...document.querySelectorAll('nav button')].find(node => node.textContent.includes('待办任务')).click()`,
+        `[...document.querySelectorAll('nav a')].find(node => node.textContent.includes('待办任务')).click()`,
       )
       await browser.wait(
         `document.body.innerText.includes('本页没有可见任务')`,
@@ -316,6 +325,7 @@ test(
       )
       assert.equal(await browser.evaluate('document.querySelectorAll("textarea").length'), 0)
 
+      await browser.click('← 返回待办任务')
       await browser.field('任务范围', 'viewable')
       await browser.click('应用筛选')
       await open(editable)
@@ -338,11 +348,15 @@ test(
           (entry) => entry.path === `/v1/tasks/${editable}` && entry.query.purpose === 'viewable',
         ),
       )
+      await browser.click('← 返回待办任务')
       await browser.field('任务范围', 'respondable')
       await browser.click('应用筛选')
       await open(slow)
       await eventually(() => releaseSlow, 'pending old Task form')
       denied = true
+      // Returning to the list cancels the pending detail read; a fresh list read
+      // must still observe revocation and must not revive that late form.
+      await browser.click('← 返回待办任务')
       await browser.click('刷新任务')
       await browser.wait(
         `document.body.innerText.includes('Task access was revoked.')`,
@@ -379,7 +393,7 @@ test(
         firstPages,
       )
       await browser.field('任务类型', 'human_work')
-      await browser.field('关联运行', 'run_filter')
+      await browser.field('关联运行 ID（可选）', 'run_filter')
       await browser.click('应用筛选')
       await eventually(
         () =>
@@ -392,7 +406,7 @@ test(
         'filters reset continuation',
       )
       await browser.connect('actor-two-fixture')
-      await browser.wait(`document.body.innerText.includes('本页没有任务。')`, 'new identity inbox')
+      await browser.wait(`document.body.innerText.includes('暂无待办任务')`, 'new identity inbox')
       assert.equal(
         await browser.evaluate(`document.querySelector('input[placeholder="全部运行"]').value`),
         '',

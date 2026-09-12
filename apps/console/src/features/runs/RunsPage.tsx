@@ -387,7 +387,7 @@ export function Runs({
       )}
       {(activeRunId || runAgent) && (
         <div className={cx('debug-workspace')}>
-          <article className={cx('debug-preview')}>
+          <article data-ui="run-preview" className={cx('debug-preview')}>
             <header className={cx('debug-heading')}>
               <div>
                 <h2>{runAgent?.display_name ?? '运行预览'}</h2>
@@ -418,7 +418,7 @@ export function Runs({
                 </div>
               )}
               {result && client ? (
-                <div className={cx('debug-assistant')}>
+                <div data-ui="run-result" className={cx('debug-assistant')}>
                   <small>Agent</small>
                   <AuthorizedContent
                     client={client}

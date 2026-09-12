@@ -587,7 +587,12 @@ export function Agents({
                 </label>
               </div>
             </details>
-            <button className={cx('button button--primary')} onClick={openNew} disabled={busy}>
+            <button
+              data-ui="agent-create"
+              className={cx('button button--primary')}
+              onClick={openNew}
+              disabled={busy}
+            >
               ＋ 创建智能体
             </button>
           </div>
@@ -629,7 +634,7 @@ export function Agents({
                     <Icon name="agents" size={21} />
                   </span>
                   <strong>{agent.display_name}</strong>
-                  <span>{agent.name}</span>
+                  <span data-ui="agent-name">{agent.name}</span>
                 </div>
                 <Status value={agent.state} />
                 <span className={cx('agent-meta')}>
@@ -698,47 +703,45 @@ export function Agents({
           )}
         </div>
       )}
-      {!editor && (
-        <details data-ui="panel" className={cx('list-tools')}>
-          <summary>恢复已发布版本（高级）</summary>
-          <form
-            className={cx('form-grid')}
-            onSubmit={(event) => {
-              event.preventDefault()
-              void restorePublished()
-            }}
-          >
-            <label>
-              <span>已发布智能体 ID</span>
-              <input
-                value={restoreAgentId}
-                onChange={(event) => setRestoreAgentId(event.target.value)}
-                maxLength={64}
-                placeholder="agt_…"
-                required
-                disabled={busy}
-              />
-            </label>
-            <label>
-              <span>已发布版本 ID</span>
-              <input
-                value={restoreVersionId}
-                onChange={(event) => setRestoreVersionId(event.target.value)}
-                maxLength={64}
-                placeholder="aif_… 或 arev_…"
-                required
-                disabled={busy}
-              />
-            </label>
-            <button className={cx('button')} disabled={busy || !client}>
-              恢复已发布源码
-            </button>
-          </form>
-          <p className={cx('body-copy')}>
-            读取所选版本及当前有权访问的源码。内容核验与编译全部通过后才替换编辑器。
-          </p>
-        </details>
-      )}
+      <details data-ui="panel" className={cx('list-tools')}>
+        <summary>恢复已发布版本（高级）</summary>
+        <form
+          className={cx('form-grid')}
+          onSubmit={(event) => {
+            event.preventDefault()
+            void restorePublished()
+          }}
+        >
+          <label>
+            <span>已发布智能体 ID</span>
+            <input
+              value={restoreAgentId}
+              onChange={(event) => setRestoreAgentId(event.target.value)}
+              maxLength={64}
+              placeholder="agt_…"
+              required
+              disabled={busy}
+            />
+          </label>
+          <label>
+            <span>已发布版本 ID</span>
+            <input
+              value={restoreVersionId}
+              onChange={(event) => setRestoreVersionId(event.target.value)}
+              maxLength={64}
+              placeholder="aif_… 或 arev_…"
+              required
+              disabled={busy}
+            />
+          </label>
+          <button className={cx('button')} disabled={busy || !client}>
+            恢复已发布源码
+          </button>
+        </form>
+        <p className={cx('body-copy')}>
+          读取所选版本及当前有权访问的源码。内容核验与编译全部通过后才替换编辑器。
+        </p>
+      </details>
       {editor && (
         <article
           ref={editorElement}

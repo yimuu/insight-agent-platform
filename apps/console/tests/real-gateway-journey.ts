@@ -115,7 +115,7 @@ function jsonLiteral(value) {
 
 function exactPanelStatus(kicker, state) {
   return `(() => {
-    const panel = [...document.querySelectorAll('article[data-ui~=panel]')].find((candidate) =>
+    const panel = [...document.querySelectorAll('[data-ui~=panel]')].find((candidate) =>
       candidate.querySelector(':scope > [data-ui~=panel__heading] [data-ui~=kicker]')?.textContent.trim() === ${jsonLiteral(kicker)}
     );
     return panel?.querySelector(':scope > [data-ui~=panel__heading] > [data-ui~=status]')?.getAttribute('data-status') === ${jsonLiteral(state)};
@@ -123,8 +123,12 @@ function exactPanelStatus(kicker, state) {
 }
 
 function exactPanelText(kicker, text) {
+  if (kicker === '运行结果')
+    return `document.querySelector('[data-ui~=run-result]')?.innerText.includes(${jsonLiteral(text)}) === true`
+  if (kicker === '发起运行')
+    return `document.querySelector('[data-ui~=run-preview]')?.innerText.includes(${jsonLiteral(text)}) === true`
   return `(() => {
-    const panel = [...document.querySelectorAll('article[data-ui~=panel]')].find((candidate) =>
+    const panel = [...document.querySelectorAll('[data-ui~=panel]')].find((candidate) =>
       candidate.querySelector(':scope > [data-ui~=kicker], :scope > [data-ui~=panel__heading] [data-ui~=kicker]')?.textContent.trim() === ${jsonLiteral(kicker)}
     );
     return panel?.innerText.includes(${jsonLiteral(text)}) === true;
@@ -132,33 +136,39 @@ function exactPanelText(kicker, text) {
 }
 
 function submitSearchAndWaitForIdle(inputSelector) {
-  return `new Promise((resolveDone, rejectDone) => {
+  return `(async () => {
+    const until = performance.now() + 10000;
+    while (${jsonLiteral(inputSelector)}.includes('run_') && !document.querySelector(${jsonLiteral(inputSelector)}) && ![...document.querySelectorAll('button')].some(node => node.textContent.trim() === '刷新' && !node.disabled && node.closest('[data-ui~=panel]')?.querySelector('[data-ui~=kicker]')?.textContent.trim() === '运行详情')) {
+      if (performance.now() >= until) throw new Error('Run authority did not finish loading');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    return new Promise((resolveDone, rejectDone) => {
     const input = document.querySelector(${jsonLiteral(inputSelector)});
     const form = input?.closest('form');
-    const button = form?.querySelector('button');
-    if (!(form instanceof HTMLFormElement) || !(button instanceof HTMLButtonElement)) {
-      rejectDone(new Error('missing search form: ' + ${jsonLiteral(inputSelector)}));
+    const button = form?.querySelector('button') ?? [...document.querySelectorAll('button')].find(node => node.textContent.trim() === '刷新' && node.closest('[data-ui~=panel]')?.querySelector('[data-ui~=kicker]')?.textContent.trim() === '运行详情');
+    if (!(button instanceof HTMLButtonElement)) {
+      rejectDone(new Error('missing search form: ' + ${jsonLiteral(inputSelector)} + ' PAGE ' + document.body.innerText.slice(0, 5000)));
       return;
     }
     let sawBusy = button.disabled;
     let timer;
     const observer = new MutationObserver((records) => {
-      if (button.disabled || records.some((record) =>
+      if (!button.isConnected || button.disabled || records.some((record) =>
         record.attributeName === 'disabled' && record.oldValue === null
       )) sawBusy = true;
-      if (sawBusy && !button.disabled) {
+      if (sawBusy && (button.isConnected ? !button.disabled : ([...document.querySelectorAll('[data-ui~=panel]')].some(panel => panel.querySelector('[data-ui~=kicker]')?.textContent.trim() === (${jsonLiteral(inputSelector)}.includes('run_') ? '运行详情' : '任务详情') && panel.querySelector('[data-ui~=status]'))))) {
         clearTimeout(timer);
         observer.disconnect();
         resolveDone(true);
       }
     });
-    observer.observe(button, { attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
     timer = setTimeout(() => {
       observer.disconnect();
       rejectDone(new Error('search form did not complete: ' + ${jsonLiteral(inputSelector)}));
     }, 10_000);
-    form.requestSubmit();
-  })`
+    if (form) form.requestSubmit(); else button.click();
+  }); })()`
 }
 
 function setInput(selector, value) {
@@ -171,8 +181,12 @@ function setInput(selector, value) {
   })()`
 }
 
-function clickText(text, selector = 'button') {
+function clickText(text, selector = 'button, nav a') {
   return `(() => {
+    if (${jsonLiteral(text)} === '运行记录') {
+      const back = [...document.querySelectorAll('button')].find(node => node.textContent.includes('返回运行记录'));
+      if (back) back.click();
+    }
     const element = [...document.querySelectorAll(${jsonLiteral(selector)})].find((candidate) => {
       const label = candidate.textContent.trim();
       return label === ${jsonLiteral(text)} || label.endsWith(${jsonLiteral(text)});
@@ -261,7 +275,8 @@ export async function runGatewayJourney({
         requestKinds.set(requestId, { origin: url.origin, method: request.method })
       if (
         request.method === 'PUT' &&
-        url.origin !== consoleServer.origin &&
+        url.origin === consoleServer.origin &&
+        path === '/_console/v1/object-upload' &&
         uploadRequests.size < 16
       )
         uploadRequests.set(requestId, {
@@ -338,7 +353,7 @@ export async function runGatewayJourney({
 
     await waitFor(
       client,
-      `[...document.querySelectorAll('button')].some(node => node.textContent.trim() === '创建智能体')`,
+      `!!document.querySelector('[data-ui~=agent-create]:not(:disabled)')`,
       'Agents page loaded',
     )
     if (authoringJourney) {
@@ -352,8 +367,9 @@ export async function runGatewayJourney({
         `document.body.innerText.includes('创建你的智能体')`,
         'new Agent editor',
       )
-      await evaluate(client, setField('名称', name))
-      await evaluate(client, setField('显示名称', displayName))
+      await evaluate(client, clickText('高级设置', '[data-ui~=editor] summary'))
+      await evaluate(client, setField('资源标识', name))
+      await evaluate(client, setField('智能体名称', displayName))
       await evaluate(client, setField('任务类型', 'deterministic'))
       await evaluate(client, clickText('高级 YAML'))
       await waitFor(client, `!!${fieldByLabel('输入 Schema JSON')}`, 'advanced schema editor')
@@ -384,10 +400,15 @@ export async function runGatewayJourney({
       await evaluate(client, clickText('编辑已校验 Plan'))
       await waitFor(
         client,
-        `(${fieldByLabel('任务类型')})?.value === 'full_plan' && !!(${fieldByLabel('Plan JSON')})`,
+        `(${fieldByLabel('任务类型')})?.value === 'full_plan'`,
         'Full Plan source editor',
       )
       await evaluate(client, clickText('高级 YAML'))
+      await waitFor(
+        client,
+        `(() => { try { return JSON.parse(${fieldValue('Plan JSON')}).plan_version === 6 } catch { return false } })()`,
+        'advanced Full Plan source',
+      )
       const planSource = await evaluate(client, `${fieldValue('Plan JSON')}`)
       assert.equal(JSON.parse(planSource).plan_version, 6)
       const invalidPlan = JSON.parse(planSource)
@@ -448,11 +469,11 @@ export async function runGatewayJourney({
       )
       await waitFor(
         client,
-        `${exactPanelText('发起运行', `运行 ${displayName}`)} && [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === '开始运行' && !button.disabled)`,
+        `${exactPanelText('发起运行', displayName)} && [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === '发送并运行' && !button.disabled)`,
         'exact newly published Agent Run input',
       )
-      await evaluate(client, setField('message（必填）', explicitInput.message))
-      await evaluate(client, clickText('开始运行'))
+      await evaluate(client, setField('任务内容', explicitInput.message))
+      await evaluate(client, clickText('发送并运行'))
       await waitFor(
         client,
         `/^run_/.test(${metricValue('运行 ID')} ?? '')`,
@@ -460,7 +481,7 @@ export async function runGatewayJourney({
       )
       const createdRunId = await evaluate(client, metricValue('运行 ID'))
       const resultRead = `(() => {
-        const panel = [...document.querySelectorAll('article[data-ui~=panel]')].find(panel => panel.querySelector(':scope > [data-ui~=kicker]')?.textContent.trim() === '运行结果');
+        const panel = document.querySelector('[data-ui~=run-result]');
         const text = panel?.querySelector('details > pre')?.textContent;
         return text ? JSON.parse(text) : null;
       })()`
@@ -489,7 +510,7 @@ export async function runGatewayJourney({
         `[...document.querySelectorAll('summary')].find(node => node.textContent === '高级运行诊断').click()`,
       )
       await evaluate(client, clickText('查看冻结源码'))
-      const sourcePanel = `([...document.querySelectorAll('article[data-ui~=panel]')].find(panel => panel.querySelector(':scope > [data-ui~=kicker]')?.textContent.trim() === '运行源码'))`
+      const sourcePanel = `([...document.querySelectorAll('[data-ui~=panel]')].find(panel => panel.querySelector(':scope > [data-ui~=kicker]')?.textContent.trim() === '运行源码'))`
       await waitFor(
         client,
         `${sourcePanel}?.innerText.includes('已验证的源码身份') && ${sourcePanel}?.querySelectorAll('li').length > 0`,
@@ -537,14 +558,14 @@ export async function runGatewayJourney({
       if (expectSlowLoading) {
         await waitFor(
           client,
-          `document.querySelector('[data-ui~=search] button').disabled && document.querySelector('[data-ui~=search] button').textContent.includes('加载中')`,
+          `document.body.innerText.includes('正在加载运行详情')`,
           'bounded loading state while the authority is slow',
           500,
         )
       }
       await waitFor(
         client,
-        `!!document.querySelector('[data-ui~=empty-state]') && document.body.innerText.includes('暂未收到运行事件')`,
+        `document.body.innerText.includes('等待执行节点') && document.body.innerText.includes('0 个执行对象')`,
         'explicit empty durable timeline',
       )
     }
@@ -609,8 +630,8 @@ export async function runGatewayJourney({
         `(() => {
           const input = document.querySelector('input[placeholder="art_…"]')
           const panel = input?.closest('[data-ui~=nested-panel]')
-          const metrics = panel && [..[data-ui~=panel].querySelectorAll('[data-ui~=metric]')]
-          const action = panel && [..[data-ui~=panel].querySelectorAll('button')]
+          const metrics = panel && [...panel.querySelectorAll('[data-ui~=metric]')]
+          const action = panel && [...panel.querySelectorAll('button')]
             .find((button) => button.textContent.trim() === '授权下载')
           const exactMetric = (label, value) => metrics && metrics.some((metric) =>
             metric.querySelector('dt')?.textContent.trim() === label
@@ -727,12 +748,6 @@ export async function runGatewayJourney({
     await evaluate(client, clickText('打开任务'))
     await waitFor(
       client,
-      `!!document.querySelector('input[placeholder="int_… 或 apv_…"]')`,
-      'Tasks page loaded',
-    )
-    await evaluate(client, submitSearchAndWaitForIdle('input[placeholder="int_… 或 apv_…"]'))
-    await waitFor(
-      client,
       `${exactPanelStatus('任务详情', 'pending')} && ${exactPanelText('任务详情', taskSafePromptKey)}`,
       'pending Task authority',
     )
@@ -816,7 +831,7 @@ export async function runGatewayJourney({
       `({
       noHorizontalOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
       navigationComplete: ['智能体', '运行记录', '待办任务', '设置'].every((label) =>
-        [...document.querySelectorAll('nav button')].some((button) => button.textContent.includes(label))
+        [...document.querySelectorAll('nav a')].some((button) => button.textContent.includes(label))
       ),
       liveRegionPresent: !!document.querySelector('[aria-live]'),
       mainFocusable: document.querySelector('main').tabIndex === -1,

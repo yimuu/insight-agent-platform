@@ -245,6 +245,7 @@ test(
         assert.equal(await browser.evaluate(fieldValue('任务类型')), 'full_plan')
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), '{}')
 
+        await browser.click('返回列表')
         await browser.upload('input[type="file"][accept=".json,application/json"]', inputPath)
         await browser.wait(
           `document.body.innerText.includes('已导入源码与精确依赖')`,
@@ -302,12 +303,17 @@ test(
           ),
         )
         for (const [index, entry] of editorDescriptor.nodes.entries()) {
-          const id = `draft_${index}`
-          await browser.field('新节点 ID', id)
-          await browser.field('新节点类型', entry.kind)
+          const previousIds = Object.keys(
+            JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).nodes,
+          )
+          await browser.field('添加步骤', entry.kind)
           await browser.click('添加节点')
+          const id = Object.keys(
+            JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).nodes,
+          ).find((key) => !previousIds.includes(key))
+          assert.ok(id, `new ${entry.kind} node has an independent identity`)
           await browser.wait(
-            `${fieldValue('当前节点')} === ${JSON.stringify(id)}`,
+            `document.body.innerText.includes(${JSON.stringify(`节点 ${id}`)})`,
             `selected ${entry.kind} node`,
           )
           assert.deepEqual(
@@ -323,7 +329,7 @@ test(
           if (entry.kind === 'compute') {
             await browser.click('重建表达式 assignments/0/expression')
             await browser.wait(
-              `JSON.parse(${fieldValue('Plan JSON')}).nodes.${id}.assignments[0].expression.semantic_digest !== ${JSON.stringify(entry.template.assignments[0].expression.semantic_digest)}`,
+              `JSON.parse(${fieldValue('Plan JSON')}).nodes[${JSON.stringify(id)}].assignments[0].expression.semantic_digest !== ${JSON.stringify(entry.template.assignments[0].expression.semantic_digest)}`,
               'Rust expression rebuild updates the source',
             )
             assert.equal(
@@ -413,15 +419,18 @@ test(
           schema_documents: typed.schema_documents,
         }
         await browser.field('任务类型', 'framework_graph')
-        await browser.field('Plan JSON', JSON.stringify(graph))
         await browser.click('高级 YAML')
+        await browser.field('Plan JSON', JSON.stringify(graph))
         await browser.click('校验配置')
         await browser.wait(
           `document.body.innerText.includes('校验通过，依赖已解析')`,
           'actual WASM static framework validation',
         )
         assert.match(await browser.evaluate(fieldValue('agent.yaml')), /framework_graph/)
-        assert.match(await browser.evaluate('document.body.innerText'), /Platform 节点/)
+        assert.equal(
+          await browser.evaluate(`!!document.querySelector('[aria-label="工作流画布"]')`),
+          true,
+        )
         await browser.click('高级 YAML')
         await browser.wait(
           `(${fieldValue('agent.yaml')}).includes('framework_graph')`,

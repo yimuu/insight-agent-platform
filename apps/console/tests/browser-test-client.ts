@@ -121,16 +121,16 @@ export async function withConsoleBrowser(
       },
       click: (text) =>
         evaluate(
-          `[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(text)}).click()`,
+          text === '创建智能体'
+            ? `document.querySelector('[data-ui~=agent-create]:not(:disabled)').click()`
+            : `[...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(text)}).click()`,
         ),
       async connect(token: string) {
         const previous = await evaluate(
           `document.querySelector('nav [aria-current="page"]')?.textContent`,
         )
         if (!(await evaluate(`!!document.querySelector('input[type="password"]')`))) {
-          await evaluate(
-            `[...document.querySelectorAll('summary')].find(node => node.textContent === '工作空间会话').click()`,
-          )
+          await evaluate(`document.querySelector('header details > summary').click()`)
           await driver.click('更换连接')
         }
         await driver.wait(`!!document.querySelector('input[type="password"]')`, 'connection page')
@@ -142,7 +142,7 @@ export async function withConsoleBrowser(
         )
         if (previous)
           await evaluate(
-            `[...document.querySelectorAll('nav button')].find(node => node.textContent === ${JSON.stringify(previous)})?.click()`,
+            `[...document.querySelectorAll('nav a')].find(node => node.textContent === ${JSON.stringify(previous)})?.click()`,
           )
         await driver.wait(`!document.body.innerText.includes('正在加载页面…')`, 'feature page')
       },

@@ -276,7 +276,7 @@ test(
         0,
       )
       await browser.evaluate(
-        `[...document.querySelectorAll('nav button')].find(node => node.textContent.includes('运行记录')).click()`,
+        `[...document.querySelectorAll('nav a')].find(node => node.textContent.includes('运行记录')).click()`,
       )
       await browser.field('通过 ID 打开运行', runId)
       await browser.click('打开')

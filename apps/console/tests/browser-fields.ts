@@ -8,6 +8,11 @@ export function fieldValue(label: string): string {
   return `(() => {
     const node = ${fieldElement(label)};
     if (!node?.classList.contains('cm-content')) return node?.value;
+    // Source editors now live in disclosure panels. Open their public controls
+    // before focusing/copying, as a user must do to inspect the source.
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement && !parent.open) parent.querySelector(':scope > summary')?.click();
+    }
     const previous = document.activeElement;
     node.focus();
     node.dispatchEvent(new KeyboardEvent('keydown', {
@@ -25,6 +30,9 @@ export function setField(label: string, value: string): string {
   return `(async () => {
     const node = ${fieldElement(label)};
     if (!node || node.disabled) throw new Error('Field unavailable: ' + ${JSON.stringify(label)});
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      if (parent instanceof HTMLDetailsElement && !parent.open) parent.querySelector(':scope > summary')?.click();
+    }
     if (node.classList.contains('cm-content')) {
       const deadline = performance.now() + 8000;
       while (!node.isContentEditable) {
