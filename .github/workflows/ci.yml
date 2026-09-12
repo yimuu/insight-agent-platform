@@ -138,6 +138,7 @@ jobs:
             tools/tests/test_installation_helm.py \
             tools/tests/test_installation_native.py \
             tools/tests/test_public_trust.py \
+            tools/tests/test_installation_compose_public_trust.py \
             tools/tests/test_platform_provider_lifecycle.py
       - name: Verify generated Kind configs, executable identities, TLS names and chart closure
         run: python3 -m unittest discover -s tools/tests -p test_platform_kind_configuration.py

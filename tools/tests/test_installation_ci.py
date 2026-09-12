@@ -53,6 +53,7 @@ class InstallationCiTests(unittest.TestCase):
         selected = [step for step in steps if step.get("name") == "Verify shared installation Compose and Helm consumers"]
         self.assertEqual(len(selected), 1)
         self.assertIn("tools/tests/test_public_trust.py", selected[0]["run"])
+        self.assertIn("tools/tests/test_installation_compose_public_trust.py", selected[0]["run"])
 
     def test_actual_consumers_are_sequential_and_required(self):
         self.assertEqual(self.job["if"], "needs.changes.outputs.runtime == 'true' || needs.changes.outputs.console == 'true'")

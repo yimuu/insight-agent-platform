@@ -168,7 +168,10 @@ def public_trust_rejects_before_ready(project, runtime, declaration):
         '--entrypoint', '/bin/sh', runtime, '-ec',
         'set +e; /usr/local/bin/platform-installation public-trust --input /installation-input/input.json '
         '--state /installation/private > /tmp/public.json 2> /tmp/error; result=$?; set -e; '
-        'test "$result" -eq 1; test ! -s /tmp/public.json; test "$(cat /tmp/error)" = "installation Incomplete"'], timeout=30, stage='public-trust-before-ready')
+        'test "$result" -eq 1; test ! -s /tmp/public.json; '
+        'case "$(cat /tmp/error)" in "installation Incomplete") ;; '
+        '"installation InvalidInput") printf "%s\\n" "installation InvalidInput" >&2; exit 1 ;; '
+        '*) printf "%s\\n" "installation ExternalOutcomeUnknown" >&2; exit 1 ;; esac'], timeout=30, stage='public-trust-before-ready')
     if trust_state_snapshot(project, runtime) != before:
         raise OWNER.InstallationFailure('pre-Ready public trust export changed private state')
 
@@ -306,7 +309,10 @@ def main():
             probe.bind(('127.0.0.1', endpoint.port))
         declaration = directory/'input.json'
         declaration.write_text(json.dumps(value, sort_keys=True)+'\n')
-        os.chmod(declaration, 0o600)
+        # InstallationInputV1 contains topology and credential file references, never secret bytes.
+        # Readers run as both root without DAC_OVERRIDE and UID 10001. The enclosing fresh
+        # directory remains 0700; only this explicit read-only bind must be readable across UIDs.
+        os.chmod(declaration, 0o644)
         document = OWNER.decode(command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
             '--user', f'{os.geteuid()}:{os.getegid()}', '--cap-drop', 'ALL',
             '--mount', f'type=bind,source={declaration},target={declaration},readonly',
