@@ -167,6 +167,52 @@ class KindQualificationTests(unittest.TestCase):
         with self.assertRaises(KIND.QualificationFailure):
             KIND.sdk_diagnostic_entries(good * 33)
 
+    def test_private_delivery_is_host_owned_atomic_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o700)
+            target = parent/'session-token'
+            for data in (b'fixture-first', b'fixture-renewed'):
+                KIND.publish_delivery(target, data)
+                self.assertEqual(target.read_bytes(), data)
+                self.assertEqual(target.stat().st_uid, os.geteuid())
+                self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(list(parent.iterdir()), [target])
+            for data in (b'', b'x' * 1_048_577):
+                with self.assertRaises(KIND.QualificationFailure):
+                    KIND.publish_delivery(target, data)
+                self.assertEqual(target.read_bytes(), b'fixture-renewed')
+            with mock.patch.object(KIND.os, 'replace', side_effect=OSError('fixture')):
+                with self.assertRaises(OSError):
+                    KIND.publish_delivery(target, b'fixture-failed')
+            self.assertEqual(target.read_bytes(), b'fixture-renewed')
+            self.assertEqual(list(parent.iterdir()), [target])
+
+    def test_session_delivery_uses_bounded_capture_without_node_host_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = KIND.Fixture('runtime', 'console', Path(directory))
+            fixture.installation = Path(directory)/'delivery'
+            fixture.installation.mkdir(mode=0o700)
+            calls = []
+            def kube(*args, **kwargs):
+                calls.append(args)
+                if args[0] == 'get':
+                    return json.dumps({'items': [{'metadata': {'name': 'fixture-pod'}}]}).encode()
+                if args[0] == 'exec':
+                    self.assertEqual(args[1:8], ('-n', fixture.namespace, 'fixture-pod', '-c', 'delivery', '--', '/usr/bin/head'))
+                    self.assertEqual(args[8:10], ('-c', '1048577'))
+                    self.assertIn(args[10], ('/delivery/result.json', '/delivery/public-ca.pem', '/delivery/session-token'))
+                    return b'fixture-private'
+                return b''
+            with mock.patch.object(fixture, 'kube', side_effect=kube):
+                fixture.operation('session')
+                fixture.operation('session')
+                fixture.operation('public-trust')
+            self.assertNotIn('cp', [call[0] for call in calls])
+            self.assertEqual(sum(call[0] == 'exec' for call in calls), 8)
+            self.assertEqual((fixture.installation/'session-token').stat().st_mode & 0o777, 0o600)
+
     def test_installer_diagnostics_are_exact_closed_owner_errors(self):
         for error in KIND.INSTALLATION_ERRORS:
             self.assertEqual(KIND.installation_diagnostic_entries(f"installation {error}\n".encode()), [error])

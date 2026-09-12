@@ -181,6 +181,18 @@ def write(path, data, mode=0o600):
         os.fsync(file.fileno())
 
 
+def publish_delivery(path, data):
+    """Keep private delivery owned by the host caller, including token renewal."""
+    if not data or len(data) > 1_048_576:
+        raise QualificationFailure("delivery_file_bytes_invalid")
+    temporary = path.parent/(".delivery-"+uuid.uuid4().hex)
+    try:
+        write(temporary, data)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def json_write(path, value):
     write(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode()+b"\n")
 
@@ -447,8 +459,13 @@ class Fixture:
                 raise QualificationFailure("session_pod_ambiguous")
             pod = pods[0]["metadata"]["name"]
             for source, destination in [("result.json", name+"-result.json"), ("public-ca.pem", "public-ca.pem")]+([("session-token", "session-token")] if name == "session" else []):
-                self.kube("cp", "-n", self.namespace, pod+":/delivery/"+source, str(self.installation/destination))
-                os.chmod(self.installation/destination, 0o600)
+                # The kubectl shim runs as root inside the Kind node. Never let it
+                # create host files through the shared mount: Linux would retain root
+                # ownership. Capture only this fixed delivery path, then publish as
+                # the host caller without logging the private bytes.
+                data = self.kube("exec", "-n", self.namespace, pod, "-c", "delivery", "--",
+                                 "/usr/bin/head", "-c", "1048577", "/delivery/"+source)
+                publish_delivery(self.installation/destination, data)
             self.kube("delete", "job", job, "-n", self.namespace, "--wait=true")
             return b""
         raise QualificationFailure("unknown_fixture_operation")
