@@ -401,11 +401,17 @@ class NativeReleaseImageTests(unittest.TestCase):
             "console-root": workflow,
             "console-arbitrary-files": workflow,
             "console-entrypoint": workflow,
+            "console-target-stage-build": workflow,
+            "console-unlocked": workflow,
+            "console-install-scripts": workflow,
+            "console-missing-inventory": workflow,
+            "console-private-context": workflow,
+            "console-wrong-context": workflow.replace("context: .\n          file: deploy/images/console.Dockerfile", "context: apps/console\n          file: deploy/images/console.Dockerfile"),
         }
         files = ["Cargo.toml", "tools/checks/check-product-release.py", "tools/release/build-product-release.py",
                  "tools/development/build-development-profile-performance.py", "apps/console/scripts/build-agent-compiler.ts",
                  "crates/authoring/platform-agent-compiler-wasm/Cargo.toml", ".github/workflows/ci.yml",
-                 "deploy/images/console.Dockerfile", "deploy/release/performance-budgets-v1.json"]
+                 "deploy/images/console.Dockerfile", "deploy/images/console.Dockerfile.dockerignore", "deploy/release/performance-budgets-v1.json"]
         for name, changed in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -417,10 +423,13 @@ class NativeReleaseImageTests(unittest.TestCase):
                 if name == "runtime-budget":
                     path = root / "deploy/release/performance-budgets-v1.json"
                     path.write_text(path.read_text().replace('"runtime_build_push": 3600', '"runtime_build_push": 3601'))
+                if name == "console-private-context":
+                    path = root / "deploy/images/console.Dockerfile.dockerignore"
+                    path.write_text(path.read_text() + "!data/**\n")
                 if name == "console-run":
                     path = root / "deploy/images/console.Dockerfile"
                     path.write_text(path.read_text() + "RUN true\n")
-                if name in {"console-floating-base", "console-root", "console-arbitrary-files", "console-entrypoint"}:
+                if name in {"console-floating-base", "console-root", "console-arbitrary-files", "console-entrypoint", "console-target-stage-build", "console-unlocked", "console-install-scripts", "console-missing-inventory"}:
                     path = root / "deploy/images/console.Dockerfile"
                     dockerfile = path.read_text()
                     if name == "console-floating-base":
@@ -428,7 +437,15 @@ class NativeReleaseImageTests(unittest.TestCase):
                     elif name == "console-root":
                         dockerfile = dockerfile.replace("USER 1000:1000", "USER 0:0")
                     elif name == "console-arbitrary-files":
-                        dockerfile = dockerfile.replace("COPY server-dist/config.js server-dist/gateway-server.js server-dist/main.js server-dist/process.js", "COPY server/")
+                        dockerfile = dockerfile.replace("COPY --from=server-build /build/server-dist/config.js", "COPY server/")
+                    elif name == "console-target-stage-build":
+                        dockerfile = dockerfile.replace("--platform=$BUILDPLATFORM ", "")
+                    elif name == "console-unlocked":
+                        dockerfile = dockerfile.replace("--frozen-lockfile", "--no-frozen-lockfile")
+                    elif name == "console-install-scripts":
+                        dockerfile = dockerfile.replace(" --ignore-scripts", "")
+                    elif name == "console-missing-inventory":
+                        dockerfile = dockerfile.replace("COPY crates/adapters/platform-postgres/schema-inventory.json /console/server-dist/\n", "")
                     else:
                         dockerfile = dockerfile.replace('/console/server-dist/main.js"]', '/console/server/native.ts"]')
                     path.write_text(dockerfile)

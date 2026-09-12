@@ -575,7 +575,7 @@ jobs:
       - name: Build actual installation images
         run: |
           docker buildx build --load --target runtime -f deploy/images/platform.Dockerfile -t insight-installation-runtime:ci .
-          docker buildx build --load -f deploy/images/console.Dockerfile -t insight-installation-console:ci apps/console
+          docker buildx build --load -f deploy/images/console.Dockerfile -t insight-installation-console:ci .
       - name: Resolve and verify actual repository image descriptors
         run: |
           python3 - <<'PY'
