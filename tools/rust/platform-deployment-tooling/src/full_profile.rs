@@ -510,7 +510,7 @@ pub fn initial_configs(
                         "event_buffer_capacity": 16,
                     },
                     "secret_provider_catalog": egress.secret_provider_catalog,
-                    "model_egress": egress.model_installation.map(|catalog| insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { grant: catalog.public_egress() }).unwrap_or(insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations: vec![] }),
+                    "model_egress": egress.model_installation.map(|catalog| insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { grant: Box::new(catalog.public_egress()) }).unwrap_or(insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations: vec![] }),
                     "capability_http_endpoints": [],
                     "capability_grpc_endpoints": [],
                     "remote_context_destinations": egress.remote_context_destinations,

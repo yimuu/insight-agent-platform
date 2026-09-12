@@ -92,7 +92,7 @@ impl InstalledModelPublicEgressV1 {
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelEgressRoutingV1 {
     PublicHttps {
-        grant: InstalledModelPublicEgressV1,
+        grant: Box<InstalledModelPublicEgressV1>,
     },
     Fixed {
         destinations: Vec<InstalledModelDestinationGrant>,

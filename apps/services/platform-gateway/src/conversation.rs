@@ -18,7 +18,7 @@ fn audit(c: &ConversationCommand) -> Result<CommandAudit, RunApplicationError> {
             .map_err(|_| RunApplicationError::Internal)
     };
     Ok(CommandAudit {
-        trace: c.principal.trace.clone(),
+        trace: c.principal.trace,
         tenant_id: c.principal.tenant_id.clone(),
         principal_id: c.principal.principal_id.clone(),
         principal_kind: c.principal.principal_kind,

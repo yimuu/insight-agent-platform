@@ -187,92 +187,6 @@ pub async fn rollout(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn package_acceptance_requires_completed_exact_release_and_unchanged_bootstrap() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap().join("private");
-        let input = insight_platform_deployment_tooling::installation::compose_input(
-            "upgrade-test",
-            format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
-        )
-        .unwrap();
-        let prepared = PreparedInstallation::prepare(&input, &root).unwrap();
-        // Seed only the completed-phase evidence; this test exercises package publication,
-        // while provider provisioning has its own integration qualification.
-        let mut progress = prepared.progress().clone();
-        progress.phase = InstallationPhase::Ready;
-        prepared
-            .directory()
-            .replace("progress.json", &serde_json::to_vec(&progress).unwrap())
-            .unwrap();
-        let mut candidate = input.clone();
-        candidate.package_digest = format!("sha256:{}", "b".repeat(64)).parse().unwrap();
-        let release = InstallationReleaseV1 {
-            schema_version: 1,
-            installation_id: prepared.identity().installation_id.clone(),
-            bootstrap_input_digest: input.digest().unwrap(),
-            bootstrap_identity_digest: prepared.identity().digest().unwrap(),
-            from_package_digest: input.package_digest.clone(),
-            to_package_digest: candidate.package_digest.clone(),
-            from_schema_version: 16,
-            to_schema_version: 17,
-            from_inventory_digest: SOURCE_INVENTORY_DIGEST.parse().unwrap(),
-            to_inventory_digest: conversation_upgrade::target_inventory_digest()
-                .parse()
-                .unwrap(),
-        };
-        let bytes = serde_json::to_vec_pretty(&release).unwrap();
-        prepared
-            .directory()
-            .write_immutable(UPGRADE_INTENT_FILE, &bytes)
-            .unwrap();
-        drop(prepared);
-        assert!(verify_release(&input, &candidate, &root).is_err());
-        let prepared = PreparedInstallation::open(&input, &root).unwrap();
-        prepared
-            .directory()
-            .write_immutable(RELEASE_FILE, &bytes)
-            .unwrap();
-        drop(prepared);
-        verify_release(&input, &candidate, &root).unwrap();
-        candidate.package_digest = format!("sha256:{}", "c".repeat(64)).parse().unwrap();
-        assert!(verify_release(&input, &candidate, &root).is_err());
-        let prepared = PreparedInstallation::open(&input, &root).unwrap();
-        let mut target = release.clone();
-        target.to_package_digest = candidate.package_digest.clone();
-        let intent = PackageRolloutIntentV1 {
-            schema_version: 1,
-            expected_previous_release_digest: release.canonical_digest().unwrap(),
-            previous_release: release.clone(),
-            target_release: target.clone(),
-        };
-        prepared
-            .directory()
-            .write_immutable(
-                &PackageRolloutIntentV1::filename(&target.canonical_digest().unwrap()),
-                &serde_json::to_vec(&intent).unwrap(),
-            )
-            .unwrap();
-        let mut wrong = intent.clone();
-        wrong.expected_previous_release_digest =
-            format!("sha256:{}", "d".repeat(64)).parse().unwrap();
-        assert!(publish_rollout(&prepared, &wrong).is_err());
-        drop(prepared);
-        assert!(verify_release(&input, &candidate, &root).is_err());
-        let prepared = PreparedInstallation::open(&input, &root).unwrap();
-        publish_rollout(&prepared, &intent).unwrap();
-        publish_rollout(&prepared, &intent).unwrap();
-        drop(prepared);
-        verify_release(&input, &candidate, &root).unwrap();
-        candidate.package_digest = target.to_package_digest;
-        candidate.name = "different-installation".into();
-        assert!(verify_release(&input, &candidate, &root).is_err());
-    }
-}
-
 pub async fn run() -> Result<(), InstallationError> {
     let public = InstallationDirectory::open(Path::new("/installation-input/prepared"), false)?;
     let input = InstallationInputV1::decode(
@@ -388,4 +302,90 @@ pub async fn run() -> Result<(), InstallationError> {
     prepared.directory().write_immutable(RELEASE_FILE, &bytes)?;
     println!("Conversation schema upgrade committed; bootstrap identity and data retained.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn package_acceptance_requires_completed_exact_release_and_unchanged_bootstrap() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap().join("private");
+        let input = insight_platform_deployment_tooling::installation::compose_input(
+            "upgrade-test",
+            format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+        )
+        .unwrap();
+        let prepared = PreparedInstallation::prepare(&input, &root).unwrap();
+        // Seed only the completed-phase evidence; this test exercises package publication,
+        // while provider provisioning has its own integration qualification.
+        let mut progress = prepared.progress().clone();
+        progress.phase = InstallationPhase::Ready;
+        prepared
+            .directory()
+            .replace("progress.json", &serde_json::to_vec(&progress).unwrap())
+            .unwrap();
+        let mut candidate = input.clone();
+        candidate.package_digest = format!("sha256:{}", "b".repeat(64)).parse().unwrap();
+        let release = InstallationReleaseV1 {
+            schema_version: 1,
+            installation_id: prepared.identity().installation_id.clone(),
+            bootstrap_input_digest: input.digest().unwrap(),
+            bootstrap_identity_digest: prepared.identity().digest().unwrap(),
+            from_package_digest: input.package_digest.clone(),
+            to_package_digest: candidate.package_digest.clone(),
+            from_schema_version: 16,
+            to_schema_version: 17,
+            from_inventory_digest: SOURCE_INVENTORY_DIGEST.parse().unwrap(),
+            to_inventory_digest: conversation_upgrade::target_inventory_digest()
+                .parse()
+                .unwrap(),
+        };
+        let bytes = serde_json::to_vec_pretty(&release).unwrap();
+        prepared
+            .directory()
+            .write_immutable(UPGRADE_INTENT_FILE, &bytes)
+            .unwrap();
+        drop(prepared);
+        assert!(verify_release(&input, &candidate, &root).is_err());
+        let prepared = PreparedInstallation::open(&input, &root).unwrap();
+        prepared
+            .directory()
+            .write_immutable(RELEASE_FILE, &bytes)
+            .unwrap();
+        drop(prepared);
+        verify_release(&input, &candidate, &root).unwrap();
+        candidate.package_digest = format!("sha256:{}", "c".repeat(64)).parse().unwrap();
+        assert!(verify_release(&input, &candidate, &root).is_err());
+        let prepared = PreparedInstallation::open(&input, &root).unwrap();
+        let mut target = release.clone();
+        target.to_package_digest = candidate.package_digest.clone();
+        let intent = PackageRolloutIntentV1 {
+            schema_version: 1,
+            expected_previous_release_digest: release.canonical_digest().unwrap(),
+            previous_release: release.clone(),
+            target_release: target.clone(),
+        };
+        prepared
+            .directory()
+            .write_immutable(
+                &PackageRolloutIntentV1::filename(&target.canonical_digest().unwrap()),
+                &serde_json::to_vec(&intent).unwrap(),
+            )
+            .unwrap();
+        let mut wrong = intent.clone();
+        wrong.expected_previous_release_digest =
+            format!("sha256:{}", "d".repeat(64)).parse().unwrap();
+        assert!(publish_rollout(&prepared, &wrong).is_err());
+        drop(prepared);
+        assert!(verify_release(&input, &candidate, &root).is_err());
+        let prepared = PreparedInstallation::open(&input, &root).unwrap();
+        publish_rollout(&prepared, &intent).unwrap();
+        publish_rollout(&prepared, &intent).unwrap();
+        drop(prepared);
+        verify_release(&input, &candidate, &root).unwrap();
+        candidate.package_digest = target.to_package_digest;
+        candidate.name = "different-installation".into();
+        assert!(verify_release(&input, &candidate, &root).is_err());
+    }
 }

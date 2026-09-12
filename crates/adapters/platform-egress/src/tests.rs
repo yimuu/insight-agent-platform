@@ -897,21 +897,32 @@ async fn public_registry_endpoint_requires_exact_policies_and_public_dns_before_
     use insight_platform_contracts::{InstalledModelPublicEgressV1, ModelEgressRoutingV1};
     let fixture = pinned_fixture();
     let entry = &fixture.entry;
-    let catalog =
-        InstalledModelDestinationCatalog::from_routing(ModelEgressRoutingV1::PublicHttps {
-            grant: InstalledModelPublicEgressV1 {
-                schema_version: 1,
-                protocols: vec![entry.protocol],
-                credential_purpose: insight_platform_contracts::MODEL_API_KEY_PURPOSE
-                    .parse()
-                    .unwrap(),
-                network_policy: entry.network_policy.clone(),
-                tls_policy: entry.tls_policy.clone(),
-                trust_policy: entry.trust_policy.clone(),
-                data_policy: entry.data_policy.clone(),
-            },
-        })
-        .unwrap();
+    let routing = ModelEgressRoutingV1::PublicHttps {
+        grant: Box::new(InstalledModelPublicEgressV1 {
+            schema_version: 1,
+            protocols: vec![entry.protocol],
+            credential_purpose: insight_platform_contracts::MODEL_API_KEY_PURPOSE
+                .parse()
+                .unwrap(),
+            network_policy: entry.network_policy.clone(),
+            tls_policy: entry.tls_policy.clone(),
+            trust_policy: entry.trust_policy.clone(),
+            data_policy: entry.data_policy.clone(),
+        }),
+    };
+    let ModelEgressRoutingV1::PublicHttps { grant } = &routing else {
+        unreachable!()
+    };
+    let wire = serde_json::to_value(&routing).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"mode": "public_https", "grant": grant.as_ref()})
+    );
+    assert_eq!(
+        serde_json::from_value::<ModelEgressRoutingV1>(wire).unwrap(),
+        routing
+    );
+    let catalog = InstalledModelDestinationCatalog::from_routing(routing).unwrap();
     let mut request = fixture.request.clone();
     request.secret_bindings[0].purpose = insight_platform_contracts::MODEL_API_KEY_PURPOSE
         .parse()
