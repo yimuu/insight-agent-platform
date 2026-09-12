@@ -5,7 +5,7 @@ use crate::repository::{
     load_secret_binding_resolution_in_transaction,
 };
 use insight_platform_contracts::{
-    ModelDispatchAuthorizationError, ModelDispatchAuthorizationV1, ModelDispatchPermitV1,
+    ModelDispatchAuthorizationError, ModelDispatchAuthorizationV1, ModelDispatchPermitV2,
     SecretBindingState,
 };
 use insight_platform_security::ModelDispatchAuthority;
@@ -15,7 +15,7 @@ impl ModelDispatchAuthority for PgRepository {
     async fn authorize_model_dispatch(
         &self,
         request: &ModelDispatchAuthorizationV1,
-    ) -> Result<ModelDispatchPermitV1, ModelDispatchAuthorizationError> {
+    ) -> Result<ModelDispatchPermitV2, ModelDispatchAuthorizationError> {
         self.authorize_current_model_dispatch(request)
             .await
             .map_err(|error| match error {
@@ -31,7 +31,7 @@ impl PgRepository {
     async fn authorize_current_model_dispatch(
         &self,
         request: &ModelDispatchAuthorizationV1,
-    ) -> Result<ModelDispatchPermitV1, RepositoryError> {
+    ) -> Result<ModelDispatchPermitV2, RepositoryError> {
         if !request.validate_at(Utc::now()) {
             return Err(RepositoryError::PermissionDenied);
         }
@@ -178,8 +178,9 @@ impl PgRepository {
         .map_err(|_| RepositoryError::PermissionDenied)?
         .parse()
         .map_err(|_| RepositoryError::PermissionDenied)?;
-        let permit = ModelDispatchPermitV1 {
-            schema_version: 1,
+        let permit = ModelDispatchPermitV2 {
+            schema_version: 2,
+            endpoint: closure.endpoint.clone(),
             request_digest,
             valid_until: lease
                 .expires_at

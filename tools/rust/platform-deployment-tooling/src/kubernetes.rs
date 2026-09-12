@@ -106,7 +106,6 @@ pub fn helm_plan(
     input.validate()?;
     let mut expected = kubernetes_input(&input.name, input.package_digest.clone())?;
     expected.network.console_origin = input.network.console_origin.clone();
-    expected.model_destinations = input.model_destinations.clone();
     expected = crate::installation::with_remote_context_destinations(
         expected,
         input.remote_context_destinations.clone(),

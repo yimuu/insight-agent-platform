@@ -87,7 +87,7 @@ class ClassifyCiPathsTests(unittest.TestCase):
             "deploy/helm/insight-platform-installation/templates/phase-job.yaml",
             "tools/rust/platform-deployment-tooling/src/renderer.rs",
             "tools/rust/platform-installation-tooling/src/main.rs",
-            "tools/install/platform_compose.py",
+            "tools/rust/platform-deployment-tooling/src/compose.rs",
             "tools/install/platform_native.py",
             "tools/install/native_runtime.py",
             "tools/install/provider_lifecycle.py",

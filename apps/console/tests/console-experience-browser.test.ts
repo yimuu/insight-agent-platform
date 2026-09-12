@@ -102,8 +102,9 @@ test(
         false,
       )
       await browser.click('创建智能体')
-      await browser.field('名称', 'wizard-model')
-      await browser.field('显示名称', '中文助手')
+      await browser.evaluate(`document.querySelector('[data-ui~=editor] details summary').click()`)
+      await browser.field('资源标识', 'wizard-model')
+      await browser.field('智能体名称', '中文助手')
       await browser.click('下一步')
       await browser.click('下一步')
       await browser.wait(
@@ -167,8 +168,8 @@ test(
       assert.match(yaml, /model_chat/)
       await browser.field('agent.yaml', '# 用户备注\n' + yaml)
       await browser.click('分步表单')
-      await browser.wait(`${fieldValue('显示名称')} === '中文助手'`, 'YAML to form')
-      await browser.field('显示名称', '保留备注的助手')
+      await browser.wait(`${fieldValue('智能体名称')} === '中文助手'`, 'YAML to form')
+      await browser.field('智能体名称', '保留备注的助手')
       await browser.click('高级 YAML')
       await browser.wait(
         `String(${fieldValue('agent.yaml')}).includes('保留备注的助手')`,
@@ -178,7 +179,7 @@ test(
       const schema = JSON.parse(await browser.evaluate(fieldValue('输入 Schema JSON')))
       assert.equal(schema.properties.context.description, '补充背景')
       assert.equal(schema.required.includes('context'), false)
-      assert.equal(schema.properties.message.maxLength, 128)
+      assert.equal(schema.properties.message.maxLength, 16384)
       assert.equal(writes, 0, 'view changes and validation do not publish')
       await browser.click('返回列表')
       access = 403

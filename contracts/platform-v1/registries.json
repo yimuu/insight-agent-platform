@@ -1417,6 +1417,11 @@
     },
     {
       "exposure": "public",
+      "name": "conversation",
+      "prefix": "cnv"
+    },
+    {
+      "exposure": "public",
       "name": "run",
       "prefix": "run"
     },

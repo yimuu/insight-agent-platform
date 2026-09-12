@@ -792,15 +792,19 @@ pub fn published_run_defaults(
 pub fn list_remote_agents(
     client: &PublicHttpClient,
 ) -> Result<Vec<AgentSummaryV1>, AgentCommandError> {
-    let mut cursor = None;
+    let mut cursor: Option<String> = None;
     let mut agents = Vec::new();
     loop {
-        let path = cursor.as_ref().map_or_else(
-            || "/v1/agents?page_size=50".to_owned(),
-            |cursor: &String| format!("/v1/agents?page_size=50&cursor={cursor}"),
-        );
+        let mut query = vec![("page_size".to_owned(), "50".to_owned())];
+        if let Some(cursor) = &cursor {
+            query.push(("cursor".to_owned(), cursor.clone()));
+        }
         let page = client
-            .get_body_json::<ListPageV1<AgentSummaryV1>>(&path, StatusCode::OK)?
+            .get_body_json_query::<ListPageV1<AgentSummaryV1>>(
+                "/v1/agents",
+                &query,
+                StatusCode::OK,
+            )?
             .body;
         if page.schema_version != 1 || page.items.len() > 50 {
             return Err(AgentCommandError::InvalidAuthority(
@@ -1941,6 +1945,40 @@ fn io_error(path: &Path, error: std::io::Error) -> AgentCommandError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn agent_list_sends_bounded_encoded_query_for_each_page() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for (index, query) in ["page_size=50", "page_size=50&cursor=opaque%2Bcursor%2F%3D"]
+                .iter()
+                .enumerate()
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 8192];
+                let count = stream.read(&mut request).unwrap();
+                assert!(std::str::from_utf8(&request[..count])
+                    .unwrap()
+                    .starts_with(&format!("GET /v1/agents?{query} HTTP/1.1")));
+                let body = serde_json::json!({"schema_version":1,"items":[],"next_cursor":if index==0 {Some("opaque+cursor/=")} else {None}}).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: 11111111111111111111111111111111\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".into(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(list_remote_agents(&client).unwrap().is_empty());
+        server.join().unwrap();
+    }
 
     #[test]
     fn lock_round_trips_privately_and_rejects_wrong_id_kinds() {

@@ -38,10 +38,15 @@ BEGIN
         'GRANT SELECT ON insight_platform.invocations, insight_platform.jobs, insight_platform.run_values, insight_platform.artifact_links, insight_platform.artifacts, insight_platform.artifact_blobs TO %I',
         reader_role
     );
+    EXECUTE pg_catalog.format('GRANT SELECT ON insight_platform.conversation_turns TO %I', reader_role);
+    EXECUTE pg_catalog.format('GRANT SELECT (principal_id, state, version) ON insight_platform.principals TO %I', reader_role);
+    EXECUTE pg_catalog.format('GRANT SELECT (tenant_id, principal_id, principal_kind, state, generation, version, permissions_schema_version, permissions, permissions_digest) ON insight_platform.tenant_principals TO %I', reader_role);
+    EXECUTE pg_catalog.format('GRANT SELECT (tenant_id,run_id,artifact_id) ON insight_platform.run_values TO %I', gateway_role);
+    EXECUTE pg_catalog.format('GRANT SELECT (tenant_id,run_id) ON insight_platform.conversation_turns TO %I', gateway_role);
     -- Scheduler TypedPlan/RunValue/Skill reads and the Skill's current Selection Policy closure.
     -- Preserve column-only reads: no Run current payload, table-wide reads, DML or row locks.
     EXECUTE pg_catalog.format(
-        'GRANT SELECT (tenant_id, run_id, version, state, bindings_schema_version, bindings, bindings_digest) ON insight_platform.runs TO %I',
+        'GRANT SELECT (tenant_id, run_id, version, state, input_value_id, output_value_id, bindings_schema_version, bindings, bindings_digest) ON insight_platform.runs TO %I',
         reader_role
     );
     EXECUTE pg_catalog.format(

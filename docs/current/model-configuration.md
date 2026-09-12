@@ -2,20 +2,23 @@
 
 在 Console 的 **Models** 页面或 `insight model` 中管理模型。两者调用相同的公开 API：来源对应
 ModelProvider，模型对应 ModelProfile，默认模型保存在 TenantConfig；没有另一套配置数据库。
-本次 O 的真实公共 CLI ModelLoop、类型化结果、完整公共事件及业务重启已通过，单次请求记录 1,089
-ProviderReported tokens；厂商费用仍未知，零记录不表示免费。物理部署和浏览器上传的独立验收范围见
-[统一证据](../specs/unified-installation/deployment-review.md#o-current-delivery-evidence)。
-安装 Ready、连接检测或一次文本成功本身不构成其他厂商能力的资格证明。
-
-先由安装配置允许模型服务的 HTTPS 地址、协议和区域，再添加来源及密钥。来源可以表示一个厂商的一个账号、
-业务空间或区域；同一个来源可以配置多个模型。同一厂商的不同来源互不覆盖，也不会自动切换或共用凭据。
+模型服务的 HTTPS 地址、协议、区域和凭据直接在页面配置，不需要预先编辑安装文件。
+地址随 Registry 来源部署冻结，出站服务从已经授权的版本读取，继续执行公网 DNS、TLS 和策略检查。
+同一个来源可以配置多个模型，不同账号的来源互不覆盖，也不会自动切换或共用凭据。
+软件升级保留模型冻结配置。发布时的 Worker 标识是来源证据；本次执行与取消按 PostgreSQL
+Job 中实际领取时的 build 与租约校验，并仍要求当前 Worker 满足冻结适配器契约及执行能力。
+已有来源在后续编辑模型时，同样按适配器名称和契约校验兼容性；软件构建标识变化不要求重发来源。
+历史厂商调用记录属于对应版本的资格证据，不代表本次部署或所有厂商均已验证。
 
 ## Console
 
-连接安装输出的 Console origin，使用其私有会话文件中的 OIDC token 登录。进入 Models：
+打开 Console，首次创建管理员账号，之后使用邮箱和密码登录。进入“模型配置”：
 
-1. **Add source**：填写稳定别名、显示名称，选择已安装的目标地址，输入 API key。
-2. **Add model**：选择来源，填写厂商的模型名称、输入输出限制和明确的累计执行额度。
+1. **添加模型**：没有已连接服务时，弹窗先选择模型服务并填写 API Key，再进入模型配置。
+   提供阿里百炼、OpenAI、Anthropic 预设，也可以填写自定义兼容 HTTPS 地址和协议。服务名称自动填写，内部别名自动生成；“更多设置”可修改地址、名称和区域。
+2. 填写厂商的 **模型 ID**。显示名称自动跟随输入，“高级设置”可调整名称、输入输出限制和累计执行额度。
+   已连接的服务可用于多个模型；“连接服务”也可单独添加账户。新建模型默认输出预算为 2,048 Token，
+   页面直接显示当前预算；回答还受 Agent 输出字段约束，修改模型不会重写已发布 Agent 的冻结引用。
 3. **Test connection**：对这个已部署模型发送一次短请求，查看响应、拒绝、限流或超时等结果。
 4. **Use as default**：将这个精确部署设为新 Agent 编写时使用的默认模型。
 
@@ -24,6 +27,8 @@ ProviderReported tokens；厂商费用仍未知，零记录不表示免费。物
 无工具的 Model chat 使用明确的零工具预算；编译器冻结该预算，运行时仍核验实际模型能力。有 Skill 或 Capability slot 的计划必须配置正工具预算。
 ModelLoop 回答其自身输出端口的封闭对象 schema。完整 Agent 可在后续人工任务或计算后组成另一份最终结果，
 模型不会因此被要求提前生成尚未发生的人工决定。响应 schema 的指令计入原有提示和 token 预算。
+失败诊断区分非法 JSON、输出约束不匹配和输出容量超限，并区分连接、流式空闲及总时限超时。
+诊断只使用固定安全说明，不回传厂商文本；结构化结果仍严格校验，不自动修补、截断或按成功保存。
 
 连接检测可能产生一次厂商调用费用。它仅检查协议响应；不能证明 Agent、文档检索、工具、流式输出、tokenizer
 或数据保留承诺。基础配置启用文本和本地验证的 JSON 文本回退，工具与原生结构化输出关闭。
@@ -45,6 +50,8 @@ reasoning 内容不会展示或写入诊断结果。
 使用旧密钥，在 **Credential** 中查看绑定后执行 **Revoke this credential**。撤销不可恢复，影响所有引用该绑定
 的模型，不自动改写默认模型或切换来源。底层厂商密钥的注销仍由厂商账号管理。
 
+添加与编辑在弹窗内完成，保存失败后保留原操作并在表单旁显示原因；关闭弹窗后可通过“继续添加”恢复。
+额度和密钥管理仅在选择对应模型或服务后展开，操作结束会清除处理中状态。
 发布、导入、默认选择、额度调整和撤销都有恢复入口。中断后沿用原命令身份、版本条件和已冻结输入；不能通过刷新版本号
 覆盖他人的修改。浏览器仅在当前会话保存恢复元数据，API key 不写入浏览器存储；导入未确认时需重新输入同一密钥。
 
@@ -84,6 +91,7 @@ insight model default "${connection[@]}"
     {
       "alias": "dashscope.work",
       "display_name": "DashScope 工作账号",
+      "region": "cn-beijing",
       "protocol": "open_ai_responses",
       "environment": {
         "schema_version": 1,
@@ -96,6 +104,7 @@ insight model default "${connection[@]}"
     {
       "alias": "anthropic.work",
       "display_name": "另一来源",
+      "region": "global",
       "protocol": "anthropic_messages",
       "environment": {
         "schema_version": 1,
@@ -131,8 +140,10 @@ insight model default "${connection[@]}"
   "sources": [{
     "alias": "dashscope.work",
     "display_name": "DashScope 工作账号",
+      "region": "cn-beijing",
     "protocol": "open_ai_responses",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "region": "cn-beijing",
     "api_key_file": "/run/keys/dashscope",
     "models": [{
       "alias": "qwen.work",
@@ -172,7 +183,7 @@ insight model revoke "${connection[@]}" --binding sbd_REPLACE_WITH_ACTUAL_ID --s
 使用私有 CA 的安装时，所有 `insight model` 命令可显式传入 `--ca-file /absolute/path/public-ca.pem`。
 命令只读取一次有界公共 PEM 证书包，将证书加入本次 API 和对象上传客户端的信任根；仍校验证书名称、
 拒绝跳转且不转发平台令牌到对象存储。证书不会写入业务资源、Receipt 或系统信任设置。
-普通公开 HTTPS 证书不需要此选项。Console 浏览器的信任由部署者单独配置。
+普通公开 HTTPS 证书不需要此选项。Console 上传由同源服务使用部署 CA 转发，浏览器无需安装存储 CA。
 
 
 ## 执行额度

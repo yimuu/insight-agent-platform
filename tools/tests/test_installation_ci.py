@@ -53,6 +53,7 @@ class InstallationCiTests(unittest.TestCase):
         selected = [step for step in steps if step.get("name") == "Verify shared installation Compose and Helm consumers"]
         self.assertEqual(len(selected), 1)
         self.assertIn("tools/tests/test_public_trust.py", selected[0]["run"])
+        self.assertIn("tools/tests/test_installation_compose_public_trust.py", selected[0]["run"])
 
     def test_actual_consumers_are_sequential_and_required(self):
         self.assertEqual(self.job["if"], "needs.changes.outputs.runtime == 'true' || needs.changes.outputs.console == 'true'")
@@ -137,8 +138,8 @@ with open(os.environ['FIXTURE_CALLS'],'a') as output:
     output.write(json.dumps(sys.argv[1:])+'\\n')
 if 'kubernetes-input' in sys.argv:
     print('{"schema_version":1}')
-elif 'helm-plan' in sys.argv:
-    print(json.dumps({'dependencies': json.loads(os.environ['FIXTURE_DEPENDENCIES'])}))
+elif 'helm-values' in sys.argv:
+    print(json.dumps({'plan': {'dependencies': json.loads(os.environ['FIXTURE_DEPENDENCIES'])}}))
 ''')
             fake.chmod(0o500)
             environment = dict(os.environ, PATH=str(root)+os.pathsep+os.environ["PATH"], FIXTURE_CALLS=str(root/"calls"),
@@ -147,7 +148,7 @@ elif 'helm-plan' in sys.argv:
             subprocess.run([sys.executable, "-c", self.python_step("Cache exact installation dependency and Kind node images")], cwd=ROOT, env=environment, check=True, timeout=10)
             calls = [json.loads(line) for line in (root/"calls").read_text().splitlines()]
             self.assertIn('kubernetes-input', calls[0])
-            self.assertIn('helm-plan', calls[1])
+            self.assertIn('helm-values', calls[1])
             for call in calls[:2]:
                 self.assertIn('none', call)
                 self.assertIn('--read-only', call)

@@ -45,7 +45,6 @@ use std::{
     collections::BTreeSet,
     error::Error,
     fmt,
-    fmt::Write as _,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -63,7 +62,8 @@ use url::Url;
 use uuid::Uuid;
 
 pub const MODEL_WORKER_ROLE: &str = "model-worker";
-pub const MODEL_LIVE_NATS_SUBJECT_PREFIX: &str = "insight.platform.v1.run.live";
+pub use insight_platform_models::model_live_delta_subject;
+use insight_platform_models::valid_model_live_namespace as valid_nats_namespace;
 const MAX_LIVE_DELTA_PUBLISH_BATCH_MESSAGES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,45 +178,6 @@ fn valid_nats_server(value: &str) -> bool {
         && matches!(url.path(), "" | "/")
         && url.query().is_none()
         && url.fragment().is_none()
-}
-
-fn valid_nats_namespace(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    (1..=64).contains(&bytes.len())
-        && bytes
-            .first()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes
-            .last()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-}
-
-pub fn model_live_delta_subject(
-    namespace: &str,
-    tenant_id: &ResourceId,
-    run_id: &ResourceId,
-) -> Result<String, ModelLiveDeltaError> {
-    if !valid_nats_namespace(namespace)
-        || tenant_id.kind() != ResourceKind::Tenant
-        || run_id.kind() != ResourceKind::Run
-    {
-        return Err(ModelLiveDeltaError::InvalidEnvelope);
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(b"insight.platform/v1/run-live-subject\0");
-    hasher.update(tenant_id.to_string().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(run_id.to_string().as_bytes());
-    let mut key = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        let _ = write!(key, "{byte:02x}");
-    }
-    Ok(format!(
-        "{MODEL_LIVE_NATS_SUBJECT_PREFIX}.{namespace}.{key}"
-    ))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -394,6 +355,7 @@ impl ModelLiveDeltaSink for BufferedNatsModelLiveDeltaSink {
         &self,
         execution: &insight_platform_models::execution::ModelAdapterExecutionRequest,
         frame: &NormalizedModelFrame,
+        text_sequence: u64,
     ) {
         let NormalizedModelDelta::Text(text) = &frame.delta else {
             self.counters
@@ -411,7 +373,7 @@ impl ModelLiveDeltaSink for BufferedNatsModelLiveDeltaSink {
             return;
         }
         self.enqueue(ModelLiveTextDelta {
-            schema_version: 1,
+            schema_version: 2,
             tenant_id: execution.tenant_id.clone(),
             run_id: execution.run_id.clone(),
             model_turn_id: execution.model_turn_id.clone(),
@@ -420,6 +382,7 @@ impl ModelLiveDeltaSink for BufferedNatsModelLiveDeltaSink {
             attempt_no: execution.attempt_no,
             lease_generation: execution.lease_generation,
             transport_sequence: frame.transport_sequence,
+            text_sequence,
             request_digest: execution.request_digest.clone(),
             classification: execution.request.classification,
             text: text.clone(),
@@ -644,7 +607,8 @@ pub struct ModelClaimBinding {
     pub tenant_id: ResourceId,
     pub job_id: ResourceId,
     pub worker_process_generation_id: ResourceId,
-    pub worker_manifest_digest: Sha256Digest,
+    /// Actual executable recorded by the claimed Job, independent of provider publication history.
+    pub worker_build_digest: Sha256Digest,
     pub expected_job_version: u64,
     pub lease_generation: u64,
     pub lease_token_digest: Sha256Digest,
@@ -679,14 +643,11 @@ impl ClaimedModelJob for ClaimedModelExecution {
             tenant_id: self.turn.tenant_id.clone(),
             job_id: projection.job_id,
             worker_process_generation_id: self.fence.worker_process_generation_id.clone(),
-            worker_manifest_digest: self
-                .turn
-                .payload
-                .admission
-                .provider
-                .installed_adapter
-                .worker_manifest_digest
-                .clone(),
+            worker_build_digest: self
+                .job
+                .attempt_build_digest
+                .clone()
+                .ok_or(ModelClaimFailure::Invariant)?,
             expected_job_version: self.fence.expected_version,
             lease_generation: self.fence.lease_generation,
             lease_token_digest: self.fence.token_digest.clone(),
@@ -857,7 +818,8 @@ pub struct ModelCancellationCandidate {
     pub model_turn_id: ResourceId,
     pub job_id: ResourceId,
     pub worker_process_generation_id: ResourceId,
-    pub worker_manifest_digest: Sha256Digest,
+    /// Actual executable recorded by the claimed Job, independent of provider publication history.
+    pub worker_build_digest: Sha256Digest,
     pub expected_turn_version: u64,
     pub fence: JobFence,
     pub usage_reservation_id: ResourceId,
@@ -923,7 +885,10 @@ impl ModelCancellationCandidate {
             model_turn_id: controlled.turn.model_turn_id,
             job_id: projection.job_id,
             worker_process_generation_id: lease.worker_process_generation_id.clone(),
-            worker_manifest_digest: installed.worker_manifest_digest.clone(),
+            worker_build_digest: job
+                .attempt_build_digest
+                .clone()
+                .ok_or(ModelCancellationSourceFailure::Invariant)?,
             expected_turn_version: controlled.turn.version,
             fence: JobFence {
                 expected_version: projection.version,
@@ -1243,7 +1208,7 @@ where
         let mut jobs = BTreeSet::new();
         for candidate in page.records {
             if candidate.worker_process_generation_id != pool.worker_process_generation_id
-                || candidate.worker_manifest_digest != pool.worker_manifest_digest
+                || candidate.worker_build_digest != self.pools.manifest().worker_build_digest
                 || candidate.fence.worker_process_generation_id != pool.worker_process_generation_id
                 || !jobs.insert(candidate.job_id.clone())
             {
@@ -1794,7 +1759,12 @@ where
         if claimed.is_empty() {
             return Ok(0);
         }
-        let bindings = validate_claims(&claimed, &claim_pool, &expected_tokens)?;
+        let bindings = validate_claims(
+            &claimed,
+            &claim_pool,
+            &self.pools.manifest().worker_build_digest,
+            &expected_tokens,
+        )?;
         let permits = reservation
             .bind_claimed_jobs(
                 bindings
@@ -1934,7 +1904,7 @@ where
             claim,
             audit,
             quota_settlement_entry_ids,
-            worker_manifest_digest: binding.worker_manifest_digest.clone(),
+            worker_manifest_digest: self.pools.snapshot().worker_manifest_digest,
             limits: self.config.limits,
             heartbeat_interval: self.config.heartbeat_interval,
             lease_milliseconds: self.config.lease_milliseconds,
@@ -2022,6 +1992,7 @@ where
 fn validate_claims<C: ClaimedModelJob>(
     claimed: &[C],
     pool: &insight_platform_worker::LocalWorkerPoolSnapshot,
+    worker_build_digest: &Sha256Digest,
     expected_tokens: &BTreeSet<Sha256Digest>,
 ) -> Result<Vec<ModelClaimBinding>, ModelWorkerDriverError> {
     if claimed.len() > expected_tokens.len() {
@@ -2035,7 +2006,7 @@ fn validate_claims<C: ClaimedModelJob>(
             .claim_binding()
             .map_err(|_| ModelWorkerDriverError::CorruptClaim)?;
         if binding.worker_process_generation_id != pool.worker_process_generation_id
-            || binding.worker_manifest_digest != pool.worker_manifest_digest
+            || &binding.worker_build_digest != worker_build_digest
             || !expected_tokens.contains(&binding.lease_token_digest)
             || !jobs.insert(binding.job_id.clone())
             || !tokens.insert(binding.lease_token_digest.clone())
@@ -2272,7 +2243,7 @@ mod tests {
     }
 
     struct EchoAuthority {
-        worker_manifest_digest: Sha256Digest,
+        worker_build_digest: Sha256Digest,
         corrupt_manifest: bool,
     }
 
@@ -2289,12 +2260,12 @@ mod tests {
                 tenant_id: ResourceId::from_uuid_v7(ResourceKind::Tenant, Uuid::now_v7()).unwrap(),
                 job_id: ResourceId::from_uuid_v7(ResourceKind::Job, Uuid::now_v7()).unwrap(),
                 worker_process_generation_id: command.worker_process_generation_id,
-                worker_manifest_digest: if self.corrupt_manifest {
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                worker_build_digest: if self.corrupt_manifest {
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                         .parse()
                         .unwrap()
                 } else {
-                    self.worker_manifest_digest.clone()
+                    self.worker_build_digest.clone()
                 },
                 expected_job_version: 2,
                 lease_generation: 1,
@@ -2381,7 +2352,7 @@ mod tests {
             model_turn_id: resource(ResourceKind::ModelTurn),
             job_id: resource(ResourceKind::Job),
             worker_process_generation_id: snapshot.worker_process_generation_id.clone(),
-            worker_manifest_digest: snapshot.worker_manifest_digest,
+            worker_build_digest: pools.manifest().worker_build_digest.clone(),
             expected_turn_version: 3,
             fence: JobFence {
                 expected_version: 4,
@@ -2446,7 +2417,7 @@ mod tests {
 
     fn live_delta(text: String) -> ModelLiveTextDelta {
         ModelLiveTextDelta {
-            schema_version: 1,
+            schema_version: 2,
             tenant_id: resource(ResourceKind::Tenant),
             run_id: resource(ResourceKind::Run),
             model_turn_id: resource(ResourceKind::ModelTurn),
@@ -2455,6 +2426,7 @@ mod tests {
             attempt_no: 1,
             lease_generation: 1,
             transport_sequence: 1,
+            text_sequence: 1,
             request_digest: digest('7'),
             classification: insight_platform_contracts::DataClassification::Internal,
             text,
@@ -2630,7 +2602,7 @@ mod tests {
                 .unwrap();
         let pools = LocalWorkerPools::new(model_manifest(2), process_generation).unwrap();
         let authority = Arc::new(EchoAuthority {
-            worker_manifest_digest: pools.snapshot().worker_manifest_digest,
+            worker_build_digest: pools.manifest().worker_build_digest.clone(),
             corrupt_manifest: false,
         });
         let driver = ModelWorkerDriver::new(
@@ -2651,13 +2623,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manifest_drift_in_claim_response_fails_closed() {
+    async fn attempt_build_drift_in_claim_response_fails_closed() {
         let process_generation =
             ResourceId::from_uuid_v7(ResourceKind::WorkerProcessGeneration, Uuid::now_v7())
                 .unwrap();
         let pools = LocalWorkerPools::new(model_manifest(1), process_generation).unwrap();
         let authority = Arc::new(EchoAuthority {
-            worker_manifest_digest: pools.snapshot().worker_manifest_digest,
+            worker_build_digest: pools.manifest().worker_build_digest.clone(),
             corrupt_manifest: true,
         });
         let driver = ModelWorkerDriver::new(
@@ -2733,6 +2705,43 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0] < pair[1]));
         drop(business);
+    }
+
+    #[tokio::test]
+    async fn cancellation_rejects_a_different_attempt_build_before_egress() {
+        let generation = resource(ResourceKind::WorkerProcessGeneration);
+        let pools = LocalWorkerPools::new(model_manifest(1), generation.clone()).unwrap();
+        let mut candidate = cancellation_candidate(&pools);
+        candidate.worker_build_digest = digest('f');
+        assert_ne!(
+            candidate.worker_build_digest,
+            pools.manifest().worker_build_digest
+        );
+        let authority = Arc::new(CancellationAuthority {
+            commands: Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(CancellationPort {
+            response: CancelResponse::Outcome(ModelAdapterCancelOutcome::Accepted),
+            requests: Mutex::new(Vec::new()),
+        });
+        let driver = ModelCancellationDriver::new(
+            Arc::new(CancellationSource {
+                expected_generation: generation,
+                candidates: Mutex::new(Some(vec![candidate])),
+            }),
+            authority.clone(),
+            port.clone(),
+            Arc::new(UuidModelWorkerIdentityFactory),
+            pools,
+            cancellation_config(),
+        )
+        .unwrap();
+        assert!(matches!(
+            driver.drive_once().await,
+            Err(ModelCancellationDriverError::CorruptCandidate)
+        ));
+        assert!(port.requests.lock().unwrap().is_empty());
+        assert!(authority.commands.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

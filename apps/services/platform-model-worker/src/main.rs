@@ -455,7 +455,12 @@ async fn run() -> Result<(), ProcessError> {
             .run(driver_cancellation)
             .await
             .map(|_| ())
-            .map_err(|_| ProcessError::WorkerFailed)
+            .map_err(|error| match error {
+                insight_platform_model_worker::ModelWorkerDriverError::CorruptClaim => {
+                    ProcessError::CorruptClaim
+                }
+                _ => ProcessError::WorkerFailed,
+            })
     });
     let control_cancellation = cancellation.child_token();
     components.spawn(async move {
@@ -463,7 +468,7 @@ async fn run() -> Result<(), ProcessError> {
             .run(control_cancellation)
             .await
             .map(|_| ())
-            .map_err(|_| ProcessError::WorkerFailed)
+            .map_err(|_| ProcessError::CancellationFailed)
     });
     let live_cancellation = cancellation.child_token();
     components.spawn(async move {
@@ -471,7 +476,7 @@ async fn run() -> Result<(), ProcessError> {
             .run(live_cancellation)
             .await
             .map(|_| ())
-            .map_err(|_| ProcessError::WorkerFailed)
+            .map_err(|_| ProcessError::LiveDeltaFailed)
     });
     let http_cancellation = cancellation.child_token();
     let router = process_observability_router(Arc::clone(&metrics));
@@ -667,6 +672,9 @@ enum ProcessError {
     EgressUnavailable,
     SignalUnavailable,
     WorkerFailed,
+    CorruptClaim,
+    CancellationFailed,
+    LiveDeltaFailed,
     WorkerExitedUnexpectedly,
     ObservabilityFailed,
 }
@@ -683,7 +691,10 @@ impl fmt::Display for ProcessError {
             Self::SchemaMismatch => formatter.write_str("database schema does not match candidate"),
             Self::EgressUnavailable => formatter.write_str("Egress Broker is unavailable"),
             Self::SignalUnavailable => formatter.write_str("shutdown signal is unavailable"),
-            Self::WorkerFailed => formatter.write_str("Model Worker driver failed"),
+            Self::WorkerFailed => formatter.write_str("model_worker_driver_failed"),
+            Self::CorruptClaim => formatter.write_str("model_worker_corrupt_claim"),
+            Self::CancellationFailed => formatter.write_str("model_worker_cancellation_failed"),
+            Self::LiveDeltaFailed => formatter.write_str("model_worker_live_delta_failed"),
             Self::WorkerExitedUnexpectedly => {
                 formatter.write_str("Model Worker exited unexpectedly")
             }

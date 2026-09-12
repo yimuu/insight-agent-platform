@@ -130,3 +130,8 @@ node tests/model-chat-installation-journey.ts \
 完整旅程不拦截 API、不注入数据库数据、不自动重试创建或批准 Task。失败后保留实际身份与恢复记录，
 先读取并核对原 Agent/Run 再决定后续动作；不要换名称盲目重跑。通过只证明该次安装中的模型执行，
 不证明文档检索、人工批准或厂商全部能力。
+
+Console 对象上传使用 V2 transport 配置中的固定 HTTPS origin、桶前缀和公共 CA。
+浏览器通过 `/_console/v1/object-upload` 交付原签名 URL 与对象正文；此私有传输端口不转发
+平台 Bearer 或 Cookie，不改变 Artifact 授权及完成校验，也不需要修改浏览器证书信任。
+当前安装交付 V3 配置、新版 Console 镜像和独立 local-identity 服务，浏览器通过账号密码登录。详见 [ADR 0013](../../docs/adr/0013-console-object-upload-transport.md)。

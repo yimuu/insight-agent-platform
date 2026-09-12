@@ -1187,6 +1187,33 @@ BEGIN
     RETURN jsonb_build_object('creation_cutoff',cutoff,'upper_tenant',upper_tenant,'upper_run',upper_run,'rows',rows_json);
 END $history$;
 
+CREATE TABLE insight_platform.conversations (
+ tenant_id text NOT NULL, conversation_id text NOT NULL,
+ agent_id text NOT NULL, agent_deployment_id text NOT NULL, deployment_digest text NOT NULL CHECK (insight_platform.is_sha256(deployment_digest)),
+ input_field text NOT NULL CHECK (octet_length(input_field) BETWEEN 1 AND 128), input_schema_digest text NOT NULL CHECK (insight_platform.is_sha256(input_schema_digest)),
+ title text NOT NULL CHECK (octet_length(title) BETWEEN 1 AND 160),
+ created_by text NOT NULL CHECK (insight_platform.is_platform_id(created_by) AND left(created_by,4)='prn_'),
+ version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
+ turn_count integer NOT NULL DEFAULT 0 CHECK (turn_count BETWEEN 0 AND 128),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY (tenant_id, conversation_id),
+ CHECK (insight_platform.is_platform_id(conversation_id) AND left(conversation_id,4)='cnv_'),
+ FOREIGN KEY (tenant_id) REFERENCES insight_platform.tenants(tenant_id),
+ FOREIGN KEY (tenant_id, agent_id) REFERENCES insight_platform.resources(tenant_id, resource_id),
+ FOREIGN KEY (tenant_id, agent_deployment_id) REFERENCES insight_platform.deployments(tenant_id, deployment_id)
+);
+CREATE INDEX conversations_listing ON insight_platform.conversations(tenant_id, created_at, conversation_id);
+CREATE TABLE insight_platform.conversation_turns (
+ tenant_id text NOT NULL, conversation_id text NOT NULL, ordinal integer NOT NULL CHECK (ordinal BETWEEN 1 AND 128),
+ run_id text NOT NULL, history_through integer NOT NULL CHECK (history_through = ordinal - 1),
+ conversation_version bigint NOT NULL CHECK (conversation_version > 1),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY (tenant_id, conversation_id, ordinal), UNIQUE (tenant_id, run_id),
+ FOREIGN KEY (tenant_id, conversation_id) REFERENCES insight_platform.conversations(tenant_id, conversation_id),
+ FOREIGN KEY (tenant_id, run_id) REFERENCES insight_platform.runs(tenant_id, run_id)
+);
+
 CREATE FUNCTION insight_platform.history_lock_run(p_tenant text,p_run text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $history$
 DECLARE root record; snapshot jsonb; cleanup_states jsonb;
@@ -1201,7 +1228,7 @@ BEGIN
         WHERE task.tenant_id=p_tenant AND task.run_id=p_run ORDER BY cleanup.state,has_deletion_proof LIMIT 32
     ) fact;
     snapshot:=jsonb_build_object('version',root.version,'public_replay_floor',root.public_replay_floor,'public_sequence',root.public_sequence,'terminal_at',root.terminal_at,'active_work_count',root.active_work_count,
-        'hold_count',(SELECT count(*) FROM jsonb_object_keys(root.history_holds->'holds')),
+        'hold_count',(SELECT count(*) FROM jsonb_object_keys(root.history_holds->'holds')) + (SELECT count(*) FROM insight_platform.conversation_turns WHERE tenant_id=p_tenant AND run_id=p_run),
         'live_jobs',(SELECT count(*) FROM (SELECT 1 FROM insight_platform.jobs j WHERE j.tenant_id=p_tenant AND j.run_id=p_run AND j.terminal_at IS NULL LIMIT 1) fact),
         'sandbox_cleanup_obligations',(SELECT count(*) FROM (SELECT 1 FROM insight_platform.jobs j WHERE j.tenant_id=p_tenant AND j.run_id=p_run AND j.job_kind='sandbox_capability_execution' AND j.payload#>>'{cleanup,required}' IS DISTINCT FROM 'false' LIMIT 1) fact),
         'live_invocations',(SELECT count(*) FROM (SELECT 1 FROM insight_platform.invocations i WHERE i.tenant_id=p_tenant AND i.run_id=p_run AND i.terminal_at IS NULL LIMIT 1) fact),
@@ -1299,7 +1326,7 @@ BEGIN
  IF p_tenant IS NULL OR p_id IS NULL OR NOT insight_platform.is_platform_id(p_tenant) OR left(p_tenant,4)<>'ten_' OR NOT insight_platform.is_platform_id(p_id) THEN RAISE EXCEPTION 'invalid history owner identity' USING ERRCODE='22023'; END IF;
  SELECT state,terminal_at,deadline,active_work_count,history_holds FROM insight_platform.runs WHERE tenant_id=p_tenant AND run_id=p_id FOR UPDATE NOWAIT INTO r;
  IF FOUND THEN
-  root_kind:='run'; SELECT count(*) INTO holds FROM jsonb_object_keys(r.history_holds->'holds');
+  root_kind:='run'; SELECT (SELECT count(*) FROM jsonb_object_keys(r.history_holds->'holds')) + (SELECT count(*) FROM insight_platform.conversation_turns WHERE tenant_id=p_tenant AND run_id=p_id) INTO holds;
   fact:=jsonb_build_object('state',r.state,'terminal_at',r.terminal_at,'deadline',r.deadline,'active_work',r.active_work_count>0);
  ELSE
   SELECT job_kind,state,terminal_at,deadline,run_id,invocation_id,owner_id,payload#>>'{cleanup,required}' AS cleanup,payload#>>'{physical,cleanup_required}' AS physical_cleanup FROM insight_platform.jobs WHERE tenant_id=p_tenant AND job_id=p_id FOR UPDATE NOWAIT INTO r;
@@ -1536,3 +1563,24 @@ REVOKE ALL ON FUNCTION insight_platform.history_delete_event(text,text,text) FRO
 REVOKE ALL ON FUNCTION insight_platform.history_lock_task_chain(text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION insight_platform.history_owner_delivery(text,text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION insight_platform.history_retire_oauth_chain(text,text,bigint,text,text,text,text) FROM PUBLIC;
+
+-- Local identity credential/session lifecycle. No business permissions are copied here.
+CREATE TABLE insight_platform.local_console_owner (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    principal_id text NOT NULL UNIQUE REFERENCES insight_platform.principals(principal_id),
+    email text NOT NULL CHECK (length(email) BETWEEN 3 AND 254 AND email = lower(email)),
+    display_name text NOT NULL CHECK (length(display_name) BETWEEN 1 AND 128),
+    password_salt bytea NOT NULL CHECK (octet_length(password_salt) = 32),
+    password_hash bytea NOT NULL CHECK (octet_length(password_hash) = 64),
+    failed_attempts integer NOT NULL DEFAULT 0 CHECK (failed_attempts BETWEEN 0 AND 10),
+    locked_until timestamptz,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE insight_platform.local_console_sessions (
+    session_digest text PRIMARY KEY CHECK (session_digest ~ '^[0-9a-f]{64}$'),
+    owner boolean NOT NULL DEFAULT true REFERENCES insight_platform.local_console_owner(singleton),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    CHECK (expires_at > created_at AND expires_at <= created_at + interval '8 hours')
+);
+CREATE INDEX local_console_sessions_expiry_idx ON insight_platform.local_console_sessions(expires_at);

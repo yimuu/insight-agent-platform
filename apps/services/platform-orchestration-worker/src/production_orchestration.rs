@@ -105,6 +105,7 @@ pub fn start_production_orchestration(
         critical_control_repository.clone(),
         critical_authority.clone(),
         artifact_client.clone(),
+        artifact_client.clone(),
     ));
     let durable_store = Arc::new(
         PostgresDurablePlanGenerationStore::new(

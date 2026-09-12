@@ -9,8 +9,193 @@ import { errorNotice } from '../../shared/ui/feedback'
 import type { Notice } from '../../shared/ui/feedback'
 import { readTokenFile, tokenExpiry } from './session'
 import type { ConsoleSession } from './session'
+import { browserAuth, checkedBrowserSession } from './browser-session'
+import type { BrowserSessionState } from './browser-session'
 
-export function ConnectionPage({
+export function ConnectionPage(props: {
+  reason?: string
+  onConnect: (session: ConsoleSession) => void
+  initialOrigin?: string
+  onCancel?: () => void
+}) {
+  const [state, setState] = useState<BrowserSessionState | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [retry, setRetry] = useState(0)
+  const connected = useRef(props.onConnect)
+  connected.current = props.onConnect
+  const pending = useRef<AbortController | null>(null)
+  const connect = async (next: BrowserSessionState, signal: AbortSignal) => {
+    const client = new PlatformClient(window.location.origin, '', 'cookie')
+    try {
+      await client.listAgents()
+      if (signal.aborted) {
+        client.dispose()
+        return
+      }
+      connected.current({
+        key: crypto.randomUUID(),
+        client,
+        expiresAt: next.expires_at ? Date.parse(next.expires_at) : null,
+      })
+    } catch (error) {
+      client.dispose()
+      throw error
+    }
+  }
+  useEffect(() => {
+    const controller = new AbortController()
+    pending.current = controller
+    setNotice(null)
+    void browserAuth('session', undefined, controller.signal)
+      .then(async (value) => {
+        const next = checkedBrowserSession(value)
+        if (controller.signal.aborted) return
+        setState(next)
+        if (next.authenticated) await connect(next, controller.signal)
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setNotice(errorNotice(error))
+      })
+    return () => controller.abort()
+  }, [retry])
+  const submit = async () => {
+    if (busy || !state) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const input = {
+        schema_version: 1,
+        email,
+        password,
+        ...(state.setup_required ? { display_name: name } : {}),
+      }
+      await browserAuth(state.setup_required ? 'setup' : 'login', input, pending.current?.signal)
+      setPassword('')
+      const next = checkedBrowserSession(
+        await browserAuth('session', undefined, pending.current?.signal),
+      )
+      if (!next.authenticated)
+        throw new Error('登录未完成，请检查浏览器是否允许本站 Cookie 后重试。')
+      await connect(next, pending.current!.signal)
+    } catch (error) {
+      if (!pending.current?.signal.aborted) {
+        setNotice(errorNotice(error))
+        // A competing setup may have completed; read current authority instead of retrying setup.
+        try {
+          setState(
+            checkedBrowserSession(await browserAuth('session', undefined, pending.current?.signal)),
+          )
+        } catch {
+          /* Retain the original actionable error. */
+        }
+      }
+    } finally {
+      if (!pending.current?.signal.aborted) setBusy(false)
+    }
+  }
+  if (state?.authentication === 'bearer') return <TokenConnectionPage {...props} />
+  return (
+    <section className={cx('connection-page')}>
+      <div className={cx('connection-intro')}>
+        <span className={cx('brand__mark')}>IA</span>
+        <h1>{state?.setup_required ? '创建你的工作空间' : '欢迎回来'}</h1>
+        <p className={cx('body-copy')}>
+          {state?.setup_required
+            ? '设置管理员账号，开始构建你的第一个智能体。'
+            : '登录 Insight，继续你的工作。'}
+        </p>
+      </div>
+      <form
+        className={cx('panel stack')}
+        aria-label={state?.setup_required ? '创建管理员' : '登录工作空间'}
+        onSubmit={(event) => {
+          event.preventDefault()
+          void submit()
+        }}
+      >
+        <NoticeBox
+          notice={notice ?? (props.reason ? { tone: 'info', text: props.reason } : null)}
+        />
+        {!state ? (
+          <>
+            <p role="status">{notice ? '登录服务暂不可用' : '正在连接工作空间…'}</p>
+            {notice && (
+              <button
+                type="button"
+                className={cx('button')}
+                onClick={() => setRetry((value) => value + 1)}
+              >
+                重新连接
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            {state.setup_required && (
+              <label>
+                <span>你的名字</span>
+                <input
+                  autoComplete="name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={128}
+                  required
+                  disabled={busy}
+                  autoFocus
+                />
+              </label>
+            )}
+            <label>
+              <span>邮箱</span>
+              <input
+                type="email"
+                autoComplete="username"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                maxLength={254}
+                required
+                disabled={busy}
+                autoFocus={!state.setup_required}
+                placeholder="you@example.com"
+              />
+            </label>
+            <label>
+              <span>密码</span>
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete={state.setup_required ? 'new-password' : 'current-password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                minLength={12}
+                maxLength={256}
+                required
+                disabled={busy}
+              />
+              {state.setup_required && <small>至少 12 个字符，可使用密码管理器生成。</small>}
+            </label>
+            <button
+              type="button"
+              className={cx('button button--link')}
+              onClick={() => setShowPassword((value) => !value)}
+            >
+              {showPassword ? '隐藏密码' : '显示密码'}
+            </button>
+            <button className={cx('button button--primary')} disabled={busy}>
+              {busy ? '正在登录…' : state.setup_required ? '创建账号并开始' : '登录'}
+            </button>
+          </>
+        )}
+      </form>
+    </section>
+  )
+}
+
+export function TokenConnectionPage({
   onConnect,
   initialOrigin = window.location.origin,
   onCancel,

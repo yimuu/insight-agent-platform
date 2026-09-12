@@ -222,7 +222,9 @@ pub trait SchedulerTypedPlanReader: Send + Sync {
 }
 
 /// Scheduler-owned lookup key for one immutable Artifact-backed RunValue already resolved by the
-/// durable controller authority. The resolver rechecks the value under the current Job fence.
+/// durable controller authority. The value belongs to this Run, or is an exact input/output of
+/// a successful prior Conversation turn within this Run's frozen history high-water mark.
+/// Both resolver and broker recheck that relationship and current content authority under the Job fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerRunValueLease {
     pub tenant_id: ResourceId,

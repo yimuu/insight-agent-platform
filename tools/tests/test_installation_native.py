@@ -214,14 +214,14 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), original)
         self.assertNotIn("a.b.c", output.getvalue())
 
-    def test_provider_commands_take_remaining_deadline_and_reject_later_mutation(self):
+    def test_serving_commands_take_remaining_deadline_and_reject_later_mutation(self):
         installation = native.NativeInstallation(SimpleNamespace(directory=self.root, binaries=self.root), self.group)
         with patch.object(native.time, "monotonic", return_value=100):
-            installation.provider_deadline = 102
+            installation.serving_deadline = 102
             self.assertEqual(installation.budget(150), 2)
             self.assertEqual(installation.budget(1), 1)
         with patch.object(native.time, "monotonic", return_value=103):
-            with self.assertRaisesRegex(runtime.NativeFailure, "provider-lifecycle-timeout"):
+            with self.assertRaisesRegex(runtime.NativeFailure, "serving-startup-timeout"):
                 installation.docker(["docker", "stop", "should-not-run"])
         self.assertEqual(len(self.group.children), 0)
 

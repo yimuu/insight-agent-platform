@@ -83,3 +83,29 @@ test('actual WASM expression rebuild computes exact stack/digest and rejects inv
     /expression|instruction|stack/i,
   )
 })
+
+test('a new canvas workflow comes from a valid compiler plan and can be published as full_plan', async () => {
+  const base = new URL(
+    '../../../../../contracts/product-experience/agent-compiler/v2/',
+    import.meta.url,
+  )
+  const read = (name: string) => readFile(new URL(name, base), 'utf8')
+  const corpus = JSON.parse(await read('corpus.json'))
+  const manifest = await read('deterministic.yaml')
+  const schema = await read('schema-message.json')
+  const input = {
+    manifest,
+    inputSchema: schema,
+    outputSchema: schema,
+    profile: corpus.profile,
+    bindings: { model: null, slots: [] },
+  }
+  const seed = await compileAgentManifest(input)
+  const workflow = await compileAgentManifest({
+    ...input,
+    manifest: manifest.replace('kind: deterministic', 'kind: full_plan\n    plan: workflow.json'),
+    plan: seed.typedPlan,
+  })
+  assert.equal(workflow.executionKind, 'full_plan')
+  assert.deepEqual(JSON.parse(workflow.typedPlan).nodes, JSON.parse(seed.typedPlan).nodes)
+})

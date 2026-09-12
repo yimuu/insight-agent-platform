@@ -99,15 +99,19 @@ pub enum ModelDispatchAuthorizationError {
 /// The receiver checks the request identity and expiry before opening the physical transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelDispatchPermitV1 {
+pub struct ModelDispatchPermitV2 {
     pub schema_version: u16,
     pub request_digest: Sha256Digest,
     pub valid_until: DateTime<Utc>,
+    pub endpoint: crate::CanonicalHttpEndpoint,
 }
 
-impl ModelDispatchPermitV1 {
+impl ModelDispatchPermitV2 {
     pub fn validate_for(&self, request: &ModelDispatchAuthorizationV1, now: DateTime<Utc>) -> bool {
-        self.schema_version == 1
+        self.schema_version == 2
+            && self.endpoint.validate().is_ok()
+            && self.endpoint.scheme == crate::CapabilityEndpointScheme::Https
+            && self.endpoint.canonical_digest().as_ref() == Ok(&request.endpoint_identity_digest)
             && self.valid_until > now
             && self.valid_until <= request.deadline
             && serde_json::to_value(request)

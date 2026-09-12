@@ -30,26 +30,30 @@
     "is_trace_id(text)"
   ],
   "physical_inventory": {
-    "digest": "sha256:6f1d0b9d2170bbfcb1d97f66b6aa98db5ccc056260eeab82d5adcfbf48d92f28",
+    "digest": "sha256:700f7d369f49c06722bd2dcc37d5b24aa6cee88f08f7a2be281987136d68a502",
     "path": "schema-inventory.json"
   },
   "postgres_major": 16,
   "schema": "insight_platform",
-  "schema_contract_version": 15,
+  "schema_contract_version": 17,
   "schema_snapshot": {
-    "digest": "sha256:4d60adc7af234e46f6704a1df3e101ac7ca2640597178dda7709ef8bf2de2b61",
+    "digest": "sha256:4a349af440bae4a6e155db86a395d96bdfc7c97cd368b9ff35e7497f6bff9552",
     "path": "schema.sql"
   },
-  "schema_snapshot_digest": "sha256:4d60adc7af234e46f6704a1df3e101ac7ca2640597178dda7709ef8bf2de2b61",
-  "table_count": 23,
+  "schema_snapshot_digest": "sha256:4a349af440bae4a6e155db86a395d96bdfc7c97cd368b9ff35e7497f6bff9552",
+  "table_count": 27,
   "tables": [
     "artifact_blobs",
     "artifact_links",
     "artifacts",
+    "conversation_turns",
+    "conversations",
     "deployments",
     "events",
     "invocations",
     "jobs",
+    "local_console_owner",
+    "local_console_sessions",
     "outbox_events",
     "principals",
     "quota_accounts",

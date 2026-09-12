@@ -6,7 +6,7 @@ pub(super) async fn verify(
     pool: &sqlx::PgPool,
     repository: &PgRepository,
     base: &BootstrapDevelopmentProfile,
-    catalog: &ModelInstallationCatalogV1,
+    catalog: &ModelInstallationCatalogV2,
     artifact: &ArtifactRef,
 ) {
     let tenant: ResourceId = base.tenant.tenant_id.parse().unwrap();
@@ -69,11 +69,13 @@ pub(super) async fn verify(
         .model_configuration_facts(&tenant, principal, kind, catalog, None, Some(&changed))
         .await
         .is_err());
-    let source = ModelSourceConfigurationV1 {
-        schema_version: 1,
+    let source = ModelSourceConfigurationV2 {
+        schema_version: 2,
         alias: "fixture.source".parse().unwrap(),
         display_name: "Fixture source".into(),
-        destination_digest: catalog.destinations[0].canonical_digest().unwrap(),
+        endpoint: normalize_model_base_url("https://api.example.com/v1").unwrap(),
+        protocol: ModelProviderWireProtocol::OpenAiResponses,
+        region: "global".parse().unwrap(),
         credential: ExactSecretBindingRef::build(
             fresh(ResourceKind::SecretBinding),
             1,

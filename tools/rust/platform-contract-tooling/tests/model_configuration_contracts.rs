@@ -130,11 +130,16 @@ fn model_configuration_machine_schema_accepts_real_typed_inputs_and_rejects_boun
         },
     )
     .unwrap();
-    let input = ModelConfigurationInputV1::Source(ModelSourceConfigurationV1 {
-        schema_version: 1,
+    let input = ModelConfigurationInputV1::Source(ModelSourceConfigurationV2 {
+        schema_version: 2,
         alias: "work.qwen".parse().unwrap(),
         display_name: "Work account".into(),
-        destination_digest: digest(),
+        endpoint: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap(),
+        protocol: ModelProviderWireProtocol::OpenAiResponses,
+        region: "global".parse().unwrap(),
         credential,
     });
     let source = serde_json::to_value(input).unwrap();

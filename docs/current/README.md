@@ -4,14 +4,14 @@
 
 ## 统一安装交付入口
 
-- [安装、启动与恢复](installation.md)：Compose 使用不可变镜像，Native 冻结主机产物，Helm 消费同一配置所有者。先声明模型或检索目的地址，再首次启动；目的地址列表为空时只启用基础平台。Sandbox 仍使用独立 Kubernetes/OpenSandbox 路径。
+- [安装、启动与恢复](installation.md)：仓库根目录直接使用 Compose 构建并启动；Native 冻结主机产物，Helm 消费同一配置所有者。模型端点在启动后通过模型配置页面管理；检索等外部依赖按安装指南配置。Sandbox 仍使用独立 Kubernetes/OpenSandbox 路径。
 - [模型配置](model-configuration.md)：Console 和公共 CLI 支持 Responses、Anthropic Messages 来源，显式文件/环境变量导入、额度、默认模型、连接检测、轮换和撤销。连接检测不是完整 Agent 运行资格，未知厂商事实仍保持未知。
-- [公共 CLI](cli.md)与[Console](console.md)：使用安装交付的私有短期会话；过期后显式续发。对象上传使用导出的公共 CA，浏览器需操作者配置真实信任，安装工具不会修改 OS 信任或跳过 TLS。
+- [公共 CLI](cli.md)与[Console](console.md)：Console 首次创建管理员账号，之后使用邮箱和密码登录；CLI 使用安装交付的私有短期会话。Console 对象上传经同源转发，由服务端验证存储 TLS；浏览器无需导入存储证书。
 - [文档检索与人工审阅样例](../../examples/productization/document-review/README.md)：完整源码及普通公开资源发布步骤已交付；实际检索端点、其 conformance Artifact、真实依赖和人工响应必须由相应操作提供，不能用本地夹具替代。
 
 同身份恢复会核对原持久数据，不重置、续补额度或修复外来状态。首次 provider 自初始化结果未知时保留原卷并拒绝自动重启。
-本次 O 已通过真实公共 CLI 模型运行、类型化结果、完整公共事件读取及同输入/产物业务重启；镜像构建和离线安装消费者也通过。
-当前镜像物理 Compose/Kind、真实检索/人工旅程与浏览器签名上传仍待各自证据。
+实际安装、模型运行、持久会话与流式输出的本地验证见[资格记录](../qualifications/README.md)。
+浏览器交互、真实检索/人工旅程与生产资格仍以各自证据为准。
 [统一验收索引](../specs/unified-installation/README.md)保留当前结果、范围及历史失败记录。
 
 ## 其他产品与工程文档

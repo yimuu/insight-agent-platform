@@ -1,4 +1,4 @@
-//! Pure OpenBao bootstrap documents. Only the first authorized dependency start uses initialize.
+//! Pure OpenBao API bootstrap requests and ordinary persistent-server configuration.
 use insight_platform_contracts::{canonical_digest, Sha256Digest};
 use insight_platform_deployment_contracts::openbao::BaoClientConfigV1;
 use insight_platform_deployment_contracts::{installation::*, installation_provider::*};
@@ -9,7 +9,7 @@ pub const OPENBAO_SEAL_FILE: &str = "openbao-seal.key";
 pub const OPENBAO_IMAGE: &str = "ghcr.io/openbao/openbao@sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0";
 pub const OPENBAO_SERVER_CERTIFICATE: &str = "openbao-server.pem";
 pub const OPENBAO_SERVER_KEY: &str = "openbao-server-key.pem";
-pub const OPENBAO_INITIALIZE_FILE: &str = "initialize.json";
+pub const OPENBAO_INITIALIZE_FILE: &str = "bootstrap.json";
 pub const OPENBAO_SERVE_FILE: &str = "serve.json";
 pub const OPENBAO_DIRECTORY: &str = "/run/insight-openbao";
 pub const OPENBAO_DATA_DIRECTORY: &str = "/var/lib/openbao";
@@ -246,8 +246,7 @@ pub fn render(
         format!("{OPENBAO_KV_MOUNT}/data/{OPENBAO_CANARY_PATH}"),
         json!({"options":{"cas":0},"data":canary}),
     );
-    let mut initialize = serve.clone();
-    initialize["initialize"] = json!([{"insight":{"request":requests}}]);
+    let initialize = json!({"schema_version":1,"requests":requests});
     let configuration_digest =
         canonical_digest(&json!({"schema_version":1,"initialize":initialize,"serve":serve}))
             .map_err(|_| InstallationError::InvalidInput)?

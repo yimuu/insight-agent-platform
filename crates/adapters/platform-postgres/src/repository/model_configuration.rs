@@ -1,6 +1,6 @@
 //! Read-only current authority for the pure model configuration compiler.
 use super::*;
-use insight_platform_contracts::ModelInstallationCatalogV1;
+use insight_platform_contracts::ModelInstallationCatalogV2;
 use insight_platform_registry::model_configuration::{
     ModelConfigurationInputV1, ModelConfigurationSourceFacts,
 };
@@ -79,7 +79,7 @@ impl PgRepository {
         tenant: &ResourceId,
         principal: &ResourceId,
         kind: PrincipalKind,
-        catalog: &ModelInstallationCatalogV1,
+        catalog: &ModelInstallationCatalogV2,
         input: Option<&ModelConfigurationInputV1>,
         artifact: Option<&ArtifactRef>,
     ) -> Result<Option<ModelConfigurationSourceFacts>, RepositoryError> {
@@ -136,15 +136,13 @@ impl PgRepository {
                 ));
             }
         }
-        for destination in &catalog.destinations {
-            for (exact, expected) in [
-                (&destination.grant.network_policy, PolicyKind::Network),
-                (&destination.grant.tls_policy, PolicyKind::Tls),
-                (&destination.grant.trust_policy, PolicyKind::Trust),
-                (&destination.grant.data_policy, PolicyKind::DataHandling),
-            ] {
-                configuration_policy(&mut tx, tenant, exact, expected).await?;
-            }
+        for (exact, expected) in [
+            (&catalog.policies.network, PolicyKind::Network),
+            (&catalog.policies.tls, PolicyKind::Tls),
+            (&catalog.policies.trust, PolicyKind::Trust),
+            (&catalog.policies.data, PolicyKind::DataHandling),
+        ] {
+            configuration_policy(&mut tx, tenant, exact, expected).await?;
         }
         let facts = match input {
             Some(ModelConfigurationInputV1::Source(source)) => {

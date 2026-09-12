@@ -18,14 +18,13 @@ use insight_platform_egress::{
     InstalledMcpOAuthJwtVerifier, InstalledMcpOAuthVerificationBinding,
     InstalledMcpOAuthVerificationCatalog, InstalledMcpStreamableHttpEndpoint,
     InstalledMcpStreamableHttpEndpointCatalog, InstalledModelDestinationCatalog,
-    InstalledModelDestinationGrant, InstalledRemoteContextDestinationCatalog,
-    InstalledRemoteContextDestinationV1, McpOAuthEgressLimits, McpRemoteTaskStateKey,
-    McpStreamableHttpEgressLimits, McpSubscriptionStateKey, ModelProviderEgressLimits,
-    RemoteContextEgressLimits, ReqwestCapabilityHttpEgressTransport,
-    ReqwestMcpOAuthCredentialBroker, ReqwestMcpStreamableHttpConnector,
-    ReqwestMcpStreamableHttpSubscriptionConnector, ReqwestModelProviderEgressBroker,
-    ReqwestRemoteContextSearchConnector, SecretMaterialResolver, SensitiveMcpRemoteTaskStateKey,
-    SensitiveMcpSubscriptionStateKey, TokioEgressDnsResolver,
+    InstalledRemoteContextDestinationCatalog, InstalledRemoteContextDestinationV1,
+    McpOAuthEgressLimits, McpRemoteTaskStateKey, McpStreamableHttpEgressLimits,
+    McpSubscriptionStateKey, ModelProviderEgressLimits, RemoteContextEgressLimits,
+    ReqwestCapabilityHttpEgressTransport, ReqwestMcpOAuthCredentialBroker,
+    ReqwestMcpStreamableHttpConnector, ReqwestMcpStreamableHttpSubscriptionConnector,
+    ReqwestModelProviderEgressBroker, ReqwestRemoteContextSearchConnector, SecretMaterialResolver,
+    SensitiveMcpRemoteTaskStateKey, SensitiveMcpSubscriptionStateKey, TokioEgressDnsResolver,
 };
 use insight_platform_egress_rpc::{
     proto::egress_broker_service_server::EgressBrokerServiceServer, EgressBrokerGrpcService,
@@ -121,7 +120,7 @@ struct ProcessConfig {
     mcp_state_keys: McpStateKeyProcessConfig,
     mcp_subscription_bridge: EgressMcpSubscriptionBridgeLimits,
     secret_provider_catalog: SecretProviderCatalogConfigV2,
-    model_destination_grants: Vec<InstalledModelDestinationGrant>,
+    model_egress: insight_platform_contracts::ModelEgressRoutingV1,
     capability_http_endpoints: Vec<InstalledCapabilityHttpEndpoint>,
     capability_grpc_endpoints: Vec<InstalledCapabilityGrpcEndpoint>,
     remote_context_destinations: Vec<InstalledRemoteContextDestinationV1>,
@@ -329,7 +328,7 @@ impl ProcessConfig {
         self.secret_provider_catalog
             .validate()
             .map_err(|_| ProcessError::InvalidConfiguration)?;
-        InstalledModelDestinationCatalog::new(self.model_destination_grants.clone())
+        InstalledModelDestinationCatalog::from_routing(self.model_egress.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
         InstalledCapabilityHttpEndpointCatalog::new(self.capability_http_endpoints.clone())
             .map_err(|_| ProcessError::InvalidConfiguration)?;
@@ -464,7 +463,7 @@ async fn run() -> Result<(), ProcessError> {
 
     let model_broker = Arc::new(
         ReqwestModelProviderEgressBroker::new(
-            InstalledModelDestinationCatalog::new(config.model_destination_grants)
+            InstalledModelDestinationCatalog::from_routing(config.model_egress)
                 .map_err(|_| ProcessError::InvalidConfiguration)?,
             Arc::clone(&secrets),
             dns.clone(),

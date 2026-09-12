@@ -187,7 +187,16 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
     };
     let provider_closure = ModelProviderDeploymentClosure {
         provider_revision,
-        endpoint_identity_digest: sha('2'),
+        endpoint: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap(),
+        endpoint_identity_digest: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap()
+        .canonical_digest()
+        .unwrap(),
         secret_bindings: vec![exact_secret_binding(12)],
         protocol_policy: protocol_policy.clone(),
         network_policy: policy(13, '3'),

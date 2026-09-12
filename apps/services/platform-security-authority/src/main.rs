@@ -168,7 +168,7 @@ impl insight_platform_security::ModelDispatchAuthority for RestrictedSecretAutho
         &self,
         request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     > {
         let result = self.repository.authorize_model_dispatch(request).await;

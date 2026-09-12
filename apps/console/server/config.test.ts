@@ -12,7 +12,7 @@ import {
 } from './config.ts'
 
 const config = () => ({
-  schema_version: 1,
+  schema_version: 3,
   topology: 'native',
   listen_host: '127.0.0.1',
   listen_port: 0,
@@ -26,15 +26,15 @@ test('current transport envelope is exact, bounded and rejects duplicate decoded
   const input = config()
   assert.deepEqual(decode(JSON.stringify(input)), input)
   for (const value of [
-    JSON.stringify(input).replace('"schema_version":1', '"schema_version":1,"schema_version":1'),
+    JSON.stringify(input).replace('"schema_version":3', '"schema_version":3,"schema_version":3'),
     JSON.stringify(input).replace(
-      '"schema_version":1',
-      '"schema_version":1,"schema_versi\\u006fn":1',
+      '"schema_version":3',
+      '"schema_version":3,"schema_versi\\u006fn":1',
     ),
     JSON.stringify({ ...input, unknown: 1 }),
-    JSON.stringify({ ...input, schema_version: 2 }),
-    JSON.stringify(input).replace('"schema_version":1,', ''),
-    JSON.stringify(input).replace('"schema_version":1', '"schema_version":{}'),
+    JSON.stringify({ ...input, schema_version: 1 }),
+    JSON.stringify(input).replace('"schema_version":3,', ''),
+    JSON.stringify(input).replace('"schema_version":3', '"schema_version":{}'),
     JSON.stringify(input).replace('{', '{\u00a0'),
     `${JSON.stringify(input)}true`,
     `${JSON.stringify(input).slice(0, -1)},}`,
@@ -119,4 +119,29 @@ test('process config reader is bounded and refuses a symlink or nonregular path'
   } finally {
     rmSync(root, { recursive: true })
   }
+})
+
+test('object transport requires a complete fixed HTTPS origin, bucket prefix and bounded public CA', () => {
+  const input = {
+    ...config(),
+    upload_origin: 'https://s3.localhost:8333',
+    upload_path_prefix: '/installation-artifacts/',
+    upload_ca_pem: '-----BEGIN CERTIFICATE-----\nvalidated at server startup',
+  }
+  assert.deepEqual(checkedTransportConfig(input), input)
+  for (const changes of [
+    { upload_origin: '' },
+    { upload_path_prefix: '' },
+    { upload_ca_pem: '' },
+    { upload_origin: 'http://s3.localhost:8333' },
+    { upload_origin: 'https://s3.localhost:8333/' },
+    { upload_origin: 'https://s3.localhost:8333/installation-artifacts' },
+    { upload_origin: 'https://user:password@s3.localhost:8333' },
+    { upload_path_prefix: '/' },
+    { upload_path_prefix: '/installation-artifacts/../' },
+    { upload_path_prefix: '/installation-artifacts%2F/' },
+    { upload_ca_pem: '-----BEGIN PRIVATE KEY-----' },
+    { upload_ca_pem: input.upload_ca_pem + 'a'.repeat(16384) },
+  ])
+    assert.throws(() => checkedTransportConfig({ ...input, ...changes }), /configuration/)
 })

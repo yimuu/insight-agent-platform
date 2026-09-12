@@ -48,6 +48,8 @@ pub struct ModelLiveTextDelta {
     pub attempt_no: u32,
     pub lease_generation: u64,
     pub transport_sequence: u64,
+    /// Counts text frames only, before any lossy queue admission.
+    pub text_sequence: u64,
     pub request_digest: Sha256Digest,
     pub classification: DataClassification,
     pub text: String,
@@ -55,7 +57,7 @@ pub struct ModelLiveTextDelta {
 
 impl ModelLiveTextDelta {
     pub fn validate(&self, limits: ModelTurnLimits) -> Result<(), ModelTurnError> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || self.tenant_id.kind() != ResourceKind::Tenant
             || self.run_id.kind() != ResourceKind::Run
             || self.model_turn_id.kind() != ResourceKind::ModelTurn
@@ -64,6 +66,8 @@ impl ModelLiveTextDelta {
             || self.attempt_no == 0
             || self.lease_generation == 0
             || self.transport_sequence == 0
+            || self.text_sequence == 0
+            || self.text_sequence > self.transport_sequence
             || self.text.is_empty()
             || self.text.contains('\0')
             || serde_json::to_vec(&self.text)
@@ -222,4 +226,42 @@ fn validate_live_delta(delta: &NormalizedModelDelta) -> Result<(), ModelTurnErro
         | NormalizedModelDelta::Text(_)
         | NormalizedModelDelta::ToolArguments { .. } => Err(ModelTurnError::InvalidStream),
     }
+}
+
+/// Shared, credential-free Core NATS observation address. No replay authority is implied.
+pub fn model_live_delta_subject(
+    namespace: &str,
+    tenant_id: &ResourceId,
+    run_id: &ResourceId,
+) -> Result<String, ModelTurnError> {
+    use sha2::{Digest, Sha256};
+    if !valid_model_live_namespace(namespace)
+        || tenant_id.kind() != ResourceKind::Tenant
+        || run_id.kind() != ResourceKind::Run
+    {
+        return Err(ModelTurnError::InvalidStream);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"insight.platform/v1/run-live-subject\0");
+    hasher.update(tenant_id.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(run_id.to_string().as_bytes());
+    let key: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("insight.platform.v1.run.live.{namespace}.{key}"))
+}
+pub fn valid_model_live_namespace(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .last()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
 }

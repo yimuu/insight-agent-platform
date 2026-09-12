@@ -44,70 +44,57 @@ export function Settings({
   const [tenantLabel, setTenantLabel] = useState(tenant)
   const [diagnostic, setDiagnostic] = useState<'artifact' | 'operation'>('artifact')
   return (
-    <section className={cx('stack')}>
+    <section className={cx('stack settings-content')}>
       <article data-ui="panel" className={cx('panel')}>
-        <div data-ui="panel__heading" className={cx('panel__heading')}>
-          <div>
-            <p data-ui="kicker" className={cx('kicker')}>
-              当前会话
-            </p>
-            <h2>工作空间连接</h2>
-          </div>
+        <div className={cx('panel__heading')}>
+          <h2>工作空间</h2>
           <Status value={ready === null ? 'unchecked' : ready ? 'ready' : 'unavailable'} />
         </div>
-        <dl className={cx('metrics')}>
-          <Metric label="服务地址" value={endpoint} />
-          <Metric label="协议版本" value="insight.platform/v1" />
-          <Metric label="凭据存储" value="Memory only" />
-        </dl>
-        <label className={cx('secondary-field')}>
-          <span>工作空间显示名称</span>
+        <label className={cx('settings-row')}>
+          <div>
+            <strong>显示名称</strong>
+            <p>用于识别当前工作空间。</p>
+          </div>
           <input
+            aria-label="工作空间显示名称"
             value={tenantLabel}
             onChange={(event) => setTenantLabel(event.target.value)}
-            onBlur={() => setTenant(tenantLabel)}
+            onBlur={() => setTenant(tenantLabel.trim() || tenant)}
             maxLength={128}
           />
         </label>
+        <div className={cx('settings-row')}>
+          <strong>服务地址</strong>
+          <span>{endpoint}</span>
+        </div>
+        <div className={cx('settings-row')}>
+          <strong>会话</strong>
+          <span>当前页面有效，退出后清除</span>
+        </div>
       </article>
-      <article data-ui="panel" className={cx('panel')}>
-        <p data-ui="kicker" className={cx('kicker')}>
-          发布检查
-        </p>
-        <h2>发布时检查可用能力</h2>
-        <p className={cx('body-copy')}>
-          编译前读取工作空间的当前模型及策略绑定。缺失或停用的能力会阻止发布，请先完成对应配置。
-        </p>
-      </article>
-      <article data-ui="panel" className={cx('panel')}>
-        <div data-ui="panel__heading" className={cx('panel__heading')}>
-          <div>
-            <p data-ui="kicker" className={cx('kicker')}>
-              高级诊断
-            </p>
-            <h2>文件与后台操作查询</h2>
-          </div>
-          <div className={cx('segmented')}>
-            <button
-              className={cx(diagnostic === 'artifact' ? 'active' : '')}
-              onClick={() => setDiagnostic('artifact')}
-            >
-              文件
-            </button>
-            <button
-              className={cx(diagnostic === 'operation' ? 'active' : '')}
-              onClick={() => setDiagnostic('operation')}
-            >
-              后台操作
-            </button>
-          </div>
+      <details data-ui="panel" className={cx('panel')}>
+        <summary>高级诊断</summary>
+        <p className={cx('body-copy')}>按 ID 查询文件和后台操作，排查上传与发布问题。</p>
+        <div className={cx('segmented')}>
+          <button
+            className={cx(diagnostic === 'artifact' ? 'active' : '')}
+            onClick={() => setDiagnostic('artifact')}
+          >
+            文件
+          </button>
+          <button
+            className={cx(diagnostic === 'operation' ? 'active' : '')}
+            onClick={() => setDiagnostic('operation')}
+          >
+            后台操作
+          </button>
         </div>
         {diagnostic === 'artifact' ? (
           <Artifacts client={client} report={report} />
         ) : (
           <Operations client={client} report={report} />
         )}
-      </article>
+      </details>
     </section>
   )
 }

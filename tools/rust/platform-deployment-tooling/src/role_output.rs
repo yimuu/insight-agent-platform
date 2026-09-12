@@ -27,10 +27,12 @@ const JOURNAL_LIMITS: JsonLimits = JsonLimits {
     max_string_bytes: 2048,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum RoleOutputMode {
     Provision,
     Verify,
+    Upgrade,
+    Rollout(Sha256Digest),
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -237,6 +239,17 @@ fn inventory<'a>(
         );
     }
     checked_bytes(&rendered.console)?;
+    if let Some(identity) = &rendered.local_identity {
+        checked_bytes(identity)?;
+        parse_strict_json(identity, INSTALLATION_LIMITS).map_err(|_| Error::ConfigurationDrift)?;
+        roles.insert(
+            "local-identity".into(),
+            Role {
+                owner: target_uid(ownership, true),
+                files: BTreeMap::from([("config.json".into(), identity.as_slice())]),
+            },
+        );
+    }
     parse_strict_json(&rendered.console, INSTALLATION_LIMITS)
         .map_err(|_| Error::ConfigurationDrift)?;
     roles.insert(
@@ -405,7 +418,6 @@ pub fn publish_dependency_outputs(
                     "openbao-server-key.pem".into(),
                     read(crate::openbao_profile::OPENBAO_SERVER_KEY)?,
                 ),
-                ("initialize.json".into(), read("openbao-initialize.json")?),
                 ("serve.json".into(), read("openbao-serve.json")?),
             ]),
         );
@@ -553,6 +565,7 @@ pub fn initialize_dependency_data_directory(
 #[cfg(unix)]
 mod unix {
     use super::*;
+    include!("role_output_upgrade.rs");
     use std::{
         ffi::{CStr, CString},
         fs::{File, Metadata},
@@ -972,8 +985,11 @@ mod unix {
         let identity = publication.identity;
         let private = publication.private;
         let output_root = publication.root;
-        let mode = publication.mode;
+        let mode = publication.mode.clone();
         let ownership = publication.ownership;
+        if matches!(mode, RoleOutputMode::Upgrade | RoleOutputMode::Rollout(_)) {
+            return upgrade_files(publication, roles);
+        }
         validate_private_identity(input, identity, private)?;
         if ownership == RoleOutputOwnership::NativeCurrentUser
             && input.network.topology != InstallationTopology::Native
@@ -1259,6 +1275,40 @@ mod tests {
         root: PathBuf,
     }
     impl Fixture {
+        fn authorize_upgrade(&self) {
+            use insight_platform_deployment_contracts::installation_release::*;
+            let release = InstallationReleaseV1 {
+                schema_version: 1,
+                installation_id: self.prepared.identity().installation_id.clone(),
+                bootstrap_input_digest: self.input.digest().unwrap(),
+                bootstrap_identity_digest: self.prepared.identity().digest().unwrap(),
+                from_package_digest: self.input.package_digest.clone(),
+                to_package_digest: format!("sha256:{}", "b".repeat(64)).parse().unwrap(),
+                from_schema_version: SOURCE_SCHEMA_VERSION,
+                to_schema_version: TARGET_SCHEMA_VERSION,
+                from_inventory_digest: SOURCE_INVENTORY_DIGEST.parse().unwrap(),
+                to_inventory_digest: format!("sha256:{}", "c".repeat(64)).parse().unwrap(),
+            };
+            self.prepared
+                .directory()
+                .write_immutable(UPGRADE_INTENT_FILE, &serde_json::to_vec(&release).unwrap())
+                .unwrap();
+        }
+        fn change_environment(&mut self) -> (String, Vec<u8>, Vec<u8>) {
+            let (process, role) = self.rendered.roles.first_key_value().unwrap();
+            let process = *process;
+            let old = role.environment.clone();
+            let new = b"PLATFORM_FIXTURE='upgraded'\n".to_vec();
+            self.rendered.roles.get_mut(&process).unwrap().environment = new.clone();
+            self.rendered
+                .evidence
+                .processes
+                .iter_mut()
+                .find(|r| r.process == process)
+                .unwrap()
+                .environment_bytes_digest = bytes_digest(&new);
+            (format!("{}/environment", process.name()), old, new)
+        }
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
             let root = fs::canonicalize(temp.path()).unwrap();
@@ -1334,6 +1384,7 @@ mod tests {
                 processes,
             };
             let rendered = RenderedInstallationFiles {
+                local_identity: None,
                 evidence,
                 roles,
                 console: br#"{"schema_version":1,"fixture":"console"}"#.to_vec(),
@@ -1385,6 +1436,110 @@ mod tests {
             });
             journal.save(self.prepared.directory(), JOURNAL).unwrap();
         }
+    }
+
+    #[test]
+    fn explicit_release_updates_exact_outputs_and_recovers_mixed_files() {
+        let mut fixture = Fixture::new();
+        fixture.publish(RoleOutputMode::Provision).unwrap();
+        fixture.authorize_upgrade();
+        let (path, old, new) = fixture.change_environment();
+        fixture.publish(RoleOutputMode::Upgrade).unwrap();
+        assert_eq!(fs::read(fixture.root.join(&path)).unwrap(), new);
+        fixture.publish(RoleOutputMode::Verify).unwrap();
+        // Replaying the fixed plan accepts a source/target mixture after an interrupted replacement.
+        fs::write(fixture.root.join(&path), old).unwrap();
+        let pending = fixture
+            .root
+            .join(&path)
+            .parent()
+            .unwrap()
+            .join(format!(".upgrade-{}", &bytes_digest(&new).as_str()[7..]));
+        fs::write(&pending, &new[..8]).unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        fixture.publish(RoleOutputMode::Upgrade).unwrap();
+        fixture.publish(RoleOutputMode::Verify).unwrap();
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn package_rollout_has_per_release_recovery_plan_and_rejects_unknown_edits() {
+        use insight_platform_deployment_contracts::installation_release::*;
+        let mut fixture = Fixture::new();
+        fixture.publish(RoleOutputMode::Provision).unwrap();
+        fixture.authorize_upgrade();
+        let bytes = fixture
+            .prepared
+            .directory()
+            .read(UPGRADE_INTENT_FILE, 65536)
+            .unwrap()
+            .unwrap();
+        let mut previous: InstallationReleaseV1 = serde_json::from_slice(&bytes).unwrap();
+        fixture
+            .prepared
+            .directory()
+            .write_immutable(RELEASE_FILE, &bytes)
+            .unwrap();
+        for package in ['d', 'e'] {
+            let mut target = previous.clone();
+            target.to_package_digest = format!("sha256:{}", package.to_string().repeat(64))
+                .parse()
+                .unwrap();
+            let intent = PackageRolloutIntentV1 {
+                schema_version: 1,
+                expected_previous_release_digest: previous.canonical_digest().unwrap(),
+                previous_release: previous.clone(),
+                target_release: target.clone(),
+            };
+            let digest = target.canonical_digest().unwrap();
+            fixture
+                .prepared
+                .directory()
+                .write_immutable(
+                    &PackageRolloutIntentV1::filename(&digest),
+                    &serde_json::to_vec(&intent).unwrap(),
+                )
+                .unwrap();
+            let (path, old, new) = fixture.change_environment();
+            fixture
+                .publish(RoleOutputMode::Rollout(digest.clone()))
+                .unwrap();
+            fs::write(fixture.root.join(&path), old).unwrap();
+            fixture
+                .publish(RoleOutputMode::Rollout(digest.clone()))
+                .unwrap();
+            fs::write(fixture.root.join(&path), b"operator changed").unwrap();
+            assert!(fixture
+                .publish(RoleOutputMode::Rollout(digest.clone()))
+                .is_err());
+            assert_eq!(
+                fs::read(fixture.root.join(&path)).unwrap(),
+                b"operator changed"
+            );
+            fs::write(fixture.root.join(&path), new).unwrap();
+            fixture.publish(RoleOutputMode::Rollout(digest)).unwrap();
+            fixture
+                .prepared
+                .directory()
+                .replace(RELEASE_FILE, &serde_json::to_vec(&target).unwrap())
+                .unwrap();
+            previous = target;
+        }
+    }
+
+    #[test]
+    fn upgrade_refuses_unreviewed_file_changes_and_missing_authorization() {
+        let mut fixture = Fixture::new();
+        fixture.publish(RoleOutputMode::Provision).unwrap();
+        let (path, _, _) = fixture.change_environment();
+        assert!(fixture.publish(RoleOutputMode::Upgrade).is_err());
+        fixture.authorize_upgrade();
+        fs::write(fixture.root.join(&path), b"operator edited this").unwrap();
+        assert!(fixture.publish(RoleOutputMode::Upgrade).is_err());
+        assert_eq!(
+            fs::read(fixture.root.join(path)).unwrap(),
+            b"operator edited this"
+        );
     }
     fn private_file(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();

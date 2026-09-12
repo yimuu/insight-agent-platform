@@ -1043,6 +1043,36 @@
             "data_policy": {
               "$ref": "#/$defs/ExactVersionRef"
             },
+            "endpoint": {
+              "additionalProperties": false,
+              "properties": {
+                "base_path": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "host": {
+                  "maxLength": 253,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "port": {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "scheme": {
+                  "const": "https"
+                }
+              },
+              "required": [
+                "base_path",
+                "host",
+                "port",
+                "scheme"
+              ],
+              "type": "object"
+            },
             "endpoint_identity_digest": {
               "$ref": "nominal/digest.schema.json"
             },
@@ -1077,6 +1107,7 @@
           "required": [
             "admission_evidence",
             "data_policy",
+            "endpoint",
             "endpoint_identity_digest",
             "network_policy",
             "protocol_policy",

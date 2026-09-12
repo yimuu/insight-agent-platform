@@ -2,14 +2,20 @@
 
 “模型配置”页面中的来源、密钥轮换、连接检测与默认模型操作见[模型配置](model-configuration.md)。
 
-[Console](../../apps/console) 是无 BFF、无数据库的静态 React 客户端，访问 Gateway 的 `/readyz` 与 public `/v1`，
+[Console](../../apps/console) 是 React 客户端，访问 Gateway 的 `/readyz` 与 public `/v1`，
 静态资源由独立 Console transport 提供，公开 API 按路由透明转发至 Management 或 Runtime Gateway，保持同源。
-页面包含智能体、运行记录、待办任务、模型配置和设置；关联对象提供低敏诊断信息。
+页面包含智能体、对话、运行记录、待办任务、模型配置和设置；关联对象提供低敏诊断信息。
 业务状态、资格判断和正文读取授权由服务端拥有。
 
-首次进入独立连接页，服务健康检查和受保护的智能体列表请求都成功后才建立工作会话。
-默认使用页面同源服务，支持粘贴令牌和导入私有令牌文件；业务页只保留会话菜单。JWT 到期时间仅用于提示，
-不授予身份；401 撤销会话并取消在途请求，403 显示权限不足并清除受影响内容。
+Compose 和 Helm 的首次页面创建管理员账号，之后使用邮箱和密码登录。密码哈希和会话由独立
+local-identity 服务保存在 PostgreSQL；Console transport 没有数据库凭据或签名私钥。
+浏览器只持有八小时 HttpOnly、SameSite=Strict cookie，服务端为 Gateway 换取短期 OIDC 令牌，
+令牌不交付 JavaScript。重启保留会话，退出登录撤销当前会话。Native 的显式 bearer 模式继续使用私有会话文件。
+401 清除工作会话并取消在途请求，403 展示当前操作权限不足。
+
+侧栏按工作空间和管理分组；列表优先展示内容、筛选和主要动作。切换页面保留当前编辑草稿。
+工作流画布显示节点与控制流连接，点击节点编辑同一份源码；新工作流由共享 Rust 编译器生成可验证的起始结构。
+原始 JSON、依赖摘要和编译位置收进高级区域，画布不会把节点位置当作运行进度。
 
 Agent 创建采用四步表单：基本信息、模型与任务、输入输出、检查发布。字段表格编辑同一份 schema 源文档，
 保留未编辑约束，复杂根结构留在高级 JSON 编辑器；新字段包含平台 closed schema 要求的显式上下界。
@@ -40,6 +46,23 @@ exact pinned nominal 只解析构建时随 owning registry 绑定的本地 schem
 const/enum 中的 `$ref` 保持普通数据，不发起网络解析，不执行 HTML。复杂字段分页显示，提交仍受 Task 输入字节、深度和集合边界约束。
 缺少可用表单时不会生成替代 JSON 表单。操作按钮只取服务端当前 `allowed_actions`；OAuth 无通用按钮，可查看权限不赋予表单读取或提交权限。
 提交绑定冻结表单返回的当前 ETag、幂等键、分类和冻结 schema digest，服务端实例验证及当前资格检查仍是最终依据。
+
+“对话”页面把工作空间会话、消息和选中轮次的执行画布放在一起。会话与轮次由 PostgreSQL
+保存，正文复用 RunValue；刷新通过 URL 中的会话 ID 重新读取，不依赖浏览器保存聊天正文。
+会话共享工作空间权限，创建者字段仅用于审计。新会话固定已发布 Agent；部署变化后旧记录
+仍可读取；页面发现新部署后提示使用新版本创建对话，服务端也会拒绝向旧绑定继续发送。当前聊天接口接收一个必填文本字段并输出 answer。
+失败轮次可通过“查看失败原因”读取执行事件的安全摘要，并在回答位置显示；记录没有具体原因时不推测原因。
+
+发送消息通过会话版本和幂等键提交，未结束轮次期间禁止重复发送；不确定失败保留同一提交意图。
+成功历史按真实 User/Assistant 角色进入后续模型请求，失败轮次不会作为助手回答加入历史。
+停止生成复用 Run 取消命令；切换会话或关闭页面只中止观察，不取消运行。
+
+实时文字使用独立 SSE 端口，与有限 durable event 页分开。它可能缺少订阅前的文字或因断线
+丢失片段，因此页面明确标记临时输出，完成后重新读取受权结果。不同模型轮次和执行尝试分别
+显示，点击历史消息只切换右侧执行画布。撤权清除相应正文；事件画布不能代替最终 Run 状态。
+画布按当前 Run 隔离，NodeExecution 和 ModelTurn 状态、耗时从各自数据库记录读取，旧事件缺少完成记录也不会被当作仍在执行。
+选中模型调用可查看真实输入消息、输出和响应中的用量；编排节点展示实际关联的 RunValue，不把 Run 总结果复制给所有节点。
+正文单独授权读取并受预览容量限制，系统指令、原始数据和诊断标识默认折叠。详情置于画布下方，避免压缩节点区。
 
 新 Run 优先按已发布 schema 提供结构化输入表单，也可切换高级 JSON。默认 schema、classification 与 deadline 来自所选 active exact 部署的已发布 Plan。提交携带同一 exact 条件；active 已变则提示冲突，用户显式刷新后再提交。当前编辑 draft 不改变这些默认值，同一提交意图重试保留完整请求和 Receipt。
 
@@ -84,3 +107,6 @@ exact 恢复、查询、Task typed tree、signal、SSE、正文清除与页面�
 [查询助手](../../crates/adapters/platform-postgres/tests/product_authoring_query_fixture.rs)在真实 PostgreSQL 验证：复用实际发布并激活的 Agent，
 以有类型的 Selection Policy 数据验证解析和权限；这不代替该 Policy 的发布准入或浏览器到 Gateway 的完整旅程。
 测试入口与真实 Gateway journey 的区别见[Console README](../../apps/console/README.md)。
+
+本次持久会话、真实流式与服务重启后的 HTTP 验证见[本机开发记录](../qualifications/conversation-live-2026-09-12.json)。
+浏览器自动化连接不可用，因此该记录不宣称自动点击或截图验收通过。

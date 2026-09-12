@@ -28,18 +28,19 @@ const MODEL_INPUTS_FILE: &str = "model-policy-inputs.json";
 const MODEL_SEED_FILE: &str = "model-policy-seed.json";
 const MODEL_MATERIAL_FILE: &str = "model-policy-material.json";
 const MAX_JOURNAL_BYTES: usize = 65_536;
-const PURPOSES: [Purpose; 5] = [
+const PURPOSES: [Purpose; 6] = [
     Purpose::Runtime,
     Purpose::Outbox,
     Purpose::History,
     Purpose::SecurityAuthority,
     Purpose::Artifact,
+    Purpose::LocalIdentity,
 ];
 const JOURNAL_LIMITS: JsonLimits = JsonLimits {
     max_bytes: MAX_JOURNAL_BYTES,
     max_depth: 5,
     max_properties_per_object: 12,
-    max_items_per_array: 5,
+    max_items_per_array: 6,
     max_string_bytes: 512,
 };
 
@@ -907,19 +908,14 @@ mod tests {
         fn new() -> Self {
             Self::create(false)
         }
-        fn create(model: bool) -> Self {
+        fn create(_model: bool) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let root = std::fs::canonicalize(temp.path()).unwrap();
-            let mut input = compose_input(
+            let input = compose_input(
                 "storage-command-test",
                 format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             )
             .unwrap();
-            if model {
-                input.model_destinations.push(serde_json::from_value(serde_json::json!({
-                    "protocol":"open_ai_responses","endpoint":{"scheme":"https","host":"api.fixture.example","port":443,"base_path":"/v1/responses"},"region":"us-east-1"
-                })).unwrap());
-            }
             let prepared =
                 PreparedInstallation::prepare(&input, &root.join("installation")).unwrap();
             let binaries = root.join("binaries with spaces");
@@ -1207,7 +1203,7 @@ mod tests {
             .unwrap();
         assert_eq!(saved, fixture.bytes());
         let calls = runner.calls.borrow();
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 6);
         for ((binary, args, environment), purpose) in calls.iter().zip(PURPOSES) {
             assert_eq!(binary, "platform-database-role");
             assert_eq!(args[0], "--installation");

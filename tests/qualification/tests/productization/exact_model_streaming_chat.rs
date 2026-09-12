@@ -410,7 +410,7 @@ fn start_remote_model_environment(
     let original_config = fs::read(&authority_config_path).expect("Egress config is readable");
     let mut config: Value =
         serde_json::from_slice(&original_config).expect("Egress config is closed JSON");
-    config["model_destination_grants"] = json!([{
+    config["model_egress"] = json!({"mode":"fixed","destinations":[{
         "schema_version": 1,
         "protocol": "open_ai_responses",
         "endpoint": endpoint,
@@ -424,7 +424,7 @@ fn start_remote_model_environment(
         "development_loopback": true,
         "development_anonymous": true,
         "trusted_root_pem": fs::read_to_string(tls.join("ca.pem")).expect("local CA is readable"),
-    }]);
+    }]});
     let config_digest = canonical_digest(&config);
     let ready_address = config["observability_listen_address"]
         .as_str()
@@ -617,7 +617,7 @@ pub(super) fn run(
         }}},
         "publish": {"kind": "single", "revision_no": 1, "content_digest": provider_contract_digest, "artifact_id": null},
         "deployment": {"environment": "local", "closure": {"resource_kind": "model_provider", "bindings": {
-            "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding], "protocol_policy": policies["protocol"].revision,
+            "endpoint": endpoint, "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding], "protocol_policy": policies["protocol"].revision,
             "network_policy": policies["network"].revision, "tls_policy": policies["tls"].revision,
             "trust_policy": policies["trust"].revision, "data_policy": policies["data"].revision,
             "region": "local", "admission_evidence": {"basis": "qualification", "artifact": qualification_ref},
@@ -641,7 +641,7 @@ pub(super) fn run(
         "model_provider_revision",
     ));
     let provider_bindings = json!({
-        "provider_revision": provider_revision, "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding],
+        "provider_revision": provider_revision, "endpoint": endpoint, "endpoint_identity_digest": endpoint_digest, "secret_bindings": [secret_binding],
         "protocol_policy": policies["protocol"].revision, "network_policy": policies["network"].revision,
         "tls_policy": policies["tls"].revision, "trust_policy": policies["trust"].revision,
         "data_policy": policies["data"].revision, "region": "local", "admission_evidence": {"basis": "qualification", "artifact": qualification_ref},

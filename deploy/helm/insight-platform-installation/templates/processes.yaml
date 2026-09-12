@@ -1,4 +1,3 @@
-{{- if eq .Values.phase "serving" -}}
 {{- $root := . -}}
 {{- range .Values.plan.processes }}
 ---
@@ -15,18 +14,20 @@ spec:
   strategy: {type: Recreate}
   selector:
     matchLabels:
-      insight.platform/installation: {{ $root.Values.owner | quote }}
+      insight.platform/installation: {{ $root.Values.plan.input.name | quote }}
       insight.platform/process: {{ .name }}
   template:
     metadata:
       labels:
-        insight.platform/installation: {{ $root.Values.owner | quote }}
+        insight.platform/installation: {{ $root.Values.plan.input.name | quote }}
         insight.platform/process: {{ .name }}
       annotations:
         insight.platform/input-digest: {{ $root.Values.plan.input_digest | quote }}
     spec:
       {{- include "installation.scheduling" $root | nindent 6 }}
       terminationGracePeriodSeconds: 35
+      initContainers:
+        {{- include "installation.gateContainer" (dict "root" $root "phase" "ready") | nindent 8 }}
       containers:
         - name: process
           image: {{ $root.Values.plan.runtime_image | quote }}
@@ -57,6 +58,7 @@ spec:
             - {name: temporary, mountPath: /tmp}
             - {name: work, mountPath: /var/lib/insight}
       volumes:
+        {{- include "installation.gateVolumes" $root | nindent 8 }}
         - name: role
           persistentVolumeClaim: {claimName: role-{{ .name }}, readOnly: true}
         - name: temporary
@@ -74,7 +76,7 @@ metadata:
     {{- include "installation.labels" $root | nindent 4 }}
 spec:
   selector:
-    insight.platform/installation: {{ $root.Values.owner | quote }}
+    insight.platform/installation: {{ $root.Values.plan.input.name | quote }}
     insight.platform/process: {{ .name }}
   ports:
     - {name: observability, port: {{ .observability_port }}, targetPort: observability}
@@ -96,15 +98,17 @@ spec:
   strategy: {type: Recreate}
   selector:
     matchLabels:
-      insight.platform/installation: {{ .Values.owner | quote }}
+      insight.platform/installation: {{ .Values.plan.input.name | quote }}
       insight.platform/process: console
   template:
     metadata:
       labels:
-        insight.platform/installation: {{ .Values.owner | quote }}
+        insight.platform/installation: {{ .Values.plan.input.name | quote }}
         insight.platform/process: console
     spec:
       {{- include "installation.scheduling" . | nindent 6 }}
+      initContainers:
+        {{- include "installation.gateContainer" (dict "root" . "phase" "ready") | nindent 8 }}
       containers:
         - name: console
           image: {{ .Values.plan.console_image | quote }}
@@ -124,10 +128,10 @@ spec:
             limits: {cpu: 500m, memory: 128Mi}
           volumeMounts:
             - name: configuration
-              mountPath: /run/insight/console/config.json
-              subPath: config.json
+              mountPath: /run/insight/console
               readOnly: true
       volumes:
+        {{- include "installation.gateVolumes" . | nindent 8 }}
         - name: configuration
           persistentVolumeClaim: {claimName: role-console, readOnly: true}
 ---
@@ -141,8 +145,7 @@ metadata:
     {{- include "installation.labels" . | nindent 4 }}
 spec:
   selector:
-    insight.platform/installation: {{ .Values.owner | quote }}
+    insight.platform/installation: {{ .Values.plan.input.name | quote }}
     insight.platform/process: console
   ports:
     - {name: http, port: 8080, targetPort: http}
-{{- end -}}

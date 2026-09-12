@@ -17,7 +17,7 @@ export async function startGatewayConsoleServer({
   return startConsoleServer({
     bundleRoot: bundleRoot ?? process.env.INSIGHT_CONSOLE_BUNDLE_ROOT ?? defaultBundleRoot,
     config: {
-      schema_version: 1,
+      schema_version: 3,
       topology: 'native',
       listen_host: '127.0.0.1',
       listen_port: port,

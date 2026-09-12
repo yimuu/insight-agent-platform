@@ -15,7 +15,7 @@ pub trait ModelDispatchAuthority: Send + Sync {
         &self,
         request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     >;
 }

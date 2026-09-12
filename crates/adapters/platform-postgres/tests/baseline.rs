@@ -44,12 +44,12 @@ fn digest(byte: char) -> String {
 #[test]
 fn current_schema_has_only_shared_authority_tables() {
     assert_eq!(EXPECTED_TABLES.len(), BASELINE_TABLE_COUNT);
-    assert_eq!(BASELINE_TABLE_COUNT, 23);
+    assert_eq!(BASELINE_TABLE_COUNT, 27);
     assert_eq!(
         CURRENT_SCHEMA_SQL
             .matches("CREATE TABLE insight_platform.")
             .count(),
-        23
+        27
     );
     for rejected in [
         "execution_attempts",
@@ -76,7 +76,7 @@ async fn real_postgres_baseline_job_receipt_outbox_and_quota() {
     let first = verify_schema(&pool).await.unwrap();
     let replay = verify_schema(&pool).await.unwrap();
     assert_eq!(first, replay);
-    assert_eq!(first.table_count, 23);
+    assert_eq!(first.table_count, 27);
 
     let repository = PgRepository::new(pool.clone());
     repository

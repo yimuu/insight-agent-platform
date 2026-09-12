@@ -1051,6 +1051,30 @@ pub fn process_launch(
                     .display()
                     .to_string(),
             ),
+            (
+                "PLATFORM_GATEWAY_NATS_CA_PATH",
+                paths
+                    .tls
+                    .join(RUNTIME_CA_CERTIFICATE_FILE)
+                    .display()
+                    .to_string(),
+            ),
+            (
+                "PLATFORM_GATEWAY_NATS_CERT_PATH",
+                paths
+                    .tls
+                    .join(RUNTIME_GATEWAY_CLIENT_CERTIFICATE_FILE)
+                    .display()
+                    .to_string(),
+            ),
+            (
+                "PLATFORM_GATEWAY_NATS_KEY_PATH",
+                paths
+                    .tls
+                    .join(RUNTIME_GATEWAY_CLIENT_PRIVATE_KEY_FILE)
+                    .display()
+                    .to_string(),
+            ),
         ],
         Process::Outbox => vec![
             (

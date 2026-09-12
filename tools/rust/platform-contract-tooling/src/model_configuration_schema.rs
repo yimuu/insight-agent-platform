@@ -22,6 +22,11 @@ fn exact(prefix: &str, kind: &str) -> Value {
     )
 }
 
+pub(super) fn endpoint_schema() -> Value {
+    object(
+        json!({"scheme":{"const":"https"},"host":{"type":"string","minLength":1,"maxLength":insight_platform_contracts::MAX_CAPABILITY_ENDPOINT_HOST_BYTES},"port":{"type":"integer","minimum":1,"maximum":65535},"base_path":{"type":"string","minLength":1,"maxLength":insight_platform_contracts::MAX_CAPABILITY_ENDPOINT_PATH_BYTES}}),
+    )
+}
 pub(super) fn schema() -> Value {
     let closure = super::deployment_closure_schema();
     let alias = json!({"type":"string","pattern":"^[a-z][a-z0-9._-]{0,63}$","maxLength":64});
@@ -45,8 +50,8 @@ pub(super) fn schema() -> Value {
             .retain(|item| item.as_str() != Some(field));
     }
     let source = object(
-        json!({"schema_version":{"const":1},"alias":alias,"display_name":name,
-        "destination_digest":digest(),"credential":reference("ExactSecretBindingRef")}),
+        json!({"schema_version":{"const":2},"alias":alias,"display_name":name,
+        "protocol":{"enum":["open_ai_responses","anthropic_messages"]},"endpoint":endpoint_schema(),"region":{"type":"string","minLength":1,"maxLength":32},"credential":reference("ExactSecretBindingRef")}),
     );
     let basic = object(
         json!({"schema_version":{"const":1},"alias":alias,"display_name":name,"source":exact("mpdep","model_provider_deployment"),
@@ -72,10 +77,6 @@ pub(super) fn schema() -> Value {
     // Closed states come from their owning enum registry, not a second spelling list.
     summary["properties"]["lifecycle_state"] = json!({"enum":insight_platform_contracts::EntityLifecycle::ALL.iter().map(|state|state.as_str()).collect::<Vec<_>>()});
     summary["properties"]["gate_state"] = json!({"enum":insight_platform_contracts::AdministrativeGate::ALL.iter().map(|state|state.as_str()).collect::<Vec<_>>()});
-    let destination = object(
-        json!({"destination_digest":digest(),"endpoint_identity_digest":digest(),"base_url":{"type":"string","minLength":1,"maxLength":8448},
-        "protocol":{"enum":["open_ai_responses","anthropic_messages"]},"region":{"type":"string","minLength":1,"maxLength":32}}),
-    );
     let quota_value = json!({"type":"integer","minimum":0,"maximum":insight_platform_contracts::MAX_MODEL_QUOTA_VALUE});
     let quota_limits =
         object(json!({"requests":quota_value,"tokens":quota_value,"cost_microunits":quota_value}));
@@ -94,8 +95,8 @@ pub(super) fn schema() -> Value {
         "ModelConfigurationDeclarationV1":declaration,
         "CompiledModelConfigurationV1":object(json!({"schema_version":{"const":1},"draft":{"$ref":"../openapi.yaml#/components/schemas/ResourceDraftPayload"},"environment":environment,
             "declaration":reference("ModelConfigurationDeclarationV1"),"deployment":{"oneOf":[provider,model]}})),
-        "ModelConfigurationCatalogViewV1":object(json!({"schema_version":{"const":1},"installation_digest":digest(),"environment":environment,"secret_provider_id":id("spr"),
-            "destinations":{"type":"array","minItems":1,"maxItems":64,"items":destination},"maximum_classification":{"const":"internal"}})),
+        "ModelConfigurationCatalogViewV2":object(json!({"schema_version":{"const":2},"installation_digest":digest(),"environment":environment,"secret_provider_id":id("spr"),
+            "protocols":{"type":"array","minItems":1,"maxItems":2,"uniqueItems":true,"items":{"enum":["open_ai_responses","anthropic_messages"]}},"maximum_classification":{"const":"internal"}})),
         "ModelConfigurationResourceSummaryV1":summary,
         "ModelConfigurationResourcePageV1":object(json!({"schema_version":{"const":1},"items":{"type":"array","maxItems":25,"items":reference("ModelConfigurationResourceSummaryV1")},"next_after":nullable(json!({"$ref":"resource-id.schema.json"}))}))
     }})

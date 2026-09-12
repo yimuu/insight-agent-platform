@@ -6,22 +6,20 @@ Insight Agent Platform 是面向关键业务 Agent 的高保证 durable executio
 
 ## 安装与配置
 
-默认通过 Docker Compose 启动完整平台和 Console，每个服务运行独立的角色进程。使用已构建镜像时，
-主机只需要 Docker Compose 和 Python 3。准备包含目标镜像及模型服务地址的安装声明后运行：
+在仓库根目录运行一条命令，构建并启动完整平台：
 
 ```bash
-python3 tools/install/platform_compose.py up \
-  --input /absolute/path/input.json \
-  --directory /absolute/path/private-installation \
-  --runtime-image "$RUNTIME_IMAGE" --console-image "$CONSOLE_IMAGE"
+docker compose up -d --build
 ```
 
-镜像使用不可变摘要。安装输出 Console 地址、租户身份和私有短期会话文件的位置。打开 Console 后，
-在 Models 中添加一个或多个账号来源、模型与执行额度，再选择默认模型。厂商、账号、环境变量名和协议
-分别配置；没有强制所有来源使用 `OPENAI_*`。API key 由 SecretBinding 管理，不写入业务配置。
+打开 http://127.0.0.1:8088，首次创建管理员账号，之后使用邮箱和密码登录。
+在“模型配置”选择服务并填写 API Key 和模型 ID，再创建智能体或工作流。
+不需要先生成配置文件、填写模型地址到安装文件，或导入浏览器证书和登录令牌。
 
-完整的声明生成、源码构建、Compose 启动、会话续发、验证与 Kubernetes 操作见
-[安装指南](docs/current/installation.md)；批量配置及恢复见[模型配置](docs/current/model-configuration.md)。
+首次构建由 Docker 完成，主机无需 Python、Rust 或 Node.js。依赖初始化由 Compose 的一次性服务完成；
+重复启动保留数据库、账号、密钥和模型配置。可选的安装名称、端口与镜像设置见 [.env.example](.env.example)。
+详细启动、验证、停止和 Kubernetes 操作见[安装指南](docs/current/installation.md)，
+模型配置及中断恢复见[模型配置](docs/current/model-configuration.md)。
 从[交付入口索引](docs/current/README.md#统一安装交付入口)进入公共 CLI、Console 和文档检索/人工审阅样例。
 实现、本地回归与实际安装/业务验收分别记录，当前[完整验收](docs/specs/unified-installation/README.md)尚未全部完成。
 安装本身不要求公开平台端口；远端模型和检索请求仍遵守部署允许的 HTTPS 目标及出站策略。
@@ -56,7 +54,7 @@ insight doctor --json
 显式 AWS 资格环境的 release transition 使用 `qualification-aws stop/dev`，不是普通启动入口。
 
 `doctor` 检查 Docker/Compose、可用端口、至少 4 CPU、8 GiB memory 与 8 GiB free disk；其 `ready` 只汇总已列依赖检查，
-不证明 runtime 可在当前主机执行。Rust 是报告中的可选检查，但 `--from-source` 启动必需；Console 镜像内使用 Node.js 提供静态资源与同源转发，主机无需安装 Node.js，除非从源码构建 Console 或运行远端框架 reference。
+不证明 runtime 可在当前主机执行。Rust 是报告中的可选检查，但 `--from-source` 启动必需；Console 镜像内使用 Node.js 提供静态资源与同源转发，主机无需安装 Node.js，除非在宿主机开发 Console 或运行远端框架 reference。
 
 ## Contributor 资格入口
 

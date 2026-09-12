@@ -1,5 +1,11 @@
 # Deployment and initialization joint review
 
+Deployment lifecycle update: [ADR-0012](../../adr/0012-declarative-container-installation.md)
+supersedes the host Compose/Helm controller and two-mode OpenBao lifecycle described in this
+historical review. Current commands are in [installation](../../current/installation.md); earlier
+wrapper test results do not qualify the declarative replacement. Other acceptance work below
+remains separately tracked.
+
 Status: accepted and implemented deployment sub-boundary after root cross-review. This temporary
 record retains the initial findings, decisions and separately bounded implementation evidence.
 Scope: shared installation inputs, role configuration generation,

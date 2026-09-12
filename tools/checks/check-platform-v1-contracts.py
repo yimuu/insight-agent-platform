@@ -435,6 +435,7 @@ def check_foundation_surfaces(errors):
         "  /recovery/mcp-pkce-cleanup:recover:",
         "  /runs:",
         "  /runs/{run_id}:",
+        "  /runs/{run_id}/executions/{source_kind}/{source_id}:",
         "  /runs/{run_id}/result:",
         "  /runs/{run_id}/events:",
         "  /runs/{run_id}/signals/{signal_key}:",
@@ -531,6 +532,7 @@ def check_foundation_surfaces(errors):
         "  /recovery/mcp-pkce-cleanup:recover:",
         "  /runs:",
         "  /runs/{run_id}:",
+        "  /runs/{run_id}/executions/{source_kind}/{source_id}:",
         "  /runs/{run_id}/definition:",
         "  /runs/{run_id}/children:",
         "  /runs/{run_id}/values:",
@@ -1349,7 +1351,7 @@ def check_machine_registry_contracts(errors):
             "trust_policy", "auth_policy", "secret_bindings", "conformance_evidence"
         }),
         ("ModelProviderDeploymentClosure", "model_provider", {
-            "provider_revision", "endpoint_identity_digest", "secret_bindings", "protocol_policy",
+            "provider_revision", "endpoint", "endpoint_identity_digest", "secret_bindings", "protocol_policy",
             "network_policy", "tls_policy", "trust_policy", "data_policy", "region",
             "admission_evidence"
         }),

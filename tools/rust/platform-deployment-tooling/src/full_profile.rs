@@ -124,7 +124,7 @@ pub struct ProcessPaths<'a> {
 }
 
 pub struct EgressConfigInputs<'a> {
-    pub model_installation: Option<&'a insight_platform_contracts::ModelInstallationCatalogV1>,
+    pub model_installation: Option<&'a insight_platform_contracts::ModelInstallationCatalogV2>,
     pub remote_context_destinations:
         &'a [insight_platform_contracts::InstalledRemoteContextDestinationV1],
     pub service_principal_id: &'a str,
@@ -510,7 +510,7 @@ pub fn initial_configs(
                         "event_buffer_capacity": 16,
                     },
                     "secret_provider_catalog": egress.secret_provider_catalog,
-                    "model_destination_grants": egress.model_installation.map(|catalog| catalog.destinations.iter().map(|destination| &destination.grant).collect::<Vec<_>>()).unwrap_or_default(),
+                    "model_egress": egress.model_installation.map(|catalog| insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { grant: Box::new(catalog.public_egress()) }).unwrap_or(insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations: vec![] }),
                     "capability_http_endpoints": [],
                     "capability_grpc_endpoints": [],
                     "remote_context_destinations": egress.remote_context_destinations,

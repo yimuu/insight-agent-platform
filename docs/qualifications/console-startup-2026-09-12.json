@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-12",
+  "scope": "local development: direct Compose startup, browser-facing API configuration, deterministic workflow",
+  "runtime_image": "sha256:fcf2614c4e409376054cfbe7e743ac4c6d8e61c9688603645f86f4aa73e9404f",
+  "api_test_console_image": "sha256:3b0ef141a61bb041093ebf6b7b5ccde61ab94bc8bc630425e62d070c6b0edd6c",
+  "final_console_image": "sha256:73bfc3399f149c89d616c1a0f73e964b92ce1c4411975050699084c131aeb3b7",
+  "api_observation": {
+    "stages": [
+      "credential_imported",
+      "正在核验配置",
+      "正在校验来源配置",
+      "正在发布模型配置",
+      "正在激活配置",
+      "已就绪",
+      "source_published_with_registry_endpoint",
+      "正在核验配置",
+      "正在校验来源配置",
+      "正在发布模型配置",
+      "正在激活配置",
+      "正在分配模型额度",
+      "已就绪",
+      "model_published_without_installation_address",
+      "validating",
+      "publishing",
+      "activating",
+      "ready",
+      "real_full_plan_run_succeeded"
+    ],
+    "external_model_called": false,
+    "source_id": "mpr_01a09165-87aa-7191-985d-830be26cba64",
+    "model_id": "mdl_01a09165-936e-7f41-9af9-b4f0012c561c",
+    "run_id": "run_01a09165-a811-79c1-93c3-9d271ddf68d0",
+    "run_state": "succeeded",
+    "output_verified": true,
+    "status": "passed"
+  },
+  "api_test_transport": "Actual PlatformClient and publication helpers over HTTP to Compose, with actual WASM and a Node timer/storage test adapter; not browser automation.",
+  "test_credentials": "Synthetic, no external model dispatch. Fixture volumes deleted after verification.",
+  "final_installation": {
+    "name": "my-platform",
+    "ready": true,
+    "setup_required": true,
+    "administrator_count": 0,
+    "fixture_data_removed": true
+  },
+  "checks": {
+    "rust_workspace_all_targets": "passed",
+    "rust_model_adapters": 54,
+    "rust_models": 16,
+    "rust_egress": {
+      "passed": 81,
+      "ignored": 1
+    },
+    "rust_registry": 5,
+    "rust_deployment": 46,
+    "rust_initializer": {
+      "passed": 47,
+      "ignored": 1
+    },
+    "rust_model_machine_contract": 3,
+    "rust_cli_model_configuration": 4,
+    "console_server_and_api": {
+      "passed": 101,
+      "skipped": 1
+    },
+    "installation_tool_tests": 51,
+    "generated_contracts": "current",
+    "rust_format": "passed",
+    "diff_whitespace": "passed"
+  },
+  "limits": {
+    "browser_visual_review": "incomplete: desktop locked; unlock requested",
+    "external_vendor_model": "not called",
+    "kubernetes_runtime": "not rerun; chart/tool regression passed",
+    "release_or_production_qualification": "not claimed"
+  }
+}

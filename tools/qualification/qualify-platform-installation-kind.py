@@ -61,7 +61,7 @@ class QualificationFailure(Exception):
 
 
 def plan_consumer():
-    spec = importlib.util.spec_from_file_location("kind_helm_consumer", ROOT/"tools/install/platform_helm.py")
+    spec = importlib.util.spec_from_file_location("kind_helm_consumer", ROOT/"tools/qualification/installation_support.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -95,6 +95,28 @@ def sdk_diagnostic_entries(data):
         if len(entries) == 32:
             raise QualificationFailure("sdk_diagnostic_count_exceeded")
         entries.append({"operation": operation, "failure": failure})
+    return entries
+
+
+# Exact owning InstallationError variants; raw stderr is never report evidence.
+INSTALLATION_ERRORS = frozenset({
+    "InvalidInput", "InvalidEndpoint", "InvalidRoleClosure", "InvalidPath",
+    "UnsupportedTopology", "IdentityDrift", "ConfigurationDrift", "ForeignState",
+    "CredentialInvalid", "PrerequisiteUnavailable", "SchemaMismatch",
+    "ExternalOutcomeUnknown", "Conflict", "Incomplete",
+})
+
+
+def installation_diagnostic_entries(data):
+    if len(data) > 16_384:
+        raise QualificationFailure("installation_diagnostic_bytes_exceeded")
+    entries = []
+    for line in data.split(b"\n"):
+        match = re.fullmatch(rb"installation ([A-Za-z]+)", line)
+        if match is not None and match[1].decode("ascii") in INSTALLATION_ERRORS:
+            if len(entries) == 32:
+                raise QualificationFailure("installation_diagnostic_count_exceeded")
+            entries.append(match[1].decode("ascii"))
     return entries
 
 
@@ -157,6 +179,18 @@ def write(path, data, mode=0o600):
         file.write(data)
         file.flush()
         os.fsync(file.fileno())
+
+
+def publish_delivery(path, data):
+    """Keep private delivery owned by the host caller, including token renewal."""
+    if not data or len(data) > 1_048_576:
+        raise QualificationFailure("delivery_file_bytes_invalid")
+    temporary = path.parent/(".delivery-"+uuid.uuid4().hex)
+    try:
+        write(temporary, data)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def json_write(path, value):
@@ -296,6 +330,14 @@ class Fixture:
         json_write(config, {"kind": "Cluster", "apiVersion": "kind.x-k8s.io/v1alpha4",
                     "networking": {"apiServerAddress": "127.0.0.1", "apiServerPort": 0},
                     "nodes": [{"role": "control-plane", "extraMounts": [{"hostPath": str(self.directory), "containerPath": str(self.directory)}]}]})
+        if getattr(self, "subnet", None):
+            import ipaddress
+            subnet = ipaddress.ip_network(self.subnet, strict=True)
+            if subnet.version != 4 or not subnet.is_private:
+                raise QualificationFailure("private_fixture_subnet_required")
+            self.fixture_network = self.name+"-network"
+            self.docker("network", "create", "--subnet", str(subnet), "--label", "insight.qualification="+self.name, self.fixture_network)
+            self.environment["KIND_EXPERIMENTAL_DOCKER_NETWORK"] = self.fixture_network
         self.progress("creating isolated pinned Kind cluster "+self.name)
         self.started = True  # Preserve the exact ownership intent if creation loses its response.
         run(["kind", "create", "cluster", "--name", self.name, "--image", NODE_IMAGE,
@@ -368,9 +410,12 @@ class Fixture:
         write(path, declaration)
         raw = self.docker(*producer, "--mount", f"type=bind,source={path},target=/installation-input/input.json,readonly",
                           "--entrypoint", "/usr/local/bin/platform-installation", self.runtime,
-                          "helm-plan", "--input", "/installation-input/input.json",
+                          "helm-values", "--input", "/installation-input/input.json",
                           "--runtime-image", self.runtime, "--console-image", self.console)
-        plan = consumer.validate_plan(consumer.decode(raw))
+        envelope = consumer.decode(raw)
+        if set(envelope) != {"plan"}:
+            raise QualificationFailure("values_envelope_differs")
+        plan = consumer.validate_plan(envelope["plan"])
         if (plan["input"] != document or plan["namespace"] != self.namespace
                 or plan["runtime_image"] != self.runtime or plan["console_image"] != self.console):
             raise QualificationFailure("selected_runtime_plan_identity_differs")
@@ -383,24 +428,58 @@ class Fixture:
             self.import_image(image, key)
         self.installation = self.directory/"installation"
         self.installation.mkdir(mode=0o700)
-        self.arguments = [sys.executable, str(ROOT/"tools/install/platform_helm.py"), "--input", str(path),
-                "--directory", str(self.installation), "--runtime-image", self.runtime, "--console-image", self.console,
-                "--kubeconfig", str(self.kubeconfig), "--context", self.context, "--node", self.node]
+        self.plan = plan
+        self.values = self.directory/"values.json"
+        json_write(self.values, {"plan": plan, "node": self.node, "storageClass": ""})
 
     def operation(self, name):
-        self.progress("actual Helm "+name)
-        output = run([*self.arguments, name], timeout=1800, environment=self.environment)
-        for line in output.splitlines():
-            value = json.loads(line)
-            if "token" in value or value.get("session_file", "") not in ("", str(self.installation/"session-token")):
-                raise QualificationFailure("unsafe_host_result")
-        return output
+        self.progress("actual declarative Helm "+name)
+        if name == "up":
+            return run(["helm", "upgrade", "--install", "installation", str(ROOT/"deploy/helm/insight-platform-installation"),
+                        "--namespace", self.namespace, "--create-namespace", "--values", str(self.values),
+                        "--wait", "--wait-for-jobs", "--timeout", "900s"], timeout=930, environment=self.environment)
+        if name == "verify":
+            source = json.loads(self.kube("get", "job", "installation-1", "-n", self.namespace, "-o", "json"))
+            spec = source["spec"]["template"]["spec"]
+            container = spec["containers"][0]
+            container["args"][0] = container["args"][0].replace(" install --input ", " verify --input ")
+            job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "verification-"+uuid.uuid4().hex[:12], "namespace": self.namespace},
+                   "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 300, "template": {"spec": spec}}}
+            path = self.directory/"verification.json"
+            json_write(path, job)
+            self.kube("create", "-f", str(path))
+            self.kube("wait", "--for=condition=Complete", "job/"+job["metadata"]["name"], "-n", self.namespace, "--timeout=300s", timeout=310)
+            return b""
+        if name in ("session", "public-trust"):
+            job = name+"-"+uuid.uuid4().hex[:12]
+            self.kube("create", "job", job, "--from=cronjob/installation-"+name, "-n", self.namespace)
+            self.kube("wait", "--for=condition=Ready", "pod", "--selector", "job-name="+job, "-n", self.namespace, "--timeout=90s", timeout=100)
+            pods = json.loads(self.kube("get", "pods", "-n", self.namespace, "--selector", "job-name="+job, "-o", "json"))["items"]
+            if len(pods) != 1:
+                raise QualificationFailure("session_pod_ambiguous")
+            pod = pods[0]["metadata"]["name"]
+            for source, destination in [("result.json", name+"-result.json"), ("public-ca.pem", "public-ca.pem")]+([("session-token", "session-token")] if name == "session" else []):
+                # The kubectl shim runs as root inside the Kind node. Never let it
+                # create host files through the shared mount: Linux would retain root
+                # ownership. Capture only this fixed delivery path, then publish as
+                # the host caller without logging the private bytes.
+                data = self.kube("exec", "-n", self.namespace, pod, "-c", "delivery", "--",
+                                 "/usr/bin/head", "-c", "1048577", "/delivery/"+source)
+                publish_delivery(self.installation/destination, data)
+            self.kube("delete", "job", job, "-n", self.namespace, "--wait=true")
+            return b""
+        raise QualificationFailure("unknown_fixture_operation")
 
     def snapshot(self):
         deployments = json.loads(self.kube("get", "deployments", "--namespace", self.namespace, "--output=json"))["items"]
         claims = json.loads(self.kube("get", "pvc", "--namespace", self.namespace, "--output=json"))["items"]
-        state = json.loads((self.installation/"helm-state.json").read_bytes())
-        plan = json.loads((self.installation/"helm-plan.json").read_bytes())["plan"]
+        plan = self.plan
+        jobs = json.loads(self.kube("get", "pods", "-n", self.namespace, "--selector", "job-name=installation-1", "-o", "json"))["items"]
+        if len(jobs) != 1:
+            raise QualificationFailure("installation_completion_ambiguous")
+        completion = json.loads(jobs[0]["status"]["containerStatuses"][0]["state"]["terminated"]["message"])
+        if completion.get("input_digest") != plan["input_digest"] or completion.get("phase") != "ready":
+            raise QualificationFailure("installation_completion_differs")
         file_digests = {}
         for name in [process["name"] for process in plan["processes"]]+["console"]:
             pods = json.loads(self.kube("get", "pods", "--namespace", self.namespace, "--selector", "insight.platform/process="+name, "--output=json"))["items"]
@@ -415,7 +494,7 @@ class Fixture:
             if not 1 <= len(lines) <= 128 or any(not re.fullmatch(r"[a-f0-9]{64}  "+re.escape(prefix)+r"[a-zA-Z0-9/._-]+", line) for line in lines):
                 raise QualificationFailure("serving_file_evidence_invalid")
             file_digests[name] = hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()
-        return {"identity_digest": state["ready"]["identity_digest"], "role_file_digests": file_digests,
+        return {"identity_digest": completion["identity_digest"], "role_file_digests": file_digests,
                 "deployments": {item["metadata"]["name"]: {"uid": item["metadata"]["uid"], "generation": item["metadata"]["generation"],
                     "spec_digest": hashlib.sha256(json.dumps(item["spec"], sort_keys=True).encode()).hexdigest()} for item in deployments},
                 "pvcs": {item["metadata"]["name"]: item["metadata"]["uid"] for item in claims}}
@@ -424,11 +503,24 @@ class Fixture:
         self.operation("up")
         self.qualify_tls()
         first = self.snapshot()
-        self.qualify_public_trust(first)
+        self.operation("up")
+        if self.snapshot() != first:
+            raise QualificationFailure("repeated_helm_install_changed_workloads_or_identity")
+        self.operation("session")
+        token_digest = hashlib.sha256((self.installation/"session-token").read_bytes()).hexdigest()
+        ca = (self.installation/"public-ca.pem").read_bytes()
+        self.operation("public-trust")
+        trust = json.loads((self.installation/"public-trust-result.json").read_bytes())
+        if (trust["input_digest"] != self.plan["input_digest"] or trust["identity_digest"] != first["identity_digest"]
+                or trust["certificate_pem"].encode() != ca or trust["certificate_sha256"] != "sha256:"+hashlib.sha256(ca).hexdigest()
+                or (self.installation/"public-ca.pem").read_bytes() != ca
+                or hashlib.sha256((self.installation/"session-token").read_bytes()).hexdigest() != token_digest):
+            raise QualificationFailure("public_trust_changed_identity_or_session")
+        self.report["checks"].append("readonly_public_trust_delivery_preserves_session")
         self.operation("verify")
         if self.snapshot() != first:
             raise QualificationFailure("readonly_verify_changed_installation")
-        self.report["checks"].extend(["fresh_base_ready_and_initial_private_session", "readonly_verify_preserves_identity_workloads_volumes"])
+        self.report["checks"].extend(["single_helm_install_ready_without_host_orchestration", "repeated_helm_install_preserves_identity", "readonly_verify_preserves_identity_workloads_volumes"])
         self.progress("actual controller recovery of one serving Pod")
         pods = json.loads(self.kube("get", "pods", "--namespace", self.namespace, "--selector", "insight.platform/process=gateway-runtime", "--output=json"))["items"]
         if len(pods) != 1:
@@ -450,36 +542,6 @@ class Fixture:
             raise QualificationFailure("explicit_session_delivery_invalid")
         self.report["checks"].append("explicit_session_renewal_private_file")
         self.report["installation"] = first
-
-    def qualify_public_trust(self, expected_snapshot):
-        consumer = plan_consumer()
-        state = consumer.decode((self.installation/"helm-state.json").read_bytes())
-        plan = consumer.decode((self.installation/"helm-plan.json").read_bytes())["plan"]
-        path = self.installation/"public-ca.pem"
-        original = consumer.TRUST.read_private(path, consumer.TRUST.MAX_CERTIFICATE_BYTES)
-        metadata = path.stat()
-        token_digest = hashlib.sha256((self.installation/"session-token").read_bytes()).digest()
-        result = consumer.decode(self.operation("public-trust"))
-        if (not isinstance(result, dict) or set(result) != {"schema_version", "input_digest", "identity_digest", "certificate_file", "certificate_sha256"}
-                or type(result["schema_version"]) is not int or result["schema_version"] != 1
-                or result["input_digest"] != plan["input_digest"]
-                or result["identity_digest"] != state["ready"]["identity_digest"]
-                or result["certificate_file"] != str(path)
-                or result["certificate_sha256"] != "sha256:"+hashlib.sha256(original).hexdigest()
-                or consumer.TRUST.read_private(path, consumer.TRUST.MAX_CERTIFICATE_BYTES) != original
-                or (path.stat().st_ino, path.stat().st_mtime_ns) != (metadata.st_ino, metadata.st_mtime_ns)
-                or hashlib.sha256((self.installation/"session-token").read_bytes()).digest() != token_digest
-                or self.snapshot() != expected_snapshot):
-            raise QualificationFailure("readonly_public_trust_delivery_differs")
-        intent = consumer.decode((self.installation/"public-trust-intent.json").read_bytes())
-        if intent.get("complete") is not True or not intent.get("pod_uid"):
-            raise QualificationFailure("public_trust_delivery_identity_missing")
-        remaining = self.kube("get", "pod", "installation-public-trust-"+intent["nonce"],
-                              "--namespace", self.namespace, "--ignore-not-found", "--output=json")
-        if remaining.strip():
-            raise QualificationFailure("public_trust_delivery_pod_remains")
-        self.report["public_ca_file_sha256"] = result["certificate_sha256"]
-        self.report["checks"].append("readonly_public_trust_pod_exact_delivery_without_session_renewal")
 
     def wait_controller_replacement(self, previous_uid):
         deadline = time.monotonic()+120
@@ -525,42 +587,23 @@ class Fixture:
         self.report["checks"].append("installed_public_ca_linux_openssl3_exact_dns_and_rejections")
 
     def failure_sdk_diagnostics(self, items):
-        def private_json(name):
-            with (self.installation/name).open("rb") as file:
-                data = file.read(262_145)
-            if len(data) > 262_144:
-                raise QualificationFailure("diagnostic_host_state_exceeded")
-            return json.loads(data)
-        state = private_json("helm-state.json")
-        plan = private_json("helm-plan.json")["plan"]
-        phase, operation, owner = state["phase"], state["operation"], state["owner"]
-        if phase not in {"prepare", "provision", "verify"} or not re.fullmatch(r"[a-f0-9]{16}", operation) or not re.fullmatch(r"[a-f0-9]{32}", owner) or plan["namespace"] != self.namespace or plan["runtime_image"] != self.runtime or not re.fullmatch(r"sha256:[a-f0-9]{64}", plan["input_digest"]):
-            raise QualificationFailure("diagnostic_host_identity_differs")
-        name = "installation-"+phase+"-"+operation
-        job = json.loads(self.kube("get", "job", name, "--namespace", self.namespace, "--output=json", timeout=10))
-        metadata = job.get("metadata", {})
-        uid = metadata.get("uid")
-        if metadata.get("name") != name or metadata.get("namespace") != self.namespace or metadata.get("labels", {}).get("insight.platform/installation") != owner or metadata.get("annotations", {}).get("insight.platform/input-digest") != plan["input_digest"] or metadata.get("annotations", {}).get("insight.platform/phase") != phase or not isinstance(uid, str) or not uid or len(uid) > 128 or job.get("spec", {}).get("backoffLimit") != 0 or not any(condition.get("type") == "Failed" and condition.get("status") == "True" for condition in job.get("status", {}).get("conditions", [])):
-            raise QualificationFailure("diagnostic_job_identity_differs")
-        owned = [pod for pod in items if any(ref.get("kind") == "Job" and ref.get("name") == name and ref.get("uid") == uid and ref.get("controller") is True for ref in pod.get("metadata", {}).get("ownerReferences", []))]
-        if len(owned) != 1:
-            raise QualificationFailure("diagnostic_pod_owner_ambiguous")
-        pod = owned[0]
-        metadata = pod["metadata"]
-        pod_name, pod_uid = metadata.get("name"), metadata.get("uid")
-        containers = pod.get("spec", {}).get("containers", [])
-        if metadata.get("namespace") != self.namespace or metadata.get("labels", {}).get("insight.platform/installation") != owner or not isinstance(pod_name, str) or not re.fullmatch(re.escape(name)+r"-[a-z0-9]{5}", pod_name) or not isinstance(pod_uid, str) or not pod_uid or len(pod_uid) > 128 or pod.get("status", {}).get("phase") != "Failed" or len(containers) != 1:
-            raise QualificationFailure("diagnostic_pod_identity_differs")
-        extra = "" if phase == "prepare" else " --binaries /usr/local/bin"
-        expected = f"exec /usr/local/bin/platform-installation {phase} --input /installation-input/input.json --state /installation/private --output /output{extra} > /tmp/installation-result.json"
-        container = containers[0]
-        if container.get("name") != "installation" or container.get("image") != self.runtime or container.get("command") != ["/bin/sh", "-ec"] or container.get("args") != [expected]:
-            raise QualificationFailure("diagnostic_installer_command_differs")
-        data = self.kube("logs", pod_name, "--namespace", self.namespace, "--container", "installation",
-                         "--tail=64", "--limit-bytes=16384", "--request-timeout=5s", timeout=10)
-        entries = sdk_diagnostic_entries(data)
-        return {"status": "observed" if entries else "unknown", "job": name, "job_uid": uid,
-                "pod": pod_name, "pod_uid": pod_uid, "entries": entries}
+        entries = []
+        owner_errors = []
+        for pod in items:
+            metadata = pod.get("metadata", {})
+            if (metadata.get("namespace") != self.namespace or pod.get("status", {}).get("phase") != "Failed"
+                    or not any(ref.get("kind") == "Job" and ref.get("name", "").startswith("installation-") and ref.get("controller") is True
+                               for ref in metadata.get("ownerReferences", []))):
+                continue
+            containers = pod.get("spec", {}).get("containers", [])
+            if len(containers) != 1 or containers[0].get("image") != self.runtime or containers[0].get("name") != "installation":
+                continue
+            data = self.kube("logs", metadata["name"], "-n", self.namespace, "-c", "installation",
+                             "--tail=64", "--limit-bytes=16384", "--request-timeout=5s", timeout=10)
+            entries.extend(sdk_diagnostic_entries(data))
+            owner_errors.extend(installation_diagnostic_entries(data))
+        return {"status": "observed" if entries or owner_errors else "unknown", "entries": entries,
+                "installation_errors": owner_errors}
 
     def diagnostics(self):
         try:
@@ -595,6 +638,11 @@ class Fixture:
                 run(["kind", "delete", "cluster", "--name", self.name, "--kubeconfig", str(self.kubeconfig)], timeout=120, environment=self.environment)
             if owned():
                 raise QualificationFailure("owned_cluster_cleanup_incomplete")
+        if getattr(self, "fixture_network", None):
+            network = json.loads(self.docker("network", "inspect", self.fixture_network))[0]
+            if network.get("Labels", {}).get("insight.qualification") != self.name or network.get("Containers"):
+                raise QualificationFailure("fixture_network_ownership_differs")
+            self.docker("network", "rm", self.fixture_network)
         self.report["cleaned"] = True
 
 
@@ -603,6 +651,7 @@ def main():
     parser.add_argument("--runtime-image", required=True)
     parser.add_argument("--console-image", required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--subnet", help="Explicit non-overlapping private subnet for this disposable fixture")
     arguments = parser.parse_args()
     if not arguments.report.is_absolute() or not arguments.report.parent.is_dir() or arguments.report.exists() or arguments.report.is_symlink():
         raise QualificationFailure("unused_absolute_report_file_required")
@@ -612,6 +661,7 @@ def main():
     os.umask(0o077)
     temporary = Path(tempfile.mkdtemp(prefix="insight-installation-kind-")).resolve()
     fixture = Fixture(arguments.runtime_image, arguments.console_image, temporary)
+    fixture.subnet = getattr(arguments, "subnet", None)
     error = None
     try:
         fixture.begin()
