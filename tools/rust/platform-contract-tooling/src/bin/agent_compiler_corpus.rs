@@ -18,7 +18,10 @@ fn main() {
     let profile: AgentCompilerProfile = serde_json::from_value(corpus["profile"].clone()).unwrap();
     for case in corpus["cases"].as_array_mut().unwrap() {
         let compiled = compile_agent(AgentCompilerInput {
-            plan_bytes: None,
+            plan_bytes: case
+                .get("plan")
+                .and_then(Value::as_str)
+                .map(|path| fs::read(root.join(path)).unwrap()),
             manifest_bytes: fs::read(root.join(case["manifest"].as_str().unwrap())).unwrap(),
             input_schema_bytes: fs::read(root.join(case["input_schema"].as_str().unwrap()))
                 .unwrap(),

@@ -41,6 +41,7 @@ export function AgentWizard({
     displayName,
     executionKind,
     instructions,
+    prompt,
     modelAlias,
     classification,
     deadline,
@@ -81,7 +82,8 @@ export function AgentWizard({
             >
               <option value="model_chat">模型对话</option>
               <option value="deterministic">确定性回显</option>
-              <option value="full_plan">多步骤工作流</option>
+              <option value="workflow">顺序模型工作流</option>
+              <option value="full_plan">完整运行计划（高级）</option>
               <option value="framework_graph">框架工作流</option>
             </select>
           </label>
@@ -103,7 +105,7 @@ export function AgentWizard({
       <div hidden={step !== 1} className={cx('wizard-step')}>
         <h3>告诉智能体要做什么</h3>
         <div className={cx('form-grid')}>
-          {executionKind === 'model_chat' && (
+          {(executionKind === 'model_chat' || executionKind === 'workflow') && (
             <label className={cx('field--wide')}>
               <span>模型</span>
               <select
@@ -130,7 +132,7 @@ export function AgentWizard({
               )}
             </label>
           )}
-          {executionKind === 'model_chat' ? (
+          {executionKind === 'model_chat' || executionKind === 'workflow' ? (
             <label className={cx('field--wide')}>
               <span>任务指令</span>
               <textarea
@@ -146,6 +148,21 @@ export function AgentWizard({
                 ? '将输入按约定结构直接返回，适合检查工作流是否连通。'
                 : '在下方画布中添加步骤，点击节点编辑配置。'}
             </p>
+          )}
+          {executionKind === 'model_chat' && (
+            <label className={cx('field--wide')}>
+              <span>输入提示词模板（可选）</span>
+              <textarea
+                rows={4}
+                value={prompt ?? ''}
+                onChange={(event) => onChange({ prompt: event.target.value })}
+                placeholder="请解读以下内容：{{ input.message }}"
+              />
+              <small>
+                引用输入字段：{'{{ input.message }}'}
+                。留空使用原始输入；仅支持必填、有界字符串字段。任务指令保持静态。
+              </small>
+            </label>
           )}
         </div>
       </div>
@@ -238,9 +255,11 @@ export function AgentWizard({
                 onChange={(event) => onChange({ outputSchemaPath: event.target.value })}
               />
             </label>
-            {(executionKind === 'full_plan' || executionKind === 'framework_graph') && (
+            {(executionKind === 'workflow' ||
+              executionKind === 'full_plan' ||
+              executionKind === 'framework_graph') && (
               <label>
-                <span>Plan 路径</span>
+                <span>{executionKind === 'workflow' ? '工作流文件路径' : 'Plan 路径'}</span>
                 <input
                   value={planPath}
                   onChange={(event) => onChange({ planPath: event.target.value })}

@@ -9,6 +9,7 @@ pub mod editor;
 pub mod evaluation;
 pub mod evaluation_schema;
 mod inspection;
+pub mod workflow;
 pub use inspection::*;
 mod features;
 pub mod framework;
@@ -117,6 +118,7 @@ impl Error for AgentCompilerError {}
 pub enum AgentExecutionKind {
     Deterministic,
     ModelChat,
+    Workflow,
     FullPlan,
     FrameworkGraph,
 }
@@ -144,6 +146,8 @@ struct AgentManifestSpec {
     execution: AgentManifestExecution,
     #[serde(default)]
     instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
     #[serde(default)]
     model: Option<AgentManifestModel>,
     input: AgentManifestInput,
@@ -578,8 +582,11 @@ pub fn compile_agent(input: AgentCompilerInput) -> Result<CompiledAgent, AgentCo
                 Vec::new(),
             )
         }
-        AgentExecutionKind::ModelChat => {
-            if !input.bindings.slots.is_empty() || input.plan_bytes.is_some() {
+        AgentExecutionKind::ModelChat | AgentExecutionKind::Workflow => {
+            if !input.bindings.slots.is_empty()
+                || (manifest.spec.execution.kind == AgentExecutionKind::ModelChat
+                    && input.plan_bytes.is_some())
+            {
                 return Err(AgentCompilerError::binding(
                     "model template has unexpected full Plan input",
                 ));
@@ -605,13 +612,35 @@ pub fn compile_agent(input: AgentCompilerInput) -> Result<CompiledAgent, AgentCo
                 },
             };
             (
-                model_chat_plan(
-                    &contract_digest,
-                    &input_schema.canonical_digest,
-                    &output_schema.canonical_digest,
-                    &requirement_digest,
-                    input.profile.model_loop,
-                ),
+                if manifest.spec.execution.kind == AgentExecutionKind::Workflow {
+                    workflow::lower(
+                        input.plan_bytes.as_deref().ok_or_else(|| {
+                            AgentCompilerError::reference("workflow source is missing")
+                        })?,
+                        &input_schema,
+                        &output_schema,
+                        &contract_digest,
+                        &requirement_digest,
+                        input.profile.model_loop,
+                    )?
+                } else if let Some(prompt) = &manifest.spec.prompt {
+                    workflow::lower_chat(
+                        prompt,
+                        &input_schema,
+                        &output_schema,
+                        &contract_digest,
+                        &requirement_digest,
+                        input.profile.model_loop,
+                    )?
+                } else {
+                    model_chat_plan(
+                        &contract_digest,
+                        &input_schema.canonical_digest,
+                        &output_schema.canonical_digest,
+                        &requirement_digest,
+                        input.profile.model_loop,
+                    )
+                },
                 vec![slot],
                 vec![RequiredAgentFeature::Model],
             )
@@ -789,7 +818,9 @@ fn validate_manifest(manifest: &AgentManifestV1) -> Result<(), AgentCompilerErro
     }
     if matches!(
         manifest.spec.execution.kind,
-        AgentExecutionKind::FullPlan | AgentExecutionKind::FrameworkGraph
+        AgentExecutionKind::FullPlan
+            | AgentExecutionKind::FrameworkGraph
+            | AgentExecutionKind::Workflow
     ) {
         let path = manifest
             .spec
@@ -802,6 +833,17 @@ fn validate_manifest(manifest: &AgentManifestV1) -> Result<(), AgentCompilerErro
         return Err(AgentCompilerError::manifest(
             "template execution cannot reference a full Plan",
         ));
+    }
+    if let Some(prompt) = &manifest.spec.prompt {
+        if manifest.spec.execution.kind != AgentExecutionKind::ModelChat
+            || prompt.is_empty()
+            || prompt.len() > workflow::MAX_TEMPLATE_BYTES
+        {
+            return Err(AgentCompilerError::manifest(
+                "prompt requires model_chat and bounded nonempty text",
+            ));
+        }
+        reject_sensitive_literal(prompt)?;
     }
     match manifest.spec.execution.kind {
         AgentExecutionKind::FullPlan | AgentExecutionKind::FrameworkGraph => {
@@ -829,7 +871,7 @@ fn validate_manifest(manifest: &AgentManifestV1) -> Result<(), AgentCompilerErro
                 ));
             }
         }
-        AgentExecutionKind::ModelChat => {
+        AgentExecutionKind::ModelChat | AgentExecutionKind::Workflow => {
             let instructions = manifest.spec.instructions.as_ref().ok_or_else(|| {
                 AgentCompilerError::manifest("model_chat requires spec.instructions")
             })?;
@@ -1415,6 +1457,8 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct ConformanceCase {
         case_id: String,
+        #[serde(default)]
+        plan: Option<String>,
         manifest: String,
         input_schema: String,
         output_schema: String,
@@ -1561,7 +1605,10 @@ spec:
         assert_eq!(corpus.schema_version, 2);
         for case in corpus.cases {
             let compiled = compile_agent(AgentCompilerInput {
-                plan_bytes: None,
+                plan_bytes: case
+                    .plan
+                    .as_ref()
+                    .map(|path| fs::read(root.join(path)).unwrap()),
                 manifest_bytes: fs::read(root.join(&case.manifest)).unwrap(),
                 input_schema_bytes: fs::read(root.join(&case.input_schema)).unwrap(),
                 output_schema_bytes: fs::read(root.join(&case.output_schema)).unwrap(),
@@ -3186,5 +3233,8 @@ spec:
                 AgentManifestInspectionResponseV1::Rejected { .. }
             ));
         }
+    }
+    mod prompt_authoring_tests {
+        include!("prompt_authoring_tests.rs");
     }
 }

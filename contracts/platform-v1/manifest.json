@@ -1,5 +1,5 @@
 {
-  "contract_digest": "sha256:b5c1b042f059a62983ab6d92b1cf0b41c9d1d27ae1e6c79a39d07662993900cb",
+  "contract_digest": "sha256:f45afcb6223734a8febe85dcf43662e1177a67fb9187bb94fff7bfb2585f1ca9",
   "contract_profile": "insight.platform/v1",
   "files": [
     {
@@ -198,7 +198,7 @@
       "bytes": 3080,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/agent-source-map-v1.schema.json",
-      "sha256": "a9279d0662b2f1248494b21b1583ef0ab7110be75fc4c9f33d7c859802b737b2"
+      "sha256": "9f76e351f7e47c4a9b0b3299f463febece50b505a66b5e5976817d3c4095804d"
     },
     {
       "bytes": 951,
@@ -207,16 +207,16 @@
       "sha256": "b7aa77b702750b5b89b31e69cdff8311cd214c405f4683e41a0e35d3311a9847"
     },
     {
-      "bytes": 4273,
+      "bytes": 4301,
       "media_type": "application/json",
       "path": "contracts/platform-v1/schemas/agent-source-inspection-response-v1.schema.json",
-      "sha256": "4474e06e9752e2519b567d0f667a4e55bd2359a124e326827e6a92d67b5f4ad3"
+      "sha256": "ec82e4c387c07dee87b1a6599a6230aff447509cbb12c16ce5d55ca314c29260"
     },
     {
       "bytes": 20499,
       "media_type": "application/json",
       "path": "contracts/platform-v1/agent-node-editor.v1.json",
-      "sha256": "8ab04d3744340a6980777982e4102e5aa2e8478e847fbe39006ad8e8828a72cf"
+      "sha256": "8f5f2707337c0256c97c4012e0e91e40a974ddcdc7d8043aa11aa9baf054adae"
     },
     {
       "bytes": 15956,

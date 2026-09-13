@@ -213,6 +213,58 @@ fn positions(
     Ok(cursor.result)
 }
 
+enum SourceLayout {
+    FullPlan,
+    Shortcut,
+    Workflow(std::collections::BTreeMap<String, usize>),
+}
+impl SourceLayout {
+    fn pointer(
+        &self,
+        target: &AgentSourceTargetV1,
+    ) -> Result<String, crate::AgentBoundaryErrorCode> {
+        use crate::AgentBoundaryErrorCode::SourceBundleInvalid;
+        let node = target.node_id().as_str();
+        match self {
+            Self::FullPlan => Ok(target.ir_pointer().into()),
+            Self::Shortcut => Ok(if node == "prompt.model" {
+                "/spec/prompt"
+            } else {
+                "/spec/execution"
+            }
+            .into()),
+            Self::Workflow(steps) => {
+                if node == "start" {
+                    return Ok(String::new());
+                }
+                if matches!(node, "result" | "finish") {
+                    return Ok("/output".into());
+                }
+                if let Some(id) = node.strip_prefix("prompt.") {
+                    let index = steps.get(id).ok_or(SourceBundleInvalid)?;
+                    return Ok(format!("/steps/{index}/prompt"));
+                }
+                if let Some(id) = node.strip_prefix("step.") {
+                    let index = steps.get(id).ok_or(SourceBundleInvalid)?;
+                    let suffix = target
+                        .ir_pointer()
+                        .strip_prefix(&format!("/nodes/{}", escape(node)))
+                        .ok_or(SourceBundleInvalid)?;
+                    let field = if suffix.starts_with("/output") {
+                        "/output"
+                    } else if suffix.starts_with("/input") {
+                        "/prompt"
+                    } else {
+                        ""
+                    };
+                    return Ok(format!("/steps/{index}{field}"));
+                }
+                Err(SourceBundleInvalid)
+            }
+        }
+    }
+}
+
 pub(crate) fn build_source_map(
     bundle: &crate::AgentSourceBundleV1,
     compiled: &crate::CompiledAgent,
@@ -225,9 +277,32 @@ pub(crate) fn build_source_map(
     let resolution =
         crate::inspect_manifest(bundle.sources.files[&bundle.sources.manifest_path].as_bytes())
             .map_err(|_| SourceBundleInvalid)?;
-    let (file, full) = match resolution.plan_path {
-        Some(path) => (path, true),
-        None => (bundle.sources.manifest_path.clone(), false),
+    let file = resolution
+        .plan_path
+        .clone()
+        .unwrap_or_else(|| bundle.sources.manifest_path.clone());
+    let layout = if resolution.execution_kind == crate::AgentExecutionKind::Workflow {
+        let workflow = crate::workflow::parse(
+            bundle
+                .sources
+                .files
+                .get(&file)
+                .ok_or(SourceBundleInvalid)?
+                .as_bytes(),
+        )
+        .map_err(|_| SourceBundleInvalid)?;
+        SourceLayout::Workflow(
+            workflow
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| (step.id.clone(), index))
+                .collect(),
+        )
+    } else if resolution.plan_path.is_some() {
+        SourceLayout::FullPlan
+    } else {
+        SourceLayout::Shortcut
     };
     let source_positions = positions(
         &file,
@@ -239,7 +314,7 @@ pub(crate) fn build_source_map(
         serde_json::from_slice(&compiled.typed_plan_bytes).map_err(|_| CompilerInternal)?;
     struct Entries<'a> {
         positions: &'a std::collections::BTreeMap<String, AgentSourceSpanV1>,
-        full: bool,
+        layout: SourceLayout,
         entries: Vec<AgentSourceMapEntryV1>,
     }
     impl Entries<'_> {
@@ -250,14 +325,10 @@ pub(crate) fn build_source_map(
             if self.entries.len() >= MAX_AGENT_SOURCE_MAP_ENTRIES {
                 return Err(CompilerLimitExceeded);
             }
-            let pointer = if self.full {
-                target.ir_pointer()
-            } else {
-                "/spec/execution"
-            };
+            let pointer = self.layout.pointer(&target)?;
             let source = self
                 .positions
-                .get(pointer)
+                .get(&pointer)
                 .ok_or(SourceBundleInvalid)?
                 .clone();
             self.entries.push(AgentSourceMapEntryV1 { target, source });
@@ -313,7 +384,7 @@ pub(crate) fn build_source_map(
     }
     let mut entries = Entries {
         positions: &source_positions,
-        full,
+        layout,
         entries: Vec::new(),
     };
     for (node_id, node) in &plan.nodes {
@@ -411,7 +482,14 @@ pub(crate) fn diagnostic_location(
             .ok()
             .and_then(|value| value.plan_path.as_ref()),
     ) {
-        (AgentBoundaryErrorCode::AgentCompileFailed, Some(file)) => (file.as_str(), "/nodes"),
+        (AgentBoundaryErrorCode::AgentCompileFailed, Some(file)) => (
+            file.as_str(),
+            if resolution.as_ref().ok()?.execution_kind == crate::AgentExecutionKind::Workflow {
+                "/steps"
+            } else {
+                "/nodes"
+            },
+        ),
         (AgentBoundaryErrorCode::AgentManifestInvalid, _) => (sources.manifest_path.as_str(), ""),
         (AgentBoundaryErrorCode::AgentCompileFailed, _) => {
             (sources.manifest_path.as_str(), "/spec/execution")
@@ -457,6 +535,59 @@ pub fn agent_source_map_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workflow_generated_nodes_and_ports_point_to_their_author_fields() {
+        let source = "version: 1\nsteps:\n  - id: analyze\n    prompt: 'Read {{input.message}}'\n    output: {type: object}\noutput: {answer: '{{nodes.analyze.output.answer}}'}\n";
+        let spans = positions("workflow.yaml", source).unwrap();
+        let layout =
+            SourceLayout::Workflow(std::collections::BTreeMap::from([("analyze".into(), 0)]));
+        for (node, suffix, expected) in [
+            ("start", "", ""),
+            ("prompt.analyze", "", "/steps/0/prompt"),
+            (
+                "prompt.analyze",
+                "/expression/instructions/0",
+                "/steps/0/prompt",
+            ),
+            ("step.analyze", "", "/steps/0"),
+            ("step.analyze", "/input", "/steps/0/prompt"),
+            ("step.analyze", "/output", "/steps/0/output"),
+            ("result", "", "/output"),
+            ("finish", "/value", "/output"),
+        ] {
+            let target = AgentSourceTargetV1::Node {
+                node_id: PlanNodeKey::new(node.into()).unwrap(),
+                ir_pointer: format!("/nodes/{node}{suffix}"),
+            };
+            let pointer = layout.pointer(&target).unwrap();
+            assert_eq!(pointer, expected);
+            assert_eq!(spans[&pointer].file, "workflow.yaml");
+        }
+        assert_eq!(spans["/steps/0/prompt"].line, 4);
+        assert_eq!(spans["/steps/0/output"].line, 5);
+        let target = AgentSourceTargetV1::Node {
+            node_id: PlanNodeKey::new("step.unknown".into()).unwrap(),
+            ir_pointer: "/nodes/step.unknown".into(),
+        };
+        assert!(layout.pointer(&target).is_err());
+    }
+
+    #[test]
+    fn shortcut_prompt_compute_points_to_explicit_prompt() {
+        let target = AgentSourceTargetV1::Expression {
+            node_id: PlanNodeKey::new("prompt.model".into()).unwrap(),
+            ir_pointer: "/nodes/prompt.model/expression/instructions/0".into(),
+        };
+        assert_eq!(
+            SourceLayout::Shortcut.pointer(&target).unwrap(),
+            "/spec/prompt"
+        );
+        assert_eq!(
+            SourceLayout::FullPlan.pointer(&target).unwrap(),
+            target.ir_pointer()
+        );
+    }
+
     #[test]
     fn parser_spans_are_real_unicode_scalar_positions() {
         let source = "{\"title\":\"你好🌍\",\"nodes\":{\"entry\":{\"kind\":\"start\"}}}";

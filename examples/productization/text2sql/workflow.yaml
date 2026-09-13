@@ -1,0 +1,73 @@
+version: 1
+steps:
+  - id: analyze
+    prompt: |
+      分析问题需要哪些表、关联条件、筛选、聚合和排序，明确时间区间与缺失信息。将分析写入 text。
+      表结构：
+      {{ input.schema_text }}
+      问题：{{ input.question }}
+    output:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 0
+          maxLength: 4096
+          x-platform-max-bytes: 4096
+  - id: generate
+    prompt: |
+      根据问题、表结构和分析生成 PostgreSQL SQL。时间范围使用左闭右开区间，避免重复聚合。
+      表结构：
+      {{ input.schema_text }}
+      问题：{{ input.question }}
+      分析：{{ nodes.analyze.output.text }}
+      输出 sql 和 explanation；缺少必要信息时 sql 为空。
+    output:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      type: object
+      additionalProperties: false
+      required: [sql, explanation]
+      properties:
+        sql:
+          type: string
+          minLength: 0
+          maxLength: 4096
+          x-platform-max-bytes: 4096
+        explanation:
+          type: string
+          minLength: 0
+          maxLength: 2048
+          x-platform-max-bytes: 2048
+  - id: review
+    prompt: |
+      复核并必要时修正 SQL 草稿：核对表/字段、关联、聚合、时间区间、排序和只读要求。
+      这是模型复核，不是数据库语法检查或执行。输出最终 sql 和 explanation。
+      表结构：
+      {{ input.schema_text }}
+      问题：{{ input.question }}
+      分析：{{ nodes.analyze.output.text }}
+      SQL 草稿：
+      {{ nodes.generate.output.sql }}
+      草稿说明：{{ nodes.generate.output.explanation }}
+    output:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      type: object
+      additionalProperties: false
+      required: [sql, explanation]
+      properties:
+        sql:
+          type: string
+          minLength: 0
+          maxLength: 4096
+          x-platform-max-bytes: 4096
+        explanation:
+          type: string
+          minLength: 0
+          maxLength: 2048
+          x-platform-max-bytes: 2048
+output:
+  sql: "{{ nodes.review.output.sql }}"
+  explanation: "{{ nodes.review.output.explanation }}"

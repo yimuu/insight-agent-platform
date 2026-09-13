@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "id": "analyze",
+      "prompt": "输入：{{ input.message }}",
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-platform-max-bytes": 1024
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "summarize",
+      "prompt": "整理前一步：{{ nodes.analyze.output.answer }}",
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "x-platform-max-bytes": 1024
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "output": {
+    "answer": "{{ nodes.summarize.output.answer }}"
+  }
+}

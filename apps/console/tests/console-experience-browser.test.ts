@@ -117,6 +117,7 @@ test(
       )
       await browser.field('模型', model.manifest_ref)
       await browser.field('任务指令', '用中文回答，将结果放入 answer 字段。')
+      await browser.field('输入提示词模板（可选）', '请解读：{{ input.message }}')
       await browser.click('下一步')
       const inputTable = `document.querySelector('section[aria-label="输入字段"]')`
       await browser.evaluate(
@@ -166,6 +167,7 @@ test(
       )
       const yaml = await browser.evaluate(fieldValue('agent.yaml'))
       assert.match(yaml, /model_chat/)
+      assert.match(yaml, /请解读：\{\{ input.message \}\}/)
       await browser.field('agent.yaml', '# 用户备注\n' + yaml)
       await browser.click('分步表单')
       await browser.wait(`${fieldValue('智能体名称')} === '中文助手'`, 'YAML to form')
@@ -181,6 +183,37 @@ test(
       assert.equal(schema.required.includes('context'), false)
       assert.equal(schema.properties.message.maxLength, 16384)
       assert.equal(writes, 0, 'view changes and validation do not publish')
+      await browser.click('返回列表')
+      await browser.click('创建智能体')
+      await browser.field('任务类型', 'workflow')
+      await browser.click('下一步')
+      await browser.wait(
+        `String(${fieldValue('工作流源码')}).includes('nodes.analyze.output.answer')`,
+        'editable default two-step workflow',
+      )
+      assert.equal(
+        await browser.evaluate(`!!document.querySelector('[aria-label="工作流画布"]')`),
+        false,
+        'author workflow does not enter RuntimePlan editor',
+      )
+      await browser.field('模型', model.manifest_ref)
+      const workflowSource =
+        '# 保留工作流备注\n' + (await browser.evaluate(fieldValue('工作流源码')))
+      await browser.field('工作流源码', workflowSource)
+      await browser.click('下一步')
+      await browser.click('下一步')
+      await browser.click('校验配置')
+      await browser.wait(
+        `document.body.innerText.includes('校验通过，依赖已解析') && ${fieldValue('工作流源码')} === ${JSON.stringify(workflowSource)}`,
+        'default workflow compiles in actual browser WASM',
+      )
+      await browser.click('高级 YAML')
+      await browser.wait(
+        `String(${fieldValue('agent.yaml')}).includes('kind: workflow') && String(${fieldValue('agent.yaml')}).includes(${JSON.stringify(model.manifest_ref)})`,
+        'workflow model binding survives YAML switch',
+      )
+      assert.equal(await browser.evaluate(fieldValue('工作流源码')), workflowSource)
+      assert.equal(writes, 0, 'prompt and workflow editing never publish implicitly')
       await browser.click('返回列表')
       access = 403
       await browser.click('刷新')

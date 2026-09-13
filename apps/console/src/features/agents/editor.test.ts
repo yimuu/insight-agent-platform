@@ -1,3 +1,5 @@
+import { initialWorkflowSource } from './editor/workflow-source.ts'
+import { DEFAULT_INPUT_SCHEMA, DEFAULT_OUTPUT_SCHEMA } from './default-schemas.ts'
 import '../../../tests/wasm-worker-fixture.ts'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -9,6 +11,7 @@ import {
 } from '../../shared/compiler/compiler.ts'
 import {
   buildFormManifest,
+  updateFormManifest,
   exactSlotBindings,
   manifestFormFields,
   planNodeOutline,
@@ -176,4 +179,55 @@ test('framework graph keeps the static export as source and compiles at Platform
     compileAgentManifest({ ...input, manifest, plan: JSON.stringify({ ...graph, reducers: {} }) }),
     AgentCompilerError,
   )
+})
+
+test('prompt templates and workflow source survive Form/YAML, WASM compilation and complete source restoration', async () => {
+  const corpus = JSON.parse(await source('corpus.json'))
+  const bindings = corpus.cases.find((entry) => entry.case_id === 'model-chat-yaml').bindings
+  const original = await source('model-chat.yaml')
+  const fields = await manifestFormFields(original)
+  const prompt = '解读报告：{{ input.message }}'
+  const manifest = updateFormManifest('# 保留作者备注\n' + original, { ...fields, prompt })
+  assert.match(manifest, /# 保留作者备注/)
+  assert.equal((await manifestFormFields(manifest)).prompt, prompt)
+  const base = {
+    inputSchema: DEFAULT_INPUT_SCHEMA,
+    outputSchema: DEFAULT_OUTPUT_SCHEMA,
+    profile: corpus.profile,
+    bindings,
+  }
+  const chat = await compileAgentManifest({ ...base, manifest })
+  assert.equal((await readEditableSourceBundle(chat.sourceBundle)).fields.prompt, prompt)
+  const workflowManifest = updateFormManifest(manifest, {
+    ...fields,
+    executionKind: 'workflow',
+    planPath: 'flows/report.yaml',
+  })
+  const projected = await manifestFormFields(workflowManifest)
+  assert.equal(projected.modelAlias, fields.modelAlias)
+  assert.equal(projected.planPath, 'flows/report.yaml')
+  assert.equal(projected.prompt, '')
+  const workflow = '# 步骤备注必须保留\n' + initialWorkflowSource()
+  const compiled = await compileAgentManifest({
+    ...base,
+    manifest: workflowManifest,
+    plan: workflow,
+  })
+  assert.equal(compiled.executionKind, 'workflow')
+  const restored = await readEditableSourceBundle(compiled.sourceBundle)
+  assert.equal(restored.plan, workflow)
+  assert.equal(restored.modelBinding.manifest_ref, fields.modelAlias)
+  assert.equal(restored.fields.executionKind, 'workflow')
+  const updated = updateFormManifest(restored.manifest, {
+    ...restored.fields,
+    displayName: '报告解读',
+  })
+  const recompiled = await compileAgentManifest({
+    ...base,
+    manifest: updated,
+    plan: restored.plan,
+    bindings: { model: restored.modelBinding, slots: exactSlotBindings(restored.slotBindings) },
+  })
+  assert.equal(recompiled.typedPlanDigest, compiled.typedPlanDigest)
+  assert.equal((await readEditableSourceBundle(recompiled.sourceBundle)).plan, workflow)
 })

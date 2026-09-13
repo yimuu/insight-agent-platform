@@ -465,8 +465,10 @@ fn compile_project_with_bindings(
             resolution.execution_kind,
             agent_compiler::AgentExecutionKind::FullPlan
                 | agent_compiler::AgentExecutionKind::FrameworkGraph
-        ) && (resolution.execution_kind != agent_compiler::AgentExecutionKind::ModelChat
-            || bindings.model.is_none()
+        ) && (!matches!(
+            resolution.execution_kind,
+            AgentExecutionKind::ModelChat | AgentExecutionKind::Workflow
+        ) || bindings.model.is_none()
             || !bindings.slots.is_empty())
         {
             return Err(AgentCommandError::InvalidLocalState(
@@ -1945,6 +1947,104 @@ fn io_error(path: &Path, error: std::io::Error) -> AgentCommandError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn workflow_uses_one_exact_model_and_preserves_author_source() {
+        let directory = crate::agent_entry_tests::project();
+        let corpus = crate::workspace_assets::workspace_path(
+            "contracts/product-experience/agent-compiler/v2",
+        );
+        let cases: serde_json::Value =
+            serde_json::from_slice(&fs::read(corpus.join("corpus.json")).unwrap()).unwrap();
+        let case = cases["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| !case["bindings"]["model"].is_null())
+            .unwrap();
+        let bindings: ResolvedAgentBindings =
+            serde_json::from_value(case["bindings"].clone()).unwrap();
+        let manifest = fs::read_to_string(corpus.join("model-chat.yaml"))
+            .unwrap()
+            .replace(
+                "kind: model_chat",
+                "kind: workflow\n    plan: workflow.json",
+            );
+        fs::write(directory.path().join("agent.yaml"), manifest).unwrap();
+        fs::copy(
+            corpus.join("schema-answer.json"),
+            directory.path().join("schema-answer.json"),
+        )
+        .unwrap();
+        let output: serde_json::Value =
+            serde_json::from_slice(&fs::read(corpus.join("schema-answer.json")).unwrap()).unwrap();
+        let workflow = serde_json::json!({"version":1,"steps":[{"id":"answer","prompt":"Read {{input.message}}","output":output}],"output":{"answer":"{{nodes.answer.output.answer}}"}}).to_string();
+        fs::write(directory.path().join("workflow.json"), &workflow).unwrap();
+        let sources = capture_project_sources(directory.path(), Path::new("agent.yaml")).unwrap();
+        let resolution = sources.resolution;
+        let sources = sources.sources;
+        let profile = offline_compiler_profile(directory.path()).unwrap();
+        let compile = |bindings| {
+            compile_project_with_bindings(
+                directory.path(),
+                Path::new("agent.yaml"),
+                profile.clone(),
+                Some(bindings),
+                None,
+                sources.clone(),
+                resolution.clone(),
+            )
+        };
+        let compiled = compile(bindings.clone()).unwrap();
+        assert_eq!(
+            compiled.compiled.execution_kind,
+            AgentExecutionKind::Workflow
+        );
+        let frozen: AgentSourceBundleV1 =
+            serde_json::from_slice(&compiled.source_bundle_bytes).unwrap();
+        assert_eq!(frozen.sources.files["workflow.json"], workflow);
+        let source_map: agent_compiler::AgentSourceMapV1 =
+            serde_json::from_slice(&compiled.source_map_bytes).unwrap();
+        for (node, pointer) in [
+            ("prompt.answer", "/steps/0/prompt"),
+            ("step.answer", "/steps/0"),
+            ("result", "/output"),
+        ] {
+            assert!(source_map
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.target.ir_pointer() == format!("/nodes/{node}")
+                        && entry.source.file == "workflow.json"
+                        && entry.source.source_pointer == pointer
+                ));
+        }
+        let mut missing = bindings.clone();
+        missing.model = None;
+        assert!(matches!(
+            compile(missing),
+            Err(AgentCommandError::InvalidLocalState(_))
+        ));
+        let mut unrelated = bindings.clone();
+        let model = bindings.model.unwrap();
+        unrelated
+            .slots
+            .push(insight_platform_contracts::AgentSlotBindingInputV1 {
+                slot_id: "unrelated".into(),
+                requirement_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .parse()
+                        .unwrap(),
+                target: insight_platform_contracts::AgentSlotTargetInputV1::Model {
+                    candidates: vec![model.deployment],
+                    selection_policy: model.selection_policy,
+                },
+            });
+        assert!(matches!(
+            compile(unrelated),
+            Err(AgentCommandError::InvalidLocalState(_))
+        ));
+    }
 
     #[test]
     fn agent_list_sends_bounded_encoded_query_for_each_page() {

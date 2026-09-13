@@ -1,0 +1,4 @@
+{
+  "schema_text": "PostgreSQL tables:\ncustomers(id bigint PRIMARY KEY, name text NOT NULL)\norders(id bigint PRIMARY KEY, customer_id bigint NOT NULL REFERENCES customers(id), total_amount numeric(12,2) NOT NULL, status text NOT NULL, created_at timestamp NOT NULL)\nBusiness rules: paid orders have status = 'paid'; total_amount is the order total, not a line-item value. created_at stores UTC timestamps.",
+  "question": "查询 2025 年 1 月已付款订单金额最高的前 10 位客户，返回客户 ID、姓名和总金额，按总金额降序，金额相同按客户 ID 升序。"
+}

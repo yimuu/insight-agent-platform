@@ -1,3 +1,4 @@
+import { initialWorkflowSource } from './editor/workflow-source'
 import sharedStyles from '../../shared/ui/Primitives.module.css'
 import { classNames } from '../../shared/ui/class-names.ts'
 import localStyles from './Agents.module.css'
@@ -93,6 +94,7 @@ export function Agents({
   const [displayName, setDisplayName] = useState('Hello Agent')
   const [executionKind, setExecutionKind] = useState<AgentExecutionKind>('model_chat')
   const [instructions, setInstructions] = useState('Respond with a concise typed answer.')
+  const [prompt, setPrompt] = useState('')
   const [modelAlias, setModelAlias] = useState('')
   const [classification, setClassification] = useState('internal')
   const [deadline, setDeadline] = useState('')
@@ -194,6 +196,7 @@ export function Agents({
     displayName,
     executionKind,
     instructions,
+    prompt,
     modelAlias,
     classification,
     deadline,
@@ -207,6 +210,7 @@ export function Agents({
     setDisplayName(fields.displayName)
     setExecutionKind(fields.executionKind)
     setInstructions(fields.instructions)
+    setPrompt(fields.prompt ?? '')
     setModelAlias(fields.modelAlias)
     setClassification(fields.classification)
     setDeadline(fields.deadline)
@@ -244,6 +248,7 @@ export function Agents({
       displayName: '我的智能体',
       executionKind: 'model_chat',
       instructions: '请根据用户输入，用简洁的中文回答。将回答放在 answer 字段中。',
+      prompt: '',
       modelAlias: '',
       classification: 'internal',
       deadline: '',
@@ -791,6 +796,15 @@ export function Agents({
               <AgentWizard
                 fields={formFields()}
                 onChange={(patch) => {
+                  invalidate()
+                  if (
+                    patch.executionKind === 'workflow' &&
+                    executionKind !== 'workflow' &&
+                    !plan.trim()
+                  ) {
+                    setPlan(initialWorkflowSource())
+                    patch = { ...patch, planPath: 'workflow.yaml' }
+                  }
                   applyFields({ ...formFields(), ...patch })
                   if (patch.modelAlias !== undefined) setExactModel(null)
                 }}
@@ -844,9 +858,29 @@ export function Agents({
                 />
               </div>
             )}
-            {(executionKind === 'full_plan' ||
-              executionKind === 'framework_graph' ||
-              mode === 'yaml') &&
+            {executionKind === 'workflow' && (mode === 'yaml' || step === 1 || step === 3) && (
+              <div className={cx('stack')}>
+                <p>
+                  按 steps 顺序执行，共用上方模型。输入引用：{'{{ input.message }}'}；前序步骤引用：
+                  {'{{ nodes.analyze.output.answer }}'}。每步 output 定义其返回对象，最终 output
+                  映射到智能体公开输出字段。
+                </p>
+                <CodeEditor
+                  label="工作流源码"
+                  language="yaml"
+                  value={plan}
+                  disabled={busy}
+                  onChange={(next) => {
+                    invalidate()
+                    setPlan(next)
+                  }}
+                />
+              </div>
+            )}
+            {executionKind !== 'workflow' &&
+              (executionKind === 'full_plan' ||
+                executionKind === 'framework_graph' ||
+                mode === 'yaml') &&
               (mode === 'yaml' || step === 1 || step === 3) && (
                 <div className={cx('stack')}>
                   {!plan.trim() && executionKind === 'full_plan' ? (
@@ -919,7 +953,7 @@ export function Agents({
               )}
             {(executionKind === 'full_plan' ||
               executionKind === 'framework_graph' ||
-              mode === 'yaml' ||
+              (mode === 'yaml' && executionKind !== 'workflow') ||
               slotBindings.trim() !== '[]') && (
               <details>
                 <summary>高级：工作流依赖绑定</summary>
@@ -968,11 +1002,15 @@ export function Agents({
                       if (step === 0 && !displayName.trim()) throw new Error('请填写智能体名称。')
                       if (
                         step === 1 &&
-                        executionKind === 'model_chat' &&
+                        (executionKind === 'model_chat' || executionKind === 'workflow') &&
                         (!modelAlias || !instructions.trim())
                       )
                         throw new Error('请选择模型并填写任务指令。')
-                      if (step === 1 && executionKind === 'full_plan' && !plan.trim())
+                      if (
+                        step === 1 &&
+                        (executionKind === 'full_plan' || executionKind === 'workflow') &&
+                        !plan.trim()
+                      )
                         throw new Error('请先创建工作流。')
                       if (step === 2) {
                         ensureValidFields()
