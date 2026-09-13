@@ -3,24 +3,21 @@ use super::*;
 fn text2sql_bundle() -> AgentSourceBundleV1 {
     let mut bundle = source_bundle();
     bundle.bindings = model_binding();
-    bundle.sources.files = BTreeMap::from([
+    let example = workspace_root().join("examples/productization/text2sql");
+    bundle.sources.files = [
+        "agent.yaml",
+        "workflow.yaml",
+        "input.schema.json",
+        "output.schema.json",
+    ]
+    .into_iter()
+    .map(|name| {
         (
-            "agent.yaml".into(),
-            include_str!("../../../../examples/productization/text2sql/agent.yaml").into(),
-        ),
-        (
-            "workflow.yaml".into(),
-            include_str!("../../../../examples/productization/text2sql/workflow.yaml").into(),
-        ),
-        (
-            "input.schema.json".into(),
-            include_str!("../../../../examples/productization/text2sql/input.schema.json").into(),
-        ),
-        (
-            "output.schema.json".into(),
-            include_str!("../../../../examples/productization/text2sql/output.schema.json").into(),
-        ),
-    ]);
+            name.to_owned(),
+            fs::read_to_string(example.join(name)).unwrap(),
+        )
+    })
+    .collect();
     bundle
 }
 
