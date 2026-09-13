@@ -3,19 +3,23 @@ import type { ArtifactRef, ExactDeploymentRef, Json, JsonObject, ResourceView } 
 export type ModelResourceKind = 'model_provider' | 'model_profile'
 export type ModelResourceNoun = 'model-providers' | 'models'
 export type ModelProtocol = 'open_ai_responses' | 'anthropic_messages'
+export interface ModelEndpoint {
+  scheme: 'https'
+  host: string
+  port: number
+  base_path: string
+}
 export interface ModelDestinationChoice {
-  destination_digest: string
-  endpoint_identity_digest: string
   base_url: string
   protocol: ModelProtocol
   region: string
 }
 export interface ModelConfigurationCatalog {
-  schema_version: 1
+  schema_version: 2
   installation_digest: string
   environment: string
   secret_provider_id: string
-  destinations: ModelDestinationChoice[]
+  protocols: ModelProtocol[]
   maximum_classification: 'internal'
 }
 export interface ModelResourceSummary {
@@ -53,10 +57,12 @@ export type ModelConfigurationInput =
   | {
       kind: 'source'
       configuration: {
-        schema_version: 1
+        schema_version: 2
         alias: string
         display_name: string
-        destination_digest: string
+        endpoint: ModelEndpoint
+        protocol: ModelProtocol
+        region: string
         credential: ExactModelCredential
       }
     }

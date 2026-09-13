@@ -231,7 +231,7 @@ class AnonymousGateTests(unittest.TestCase):
         files = ["Cargo.toml", "tools/checks/check-product-release.py", "tools/release/build-product-release.py",
                  "tools/development/build-development-profile-performance.py", "apps/console/scripts/build-agent-compiler.ts",
                  "crates/authoring/platform-agent-compiler-wasm/Cargo.toml", ".github/workflows/ci.yml",
-                 "deploy/images/console.Dockerfile", "deploy/release/performance-budgets-v1.json"]
+                 "deploy/images/console.Dockerfile", "deploy/images/console.Dockerfile.dockerignore", "deploy/release/performance-budgets-v1.json"]
         for name, changed in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)

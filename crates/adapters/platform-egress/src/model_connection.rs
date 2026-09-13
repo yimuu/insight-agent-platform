@@ -43,13 +43,25 @@ impl ModelConnectionProbe for ReqwestModelProviderEgressBroker {
         }
         let target = &permit.target;
         let provider = &target.provider;
-        let entry = self
-            .catalog
-            .entries
-            .iter()
-            .find(|e| {
-                e.protocol == target.protocol
-                    && e.endpoint_identity_digest == provider.endpoint_identity_digest
+        let candidate = match &self.catalog.routing {
+            insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations } => {
+                destinations
+                    .iter()
+                    .find(|entry| {
+                        entry.protocol == target.protocol && entry.endpoint == provider.endpoint
+                    })
+                    .cloned()
+            }
+            insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { grant } => grant
+                .destination(
+                    target.protocol,
+                    provider.endpoint.clone(),
+                    provider.region.clone(),
+                ),
+        };
+        let entry = candidate
+            .filter(|e| {
+                e.endpoint_identity_digest == provider.endpoint_identity_digest
                     && e.network_policy == provider.network_policy
                     && e.tls_policy == provider.tls_policy
                     && e.trust_policy == provider.trust_policy
@@ -58,8 +70,8 @@ impl ModelConnectionProbe for ReqwestModelProviderEgressBroker {
                     && provider.secret_bindings.len() == 1
                     && provider.secret_bindings[0].purpose == e.credential_purpose
             })
-            .cloned()
             .ok_or(Failure::Rejected)?;
+        entry.validate().map_err(|_| Failure::Rejected)?;
         let body = insight_platform_model_adapters::model_connection_request(target)?;
         let cancellation = CancellationToken::new();
         let operation = async {

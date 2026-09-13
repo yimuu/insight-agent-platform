@@ -186,6 +186,9 @@ mod tests {
 
     #[test]
     fn nominated_ca_is_shared_by_clients_without_disabling_tls_identity() {
+        // Native trust verification may exceed three seconds on macOS; this fixture
+        // exercises certificate identity, not the production request deadline.
+        let fixture_timeout = Duration::from_secs(10);
         for outcome in ["trusted", "wrong_root", "wrong_name"] {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -194,7 +197,7 @@ mod tests {
             let trusted = outcome == "trusted";
             let server = thread::spawn(move || {
                 let (tcp, _) = listener.accept().unwrap();
-                tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                tcp.set_read_timeout(Some(fixture_timeout)).unwrap();
                 let mut stream = StreamOwned::new(ServerConnection::new(server_config).unwrap(), tcp);
                 let mut first = [0u8; 1];
                 if !trusted { assert!(stream.read(&mut first).is_err()); return; }
@@ -205,12 +208,12 @@ mod tests {
                 stream.flush().unwrap();
             });
             let host = if outcome == "wrong_name" { "localhost" } else { "127.0.0.1" };
-            let client = PublicHttpClient::with_additional_roots(format!("https://{host}:{port}"), "test-token".to_owned(), Duration::from_secs(3), vec![extra]).unwrap();
+            let client = PublicHttpClient::with_additional_roots(format!("https://{host}:{port}"), "test-token".to_owned(), fixture_timeout, vec![extra]).unwrap();
             assert_eq!(client.additional_roots().len(), 1);
             // Object upload receives the same frozen roots, without the API client's bearer token.
             HttpsArtifactObjectUploader::with_additional_roots(client.additional_roots()).unwrap();
             let result = client.get_body_json::<serde_json::Value>("/v1/model-configuration", StatusCode::OK);
-            assert_eq!(result.is_ok(), trusted, "{outcome}");
+            assert_eq!(result.is_ok(), trusted, "{outcome}: {result:?}");
             server.join().unwrap();
         }
     }

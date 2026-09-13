@@ -1450,6 +1450,13 @@ impl SchedulerRunValueRequestResolver for PgRepository {
         let mut transaction = begin_read_only_repeatable(self.pool())
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        crate::repository::authorize_conversation_run_read(
+            &mut transaction,
+            &lease.tenant_id,
+            &lease.run_id,
+        )
+        .await
+        .map_err(classify_gateway_artifact_read_error)?;
         let row = sqlx::query(
             r#"
             SELECT value.schema_digest, value.content_digest AS value_content_digest,
@@ -1462,7 +1469,19 @@ impl SchedulerRunValueRequestResolver for PgRepository {
             JOIN insight_platform.runs AS run
               ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
             JOIN insight_platform.run_values AS value
-              ON value.tenant_id = run.tenant_id AND value.run_id = run.run_id
+              ON value.tenant_id = run.tenant_id
+             AND (value.run_id = run.run_id OR EXISTS (
+                SELECT 1 FROM insight_platform.conversation_turns current_turn
+                JOIN insight_platform.conversation_turns previous_turn
+                  ON previous_turn.tenant_id=current_turn.tenant_id
+                 AND previous_turn.conversation_id=current_turn.conversation_id
+                 AND previous_turn.ordinal<=current_turn.history_through
+                JOIN insight_platform.runs previous_run
+                  ON previous_run.tenant_id=previous_turn.tenant_id AND previous_run.run_id=previous_turn.run_id
+                 AND previous_run.state='succeeded'
+                WHERE current_turn.tenant_id=run.tenant_id AND current_turn.run_id=run.run_id
+                  AND previous_run.run_id=value.run_id AND value.value_id IN (previous_run.input_value_id,previous_run.output_value_id)
+             ))
              AND value.value_id = $4 AND value.inline_value IS NULL
             JOIN insight_platform.artifacts AS artifact
               ON artifact.tenant_id = value.tenant_id AND artifact.artifact_id = value.artifact_id
@@ -1594,6 +1613,13 @@ impl ArtifactObjectReadAuthority<SchedulerRunValueReadRequest> for PgRepository 
         let mut transaction = begin_read_only_repeatable(self.pool())
             .await
             .map_err(|_| ArtifactObjectReadAuthorityError::Unavailable)?;
+        crate::repository::authorize_conversation_run_read(
+            &mut transaction,
+            &request.tenant_id,
+            &request.run_id,
+        )
+        .await
+        .map_err(classify_gateway_artifact_read_error)?;
         let row = sqlx::query(
             r#"
             SELECT job.version AS job_version,
@@ -1611,7 +1637,19 @@ impl ArtifactObjectReadAuthority<SchedulerRunValueReadRequest> for PgRepository 
             JOIN insight_platform.runs AS run
               ON run.tenant_id = job.tenant_id AND run.run_id = job.run_id
             JOIN insight_platform.run_values AS value
-              ON value.tenant_id = run.tenant_id AND value.run_id = run.run_id
+              ON value.tenant_id = run.tenant_id
+             AND (value.run_id = run.run_id OR EXISTS (
+                SELECT 1 FROM insight_platform.conversation_turns current_turn
+                JOIN insight_platform.conversation_turns previous_turn
+                  ON previous_turn.tenant_id=current_turn.tenant_id
+                 AND previous_turn.conversation_id=current_turn.conversation_id
+                 AND previous_turn.ordinal<=current_turn.history_through
+                JOIN insight_platform.runs previous_run
+                  ON previous_run.tenant_id=previous_turn.tenant_id AND previous_run.run_id=previous_turn.run_id
+                 AND previous_run.state='succeeded'
+                WHERE current_turn.tenant_id=run.tenant_id AND current_turn.run_id=run.run_id
+                  AND previous_run.run_id=value.run_id AND value.value_id IN (previous_run.input_value_id,previous_run.output_value_id)
+             ))
              AND value.value_id = $4 AND value.inline_value IS NULL
             JOIN insight_platform.artifacts AS artifact
               ON artifact.tenant_id = value.tenant_id AND artifact.artifact_id = value.artifact_id
@@ -7231,8 +7269,15 @@ async fn artifact_deletion_link_facts(
     .bind(database_now)
     .fetch_one(&mut **transaction)
     .await?;
+    let conversation_references:i64 = sqlx::query_scalar("SELECT count(*) FROM insight_platform.run_values value JOIN insight_platform.conversation_turns turn ON turn.tenant_id=value.tenant_id AND turn.run_id=value.run_id WHERE value.tenant_id=$1 AND value.artifact_id=$2")
+        .bind(tenant_id.to_string()).bind(artifact_id.to_string()).fetch_one(&mut **transaction).await?;
     Ok((
-        parse_u64(references, "Artifact live reference count")?,
+        parse_u64(
+            references
+                .checked_add(conversation_references)
+                .ok_or_else(|| RepositoryError::CorruptRow("Artifact reference overflow".into()))?,
+            "Artifact live reference count",
+        )?,
         parse_u64(holds, "Artifact active hold count")?,
         parse_u64(provenance, "Artifact provenance count")?,
     ))

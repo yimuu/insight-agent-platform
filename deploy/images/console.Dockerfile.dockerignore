@@ -1,0 +1,14 @@
+**
+!apps/
+!apps/console/
+!apps/console/package.json
+!apps/console/pnpm-lock.yaml
+!apps/console/tsconfig.server.json
+!apps/console/server/
+!apps/console/server/**
+!apps/console/dist/
+!apps/console/dist/**
+!crates/
+!crates/adapters/
+!crates/adapters/platform-postgres/
+!crates/adapters/platform-postgres/schema-inventory.json

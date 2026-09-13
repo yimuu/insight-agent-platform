@@ -8,6 +8,7 @@ use crate::{
 };
 use insight_platform_contracts::{canonical_digest, parse_strict_json, Sha256Digest};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 pub const PROVIDER_INITIALIZATION_VERSION: u32 = 1;
 pub const OPENBAO_AUTH_MOUNT: &str = "insight-cert";
@@ -17,6 +18,89 @@ pub const OPENBAO_INITIALIZER_ROLE: &str = "insight-initializer";
 pub const OPENBAO_ARTIFACT_KEY: &str = "artifact-reference";
 pub const OPENBAO_SECRET_KEY: &str = "secret-reference";
 pub const OPENBAO_CANARY_PATH: &str = "readiness";
+/// One deadline for observing startup; uncertain writes are never retried by this wait.
+pub const INSTALLATION_STARTUP_SECONDS: u64 = 180;
+pub const INSTALLATION_GATE_MAX_BYTES: usize = 4096;
+
+/// Private bootstrap recovery material; deliberately has no Debug implementation.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenBaoBootstrapCredentialsV1 {
+    pub schema_version: u32,
+    pub input_digest: Sha256Digest,
+    pub identity_digest: Sha256Digest,
+    pub root_token: String,
+    pub recovery_keys_base64: Vec<String>,
+    pub root_revoked: bool,
+}
+
+impl Drop for OpenBaoBootstrapCredentialsV1 {
+    fn drop(&mut self) {
+        self.root_token.zeroize();
+        self.recovery_keys_base64.zeroize();
+    }
+}
+
+impl OpenBaoBootstrapCredentialsV1 {
+    pub fn validate_for(
+        &self,
+        input: &InstallationInputV1,
+        identity: &InstallationIdentityV1,
+    ) -> Result<(), InstallationError> {
+        if self.schema_version != 1
+            || self.input_digest != input.digest()?
+            || self.identity_digest != identity.digest()?
+            || self.root_token.is_empty()
+            || self.root_token.len() > 4096
+            || self.root_token.chars().any(char::is_control)
+            || self.recovery_keys_base64.len() != 1
+            || self
+                .recovery_keys_base64
+                .iter()
+                .any(|key| key.is_empty() || key.len() > 4096 || !key.is_ascii())
+        {
+            return Err(InstallationError::CredentialInvalid);
+        }
+        Ok(())
+    }
+}
+
+/// Deployment publication only. Consumers must still verify their owning process contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallationGatePhaseV1 {
+    Prepared,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationGateV1 {
+    pub schema_version: u32,
+    pub phase: InstallationGatePhaseV1,
+    pub input_digest: Sha256Digest,
+    pub identity_digest: Sha256Digest,
+}
+
+impl InstallationGateV1 {
+    pub fn decode_for(
+        bytes: &[u8],
+        input: &InstallationInputV1,
+        phase: InstallationGatePhaseV1,
+    ) -> Result<Self, InstallationError> {
+        if bytes.len() > INSTALLATION_GATE_MAX_BYTES {
+            return Err(InstallationError::InvalidInput);
+        }
+        let value = parse_strict_json(bytes, INSTALLATION_LIMITS)
+            .map_err(|_| InstallationError::InvalidInput)?;
+        let gate: Self =
+            serde_json::from_value(value).map_err(|_| InstallationError::InvalidInput)?;
+        if gate.schema_version != 1 || gate.phase != phase || gate.input_digest != input.digest()? {
+            return Err(InstallationError::IdentityDrift);
+        }
+        Ok(gate)
+    }
+}
 
 /// These names are deployment ACL scopes, not platform permission or resource authorities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -108,7 +192,7 @@ pub struct InstallationProviderInitializationV1 {
     pub schema_version: u32,
     pub input_digest: Sha256Digest,
     pub identity_digest: Sha256Digest,
-    /// The two pre-frozen initialization/ordinary-serving configurations, not mutable business state.
+    /// Frozen bootstrap requests and ordinary-server configuration, not mutable business state.
     pub configuration_digest: Sha256Digest,
     pub state: InstallationProviderStateV1,
 }

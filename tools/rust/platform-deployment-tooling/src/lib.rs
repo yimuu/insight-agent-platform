@@ -22,6 +22,7 @@ pub mod role_output;
 pub mod s3_profile;
 pub mod tls;
 pub mod worker_profile;
+pub mod workspace_assets;
 pub use dev_profile::DevProfile;
 use std::{
     collections::BTreeMap,

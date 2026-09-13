@@ -1,3 +1,6 @@
+import type { Conversation, ConversationTurn, ConversationPage } from './conversation-types.ts'
+import { readLiveTextStream } from './live-text.ts'
+import type { LiveTextFrame } from './live-text.ts'
 import { parseBindingResolution, parseDependencyPage } from './authoring-query.ts'
 import type {
   CompiledModelConfiguration,
@@ -121,6 +124,7 @@ async function decodeProblem(response: Response): Promise<PlatformProblem> {
 
 export class PlatformClient {
   readonly origin: string
+  readonly authentication: 'bearer' | 'cookie'
   private accessToken: string
   private readonly sessionAbort = new AbortController()
   private authenticationRequired?: () => void
@@ -137,8 +141,13 @@ export class PlatformClient {
     return signal ? AbortSignal.any([this.sessionAbort.signal, signal]) : this.sessionAbort.signal
   }
 
-  constructor(endpoint: string, accessToken: string) {
+  constructor(
+    endpoint: string,
+    accessToken: string,
+    authentication: 'bearer' | 'cookie' = 'bearer',
+  ) {
     this.origin = normalizeOrigin(endpoint)
+    this.authentication = authentication
     this.accessToken = accessToken
   }
 
@@ -159,7 +168,7 @@ export class PlatformClient {
       signal: this.signal(init.signal),
       headers,
       cache: 'no-store',
-      credentials: 'omit',
+      credentials: this.authentication === 'cookie' ? 'same-origin' : 'omit',
       redirect: 'error',
       referrerPolicy: 'no-referrer',
     })
@@ -170,7 +179,7 @@ export class PlatformClient {
     if (expectedStatus !== undefined && response.status !== expectedStatus) {
       await response.body?.cancel()
       throw new Error(
-        'unexpected_response_status: Public operation returned an unsupported success status',
+        `unexpected_response_status: ${init.method ?? 'GET'} ${path.split('?')[0]} expected ${expectedStatus}, received ${response.status}`,
       )
     }
     const text = await boundedText(response)
@@ -228,6 +237,52 @@ export class PlatformClient {
     return this.request<ListPage<RunSummary>>(`/runs?${query}`)
   }
 
+  listConversations(agentId?: string, cursor?: string, signal?: AbortSignal) {
+    const query = new URLSearchParams()
+    if (agentId) query.set('agent_id', agentId)
+    if (cursor) query.set('cursor', cursor)
+    return this.request<ConversationPage<Conversation>>(`/conversations?${query}`, { signal })
+  }
+  getConversation(id: string, signal?: AbortSignal) {
+    return this.request<Conversation>(`/conversations/${encodeURIComponent(id)}`, { signal })
+  }
+  createConversation(agentId: string, title: string, receipt: string) {
+    return this.request<Conversation>(
+      '/conversations',
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': receipt },
+        body: JSON.stringify({ schema_version: 1, agent_id: agentId, title }),
+      },
+      undefined,
+      201,
+    )
+  }
+  listConversationTurns(id: string, cursor?: string, signal?: AbortSignal) {
+    return this.request<ConversationPage<ConversationTurn>>(
+      `/conversations/${encodeURIComponent(id)}/turns${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
+      { signal },
+    )
+  }
+  sendConversationMessage(
+    id: string,
+    version: number,
+    message: string,
+    deadline: string,
+    receipt: string,
+  ) {
+    return this.request<ConversationTurn>(
+      `/conversations/${encodeURIComponent(id)}/turns`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': receipt, 'If-Match': `"${id}-v${version}"` },
+        body: JSON.stringify({ schema_version: 1, message, deadline }),
+      },
+      undefined,
+      201,
+    )
+  }
+
   getRun(id: string, options: { signal?: AbortSignal } = {}) {
     return this.request<RunView>(`/runs/${encodeURIComponent(id)}`, { signal: options.signal })
   }
@@ -256,6 +311,17 @@ export class PlatformClient {
     return this.request<JsonObject>(
       `/runs/${encodeURIComponent(runId)}/values/${encodeURIComponent(valueId)}/content`,
       options,
+    )
+  }
+  getExecutionDetail(
+    runId: string,
+    kind: 'node_execution' | 'model_turn',
+    sourceId: string,
+    signal?: AbortSignal,
+  ) {
+    return this.request<import('./types.ts').ExecutionDetail>(
+      `/runs/${encodeURIComponent(runId)}/executions/${kind}/${encodeURIComponent(sourceId)}`,
+      { signal },
     )
   }
   listTasks(
@@ -480,7 +546,7 @@ export class PlatformClient {
         headers: { 'If-Match': etag, 'Idempotency-Key': receipt },
       },
       undefined,
-      201,
+      200,
     )
   }
   createModelDeployment(
@@ -589,20 +655,25 @@ export class PlatformClient {
     if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
       throw new Error('invalid_upload_target: Artifact upload authority returned an unsafe target')
     }
-    const response = await fetch(url, {
-      method: 'PUT',
-      signal: this.signal(),
-      headers: { 'Content-Type': mediaType, 'Content-Length': String(bytes.byteLength) },
-      body: bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-      ) as ArrayBuffer,
-      credentials: 'omit',
-      redirect: 'error',
-      referrerPolicy: 'no-referrer',
-    })
-    if (!response.ok)
-      throw new Error('artifact_upload_failed: Signed object upload was not accepted')
+    let response: Response
+    try {
+      response = await fetch(`${this.origin}/_console/v1/object-upload`, {
+        method: 'PUT',
+        signal: this.signal(),
+        headers: { 'Content-Type': mediaType, 'X-Insight-Upload-Target': target },
+        body: bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer,
+        credentials: 'omit',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+      })
+    } catch {
+      this.signal().throwIfAborted()
+      throw new Error('artifact_upload_unreachable')
+    }
+    if (!response.ok) throw await decodeProblem(response)
   }
 
   async waitOperation(
@@ -621,6 +692,28 @@ export class PlatformClient {
     )
   }
 
+  async followLiveText(
+    id: string,
+    options: { signal: AbortSignal; onFrame: (frame: LiveTextFrame) => void },
+  ): Promise<void> {
+    const headers = new Headers({ Accept: 'text/event-stream' })
+    if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`)
+    const signal = this.signal(options.signal)
+    const response = await fetch(`${this.origin}/v1/runs/${encodeURIComponent(id)}/live-text`, {
+      headers,
+      signal,
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+      credentials: this.authentication === 'cookie' ? 'same-origin' : 'omit',
+    })
+    if (!response.ok) {
+      if (response.status === 401) this.authenticationRequired?.()
+      throw await decodeProblem(response)
+    }
+    return readLiveTextStream(response, id, signal, options.onFrame)
+  }
+
   async getRunEvents(
     id: string,
     cursor?: string,
@@ -635,7 +728,7 @@ export class PlatformClient {
         headers,
         signal: this.signal(options.signal),
         cache: 'no-store',
-        credentials: 'omit',
+        credentials: this.authentication === 'cookie' ? 'same-origin' : 'omit',
         redirect: 'error',
         referrerPolicy: 'no-referrer',
       })
@@ -710,7 +803,7 @@ export class PlatformClient {
       headers,
       signal: this.signal(options.signal),
       cache: 'no-store',
-      credentials: 'omit',
+      credentials: this.authentication === 'cookie' ? 'same-origin' : 'omit',
       redirect: 'error',
       referrerPolicy: 'no-referrer',
     })

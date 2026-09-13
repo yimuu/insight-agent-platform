@@ -348,11 +348,7 @@ impl OpenAiResponsesCodec {
         }
 
         let structured_output = if tool_intents.is_empty() {
-            parse_structured_output(
-                &self.request,
-                &text,
-                "openai_responses_invalid_structured_output",
-            )?
+            parse_structured_output(&self.request, &text)?
         } else {
             None
         };

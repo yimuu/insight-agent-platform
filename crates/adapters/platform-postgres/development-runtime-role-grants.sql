@@ -16,6 +16,7 @@ BEGIN
     EXECUTE pg_catalog.format('GRANT USAGE ON SCHEMA insight_platform TO %I', target_role);
     EXECUTE pg_catalog.format('GRANT SELECT, INSERT, UPDATE, DELETE ON
         insight_platform.artifact_blobs, insight_platform.artifact_links, insight_platform.artifacts,
+        insight_platform.conversations, insight_platform.conversation_turns,
         insight_platform.deployments, insight_platform.events, insight_platform.invocations,
         insight_platform.jobs, insight_platform.outbox_events, insight_platform.principals,
         insight_platform.quota_accounts, insight_platform.quota_ledger, insight_platform.receipts,

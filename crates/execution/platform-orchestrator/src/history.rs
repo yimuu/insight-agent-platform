@@ -106,6 +106,7 @@ pub struct PublicRunEventRecord {
     pub event_type: PublicRunEventType,
     pub source_id: ResourceId,
     pub source_projection_version: u64,
+    pub safe_summary: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 

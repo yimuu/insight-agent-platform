@@ -1,0 +1,21 @@
+{
+  "all_roles_and_console_ready": true,
+  "cleaned": true,
+  "console_image": "insight-platform-console@sha256:0c030b3bf9039e07a8a74955e646df9224027805fc687cde3f08d327e07ffd7b",
+  "controlled_provider_container_recreation": true,
+  "direct_compose_up": true,
+  "drift_rejected_without_repair": true,
+  "explicit_session_only": true,
+  "internal_model_policy_artifact_stage_and_readback": true,
+  "model_provider_requests": false,
+  "public_ca_file_sha256": "sha256:8e03cdb15a73f1ea1900f7bfc42bfd188e6e91dbdf2f1d7675c9736493dad193",
+  "public_trust_readonly_mount_and_immutable_delivery": true,
+  "public_trust_rejected_before_ready": true,
+  "readonly_verify": true,
+  "remote_context_destination_installed": false,
+  "remote_context_provider_dispatch_tested": false,
+  "result": "passed",
+  "runtime_image": "insight-runtime@sha256:c276d4738a5862ab015879ad3729e9cca72544b7aa62b2251eed262b40a15e55",
+  "schema_version": 1,
+  "stopped_restart_preserved_identity_and_configuration": true
+}

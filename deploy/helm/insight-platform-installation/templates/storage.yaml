@@ -1,6 +1,5 @@
-{{- if has .Values.phase (list "prepare" "dependencies" "provision" "serving") -}}
 {{- $root := . -}}
-{{- $names := list "installation-private" "postgres-data" "nats-data" "s3-data" "openbao-data" "dependency-postgres" "dependency-nats" "dependency-s3" "dependency-openbao" "role-console" -}}
+{{- $names := list "installation-private" "postgres-data" "nats-data" "s3-data" "openbao-data" "dependency-postgres" "dependency-nats" "dependency-s3" "dependency-openbao" "role-console" "role-local-identity" "installation-gates" -}}
 {{- range .Values.plan.processes -}}{{- $names = append $names (printf "role-%s" .name) -}}{{- end -}}
 {{- range $names }}
 ---
@@ -13,7 +12,6 @@ metadata:
   annotations:
     helm.sh/resource-policy: keep
     insight.platform/input-digest: {{ $root.Values.plan.input_digest | quote }}
-    insight.platform/namespace-uid: {{ $root.Values.namespaceUID | quote }}
 spec:
   accessModes: [ReadWriteOnce]
   {{- if $root.Values.storageClass }}
@@ -36,4 +34,3 @@ metadata:
 immutable: true
 data:
   input.json: {{ mustToJson .Values.plan.input | quote }}
-{{- end }}

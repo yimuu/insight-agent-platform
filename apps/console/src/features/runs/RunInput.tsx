@@ -18,6 +18,11 @@ export function RunInput({
   disabled: boolean
   onSubmit(value: JsonObject): Promise<void>
 }) {
+  const schemaBody = object(schema.schema) ? schema.schema : null
+  const properties = schemaBody && object(schemaBody.properties) ? schemaBody.properties : null
+  const keys = properties ? Object.keys(properties) : []
+  const singleProperty = keys.length === 1 ? properties?.[keys[0]!] : null
+  const singleKey = object(singleProperty) && singleProperty.type === 'string' ? keys[0]! : null
   const [node, setNode] = useState<TreeSchema | null>(null)
   const [value, setValue] = useState<Json>(null)
   const [source, setSource] = useState('{}')
@@ -96,6 +101,21 @@ export function RunInput({
           onChange={setSource}
           disabled={disabled}
         />
+      ) : node && singleKey ? (
+        <label>
+          <span>任务内容</span>
+          <textarea
+            rows={4}
+            placeholder="发送消息，测试 Agent…"
+            value={
+              object(value) && typeof value[singleKey] === 'string'
+                ? (value[singleKey] as string)
+                : ''
+            }
+            onChange={(event) => setValue({ [singleKey]: event.target.value })}
+            disabled={disabled}
+          />
+        </label>
       ) : node ? (
         <SchemaTree
           node={node}
@@ -114,7 +134,7 @@ export function RunInput({
         </p>
       )}
       <button className={cx('button button--primary')} disabled={disabled || !node}>
-        开始运行
+        发送并运行
       </button>
     </form>
   )

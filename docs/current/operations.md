@@ -2,10 +2,13 @@
 
 ## Compose 与 Helm 安装
 
-默认单机启动使用 [共享安装工具](installation.md)，容器分别运行各 role 与 Console。安装和 serving
+仓库根目录首次启动使用 `docker compose up -d --build`，已有镜像时使用 `docker compose up -d`；
+`docker compose stop` 停止服务并保留数据。Kubernetes 使用 `helm upgrade --install`。
+可选配置与部署步骤见[安装指南](installation.md)，启动不依赖宿主机 Python 包装脚本。
+容器分别运行各 role 与 Console。安装和 serving
 使用不同命令、凭据及卷；初始化通过后，重复启动核验原身份、权限、对象和进程配置。`verify` 只读检查，
 `session` 显式续发短期登录凭据；它们不会修复漂移或重置数据。模型来源、API key、默认值和执行额度通过
-[公开配置入口](model-configuration.md) 管理，部署工具只负责允许的物理目标和初始化身份。
+[公开配置入口](model-configuration.md) 管理，模型端点随来源配置保存；部署工具负责基础设施、初始化身份和出站策略。
 
 普通 Native 启动使用同一安装 owner 的 `tools/install/platform_native.py`，具体命令、冻结宿主产物及前台停止语义见
 [Native 安装](installation.md#start-native-processes)。Compose/Helm 的启动、停止与 rollout 由部署工具管理。

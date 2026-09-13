@@ -258,12 +258,18 @@ impl PgRepository {
             })?;
         let rows = sqlx::query(
             r#"
-            SELECT event_id, aggregate_kind, aggregate_id, aggregate_version, trace_id,
-                   public_sequence, event_type, payload, occurred_at
-            FROM insight_platform.events
-            WHERE tenant_id = $1 AND run_id = $2 AND visibility = 'public'
-              AND public_sequence > $3
-            ORDER BY public_sequence
+            SELECT event.event_id, event.aggregate_kind, event.aggregate_id, event.aggregate_version, event.trace_id,
+                   event.public_sequence, event.event_type, event.payload, event.occurred_at,
+                   invocation.payload #>> '{failure,safe_message}' AS model_failure_message
+            FROM insight_platform.events AS event
+            LEFT JOIN insight_platform.invocations AS invocation
+              ON event.aggregate_kind = 'model_turn' AND event.event_type = 'model.failed'
+             AND invocation.tenant_id = event.tenant_id AND invocation.run_id = event.run_id
+             AND invocation.invocation_id = event.aggregate_id AND invocation.version = event.aggregate_version
+             AND invocation.invocation_kind = 'model' AND invocation.state = 'failed'
+            WHERE event.tenant_id = $1 AND event.run_id = $2 AND event.visibility = 'public'
+              AND event.public_sequence > $3
+            ORDER BY event.public_sequence
             LIMIT $4
             "#,
         )

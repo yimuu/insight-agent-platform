@@ -11,6 +11,8 @@ pub mod capability;
 pub mod command;
 pub mod component_role;
 pub mod context;
+pub mod conversation;
+pub use conversation::*;
 pub mod context_destination;
 pub mod context_dispatch;
 pub mod execution;

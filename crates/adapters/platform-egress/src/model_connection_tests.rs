@@ -4,6 +4,7 @@ use insight_platform_security::{ModelConnectionProbe, ModelConnectionProbeAuthor
 
 fn target(f: &Fixture) -> ModelConnectionTargetV1 {
     let provider = ModelProviderDeploymentClosure {
+        endpoint: f.entry.endpoint.clone(),
         provider_revision: f.request.provider_revision.clone(),
         endpoint_identity_digest: f.entry.endpoint_identity_digest.clone(),
         secret_bindings: f.request.secret_bindings.clone(),
@@ -198,11 +199,11 @@ async fn probe_reauthorizes_after_secret_and_never_sends_after_denial_or_target_
             mode: 0,
         });
         let broker = ReqwestModelProviderEgressBroker::with_transport(
-            InstalledModelDestinationCatalog::new(vec![f.entry]).unwrap(),
+            InstalledModelDestinationCatalog::new(vec![f.entry.clone()]).unwrap(),
             secrets.clone(),
             public_dns(),
             transport.clone(),
-            Arc::new(FixtureDispatchAuthority),
+            Arc::new(FixtureDispatchAuthority(f.entry.endpoint.clone())),
             ModelProviderEgressLimits::default(),
         )
         .unwrap()
@@ -254,14 +255,14 @@ async fn probe_body_deadline_size_and_status_are_closed_and_release_capacity() {
             secrets: secrets.clone(),
         });
         let broker = ReqwestModelProviderEgressBroker::with_transport(
-            InstalledModelDestinationCatalog::new(vec![f.entry]).unwrap(),
+            InstalledModelDestinationCatalog::new(vec![f.entry.clone()]).unwrap(),
             secrets,
             public_dns(),
             Arc::new(ProbeTransport {
                 calls: AtomicUsize::new(0),
                 mode,
             }),
-            Arc::new(FixtureDispatchAuthority),
+            Arc::new(FixtureDispatchAuthority(f.entry.endpoint.clone())),
             ModelProviderEgressLimits::default(),
         )
         .unwrap()
@@ -311,7 +312,7 @@ fn probe_permit_binds_complete_target_request_and_original_deadline() {
     assert!(serde_json::from_value::<ModelConnectionProbeAuthorizationV1>(value).is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_actual_https_uses_pinned_address_ca_san_and_nonstream_body() {
     use rcgen::{ExtendedKeyUsagePurpose, SanType};
     use rustls::pki_types::PrivatePkcs8KeyDer;
@@ -400,7 +401,11 @@ async fn probe_actual_https_uses_pinned_address_ca_san_and_nonstream_body() {
         f.entry.endpoint_identity_digest = f.entry.endpoint.canonical_digest().unwrap();
         f.entry.development_loopback = true;
         f.entry.trusted_root_pem = Some(ca.pem());
-        let target = target(&f);
+        let mut target = target(&f);
+        // Give real platform trust verification a bounded fixture budget while
+        // retaining the broker's production connect cap and the request deadline.
+        target.request_limits.connect_timeout_milliseconds = MODEL_PROBE_CONNECT_MILLISECONDS;
+        target.request_limits.total_timeout_milliseconds = 20_000;
         let request = request(&target);
         let secrets = successful_secrets();
         let authority = Arc::new(ProbeAuthority {
@@ -411,18 +416,21 @@ async fn probe_actual_https_uses_pinned_address_ca_san_and_nonstream_body() {
             secrets: secrets.clone(),
         });
         let broker = ReqwestModelProviderEgressBroker::new(
-            InstalledModelDestinationCatalog::new(vec![f.entry]).unwrap(),
+            InstalledModelDestinationCatalog::new(vec![f.entry.clone()]).unwrap(),
             secrets,
             Arc::new(FixtureDnsResolver {
                 addresses: vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)],
             }),
-            Arc::new(FixtureDispatchAuthority),
+            Arc::new(FixtureDispatchAuthority(f.entry.endpoint.clone())),
             ModelProviderEgressLimits::default(),
         )
         .unwrap()
         .with_model_connection_authority(authority);
+        // Platform trust verification on macOS can exceed the old fixture budget
+        // in the full workspace suite. Keep this watchdog inside the request's
+        // 29-second deadline; certificate and hostname verification stay enabled.
         let observation = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(25),
             broker.probe_model_connection(request),
         )
         .await
@@ -473,11 +481,11 @@ async fn probe_capacity_is_four_shared_with_business_and_held_until_body_complet
     });
     let broker = Arc::new(
         ReqwestModelProviderEgressBroker::with_transport(
-            InstalledModelDestinationCatalog::new(vec![f.entry]).unwrap(),
+            InstalledModelDestinationCatalog::new(vec![f.entry.clone()]).unwrap(),
             successful_secrets(),
             public_dns(),
             transport.clone(),
-            Arc::new(FixtureDispatchAuthority),
+            Arc::new(FixtureDispatchAuthority(f.entry.endpoint.clone())),
             ModelProviderEgressLimits::default(),
         )
         .unwrap()

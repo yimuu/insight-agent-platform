@@ -54,7 +54,64 @@ pub fn inspect_source_files(
                 return Err(AgentBoundaryErrorCode::AgentCompileFailed);
             }
         }
-        crate::AgentExecutionKind::ModelChat => {}
+        crate::AgentExecutionKind::ModelChat | crate::AgentExecutionKind::Workflow => {
+            let manifest = crate::parse_manifest(manifest.as_bytes())
+                .map_err(crate::boundary::compiler_error_code)?;
+            if resolution.execution_kind == crate::AgentExecutionKind::Workflow
+                || manifest.spec.prompt.is_some()
+            {
+                let contract = crate::agent_interface_contract_digest(&input, &output)
+                    .map_err(crate::boundary::compiler_error_code)?;
+                let requirement = crate::model_requirement_digest(
+                    resolution
+                        .model_ref
+                        .as_deref()
+                        .ok_or(AgentBoundaryErrorCode::AgentManifestInvalid)?,
+                )
+                .map_err(crate::boundary::compiler_error_code)?;
+                let limits = crate::ModelLoopCompilerLimits {
+                    maximum_rounds: 1,
+                    maximum_capability_calls: 0,
+                    maximum_parallel_calls_per_round: 0,
+                    token_budget: 1,
+                };
+                let mut plan =
+                    if resolution.execution_kind == crate::AgentExecutionKind::Workflow {
+                        crate::workflow::lower(
+                            source(
+                                resolution
+                                    .plan_path
+                                    .as_deref()
+                                    .ok_or(AgentBoundaryErrorCode::SourceReferenceMissing)?,
+                            )?
+                            .as_bytes(),
+                            &input,
+                            &output,
+                            &contract,
+                            &requirement,
+                            limits,
+                        )
+                    } else {
+                        crate::workflow::lower_chat(
+                            manifest
+                                .spec
+                                .prompt
+                                .as_deref()
+                                .ok_or(AgentBoundaryErrorCode::AgentManifestInvalid)?,
+                            &input,
+                            &output,
+                            &contract,
+                            &requirement,
+                            limits,
+                        )
+                    }
+                    .map_err(crate::boundary::compiler_error_code)?;
+                let error =
+                    crate::compiler_error_schema().map_err(crate::boundary::compiler_error_code)?;
+                crate::validate_authored_plan(&mut plan, &input, &output, &error)
+                    .map_err(crate::boundary::compiler_error_code)?;
+            }
+        }
         crate::AgentExecutionKind::FullPlan | crate::AgentExecutionKind::FrameworkGraph => {
             let path = resolution
                 .plan_path
@@ -138,7 +195,7 @@ pub fn agent_source_inspection_response_schema() -> serde_json::Value {
     let path =
         json!({"type":"string","minLength":1,"maxLength":crate::MAX_AGENT_SOURCE_PATH_BYTES});
     let resolution = json!({"type":"object","additionalProperties":false,"required":["execution_kind","model_ref","input_schema_path","output_schema_path","plan_path"],"properties":{
-        "execution_kind":{"enum":[crate::AgentExecutionKind::Deterministic,crate::AgentExecutionKind::ModelChat,crate::AgentExecutionKind::FullPlan,crate::AgentExecutionKind::FrameworkGraph]},
+        "execution_kind":{"enum":[crate::AgentExecutionKind::Deterministic,crate::AgentExecutionKind::ModelChat,crate::AgentExecutionKind::Workflow,crate::AgentExecutionKind::FullPlan,crate::AgentExecutionKind::FrameworkGraph]},
         "model_ref":{"type":["string","null"],"maxLength":256},"input_schema_path":path,"output_schema_path":path,"plan_path":{"anyOf":[path,{"type":"null"}]}
     }});
     let location = json!({"type":"object","additionalProperties":false,"required":["file","source_pointer","line","column"],"properties":{"file":path,"source_pointer":{"type":"string","maxLength":crate::MAX_AGENT_SOURCE_POINTER_BYTES},"line":{"type":"integer","minimum":1,"maximum":crate::MAX_AGENT_SOURCE_FILE_BYTES},"column":{"type":"integer","minimum":1,"maximum":crate::MAX_AGENT_SOURCE_FILE_BYTES}}});

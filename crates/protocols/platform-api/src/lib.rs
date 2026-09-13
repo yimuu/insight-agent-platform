@@ -28,6 +28,7 @@ use std::sync::Arc;
 pub mod artifact;
 pub mod authentication;
 pub mod authoring;
+pub mod conversation;
 pub mod model_configuration;
 pub mod model_connection;
 pub mod model_credential_management;
@@ -38,6 +39,7 @@ pub mod product;
 pub mod recovery;
 pub mod resource;
 pub mod run;
+pub mod run_live;
 pub mod task;
 pub mod trace;
 
@@ -350,3 +352,5 @@ mod tests {
         }
     }
 }
+
+pub mod run_execution;

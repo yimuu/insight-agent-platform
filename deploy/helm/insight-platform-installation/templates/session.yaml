@@ -1,0 +1,57 @@
+{{- range $operation := list "session" "public-trust" }}
+---
+# Explicit operator jobs only. Files stay in an ephemeral delivery volume, never in logs.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: installation-{{ $operation }}
+  labels:
+    {{- include "installation.labels" $ | nindent 4 }}
+spec:
+  suspend: true
+  schedule: "0 0 1 1 *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 960
+      template:
+        spec:
+          {{- include "installation.scheduling" $ | nindent 10 }}
+          restartPolicy: Never
+          containers:
+            - name: delivery
+              image: {{ $.Values.plan.runtime_image | quote }}
+              command: [/bin/sh, -ec]
+              args:
+                - >-
+                  umask 077;
+                  /usr/local/bin/platform-installation {{ $operation }} --input /installation-input/input.json --state /installation/private > /delivery/result.json;
+                  {{ if eq $operation "session" }}cp /installation/private/session-token /delivery/session-token;{{ end }}
+                  cp /installation/private/ca.pem /delivery/public-ca.pem;
+                  touch /delivery/complete;
+                  exec sleep 900
+              readinessProbe:
+                exec: {command: [/usr/bin/test, -f, /delivery/complete]}
+                periodSeconds: 1
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {cpu: 100m, memory: 128Mi}
+              volumeMounts:
+                - {name: installation-private, mountPath: /installation, readOnly: {{ eq $operation "public-trust" }}}
+                - {name: installation-input, mountPath: /installation-input/input.json, subPath: input.json, readOnly: true}
+                - {name: delivery, mountPath: /delivery}
+          volumes:
+            - name: installation-private
+              persistentVolumeClaim: {claimName: installation-private, readOnly: {{ eq $operation "public-trust" }}}
+            - name: installation-input
+              configMap: {name: installation-input, defaultMode: 0444}
+            - name: delivery
+              emptyDir: {medium: Memory, sizeLimit: 1Mi}
+{{- end }}

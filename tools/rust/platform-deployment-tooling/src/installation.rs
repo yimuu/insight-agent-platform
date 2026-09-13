@@ -78,6 +78,7 @@ impl PrivateIdentity {
 const DATABASE_CREDENTIALS: &[&str] = &[
     "postgres-admin-password",
     "runtime-password",
+    "local-identity-password",
     "outbox-password",
     "history-password",
     "security-authority-password",
@@ -389,6 +390,10 @@ impl PreparedInstallation {
         files.insert(
             "ca.pem".into(),
             self.material.authority_certificate_pem.as_bytes().to_vec(),
+        );
+        files.insert(
+            "local-issuer-key.pem".into(),
+            self.material.issuer_key_pem.as_bytes().to_vec(),
         );
         Ok(files)
     }
@@ -914,7 +919,6 @@ pub fn compose_input(
             })
             .collect(),
         credentials: CredentialReferencesV1 { files: vec![] },
-        model_destinations: Vec::new(),
         remote_context_destinations: Vec::new(),
     };
     input.credentials = crate::role_material::credentials(&input.network);
@@ -1016,7 +1020,7 @@ mod tests {
             .unwrap();
         assert!(serde_json::from_slice::<Value>(&initialize)
             .unwrap()
-            .get("initialize")
+            .get("requests")
             .is_some());
         assert!(serde_json::from_slice::<Value>(&serve)
             .unwrap()

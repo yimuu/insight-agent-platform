@@ -42,7 +42,7 @@ impl PgRepository {
         tenant_id: &ResourceId,
         principal_id: &ResourceId,
         principal_kind: PrincipalKind,
-        catalog: &insight_platform_contracts::ModelInstallationCatalogV1,
+        catalog: &insight_platform_contracts::ModelInstallationCatalogV2,
     ) -> Result<Option<ExactDeploymentRef>, RepositoryError> {
         if !catalog.validate() {
             return Err(RepositoryError::CorruptRow(

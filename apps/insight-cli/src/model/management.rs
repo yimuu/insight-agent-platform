@@ -1,7 +1,7 @@
 use super::*;
 use crate::public_client::PublicJsonResponse;
 use insight_platform_api::{
-    model_configuration::ModelConfigurationCatalogViewV1,
+    model_configuration::ModelConfigurationCatalogViewV2,
     model_credential_management::{ModelCredentialMetadataViewV1, RevokeModelCredentialRequestV1},
     resource::{DeploymentViewV1, ModelDefaultViewV1, ResourceViewV1},
 };
@@ -146,7 +146,7 @@ pub fn probe(client: &PublicHttpClient, command: &Command) -> Result<Value, Stri
             .as_deref()
             .ok_or("model selector is required")?,
     )?;
-    let catalog: ModelConfigurationCatalogViewV1 = client
+    let catalog: ModelConfigurationCatalogViewV2 = client
         .get_body_json("/v1/model-configuration", StatusCode::OK)
         .map_err(|e| e.to_string())?
         .body;

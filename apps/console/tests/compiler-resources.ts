@@ -110,9 +110,14 @@ if (!isMainThread) {
   for (const fixture of corpus.cases) {
     const files = Object.fromEntries(
       await Promise.all(
-        [...new Set([fixture.manifest, fixture.input_schema, fixture.output_schema])].map(
-          async (path) => [path, await readFile(join(corpusRoot, path), 'utf8')],
-        ),
+        [
+          ...new Set([
+            fixture.manifest,
+            fixture.input_schema,
+            fixture.output_schema,
+            ...(fixture.plan ? [fixture.plan] : []),
+          ]),
+        ].map(async (path) => [path, await readFile(join(corpusRoot, path), 'utf8')]),
       ),
     )
     cases.push({

@@ -6,7 +6,7 @@ use crate::{
     worker_profile::WorkerBuilds,
 };
 use insight_platform_contracts::{
-    canonical_digest, ModelInstallationCatalogV1, ResourceId, Sha256Digest,
+    canonical_digest, ModelInstallationCatalogV2, ResourceId, Sha256Digest,
 };
 use insight_platform_deployment_contracts::{
     development::DevelopmentArtifactAuthorityConfigV1,
@@ -26,7 +26,7 @@ pub struct InstallationRenderInputs<'a> {
     pub provider_ready: &'a InstallationProviderReadyV1,
     pub artifact_bucket: &'a str,
     pub artifact_bootstrap: &'a DevelopmentArtifactAuthorityConfigV1,
-    pub model_installation: Option<&'a ModelInstallationCatalogV1>,
+    pub model_installation: Option<&'a ModelInstallationCatalogV2>,
     pub capability_protocol_profile: Option<&'a ResourceId>,
     /// Exact private prepared files; no automatic credential generation is permitted here.
     pub private_files: &'a BTreeMap<String, Vec<u8>>,
@@ -42,6 +42,7 @@ pub struct RenderedInstallationFiles {
     pub evidence: RenderedInstallationV1,
     pub roles: BTreeMap<InstallationProcess, RenderedProcessFiles>,
     pub console: Vec<u8>,
+    pub local_identity: Option<Vec<u8>>,
 }
 fn bad() -> InstallationError {
     InstallationError::InvalidInput
@@ -84,6 +85,7 @@ fn database(
     }
     let role = match name {
         "runtime-password" => "insight_runtime_dev",
+        "local-identity-password" => "insight_local_identity_dev",
         "outbox-password" => "insight_outbox_dev",
         "history-password" => "insight_history_dev",
         "security-authority-password" => "insight_security_authority_dev",
@@ -422,13 +424,34 @@ pub fn render_installation(
     } else {
         8080
     };
+    let identity_origin = match input.network.topology {
+        InstallationTopology::Compose => "http://local-identity:8081".to_owned(),
+        InstallationTopology::KubernetesLocal => format!(
+            "http://local-identity.{}.svc.cluster.local:8081",
+            input.name
+        ),
+        InstallationTopology::Native => String::new(),
+    };
+    let local_identity = if identity_origin.is_empty() {
+        None
+    } else {
+        Some(encoded(&serde_json::json!({
+            "schema_version":1, "listen_host":"0.0.0.0", "listen_port":8081,
+            "public_origin":input.network.console_origin.as_str(),
+            "database_url":database(input, private_files, "local-identity-password")?,
+            "principal_id":identity.bootstrap.administrator.principal_id,
+            "issuer_key_pem":std::str::from_utf8(private(private_files,"local-issuer-key.pem")?).map_err(|_| bad())?,
+            "session":identity.session,
+        }))?)
+    };
     let console = encoded(
-        &serde_json::json!({"schema_version":1,"topology":match input.network.topology{InstallationTopology::Native=>"native",InstallationTopology::Compose=>"compose",InstallationTopology::KubernetesLocal=>"kubernetes_local"},"listen_host":if input.network.topology==InstallationTopology::Native{"127.0.0.1"}else{"0.0.0.0"},"listen_port":console_port,"runtime_origin":input.network.origin(InstallationProcess::GatewayRuntime)?,"management_origin":input.network.origin(InstallationProcess::GatewayManagement)?,"max_request_bytes":1048576,"max_buffered_request_bytes":8388608,"request_timeout_ms":15000,"upstream_header_timeout_ms":30000,"idle_timeout_ms":60000,"max_connections":128,"max_header_bytes":32768}),
+        &serde_json::json!({"schema_version":3,"identity_origin":identity_origin,"upload_origin":input.network.providers.artifact().as_str(),"upload_path_prefix":format!("/{artifact_bucket}/"),"upload_ca_pem":std::str::from_utf8(private(private_files,"ca.pem")?).map_err(|_| bad())?,"topology":match input.network.topology{InstallationTopology::Native=>"native",InstallationTopology::Compose=>"compose",InstallationTopology::KubernetesLocal=>"kubernetes_local"},"listen_host":if input.network.topology==InstallationTopology::Native{"127.0.0.1"}else{"0.0.0.0"},"listen_port":console_port,"runtime_origin":input.network.origin(InstallationProcess::GatewayRuntime)?,"management_origin":input.network.origin(InstallationProcess::GatewayManagement)?,"max_request_bytes":1048576,"max_buffered_request_bytes":8388608,"request_timeout_ms":15000,"upstream_header_timeout_ms":30000,"idle_timeout_ms":60000,"max_connections":128,"max_header_bytes":32768}),
     )?;
     Ok(RenderedInstallationFiles {
         evidence,
         roles,
         console,
+        local_identity,
     })
 }
 

@@ -190,6 +190,7 @@ pub struct RunEventProjectionV1 {
     pub source_kind: PublicRunEventSourceKind,
     pub source_id: ResourceId,
     pub source_projection_version: u64,
+    pub safe_summary: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -390,6 +391,12 @@ pub enum RunApplicationError {
 
 #[async_trait]
 pub trait RunApplication: Send + Sync {
+    async fn read_run_execution(
+        &self,
+        _intent: crate::run_execution::ReadRunExecutionIntent,
+    ) -> Result<crate::run_execution::RunExecutionDetailV1, RunApplicationError> {
+        Err(RunApplicationError::Unavailable)
+    }
     async fn read_run_definition(
         &self,
         _intent: ReadRunIntent,
@@ -479,7 +486,7 @@ impl RunClock for SystemRunClock {
 
 #[derive(Clone)]
 pub struct RunHttpState {
-    application: Arc<dyn RunApplication>,
+    pub(crate) application: Arc<dyn RunApplication>,
     clock: Arc<dyn RunClock>,
     event_cursor_codec: Option<Arc<dyn RunEventCursorCodec>>,
     list_cursor_codec: Option<Arc<dyn ListCursorCodec>>,
@@ -515,6 +522,10 @@ pub fn build_run_router(state: RunHttpState) -> Router {
         )
         .route("/v1/runs/{run_id}/children", get(list_child_runs))
         .route("/v1/runs/{run_id}/definition", get(read_run_definition))
+        .route(
+            "/v1/runs/{run_id}/executions/{source_kind}/{source_id}",
+            get(crate::run_execution::read),
+        )
         .route("/v1/runs/{run_id}/values", get(list_run_values))
         .route("/v1/runs/{run_id}/result", get(read_run_result))
         .route(
@@ -717,7 +728,7 @@ async fn read_run_events(
             source_kind: projection.source_kind,
             source_id: projection.source_id,
             source_projection_version: projection.source_projection_version,
-            safe_summary: None,
+            safe_summary: projection.safe_summary,
         };
         let event = PublicRunEvent {
             event_id: Some(projection.event_id),
@@ -1597,6 +1608,7 @@ mod tests {
                     source_kind: PublicRunEventSourceKind::Run,
                     source_id: intent.run_id,
                     source_projection_version: 1,
+                    safe_summary: Some("固定安全摘要".to_owned()),
                     occurred_at: Utc::now(),
                 })
                 .into_iter()
@@ -1698,6 +1710,7 @@ mod tests {
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("event: run.queued"));
+        assert!(body.contains("固定安全摘要"));
         assert!(body.contains(&format!("\"run_id\":\"{run_id}\"")));
         assert!(body.contains(&format!("\"trace_id\":\"{event_trace_id}\"")));
         assert!(!body.contains(&format!("\"trace_id\":\"{request_trace_id}\"")));

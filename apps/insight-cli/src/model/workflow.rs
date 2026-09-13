@@ -3,7 +3,7 @@ use crate::{
     apply, artifact,
     public_client::{PublicHttpClient, PublicJsonResponse},
 };
-use configuration::{ConfigurationFileV1, ResolvedSource};
+use configuration::ConfigurationFileV1;
 use insight_platform_api::{
     model_configuration::*,
     resource::{DeploymentViewV1, ModelDefaultViewV1, ResourceViewV1},
@@ -133,22 +133,23 @@ pub fn configure(
         |name| std::env::var(name).map_err(|_| "mapped input unavailable".to_owned()),
         |path| super::read_private_key_file(Path::new(path)),
     )?;
-    let catalog: ModelConfigurationCatalogViewV1 = client
+    let catalog: ModelConfigurationCatalogViewV2 = client
         .get_body_json("/v1/model-configuration", StatusCode::OK)
         .map_err(|e| e.to_string())?
         .body;
-    if catalog.schema_version != 1
+    if catalog.schema_version != 2
         || catalog.secret_provider_id.kind() != ResourceKind::SecretProvider
-        || catalog.destinations.is_empty()
-        || catalog.destinations.len() > 64
+        || catalog.protocols.is_empty()
+        || catalog.protocols.len() > 2
     {
         return Err("installed model choices are invalid".to_owned());
     }
-    // Resolve every physical destination before importing any credential.
-    let destinations = sources
+    if sources
         .iter()
-        .map(|source| destination(source, &catalog))
-        .collect::<Result<Vec<_>, _>>()?;
+        .any(|source| !catalog.protocols.contains(&source.protocol))
+    {
+        return Err("model protocol is unavailable".to_owned());
+    }
     let identity:Sha256Digest=canonical_digest(&json!({"schema_version":1,"endpoint":command.endpoint,"tenant":command.tenant,"sources":sources,"default_model":file.default_model,"installation_digest":catalog.installation_digest}))
         .map_err(|_|"cannot canonicalize model configuration")?.parse().map_err(|_|"invalid configuration digest")?;
     let root = InstallationDirectory::open(state_path, true).map_err(|_| {
@@ -171,7 +172,7 @@ pub fn configure(
         .map_err(|_| "cannot open private model attempt directory")?;
     let mut reports = Vec::new();
     let mut selected = None;
-    for (index, (source, destination)) in sources.iter().zip(destinations).enumerate() {
+    for (index, source) in sources.iter().enumerate() {
         let credential_name = format!("source-{index}-credential.json");
         let credential: CredentialAttempt = match read(&state, &credential_name)? {
             Some(value) => value,
@@ -197,11 +198,13 @@ pub fn configure(
                 environment.key(&source.credential)?,
             )
             .map_err(|e| e.to_string())?;
-        let input = ModelConfigurationInputV1::Source(ModelSourceConfigurationV1 {
-            schema_version: 1,
+        let input = ModelConfigurationInputV1::Source(ModelSourceConfigurationV2 {
+            schema_version: 2,
             alias: source.alias.clone(),
             display_name: source.display_name.clone(),
-            destination_digest: destination,
+            protocol: source.protocol,
+            endpoint: source.endpoint.clone(),
+            region: source.region.clone(),
             credential: imported.binding,
         });
         let (report, source_deployment) = register(
@@ -316,28 +319,10 @@ pub fn configure(
         json!({"schema_version":1,"tenant_id":command.tenant,"configured":reports,"default_model":file.default_model}),
     )
 }
-fn destination(
-    source: &ResolvedSource,
-    catalog: &ModelConfigurationCatalogViewV1,
-) -> Result<Sha256Digest, String> {
-    let candidates = catalog
-        .destinations
-        .iter()
-        .filter(|choice| {
-            choice.protocol == source.protocol
-                && normalize_model_base_url(&choice.base_url).ok().as_ref()
-                    == Some(&source.endpoint)
-        })
-        .collect::<Vec<_>>();
-    if candidates.len() != 1 {
-        return Err(format!("source {} requires exactly one matching installed destination; update installation configuration before importing its key",source.alias.as_str()));
-    }
-    Ok(candidates[0].destination_digest.clone())
-}
 fn register(
     client: &PublicHttpClient,
     tenant: &ResourceId,
-    catalog: &ModelConfigurationCatalogViewV1,
+    catalog: &ModelConfigurationCatalogViewV2,
     state: &InstallationDirectory,
     path: &Path,
     step: &str,

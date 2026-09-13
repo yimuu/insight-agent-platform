@@ -8,7 +8,10 @@ async function configureSyntheticBrowser({ client, consoleOrigin, gatewayOrigin 
   client.on('Fetch.requestPaused', async ({ requestId, request, networkId }) => {
     let status = 500
     try {
-      const url = new URL(request.url)
+      const target = Object.entries(request.headers).find(
+        ([name]) => name.toLowerCase() === 'x-insight-upload-target',
+      )?.[1]
+      const url = new URL(String(target))
       if (url.origin !== 'https://objects.example')
         throw new Error('unexpected synthetic object origin')
       if (request.method === 'OPTIONS') status = 204
@@ -41,7 +44,9 @@ async function configureSyntheticBrowser({ client, consoleOrigin, gatewayOrigin 
     })
   })
   await client.call('Fetch.enable', {
-    patterns: [{ urlPattern: 'https://objects.example/*', requestStage: 'Request' }],
+    patterns: [
+      { urlPattern: `${consoleOrigin}/_console/v1/object-upload`, requestStage: 'Request' },
+    ],
   })
 }
 

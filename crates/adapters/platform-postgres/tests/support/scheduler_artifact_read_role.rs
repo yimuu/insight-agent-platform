@@ -1,6 +1,7 @@
 //! Real Scheduler object authorization under the actual Artifact DataReader grants.
 use super::*;
 use futures::FutureExt;
+use sqlx::Row;
 use std::panic::AssertUnwindSafe;
 
 pub(super) async fn verify(
@@ -267,6 +268,7 @@ async fn verify_inner(
         authorized_value.blob_id,
         id("blb_0198f1c3-9a00-7c3e-b1f3-773c2836ae00")
     );
+    verify_conversation_history_artifact(pool, reader, &run_value_lease).await;
     let mut wrong_value = run_value_lease;
     wrong_value.run_value_id = id("val_0198f1c3-9a00-7c3e-b1f3-773c2836ae04");
     assert!(matches!(
@@ -301,4 +303,98 @@ async fn verify_inner(
         reader.authorize_object_read(&run_value_read).await,
         Err(ArtifactObjectReadAuthorityError::Denied)
     ));
+}
+
+/// The same actual Artifact reader role must authorize only the frozen successful prefix.
+async fn verify_conversation_history_artifact(
+    pool: &PgPool,
+    reader: &PgRepository,
+    lease: &SchedulerRunValueLease,
+) {
+    let cid = "cnv_0198f1c3-9a00-7c3e-b1f3-773c2836ae10";
+    let other_cid = "cnv_0198f1c3-9a00-7c3e-b1f3-773c2836ae11";
+    let previous = "run_0198f1c3-9a00-7c3e-b1f3-773c2836ae12";
+    let original=sqlx::query("SELECT permissions,permissions_digest FROM insight_platform.tenant_principals WHERE tenant_id=$1 AND principal_id=$2").bind(TENANT_ID).bind(PRINCIPAL_ID).fetch_one(pool).await.unwrap();
+    let old_payload: serde_json::Value = original.get("permissions");
+    let old_digest: String = original.get("permissions_digest");
+    let mut raw = old_payload.clone();
+    raw.as_object_mut().unwrap().remove("schema_version");
+    let mut payload: TenantPrincipalPayload = serde_json::from_value(raw).unwrap();
+    let mut permissions = payload.permissions.iter().collect::<Vec<_>>();
+    if !permissions.contains(&Permission::RuntimeRead) {
+        permissions.push(Permission::RuntimeRead)
+    }
+    payload.permissions = PermissionSet::new(permissions).unwrap();
+    let granted = TypedPayload::new(1, &payload).unwrap();
+    sqlx::query("UPDATE insight_platform.tenant_principals SET permissions=$3,permissions_digest=$4 WHERE tenant_id=$1 AND principal_id=$2").bind(TENANT_ID).bind(PRINCIPAL_ID).bind(granted.value.clone()).bind(granted.digest.clone()).execute(pool).await.unwrap();
+    // Separate immutable historical Run, with only its exact output selected by the new relation.
+    sqlx::query("INSERT INTO insight_platform.runs SELECT (jsonb_populate_record(NULL::insight_platform.runs,to_jsonb(r)||jsonb_build_object('run_id',$3::text,'root_run_id',$3::text,'parent_run_id',NULL,'parent_node_id',NULL,'depth',0,'state','succeeded','terminal_at',clock_timestamp(),'output_value_id',$4::text))).* FROM insight_platform.runs r WHERE tenant_id=$1 AND run_id=$2")
+        .bind(TENANT_ID).bind(lease.run_id.to_string()).bind(previous).bind(lease.run_value_id.to_string()).execute(pool).await.unwrap();
+    for conversation in [cid, other_cid] {
+        sqlx::query("INSERT INTO insight_platform.conversations(tenant_id,conversation_id,agent_id,agent_deployment_id,deployment_digest,input_field,input_schema_digest,title,created_by,version,turn_count) SELECT r.tenant_id,$2,d.resource_id,r.agent_deployment_id,d.bindings_digest,'question',$4,'History authorization',$5,3,2 FROM insight_platform.runs r JOIN insight_platform.deployments d ON d.tenant_id=r.tenant_id AND d.deployment_id=r.agent_deployment_id WHERE r.tenant_id=$1 AND r.run_id=$3")
+            .bind(TENANT_ID).bind(conversation).bind(lease.run_id.to_string()).bind(agent_schema().canonical_digest.to_string()).bind(PRINCIPAL_ID).execute(pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO insight_platform.conversation_turns(tenant_id,conversation_id,ordinal,run_id,history_through,conversation_version) VALUES($1,$2,1,$3,0,2),($1,$2,2,$4,1,3)").bind(TENANT_ID).bind(cid).bind(previous).bind(lease.run_id.to_string()).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.run_values SET run_id=$3 WHERE tenant_id=$1 AND value_id=$2",
+    )
+    .bind(TENANT_ID)
+    .bind(lease.run_value_id.to_string())
+    .bind(previous)
+    .execute(pool)
+    .await
+    .unwrap();
+    let read = reader.resolve_run_value_read(lease.clone()).await.unwrap();
+    assert!(
+        reader.authorize_object_read(&read).await.is_ok(),
+        "retained exact successful history is readable through real limited role"
+    );
+    // Failure, future order, unrelated conversation, and a non-output value each deny BOTH passes.
+    for (mutate,restore) in [
+        ("UPDATE insight_platform.runs SET state='failed' WHERE tenant_id=$1 AND run_id=$2","UPDATE insight_platform.runs SET state='succeeded' WHERE tenant_id=$1 AND run_id=$2"),
+        ("UPDATE insight_platform.runs SET output_value_id=NULL WHERE tenant_id=$1 AND run_id=$2","UPDATE insight_platform.runs SET output_value_id='val_0198f1c3-9a00-7c3e-b1f3-773c2836ae02' WHERE tenant_id=$1 AND run_id=$2"),
+    ] {
+        sqlx::query(mutate).bind(TENANT_ID).bind(previous).execute(pool).await.unwrap();
+        assert!(reader.resolve_run_value_read(lease.clone()).await.is_err());assert!(reader.authorize_object_read(&read).await.is_err());
+        sqlx::query(restore).bind(TENANT_ID).bind(previous).execute(pool).await.unwrap();
+    }
+    sqlx::query("UPDATE insight_platform.conversation_turns SET ordinal=3,history_through=2 WHERE tenant_id=$1 AND run_id=$2").bind(TENANT_ID).bind(previous).execute(pool).await.unwrap();
+    assert!(reader.resolve_run_value_read(lease.clone()).await.is_err());
+    assert!(reader.authorize_object_read(&read).await.is_err());
+    sqlx::query("UPDATE insight_platform.conversation_turns SET ordinal=1,history_through=0,conversation_id=$3 WHERE tenant_id=$1 AND run_id=$2").bind(TENANT_ID).bind(previous).bind(other_cid).execute(pool).await.unwrap();
+    assert!(reader.resolve_run_value_read(lease.clone()).await.is_err());
+    assert!(reader.authorize_object_read(&read).await.is_err());
+    sqlx::query("UPDATE insight_platform.conversation_turns SET conversation_id=$3 WHERE tenant_id=$1 AND run_id=$2").bind(TENANT_ID).bind(previous).bind(cid).execute(pool).await.unwrap();
+    // A once-resolved request cannot survive current content permission revocation.
+    payload.permissions = PermissionSet::new(
+        payload
+            .permissions
+            .iter()
+            .filter(|p| *p != Permission::ArtifactRead)
+            .collect(),
+    )
+    .unwrap();
+    let revoked = TypedPayload::new(1, &payload).unwrap();
+    sqlx::query("UPDATE insight_platform.tenant_principals SET permissions=$3,permissions_digest=$4 WHERE tenant_id=$1 AND principal_id=$2").bind(TENANT_ID).bind(PRINCIPAL_ID).bind(revoked.value).bind(revoked.digest).execute(pool).await.unwrap();
+    assert!(reader.resolve_run_value_read(lease.clone()).await.is_err());
+    assert!(reader.authorize_object_read(&read).await.is_err());
+    // Restore this shared qualification fixture before the existing fence-expiry assertions.
+    sqlx::query("UPDATE insight_platform.tenant_principals SET permissions=$3,permissions_digest=$4 WHERE tenant_id=$1 AND principal_id=$2").bind(TENANT_ID).bind(PRINCIPAL_ID).bind(old_payload).bind(old_digest).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE insight_platform.run_values SET run_id=$3 WHERE tenant_id=$1 AND value_id=$2",
+    )
+    .bind(TENANT_ID)
+    .bind(lease.run_value_id.to_string())
+    .bind(lease.run_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM insight_platform.conversation_turns WHERE tenant_id=$1 AND conversation_id IN ($2,$3)").bind(TENANT_ID).bind(cid).bind(other_cid).execute(pool).await.unwrap();
+    sqlx::query("DELETE FROM insight_platform.conversations WHERE tenant_id=$1 AND conversation_id IN ($2,$3)").bind(TENANT_ID).bind(cid).bind(other_cid).execute(pool).await.unwrap();
+    sqlx::query("DELETE FROM insight_platform.runs WHERE tenant_id=$1 AND run_id=$2")
+        .bind(TENANT_ID)
+        .bind(previous)
+        .execute(pool)
+        .await
+        .unwrap();
 }

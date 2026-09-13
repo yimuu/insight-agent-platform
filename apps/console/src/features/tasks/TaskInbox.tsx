@@ -1,3 +1,4 @@
+import { Icon } from '../../shared/ui/Icon'
 import { displayState } from '../../shared/i18n/display'
 import { Status } from '../../shared/ui/console-ui'
 import { formatTime } from '../../shared/ui/feedback'
@@ -322,187 +323,214 @@ export function TaskInbox({
   const busy = detailBusy || mutating
   return (
     <section className={cx('stack')}>
-      <article data-ui="panel" className={cx('panel')}>
-        <div data-ui="panel__heading" className={cx('panel__heading')}>
-          <div>
-            <p data-ui="kicker" className={cx('kicker')}>
-              待办中心
-            </p>
-            <h2>当前任务</h2>
-          </div>
-          <button className={cx('button')} disabled={listBusy} onClick={() => void loadPage()}>
-            刷新任务
-          </button>
-        </div>
-        <p className={cx('body-copy')}>
-          仅显示当前会话可访问的任务，提交时服务端会再次检查操作权限。
-        </p>
-        <form
-          className={cx('form-grid')}
-          onSubmit={(event) => {
-            event.preventDefault()
-            clearDetail()
-            setFilters({ ...filterDraft, runId: filterDraft.runId.trim() })
-          }}
-        >
-          <label>
-            <span>任务范围</span>
-            <select
-              value={filterDraft.purpose}
-              onChange={(event) =>
-                setFilterDraft({ ...filterDraft, purpose: event.target.value as TaskQueryPurpose })
-              }
-            >
-              <option value="respondable">可处理任务</option>
-              <option value="viewable">可查看任务</option>
-            </select>
-          </label>
-          <label>
-            <span>任务状态</span>
-            <select
-              value={filterDraft.state}
-              onChange={(event) => setFilterDraft({ ...filterDraft, state: event.target.value })}
-            >
-              {[
-                '',
-                'pending',
-                'responded',
-                'declined',
-                'approved',
-                'rejected',
-                'cancelled',
-                'expired',
-              ].map((state) => (
-                <option key={state} value={state}>
-                  {state ? displayState(state) : '全部状态'}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>任务类型</span>
-            <select
-              value={filterDraft.kind}
-              onChange={(event) => setFilterDraft({ ...filterDraft, kind: event.target.value })}
-            >
-              {[
-                '',
-                'approval',
-                'interaction_form',
-                'interaction_url_consent',
-                'interaction_business_input',
-                'external_authorization',
-                'human_work',
-              ].map((kind) => (
-                <option key={kind} value={kind}>
-                  {kind ? displayState(kind) : '全部类型'}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>关联运行</span>
-            <input
-              value={filterDraft.runId}
-              onChange={(event) => setFilterDraft({ ...filterDraft, runId: event.target.value })}
-              maxLength={128}
-              placeholder="全部运行"
-            />
-          </label>
-          <div className={cx('actions')}>
-            <button className={cx('button')} disabled={listBusy}>
-              应用筛选
-            </button>
-          </div>
-        </form>
-        {listError && (
-          <p data-ui="notice--error" className={cx('notice notice--error')} role="alert">
-            {listError}
-          </p>
-        )}
-        {listBusy ? (
-          <p className={cx('body-copy')} role="status">
-            正在加载任务…
-          </p>
-        ) : items.length ? (
-          <div className={cx('task-inbox-list')}>
-            {items.map((item) => (
-              <div data-ui="panel__heading" className={cx('panel__heading')} key={item.task_id}>
-                <div>
-                  <strong>{item.safe_prompt_key}</strong>
-                  <p className={cx('body-copy muted')}>
-                    {displayState(item.task_kind)} · {displayState(item.state)}
-                  </p>
-                </div>
-                <button
-                  className={cx('button')}
-                  onClick={() => {
-                    report(null)
-                    void loadTask(item.task_id)
-                  }}
-                >
-                  打开 {item.safe_prompt_key}
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          !listError && (
-            <p className={cx('body-copy')} role="status">
-              {cursor ? '本页没有可见任务，可继续查看下一页。' : '本页没有任务。'}
-            </p>
-          )
-        )}
-        <div className={cx('actions')}>
-          <span className={cx('body-copy')}>页码 {page}</span>
+      {task && (
+        <div className={cx('page-toolbar')}>
           <button
             className={cx('button')}
-            disabled={listBusy || page === 1}
-            onClick={() => void loadPage()}
-          >
-            返回首页
-          </button>
-          <button
-            className={cx('button')}
-            disabled={listBusy || !cursor}
             onClick={() => {
-              if (cursor) void loadPage(cursor, page + 1)
+              clearDetail()
+              setId('')
             }}
           >
-            下一页任务
+            ← 返回待办任务
           </button>
         </div>
-      </article>
-      <article data-ui="panel" className={cx('panel')}>
-        <form
-          data-ui="search"
-          className={cx('search')}
-          onSubmit={(event) => {
-            event.preventDefault()
-            report(null)
-            void loadTask(id.trim())
-          }}
-        >
-          <label>
-            <span>任务 ID</span>
-            <input
-              value={id}
-              onChange={(event) => {
-                clearDetail()
-                setId(event.target.value)
-                report(null)
-              }}
-              placeholder="int_… 或 apv_…"
-              required
-              autoComplete="off"
-              maxLength={128}
-            />
-          </label>
-          <button className={cx('button button--primary')} disabled={busy}>
-            {detailBusy ? '加载中…' : '打开'}
-          </button>
-        </form>
-      </article>
+      )}
+      {!task && (
+        <article data-ui="panel" className={cx('panel')}>
+          <div data-ui="panel__heading" className={cx('panel__heading')}>
+            <div>
+              <h2>待办列表</h2>
+            </div>
+            <button className={cx('button')} disabled={listBusy} onClick={() => void loadPage()}>
+              刷新任务
+            </button>
+          </div>
+
+          <form
+            className={cx('filter-bar')}
+            onSubmit={(event) => {
+              event.preventDefault()
+              clearDetail()
+              setFilters({ ...filterDraft, runId: filterDraft.runId.trim() })
+            }}
+          >
+            <label>
+              <span>任务范围</span>
+              <select
+                value={filterDraft.purpose}
+                onChange={(event) =>
+                  setFilterDraft({
+                    ...filterDraft,
+                    purpose: event.target.value as TaskQueryPurpose,
+                  })
+                }
+              >
+                <option value="respondable">可处理任务</option>
+                <option value="viewable">可查看任务</option>
+              </select>
+            </label>
+            <label>
+              <span>任务状态</span>
+              <select
+                value={filterDraft.state}
+                onChange={(event) => setFilterDraft({ ...filterDraft, state: event.target.value })}
+              >
+                {[
+                  '',
+                  'pending',
+                  'responded',
+                  'declined',
+                  'approved',
+                  'rejected',
+                  'cancelled',
+                  'expired',
+                ].map((state) => (
+                  <option key={state} value={state}>
+                    {state ? displayState(state) : '全部状态'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>任务类型</span>
+              <select
+                value={filterDraft.kind}
+                onChange={(event) => setFilterDraft({ ...filterDraft, kind: event.target.value })}
+              >
+                {[
+                  '',
+                  'approval',
+                  'interaction_form',
+                  'interaction_url_consent',
+                  'interaction_business_input',
+                  'external_authorization',
+                  'human_work',
+                ].map((kind) => (
+                  <option key={kind} value={kind}>
+                    {kind ? displayState(kind) : '全部类型'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>关联运行 ID（可选）</span>
+              <input
+                value={filterDraft.runId}
+                onChange={(event) => setFilterDraft({ ...filterDraft, runId: event.target.value })}
+                maxLength={128}
+                placeholder="全部运行"
+              />
+            </label>
+            <div className={cx('actions')}>
+              <button className={cx('button')} disabled={listBusy}>
+                应用筛选
+              </button>
+            </div>
+          </form>
+          {listError && (
+            <p data-ui="notice--error" className={cx('notice notice--error')} role="alert">
+              {listError}
+            </p>
+          )}
+          {listBusy ? (
+            <p className={cx('body-copy')} role="status">
+              正在加载任务…
+            </p>
+          ) : items.length ? (
+            <div className={cx('task-inbox-list')} role="list">
+              {items.map((item) => (
+                <div
+                  data-ui="panel__heading"
+                  className={cx('task-row')}
+                  key={item.task_id}
+                  role="listitem"
+                >
+                  <div>
+                    <strong>{item.safe_prompt_key}</strong>
+                    <p className={cx('body-copy muted')}>
+                      {displayState(item.task_kind)} · 截止 {formatTime(item.deadline)}
+                    </p>
+                  </div>
+                  <Status value={item.state} />
+                  <button
+                    className={cx('button')}
+                    onClick={() => {
+                      report(null)
+                      void loadTask(item.task_id)
+                    }}
+                  >
+                    打开 {item.safe_prompt_key}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            !listError && (
+              <div className={cx('empty-content')} role="status">
+                <Icon name="tasks" />
+                <h3>{cursor ? '本页没有可见任务' : '暂无待办任务'}</h3>
+                <p>{cursor ? '继续查看下一页。' : '需要审批或补充信息时，任务会显示在这里。'}</p>
+              </div>
+            )
+          )}
+          {(page > 1 || cursor) && (
+            <div className={cx('pagination')}>
+              <span>第 {page} 页</span>
+              <button
+                className={cx('button')}
+                disabled={listBusy || page === 1}
+                onClick={() => void loadPage()}
+              >
+                返回首页
+              </button>
+              <button
+                className={cx('button')}
+                disabled={listBusy || !cursor}
+                onClick={() => {
+                  if (cursor) void loadPage(cursor, page + 1)
+                }}
+              >
+                下一页任务
+              </button>
+            </div>
+          )}
+        </article>
+      )}
+      {!task && (
+        <details className={cx('list-tools')}>
+          <summary>通过任务 ID 查找</summary>
+          <form
+            data-ui="search"
+            className={cx('search')}
+            onSubmit={(event) => {
+              event.preventDefault()
+              report(null)
+              void loadTask(id.trim())
+            }}
+          >
+            <label>
+              <span>任务 ID</span>
+              <input
+                value={id}
+                onChange={(event) => {
+                  clearDetail()
+                  setId(event.target.value)
+                  report(null)
+                }}
+                placeholder="int_… 或 apv_…"
+                required
+                autoComplete="off"
+                maxLength={128}
+              />
+            </label>
+            <button className={cx('button button--primary')} disabled={busy}>
+              {detailBusy ? '加载中…' : '打开'}
+            </button>
+          </form>
+        </details>
+      )}
+      {detailBusy && !task && <p role="status">正在加载任务详情…</p>}
       {formError && !task && (
         <p data-ui="notice--error" className={cx('notice notice--error')} role="alert">
           {formError}
@@ -519,9 +547,7 @@ export function TaskInbox({
             </div>
             <Status value={task.state} />
           </div>
-          <p className={cx('body-copy')}>
-            截止时间： {formatTime(task.deadline)}。代次 {task.generation}，版本 {task.version}.
-          </p>
+          <p className={cx('body-copy')}>截止时间：{formatTime(task.deadline)}</p>
           {task.task_kind === 'approval' && task.state === 'pending' && (
             <p className={cx('body-copy')}>请审阅此审批请求并选择操作。</p>
           )}
@@ -549,7 +575,14 @@ export function TaskInbox({
                 >
                   {['public', 'internal', 'confidential', 'restricted'].map((value) => (
                     <option key={value} value={value}>
-                      {value}
+                      {
+                        {
+                          public: '公开',
+                          internal: '内部',
+                          confidential: '机密',
+                          restricted: '受限',
+                        }[value]
+                      }
                     </option>
                   ))}
                 </select>

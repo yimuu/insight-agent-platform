@@ -16,55 +16,25 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelDestinationChoiceV1 {
-    pub destination_digest: Sha256Digest,
-    pub endpoint_identity_digest: Sha256Digest,
-    pub base_url: String,
-    pub protocol: ModelProviderWireProtocol,
-    pub region: DataRegion,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelConfigurationCatalogViewV1 {
+pub struct ModelConfigurationCatalogViewV2 {
     pub schema_version: u16,
     pub installation_digest: Sha256Digest,
     pub environment: String,
     pub secret_provider_id: ResourceId,
-    pub destinations: Vec<ModelDestinationChoiceV1>,
+    pub protocols: Vec<ModelProviderWireProtocol>,
     pub maximum_classification: DataClassification,
 }
-impl ModelConfigurationCatalogViewV1 {
+impl ModelConfigurationCatalogViewV2 {
     pub fn from_catalog(
-        catalog: &ModelInstallationCatalogV1,
+        catalog: &ModelInstallationCatalogV2,
     ) -> Result<Self, ModelConfigurationApplicationError> {
         let invalid = || ModelConfigurationApplicationError::Unavailable;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             installation_digest: catalog.canonical_digest().map_err(|_| invalid())?,
             environment: catalog.environment.clone(),
             secret_provider_id: catalog.secret_provider_id.clone(),
-            destinations: catalog
-                .destinations
-                .iter()
-                .map(|item| {
-                    Ok(ModelDestinationChoiceV1 {
-                        destination_digest: item.canonical_digest().map_err(|_| invalid())?,
-                        endpoint_identity_digest: item.grant.endpoint_identity_digest.clone(),
-                        base_url: format!(
-                            "{}://{}:{}{}",
-                            match item.grant.endpoint.scheme {
-                                CapabilityEndpointScheme::Https => "https",
-                                CapabilityEndpointScheme::Http => "http",
-                            },
-                            item.grant.endpoint.host,
-                            item.grant.endpoint.port,
-                            item.grant.endpoint.base_path
-                        ),
-                        protocol: item.grant.protocol,
-                        region: item.grant.region.clone(),
-                    })
-                })
-                .collect::<Result<_, ModelConfigurationApplicationError>>()?,
+            protocols: catalog.public_egress().protocols,
             maximum_classification: DataClassification::Internal,
         })
     }
@@ -134,7 +104,7 @@ pub trait ModelConfigurationApplication: Send + Sync {
     async fn catalog(
         &self,
         intent: ModelConfigurationIntent,
-    ) -> Result<ModelConfigurationCatalogViewV1, ModelConfigurationApplicationError>;
+    ) -> Result<ModelConfigurationCatalogViewV2, ModelConfigurationApplicationError>;
     async fn declare(
         &self,
         intent: ModelConfigurationIntent,
@@ -392,7 +362,7 @@ mod tests {
         async fn catalog(
             &self,
             _: ModelConfigurationIntent,
-        ) -> Result<ModelConfigurationCatalogViewV1, ModelConfigurationApplicationError> {
+        ) -> Result<ModelConfigurationCatalogViewV2, ModelConfigurationApplicationError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(ModelConfigurationApplicationError::Unavailable)
         }

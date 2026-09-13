@@ -1,5 +1,6 @@
 // Thin adapter for the shared Rust compiler. No parsing, lowering or compiler defaults live here.
-export type AgentExecutionKind = 'deterministic' | 'model_chat' | 'full_plan' | 'framework_graph'
+export type AgentExecutionKind =
+  'deterministic' | 'model_chat' | 'workflow' | 'full_plan' | 'framework_graph'
 export type RequiredAgentFeature = 'model' | 'context' | 'remote-capability' | 'mcp' | 'sandbox'
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
 
@@ -91,6 +92,7 @@ function executionKind(value: unknown): AgentExecutionKind {
   if (
     value === 'deterministic' ||
     value === 'model_chat' ||
+    value === 'workflow' ||
     value === 'full_plan' ||
     value === 'framework_graph'
   )

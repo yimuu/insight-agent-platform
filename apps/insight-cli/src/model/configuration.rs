@@ -41,6 +41,7 @@ pub struct ConfigurationFileV1 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceInputV1 {
+    pub region: DataRegion,
     pub alias: ResourceAlias,
     pub display_name: String,
     pub preset: Option<EnvironmentPreset>,
@@ -82,6 +83,7 @@ pub struct ResolvedModel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSource {
+    pub region: DataRegion,
     pub alias: ResourceAlias,
     pub display_name: String,
     pub credential: CredentialInput,
@@ -311,6 +313,7 @@ impl ConfigurationFileV1 {
                 });
             }
             sources.push(ResolvedSource {
+                region: source.region.clone(),
                 alias: source.alias.clone(),
                 display_name: source.display_name.clone(),
                 credential,
@@ -333,7 +336,7 @@ mod tests {
     #[test]
     fn explicit_vendor_inputs_are_read_once_and_secrets_never_enter_resolved_configuration() {
         let input:ConfigurationFileV1=serde_json::from_value(json!({"schema_version":1,"default_model":"qwen.work","sources":[{
-            "alias":"work","display_name":"Work","protocol":"open_ai_responses","environment":{"schema_version":1,"api_key":"COMPANY_KEY","base_url":"COMPANY_URL","model":"COMPANY_MODEL"},
+            "alias":"work","display_name":"Work","region":"global","protocol":"open_ai_responses","environment":{"schema_version":1,"api_key":"COMPANY_KEY","base_url":"COMPANY_URL","model":"COMPANY_MODEL"},
             "models":[{"alias":"qwen.work","display_name":"Work Qwen","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000}},{"alias":"qwen.small","display_name":"Small Qwen","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000},"model":"another-model"}]}]})).unwrap();
         let mut read = BTreeMap::<String, u8>::new();
         let (sources, values) = input
@@ -365,7 +368,7 @@ mod tests {
     }
     #[test]
     fn multiple_accounts_share_one_file_read_and_never_scan_unused_preset_variables() {
-        let source = |alias: &str| json!({"alias":alias,"display_name":alias,"preset":"dashscope","api_key_file":"/run/keys/shared","base_url":"https://api.example.com/v1","models":[{"alias":format!("{alias}.chat"),"display_name":"Chat","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000},"model":"qwen-example"}]});
+        let source = |alias: &str| json!({"alias":alias,"display_name":alias,"region":"global","preset":"dashscope","api_key_file":"/run/keys/shared","base_url":"https://api.example.com/v1","models":[{"alias":format!("{alias}.chat"),"display_name":"Chat","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000},"model":"qwen-example"}]});
         let input: ConfigurationFileV1 = serde_json::from_value(
             json!({"schema_version":1,"sources":[source("work"),source("personal")]}),
         )
@@ -396,7 +399,7 @@ mod tests {
     }
     #[test]
     fn cross_source_credential_metadata_overlap_fails_before_reading_inputs() {
-        let source = |alias: &str, key: &str, model: &str| json!({"alias":alias,"display_name":alias,"protocol":"open_ai_responses","environment":{"schema_version":1,"api_key":key},"base_url":"https://api.example.com/v1","models":[{"alias":format!("{alias}.chat"),"display_name":"Chat","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000},"model_environment_variable":model}]});
+        let source = |alias: &str, key: &str, model: &str| json!({"alias":alias,"display_name":alias,"region":"global","protocol":"open_ai_responses","environment":{"schema_version":1,"api_key":key},"base_url":"https://api.example.com/v1","models":[{"alias":format!("{alias}.chat"),"display_name":"Chat","quota":{"requests":20,"tokens":204800,"cost_microunits":20000000},"model_environment_variable":model}]});
         let input:ConfigurationFileV1=serde_json::from_value(json!({"schema_version":1,"sources":[source("work","WORK_KEY","WORK_MODEL"),source("personal","PERSONAL_KEY","WORK_KEY")]})).unwrap();
         assert!(input
             .resolve(
@@ -407,7 +410,7 @@ mod tests {
     }
     #[test]
     fn quota_is_required_and_bounded_before_reading_any_secret() {
-        let mut raw = json!({"schema_version":1,"sources":[{"alias":"work","display_name":"Work","preset":"dashscope","base_url":"https://example.com/v1","models":[{"alias":"work.chat","display_name":"Chat","model":"example"}]}]});
+        let mut raw = json!({"schema_version":1,"sources":[{"alias":"work","display_name":"Work","region":"global","preset":"dashscope","base_url":"https://example.com/v1","models":[{"alias":"work.chat","display_name":"Chat","model":"example"}]}]});
         assert!(serde_json::from_value::<ConfigurationFileV1>(raw.clone()).is_err());
         raw["sources"][0]["models"][0]["quota"] =
             json!({"requests":MAX_MODEL_QUOTA_VALUE+1,"tokens":0,"cost_microunits":0});

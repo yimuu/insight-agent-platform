@@ -61,6 +61,7 @@ pub(super) async fn assert_projection(
                 keys,
                 std::collections::BTreeSet::from([
                     "event_id",
+                    "safe_summary",
                     "trace_id",
                     "sequence",
                     "event_type",

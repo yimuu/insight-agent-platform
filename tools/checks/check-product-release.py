@@ -134,14 +134,44 @@ for key, value in (("RUNTIME_DIGEST", "${{ steps.native.outputs.runtime_digest }
     if not bindings or any(binding != value for binding in bindings):
         failures.append("downstream image evidence must bind the verified native merge outputs")
 console_dockerfile = (ROOT / "deploy/images/console.Dockerfile").read_text()
-if (re.findall(r"^([A-Z]+)\b", console_dockerfile, re.MULTILINE) != ["FROM", "COPY", "COPY", "USER", "WORKDIR", "ENTRYPOINT", "CMD", "LABEL", "LABEL"]
-        or not re.match(r"^FROM node:24\.11\.1-bookworm-slim@sha256:[0-9a-f]{64}\n", console_dockerfile)
-        or "\nCOPY dist/ /console/dist/\n" not in console_dockerfile
-        or "\nCOPY server-dist/config.js server-dist/gateway-server.js server-dist/main.js server-dist/process.js /console/server-dist/\n" not in console_dockerfile
-        or "\nUSER 1000:1000\nWORKDIR /console\n" not in console_dockerfile
-        or '\nENTRYPOINT ["/usr/local/bin/node", "/console/server-dist/main.js"]\nCMD ["--config", "/config/console.json"]\n' not in console_dockerfile
-        or "# syntax" in console_dockerfile or "#syntax" in console_dockerfile):
-    failures.append("Console must use a pinned Node runtime, exact transport files, unprivileged fixed entrypoint and no target-architecture build execution")
+console_base = r"node:24\.11\.1-bookworm-slim@sha256:[0-9a-f]{64}"
+console_stages = re.split(r"(?=^FROM )", console_dockerfile, flags=re.MULTILINE)
+console_stages = [stage for stage in console_stages if stage.strip()]
+server_files = " ".join(f"/build/server-dist/{name}.js" for name in (
+    "config", "gateway-server", "main", "process", "identity-config", "identity-main",
+    "identity-schema", "identity-server",
+))
+if (len(console_stages) != 2
+        or not re.match(rf"^FROM --platform=\$BUILDPLATFORM {console_base} AS server-build\n", console_stages[0])
+        or not re.match(rf"^FROM {console_base}\n", console_stages[-1])
+        or re.findall(r"^([A-Z]+)\b", console_stages[0], re.MULTILINE) != ["FROM", "WORKDIR", "COPY", "RUN", "COPY", "COPY", "RUN"]
+        or re.findall(r"^([A-Z]+)\b", console_stages[-1], re.MULTILINE) != ["FROM", "COPY", "COPY", "COPY", "COPY", "USER", "WORKDIR", "ENTRYPOINT", "CMD", "LABEL", "LABEL"]
+        or "\nWORKDIR /build\nCOPY apps/console/package.json apps/console/pnpm-lock.yaml ./\n" not in console_stages[0]
+        or "\nRUN npm install --global pnpm@11.19.0 && pnpm install --frozen-lockfile --ignore-scripts\n" not in console_stages[0]
+        or "\nCOPY apps/console/tsconfig.server.json ./\nCOPY apps/console/server/ ./server/\n" not in console_stages[0]
+        or "\nRUN pnpm exec tsc -p tsconfig.server.json && pnpm prune --prod --ignore-scripts\n" not in console_stages[0]
+        or "\nCOPY apps/console/dist/ /console/dist/\n" not in console_stages[-1]
+        or f"\nCOPY --from=server-build {server_files} /console/server-dist/\n" not in console_stages[-1]
+        or "\nCOPY crates/adapters/platform-postgres/schema-inventory.json /console/server-dist/\n" not in console_stages[-1]
+        or "\nCOPY --from=server-build /build/node_modules/ /console/node_modules/\n" not in console_stages[-1]
+        or "\nUSER 1000:1000\nWORKDIR /console\n" not in console_stages[-1]
+        or '\nENTRYPOINT ["/usr/local/bin/node", "/console/server-dist/main.js"]\nCMD ["--config", "/config/console.json"]\n' not in console_stages[-1]
+        or "# syntax" in console_dockerfile or "#syntax" in console_dockerfile
+        or "          context: .\n          file: deploy/images/console.Dockerfile\n" not in images_job):
+    failures.append("Console must use pinned Node stages, build-platform-only locked dependency compilation, exact runtime files, unprivileged fixed entrypoint and no target-architecture build execution")
+
+console_context_files = (ROOT / "deploy/images/console.Dockerfile.dockerignore").read_text().splitlines()
+if console_context_files != [
+    "**", "!apps/", "!apps/console/", "!apps/console/package.json",
+    "!apps/console/pnpm-lock.yaml", "!apps/console/tsconfig.server.json",
+    "!apps/console/server/", "!apps/console/server/**", "!apps/console/dist/",
+    "!apps/console/dist/**", "!crates/", "!crates/adapters/",
+    "!crates/adapters/platform-postgres/",
+    "!crates/adapters/platform-postgres/schema-inventory.json",
+]:
+    failures.append("Console release context must contain only its sources, bound assets and owner inventory")
+if "docker buildx build --load -f deploy/images/console.Dockerfile -t insight-installation-console:ci .\n" not in (ROOT / ".github/workflows/ci.yml").read_text():
+    failures.append("Console installation qualification must use the same repository-root image context")
 expected_budgets = {"cli_build": 1200, "console_build": 300, "runtime_build_push": 3600,
                     "sandbox_runner_build_push": 1800, "console_image_build_push": 300,
                     "sbom": 1200, "provenance": 300, "cosign": 600, "cold_pull": 300, "warm_reuse": 60}

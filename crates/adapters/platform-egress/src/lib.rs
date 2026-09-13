@@ -166,7 +166,7 @@ fn valid_model_trust_roots(pem: &str) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct InstalledModelDestinationCatalog {
-    entries: Vec<InstalledModelDestinationGrant>,
+    routing: insight_platform_contracts::ModelEgressRoutingV1,
 }
 
 impl InstalledModelDestinationCatalog {
@@ -189,18 +189,50 @@ impl InstalledModelDestinationCatalog {
                 return Err(EgressConfigurationError::DuplicateEndpoint);
             }
         }
-        Ok(Self { entries })
+        Ok(Self {
+            routing: insight_platform_contracts::ModelEgressRoutingV1::Fixed {
+                destinations: entries,
+            },
+        })
     }
 
+    pub fn from_routing(
+        routing: insight_platform_contracts::ModelEgressRoutingV1,
+    ) -> Result<Self, EgressConfigurationError> {
+        match routing {
+            insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations } => {
+                Self::new(destinations)
+            }
+            insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { ref grant }
+                if grant.validate() =>
+            {
+                Ok(Self { routing })
+            }
+            _ => Err(EgressConfigurationError::InvalidEndpointCatalog),
+        }
+    }
     fn resolve(
         &self,
         request: &ModelProviderWireRequest,
+        endpoint: &insight_platform_contracts::CanonicalHttpEndpoint,
     ) -> Result<InstalledModelDestinationGrant, ModelAdapterFailure> {
-        self.entries
-            .iter()
-            .find(|entry| entry.matches(request))
-            .cloned()
-            .ok_or_else(|| rejected_before_dispatch("model_egress_endpoint_not_installed"))
+        let selected = match &self.routing {
+            insight_platform_contracts::ModelEgressRoutingV1::Fixed { destinations } => {
+                destinations
+                    .iter()
+                    .find(|entry| &entry.endpoint == endpoint && entry.matches(request))
+                    .cloned()
+            }
+            insight_platform_contracts::ModelEgressRoutingV1::PublicHttps { grant } => grant
+                .destination(request.protocol, endpoint.clone(), request.region.clone())
+                .filter(|entry| entry.matches(request)),
+        };
+        let entry = selected
+            .ok_or_else(|| rejected_before_dispatch("model_egress_endpoint_not_authorized"))?;
+        entry
+            .validate()
+            .map_err(|_| rejected_before_dispatch("model_egress_endpoint_invalid"))?;
+        Ok(entry)
     }
 }
 
@@ -810,7 +842,6 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
         request: ModelProviderWireRequest,
     ) -> Result<ModelProviderEgressResponse, ModelAdapterFailure> {
         request.validate_at(Utc::now())?;
-        let entry = self.catalog.resolve(&request)?;
         let registration = self.register(request.identity(), request.deadline)?;
         let authorization = dispatch_authorization(&request);
         let authorized = tokio::select! {
@@ -829,6 +860,7 @@ impl ModelProviderEgressBroker for ReqwestModelProviderEgressBroker {
             }
             _ => return Err(rejected_before_dispatch("model_dispatch_not_authorized")),
         };
+        let entry = self.catalog.resolve(&request, &permit.endpoint)?;
         let (dns_host, addresses) = self
             .resolve_addresses(&entry, &registration.cancellation, request.deadline)
             .await?;

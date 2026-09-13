@@ -1,19 +1,26 @@
+import { validEndpoint, validProtocol } from './endpoints.ts'
 import { id, sha, uuid4, closed } from './validation.ts'
 import type { PlatformClient } from '../../shared/api/client.ts'
-import type { ExactModelCredential } from '../../shared/api/model-types.ts'
+import type {
+  ExactModelCredential,
+  ModelEndpoint,
+  ModelProtocol,
+} from '../../shared/api/model-types.ts'
 
-const KEY = 'insight.console.model-credential.v1'
+const KEY = 'insight.console.model-credential.v2'
 export interface SourceCredentialIntent {
   display_name: string
   tenant_id: string
   provider_id: string
   alias: string
-  destination_digest: string
+  endpoint: ModelEndpoint
+  protocol: ModelProtocol
+  region: string
   resource_id: string | null
   resource_etag: string | null
 }
 interface Handle {
-  schema_version: 1
+  schema_version: 2
   origin: string
   operation_id: string
   intent: SourceCredentialIntent
@@ -27,7 +34,7 @@ function conflict(): never {
 function validate(value: Handle): void {
   if (
     !closed(value, ['schema_version', 'origin', 'operation_id', 'intent', 'binding']) ||
-    value.schema_version !== 1 ||
+    value.schema_version !== 2 ||
     typeof value.origin !== 'string' ||
     !uuid4(value.operation_id) ||
     !closed(value.intent, [
@@ -35,14 +42,18 @@ function validate(value: Handle): void {
       'tenant_id',
       'provider_id',
       'alias',
-      'destination_digest',
+      'endpoint',
+      'protocol',
+      'region',
       'resource_id',
       'resource_etag',
     ]) ||
     !id(value.intent.tenant_id, 'ten') ||
     !id(value.intent.provider_id, 'spr') ||
     !/^[a-z][a-z0-9._-]{0,63}$/.test(value.intent.alias) ||
-    !sha(value.intent.destination_digest) ||
+    !validEndpoint(value.intent.endpoint) ||
+    !validProtocol(value.intent.protocol) ||
+    !/^[a-z][a-z0-9_-]{0,31}$/.test(value.intent.region) ||
     typeof value.intent.display_name !== 'string' ||
     !value.intent.display_name.trim() ||
     new TextEncoder().encode(value.intent.display_name).length > 255
@@ -84,7 +95,7 @@ export async function importSourceCredential(
   const handle: Handle = raw
     ? (JSON.parse(raw) as Handle)
     : {
-        schema_version: 1,
+        schema_version: 2,
         origin: client.origin,
         operation_id: crypto.randomUUID(),
         intent,

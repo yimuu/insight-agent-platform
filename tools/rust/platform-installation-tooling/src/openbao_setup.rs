@@ -21,7 +21,7 @@ const LIMITS: JsonLimits = JsonLimits {
     max_items_per_array: 256,
     max_string_bytes: 65_536,
 };
-struct ProtectedJson(Value);
+pub(super) struct ProtectedJson(pub(super) Value);
 impl Drop for ProtectedJson {
     fn drop(&mut self) {
         fn clear(value: &mut Value) {
@@ -65,14 +65,14 @@ fn field(value: &Value, pointer: &str, maximum: usize) -> Result<String, Install
     }
     Ok(value.to_owned())
 }
-struct BootstrapReader {
-    client: reqwest::Client,
-    origin: String,
-    token: Option<HeaderValue>,
-    deadline: Instant,
+pub(super) struct BootstrapReader {
+    pub(super) client: reqwest::Client,
+    pub(super) origin: String,
+    pub(super) token: Option<HeaderValue>,
+    pub(super) deadline: Instant,
 }
 impl BootstrapReader {
-    fn install(prepared: &PreparedInstallation) -> Result<Self, InstallationError> {
+    pub(super) fn install(prepared: &PreparedInstallation) -> Result<Self, InstallationError> {
         let read = |name| -> Result<SensitiveBytes, InstallationError> {
             SensitiveBytes::new(
                 prepared
@@ -125,7 +125,7 @@ impl BootstrapReader {
             deadline: Instant::now() + Duration::from_secs(30),
         })
     }
-    async fn request(
+    pub(super) async fn request(
         &self,
         method: Method,
         path: &str,
@@ -159,6 +159,9 @@ impl BootstrapReader {
             {
                 return Err(invalid());
             }
+            if response.status() == reqwest::StatusCode::NO_CONTENT {
+                return Ok(ProtectedJson(Value::Null));
+            }
             let mut bytes = Zeroizing::new(Vec::new());
             while let Some(chunk) = response
                 .chunk()
@@ -178,7 +181,7 @@ impl BootstrapReader {
             .await
             .map_err(|_| InstallationError::PrerequisiteUnavailable)?
     }
-    async fn get(&self, path: &str) -> Result<ProtectedJson, InstallationError> {
+    pub(super) async fn get(&self, path: &str) -> Result<ProtectedJson, InstallationError> {
         self.request(Method::GET, path, None).await
     }
     async fn login(&mut self) -> Result<(), InstallationError> {

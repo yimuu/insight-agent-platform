@@ -13,6 +13,9 @@ pub fn development_runtime_role_grants_sql() -> &'static str {
 pub fn security_authority_role_grants_sql() -> &'static str {
     include_str!("../security-authority-grants.sql")
 }
+pub fn local_identity_role_grants_sql() -> &'static str {
+    include_str!("../local-identity-role-grants.sql")
+}
 
 mod agent_feature_repository;
 pub mod artifact_repository;
@@ -52,9 +55,9 @@ use sqlx::{PgPool, Row};
 use std::{collections::BTreeSet, error::Error, fmt};
 
 pub const AUTHORITY_SCHEMA: &str = "insight_platform";
-pub const SCHEMA_CONTRACT_VERSION: u32 = 15;
+pub const SCHEMA_CONTRACT_VERSION: u32 = 17;
 pub const POSTGRES_MAJOR_VERSION: i32 = 16;
-pub const BASELINE_TABLE_COUNT: usize = 23;
+pub const BASELINE_TABLE_COUNT: usize = 27;
 
 const CHECKED_IN_SCHEMA_CONTRACT: &[u8] = include_bytes!("../schema-contract.json");
 const EXPECTED_SCHEMA_INVENTORY: &[u8] = include_bytes!("../schema-inventory.json");
@@ -65,10 +68,14 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "artifact_blobs",
     "artifact_links",
     "artifacts",
+    "conversation_turns",
+    "conversations",
     "deployments",
     "events",
     "invocations",
     "jobs",
+    "local_console_owner",
+    "local_console_sessions",
     "outbox_events",
     "principals",
     "quota_accounts",
@@ -279,6 +286,13 @@ fn verify_inventory_value(actual: &Value) -> Result<(), AuthoritySchemaError> {
     })
 }
 
+/// Read-only inventory capture inside a provisioning-owned transaction.
+pub async fn capture_schema_inventory_in_transaction(
+    connection: &mut sqlx::PgConnection,
+) -> Result<Value, AuthoritySchemaError> {
+    Ok(schema_inventory::capture(connection).await?)
+}
+
 pub async fn capture_schema_inventory(pool: &PgPool) -> Result<Vec<u8>, AuthoritySchemaError> {
     let value = capture_schema_inventory_value(pool).await?;
     let mut bytes = serde_json::to_vec_pretty(&sorted_json(&value))
@@ -329,6 +343,16 @@ pub fn validate_checked_in_schema_contract() -> Result<(), AuthoritySchemaError>
     } else {
         Err(AuthoritySchemaError::CheckedInContractMismatch)
     }
+}
+
+/// Canonical digest of the complete inventory embedded by the schema owner.
+pub fn expected_schema_inventory_digest() -> String {
+    let inventory: Value = serde_json::from_slice(EXPECTED_SCHEMA_INVENTORY)
+        .expect("checked-in schema inventory must be valid JSON");
+    prefixed_sha256(
+        &serde_jcs::to_vec(&inventory)
+            .expect("schema inventory contains only canonicalizable JSON values"),
+    )
 }
 
 pub fn schema_snapshot_digest() -> String {
@@ -428,7 +452,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_has_exactly_twenty_three_tables() {
+    fn baseline_has_exactly_twenty_seven_tables() {
         assert_eq!(EXPECTED_TABLES.len(), BASELINE_TABLE_COUNT);
         assert_eq!(
             EXPECTED_TABLES
@@ -436,7 +460,7 @@ mod tests {
                 .copied()
                 .collect::<BTreeSet<_>>()
                 .len(),
-            23
+            27
         );
     }
 

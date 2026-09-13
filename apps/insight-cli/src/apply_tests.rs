@@ -1509,7 +1509,8 @@ mod tests {
         let provider_revision = published(ResourceKind::ModelProviderRevision, 'e');
         let resolved =
             ApplyDeploymentClosure::ModelProvider(ApplyModelProviderDeploymentBindings {
-                endpoint_identity_digest: digest('f'),
+                endpoint: insight_platform_contracts::normalize_model_base_url("https://api.example.com/v1").unwrap(),
+        endpoint_identity_digest: insight_platform_contracts::normalize_model_base_url("https://api.example.com/v1").unwrap().canonical_digest().unwrap(),
                 secret_bindings: Vec::new(),
                 protocol_policy: exact_version(ResourceKind::PolicyRevision, '1'),
                 network_policy: exact_version(ResourceKind::PolicyRevision, '2'),

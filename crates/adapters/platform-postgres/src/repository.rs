@@ -18,10 +18,15 @@ mod model_quota;
 pub(crate) use model_default_commands::validate_default_model_closure;
 mod model_convergence;
 use model_convergence::{model_run_convergence_goal, settle_suppressed_model_continuation};
+mod conversations;
 mod quota_commands;
 mod registry_commands;
 mod registry_queries;
 mod run_commands;
+pub(crate) use conversations::authorize_conversation_run_read;
+pub use conversations::{ConversationHistoryValue, ConversationReadScope};
+mod run_execution;
+pub mod run_live;
 mod run_queries;
 mod scheduler_commands;
 mod task_commands;
@@ -19227,6 +19232,7 @@ fn public_run_event_type(
             public_terminal_run_event(payload)
         }
         ("node_execution", "node.started") => Some(Public::NodeStarted),
+        ("node_execution", "node.controller_completed") => Some(Public::NodeCompleted),
         ("node_execution", "node.failed") => Some(Public::NodeFailed),
         ("node_execution", "node.cancelled") => Some(Public::NodeCancelled),
         ("node_execution", "node.terminal_committed" | "node.terminal_converged") => {
@@ -19326,6 +19332,11 @@ fn public_run_event_from_row(row: PgRow) -> Result<PublicRunEventRecord, Reposit
         event_type,
         source_id,
         source_projection_version,
+        safe_summary: row
+            .try_get::<Option<String>, _>("model_failure_message")?
+            .as_deref()
+            .and_then(insight_platform_models::public_model_failure_summary)
+            .map(str::to_owned),
         occurred_at: row.try_get("occurred_at")?,
     })
 }
@@ -22635,6 +22646,25 @@ mod tests {
             validate_development_bootstrap(&mismatched_tenant),
             Err(RepositoryError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn controller_completion_projects_only_the_succeeded_node_authority() {
+        use PublicRunEventType as Public;
+        // The controller transaction terminalizes its source node as succeeded before this event.
+        assert_eq!(
+            public_run_event_type("node_execution", "node.controller_completed", &Value::Null),
+            Some(Public::NodeCompleted)
+        );
+        for (kind, event) in [
+            ("job", "job.controller_completed"),
+            ("run", "run.controller_advanced"),
+            ("job", "node.controller_completed"),
+            ("node_execution", "node.model_waiting"),
+            ("node_execution", "node.external_leaf_completion_ready"),
+        ] {
+            assert_eq!(public_run_event_type(kind, event, &Value::Null), None);
+        }
     }
 
     #[test]

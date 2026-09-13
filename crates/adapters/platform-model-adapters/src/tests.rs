@@ -227,7 +227,16 @@ fn fixture(adapter_name: &str, manifest: char, contract: char) -> Fixture {
     };
     let provider_closure = ModelProviderDeploymentClosure {
         provider_revision,
-        endpoint_identity_digest: sha('2'),
+        endpoint: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap(),
+        endpoint_identity_digest: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap()
+        .canonical_digest()
+        .unwrap(),
         secret_bindings: vec![exact_secret_binding(12)],
         protocol_policy: protocol_policy.clone(),
         network_policy: policy(13, '3'),
@@ -483,6 +492,7 @@ impl ModelProviderAdapter for StaticAdapter {
 #[derive(Default)]
 struct CapturingSink {
     frames: Mutex<Vec<NormalizedModelFrame>>,
+    text_sequences: Mutex<Vec<u64>>,
 }
 
 #[async_trait]
@@ -491,9 +501,11 @@ impl ModelLiveDeltaSink for CapturingSink {
         &self,
         execution: &ModelAdapterExecutionRequest,
         frame: &NormalizedModelFrame,
+        text_sequence: u64,
     ) {
         assert_eq!(execution.model_turn_id, frame.model_turn_id);
         self.frames.lock().unwrap().push(frame.clone());
+        self.text_sequences.lock().unwrap().push(text_sequence);
     }
 }
 
@@ -525,10 +537,12 @@ async fn two_exact_provider_adapters_share_one_conformance_boundary() {
 #[tokio::test]
 async fn compatible_rebuilt_worker_uses_frozen_adapter_semantics() {
     let mut fixture = fixture("fixture.responses/v1", '9', 'a');
+    let mut descriptor = fixture.descriptor;
+    descriptor.worker_manifest_digest = sha('0');
     let mut registry = InstalledModelAdapterRegistry::default();
     registry
         .install(Arc::new(StaticAdapter {
-            descriptor: fixture.descriptor,
+            descriptor,
             response: fixture.response,
         }))
         .unwrap();
@@ -2149,24 +2163,45 @@ async fn textual_json_rejects_unsupported_modes_and_oversized_requests_before_di
 #[tokio::test]
 async fn structured_text_is_strict_json_and_exact_schema_without_repair_or_retry() {
     let outputs = [
-        "{\"answer\":\"secret-canary\",\"answer\":\"hello\"}",
-        "{\"answer\":NaN}",
-        "{\"answer\":1e999}",
-        "{\"answer\":42}",
-        "{\"answer\":\"hello\",\"unexpected\":true}",
-        "{\"answer\":\"hello\"} trailing",
-        "{\"answer\":\"hello\"}{\"answer\":\"again\"}",
-        "```json\n{\"answer\":\"hello\"}\n```",
-        "prefix {\"answer\":\"hello\"}",
-        "[]",
-        "{\"answer\":\"\\ud800\"}",
+        (
+            "{\"answer\":\"secret-canary\",\"answer\":\"hello\"}",
+            "model_structured_output_invalid_json",
+        ),
+        ("{\"answer\":NaN}", "model_structured_output_invalid_json"),
+        ("{\"answer\":1e999}", "model_structured_output_invalid_json"),
+        ("{\"answer\":42}", "model_structured_output_schema_mismatch"),
+        (
+            "{\"answer\":\"hello\",\"unexpected\":true}",
+            "model_structured_output_schema_mismatch",
+        ),
+        (
+            "{\"answer\":\"hello\"} trailing",
+            "model_structured_output_invalid_json",
+        ),
+        (
+            "{\"answer\":\"hello\"}{\"answer\":\"again\"}",
+            "model_structured_output_invalid_json",
+        ),
+        (
+            "```json\n{\"answer\":\"hello\"}\n```",
+            "model_structured_output_invalid_json",
+        ),
+        (
+            "prefix {\"answer\":\"hello\"}",
+            "model_structured_output_invalid_json",
+        ),
+        ("[]", "model_structured_output_schema_mismatch"),
+        (
+            "{\"answer\":\"\\ud800\"}",
+            "model_structured_output_invalid_json",
+        ),
     ];
     for adapter_name in [
         OPENAI_RESPONSES_ADAPTER_NAME,
         ANTHROPIC_MESSAGES_ADAPTER_NAME,
     ] {
         for native in [false, true] {
-            for output in outputs {
+            for (output, expected_code) in outputs {
                 let mut fixture = wire_fixture(adapter_name);
                 enable_structured_output(&mut fixture);
                 fixture.request.profile.structured_output.native = native;
@@ -2180,7 +2215,7 @@ async fn structured_text_is_strict_json_and_exact_schema_without_repair_or_retry
                     panic!("{adapter_name}/native={native} accepted invalid structured text: {outcome:?}");
                 };
                 assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
-                assert!(failure.safe_code.ends_with("invalid_structured_output"));
+                assert_eq!(failure.safe_code, expected_code);
                 assert!(failure.request_sent);
                 assert!(!format!("{failure:?}").contains("secret-canary"));
                 assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
@@ -2192,7 +2227,6 @@ async fn structured_text_is_strict_json_and_exact_schema_without_repair_or_retry
         }
     }
 }
-
 #[tokio::test]
 async fn textual_json_output_has_exact_byte_bound_and_real_incremental_sse_validation() {
     let raw = "{\"answer\":\"你好\\\"\\n\"}";
@@ -2223,7 +2257,7 @@ async fn textual_json_output_has_exact_byte_bound_and_real_incremental_sse_valid
                 }
                 ModelAdapterExecutionOutcome::Failed(failure) if !fits => {
                     assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
-                    assert!(failure.safe_code.ends_with("invalid_structured_output"));
+                    assert_eq!(failure.safe_code, "model_structured_output_too_large");
                 }
                 other => panic!("{adapter_name}/fits={fits}: {other:?}"),
             }
@@ -2470,4 +2504,96 @@ async fn brokered_connector_maps_status_content_type_and_duplicate_json_closed()
         panic!("duplicate Provider JSON key was accepted");
     };
     assert_eq!(failure.safe_code, "model_sse_invalid_json");
+}
+
+#[tokio::test]
+async fn live_text_sequence_ignores_private_metadata_and_resets_per_attempt() {
+    let fixture = fixture("fixture.responses/v1", '9', 'a');
+    let sink = Arc::new(CapturingSink::default());
+    let host = ModelAdapterHost::new(
+        InstalledModelAdapterRegistry::default(),
+        sink.clone(),
+        limits(),
+    );
+    let deltas = vec![
+        NormalizedModelDelta::Text("a".into()),
+        NormalizedModelDelta::ProviderMetadataDigest(sha('a')),
+        NormalizedModelDelta::Text("b".into()),
+    ];
+    let mut response = fixture.response.clone();
+    response.observation.stream_delta_count = 3;
+    response.observation.stream_bytes = deltas
+        .iter()
+        .map(|d| serde_json::to_vec(d).unwrap().len() as u64)
+        .sum();
+    let mut frames: Vec<_> = deltas
+        .into_iter()
+        .enumerate()
+        .map(|(i, delta)| {
+            Ok(NormalizedModelFrame {
+                model_turn_id: fixture.request.model_turn_id.clone(),
+                attempt_no: fixture.request.attempt_no,
+                lease_generation: fixture.request.lease_generation,
+                transport_sequence: i as u64 + 1,
+                delta,
+            })
+        })
+        .collect();
+    frames.push(Ok(NormalizedModelFrame {
+        model_turn_id: fixture.request.model_turn_id.clone(),
+        attempt_no: fixture.request.attempt_no,
+        lease_generation: fixture.request.lease_generation,
+        transport_sequence: 4,
+        delta: NormalizedModelDelta::Terminal(Box::new(response)),
+    }));
+    for _ in 0..2 {
+        host.consume_stream(Box::pin(stream::iter(frames.clone())), &fixture.request)
+            .await
+            .unwrap();
+    }
+    assert_eq!(*sink.text_sequences.lock().unwrap(), vec![1, 1, 2, 1, 1, 2]);
+}
+
+#[tokio::test]
+async fn structured_answer_exceeding_128_characters_is_schema_failure_without_truncation() {
+    for adapter_name in [
+        OPENAI_RESPONSES_ADAPTER_NAME,
+        ANTHROPIC_MESSAGES_ADAPTER_NAME,
+    ] {
+        let mut fixture = wire_fixture(adapter_name);
+        enable_structured_output(&mut fixture);
+        let mut schema = fixture
+            .request
+            .request
+            .response_contract
+            .structured_schema
+            .as_ref()
+            .unwrap()
+            .schema
+            .clone();
+        schema["properties"]["answer"]["maxLength"] = serde_json::json!(128);
+        let schema = ClosedSchemaDocument::build(schema).unwrap();
+        fixture
+            .request
+            .request
+            .response_contract
+            .output_schema_digest = schema.canonical_digest.clone();
+        fixture.request.request.response_contract.structured_schema = Some(schema);
+        fixture.request.request_digest =
+            canonical_request_digest(&fixture.request.request).unwrap();
+        let output =
+            serde_json::to_string(&serde_json::json!({"answer": "a".repeat(500)})).unwrap();
+        let events = if adapter_name == OPENAI_RESPONSES_ADAPTER_NAME {
+            openai_text_events(&output)
+        } else {
+            anthropic_text_events(&output)
+        };
+        let (result, connector) = execute_wire_fixture_result(fixture, events).await;
+        let Ok(ModelAdapterExecutionOutcome::Failed(failure)) = result else {
+            panic!("overlong answer must fail")
+        };
+        assert_eq!(failure.safe_code, "model_structured_output_schema_mismatch");
+        assert_eq!(failure.class, ModelAdapterFailureClass::Permanent);
+        assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
+    }
 }

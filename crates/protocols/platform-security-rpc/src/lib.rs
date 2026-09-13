@@ -380,7 +380,7 @@ impl ModelDispatchAuthority for SecuritySecretAuthorityGrpcClient {
         &self,
         request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
     ) -> Result<
-        insight_platform_contracts::ModelDispatchPermitV1,
+        insight_platform_contracts::ModelDispatchPermitV2,
         insight_platform_contracts::ModelDispatchAuthorizationError,
     > {
         use insight_platform_contracts::ModelDispatchAuthorizationError as Failure;
@@ -397,7 +397,7 @@ impl ModelDispatchAuthority for SecuritySecretAuthorityGrpcClient {
                 tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => Failure::Unavailable,
                 _ => Failure::Rejected,
             })?;
-        let permit: insight_platform_contracts::ModelDispatchPermitV1 =
+        let permit: insight_platform_contracts::ModelDispatchPermitV2 =
             decode(response.into_inner(), self.limits).map_err(|_| Failure::Rejected)?;
         if !permit.validate_for(request, Utc::now()) {
             return Err(Failure::Rejected);
@@ -1041,7 +1041,7 @@ mod tests {
             &self,
             _request: &insight_platform_contracts::ModelDispatchAuthorizationV1,
         ) -> Result<
-            insight_platform_contracts::ModelDispatchPermitV1,
+            insight_platform_contracts::ModelDispatchPermitV2,
             insight_platform_contracts::ModelDispatchAuthorizationError,
         > {
             Err(insight_platform_contracts::ModelDispatchAuthorizationError::Rejected)

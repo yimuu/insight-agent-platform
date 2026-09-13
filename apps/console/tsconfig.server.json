@@ -10,5 +10,11 @@
     "rewriteRelativeImportExtensions": true,
     "noEmitOnError": true
   },
-  "include": ["server/main.ts", "server/config.ts", "server/gateway-server.ts", "server/process.ts"]
+  "include": [
+    "server/main.ts",
+    "server/config.ts",
+    "server/gateway-server.ts",
+    "server/process.ts",
+    "server/identity-main.ts"
+  ]
 }

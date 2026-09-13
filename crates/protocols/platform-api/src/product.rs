@@ -301,6 +301,8 @@ impl RunSummaryV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListRoutePurpose {
+    Conversations,
+    ConversationTurns,
     AuthoringDependencies,
     RunValues,
     ChildRuns,
@@ -328,6 +330,14 @@ impl ListCursorContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ListKeysetBoundary {
+    Conversation {
+        created_at: UtcTimestamp,
+        conversation_id: ResourceId,
+    },
+    ConversationTurn {
+        created_at: UtcTimestamp,
+        ordinal: u32,
+    },
     ChildRun {
         created_at: UtcTimestamp,
         run_id: ResourceId,
@@ -356,17 +366,21 @@ pub enum ListKeysetBoundary {
 
 impl ListKeysetBoundary {
     fn validates_for(&self, purpose: ListRoutePurpose) -> bool {
-        matches!(
-            (purpose, self),
-            (
-                ListRoutePurpose::Agents,
-                Self::Agent { agent_id, .. }
-            ) if agent_id.kind() == ResourceKind::Agent
-        ) || matches!(
-            (purpose, self),
-            (ListRoutePurpose::Runs, Self::Run { run_id, .. })
-                if run_id.kind() == ResourceKind::Run
-        ) || matches!((purpose,self),(ListRoutePurpose::ChildRuns,Self::ChildRun{run_id,..}) if run_id.kind()==ResourceKind::Run)
+        matches!((purpose,self),(ListRoutePurpose::Conversations,Self::Conversation{conversation_id,..}) if conversation_id.kind()==ResourceKind::Conversation)
+            || matches!((purpose,self),(ListRoutePurpose::ConversationTurns,Self::ConversationTurn{ordinal,..}) if *ordinal>0 && *ordinal<=128)
+            || matches!(
+                (purpose, self),
+                (
+                    ListRoutePurpose::Agents,
+                    Self::Agent { agent_id, .. }
+                ) if agent_id.kind() == ResourceKind::Agent
+            )
+            || matches!(
+                (purpose, self),
+                (ListRoutePurpose::Runs, Self::Run { run_id, .. })
+                    if run_id.kind() == ResourceKind::Run
+            )
+            || matches!((purpose,self),(ListRoutePurpose::ChildRuns,Self::ChildRun{run_id,..}) if run_id.kind()==ResourceKind::Run)
             || matches!((purpose,self),(ListRoutePurpose::RunValues,Self::RunValue{value_id,..}) if value_id.kind()==ResourceKind::RunValue)
             || matches!((purpose,self),(ListRoutePurpose::AuthoringDependencies,Self::AuthoringDependency{deployment_id,..}) if deployment_id.kind().is_deployment())
             || matches!((purpose, self), (ListRoutePurpose::Tasks, Self::Task { task_id, .. }) if matches!(task_id.kind(), ResourceKind::Interaction | ResourceKind::ApprovalTask))
@@ -523,7 +537,9 @@ impl ListCursorCodec for HmacListCursorCodec {
             .with_timezone(&Utc);
         let boundary_at = match &claims.boundary {
             ListKeysetBoundary::Agent { updated_at, .. } => updated_at,
-            ListKeysetBoundary::Run { created_at, .. }
+            ListKeysetBoundary::Conversation { created_at, .. }
+            | ListKeysetBoundary::ConversationTurn { created_at, .. }
+            | ListKeysetBoundary::Run { created_at, .. }
             | ListKeysetBoundary::Task { created_at, .. }
             | ListKeysetBoundary::AuthoringDependency { created_at, .. }
             | ListKeysetBoundary::ChildRun { created_at, .. }

@@ -308,6 +308,7 @@ pub(super) async fn verify(pool: &PgPool, repository: &PgRepository, original: &
         repository.clone(),
         Arc::new(repository.clone()),
         Arc::new(NoSkillReads),
+        Arc::new(NoSkillReads),
     );
     let request = ControllerModelAdmissionRequest {
         lease: ControllerRunValueReadContext {
@@ -517,4 +518,14 @@ pub(super) async fn verify(pool: &PgPool, repository: &PgRepository, original: &
     .await
     .unwrap();
     assert_eq!(count, 1);
+}
+
+#[async_trait::async_trait]
+impl insight_platform_artifacts::SchedulerRunValueReader for NoSkillReads {
+    async fn read_exact(
+        &self,
+        _: insight_platform_artifacts::SchedulerRunValueReadRequest,
+    ) -> Result<Vec<u8>, insight_platform_artifacts::SchedulerRunValueReadError> {
+        panic!("no conversation Artifact in this fixture")
+    }
 }

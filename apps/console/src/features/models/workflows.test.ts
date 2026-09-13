@@ -28,7 +28,7 @@ import {
 } from './management.ts'
 
 const publicationKey = 'insight.console.model-publication.v1'
-const credentialKey = 'insight.console.model-credential.v1'
+const credentialKey = 'insight.console.model-credential.v2'
 const id = (prefix, n) => `${prefix}_0198f1cc-32e4-75e1-a9e8-${n.toString(16).padStart(12, '0')}`
 const sha = (n) => `sha256:${String(n).repeat(64)}`
 const tenant = id('ten', 1),
@@ -164,7 +164,9 @@ test('credential response loss reuses exact operation, never persists the key, a
     tenant_id: tenant,
     provider_id: provider,
     alias: 'regional',
-    destination_digest: sha('d'),
+    endpoint: { scheme: 'https' as const, host: 'api.example.com', port: 443, base_path: '/' },
+    protocol: 'open_ai_responses' as const,
+    region: 'global',
     resource_id: null,
     resource_etag: null,
   }
@@ -520,7 +522,7 @@ async function fixture(
         value = { operation_id: id('job', counter++) }
       } else if (phase === 'publish') {
         assert.equal(body.revision_no, resource.draft_generation)
-        status = 201
+        status = 200
         advance()
         value = {
           schema_version: 1,
@@ -594,10 +596,12 @@ async function fixture(
   })
   const configuration = source
     ? {
-        schema_version: 1,
+        schema_version: 2,
         alias: 'primary',
         display_name: 'Primary',
-        destination_digest: sha('d'),
+        endpoint: { scheme: 'https' as const, host: 'api.example.com', port: 443, base_path: '/' },
+        protocol: 'open_ai_responses' as const,
+        region: 'global',
         credential: await credential(),
       }
     : {
@@ -798,4 +802,23 @@ test('publication retains frozen quota and resumes its original allocation after
   const result = await resumeModelPublication(f.client, tenant, sha('b'), () => {})
   assert.equal(result.deployment.deployment_id, pending.deployment.deployment_id)
   assert.equal(f.storage.has(publicationKey), false)
+})
+
+test('public publish success status is read from the owning OpenAPI contract', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { parse } = await import('yaml')
+  const contract = parse(
+    await readFile(
+      new URL('../../../../../contracts/platform-v1/openapi.yaml', import.meta.url),
+      'utf8',
+    ),
+  )
+  const publish = Object.entries(contract.paths).filter(
+    ([path]) => path === '/{resource_noun}/{resource_id}/draft:publish',
+  )
+  assert.equal(publish.length, 1)
+  const responses = (publish[0][1] as { post: { responses: Record<string, unknown> } }).post
+    .responses
+  assert.ok(responses['200'])
+  assert.equal(responses['201'], undefined)
 })

@@ -59,6 +59,8 @@ test(
     writeFileSync(inputPath, full.sourceBundle)
     let mutationCalls = 0
     let denyContent = false
+    let holdNextList = false
+    let releaseList: (() => void) | undefined
     const sourceId = 'art_01950000-0000-7000-8000-000000000003'
     const planId = 'art_01950000-0000-7000-8000-000000000004'
     const agentId = 'agt_01950000-0000-7000-8000-000000000001'
@@ -94,28 +96,33 @@ test(
         return
       }
       if (request.url.startsWith('/v1/agents?')) {
-        send(200, {
-          schema_version: 1,
-          next_cursor: null,
-          items: [
-            {
-              agent_id: agentId,
-              name: 'editable',
-              display_name: 'Complete source Agent',
-              state: 'draft',
-              environment: null,
-              published_at: null,
-            },
-            {
-              agent_id: 'agt_missing',
-              name: 'missing',
-              display_name: 'Missing source Agent',
-              state: 'draft',
-              environment: null,
-              published_at: null,
-            },
-          ],
-        })
+        const respond = () =>
+          send(200, {
+            schema_version: 1,
+            next_cursor: null,
+            items: [
+              {
+                agent_id: agentId,
+                name: 'editable',
+                display_name: 'Complete source Agent',
+                state: 'draft',
+                environment: null,
+                published_at: null,
+              },
+              {
+                agent_id: 'agt_missing',
+                name: 'missing',
+                display_name: 'Missing source Agent',
+                state: 'draft',
+                environment: null,
+                published_at: null,
+              },
+            ],
+          })
+        if (holdNextList) {
+          holdNextList = false
+          releaseList = respond
+        } else respond()
         return
       }
       if (request.url === `/v1/agents/${agentId}`) {
@@ -202,7 +209,7 @@ test(
         await browser.click('下一步')
         await browser.click('校验配置')
         await browser.wait(
-          `document.body.innerText.includes('校验通过，依赖已解析')`,
+          `document.body.innerText.includes('校验通过，依赖已解析') && [...document.querySelectorAll('button')].some(button => button.textContent.trim() === '编辑已校验 Plan' && !button.disabled)`,
           'validated deterministic starting point',
         )
         await browser.click('编辑已校验 Plan')
@@ -239,30 +246,43 @@ test(
         await browser.field('Plan JSON', '{}')
         await browser.click('校验配置')
         await browser.wait(
-          `!!document.querySelector('[role="alert"]')`,
+          `!!document.querySelector('[role="alert"]') && ${fieldValue('任务类型')} === 'full_plan' && ${fieldValue('Plan JSON')} === '{}'`,
           'Rust invalid Plan diagnostics',
         )
         assert.equal(await browser.evaluate(fieldValue('任务类型')), 'full_plan')
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), '{}')
 
+        await browser.click('返回列表')
         await browser.upload('input[type="file"][accept=".json,application/json"]', inputPath)
         await browser.wait(
-          `document.body.innerText.includes('已导入源码与精确依赖')`,
-          'complete source bundle import',
+          `document.body.innerText.includes('已导入源码与精确依赖') &&
+           ${fieldValue('Plan JSON')} === ${JSON.stringify(seed.typedPlan)} &&
+           ${fieldValue('输入 Schema JSON')} === ${JSON.stringify(input.inputSchema)} &&
+           ${fieldValue('输出 Schema JSON')} === ${JSON.stringify(input.outputSchema)}`,
+          'complete source bundle import and mounted source editors',
         )
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), seed.typedPlan)
         assert.equal(await browser.evaluate(fieldValue('输入 Schema JSON')), input.inputSchema)
         assert.equal(await browser.evaluate(fieldValue('输出 Schema JSON')), input.outputSchema)
         await browser.click('分步表单')
-        await browser.wait(`${fieldValue('任务类型')} === 'full_plan'`, 'Full Plan Form projection')
+        await browser.wait(
+          `${fieldValue('任务类型')} === 'full_plan' && ${fieldValue('Plan 路径')} === 'plans/flow.json'`,
+          'Full Plan Form projection',
+        )
         assert.equal(await browser.evaluate(fieldValue('Plan 路径')), 'plans/flow.json')
         await browser.click('高级 YAML')
-        await browser.wait(`typeof (${fieldValue('agent.yaml')}) === 'string'`, 'YAML editing')
+        await browser.wait(
+          `String(${fieldValue('agent.yaml')}).includes('full_plan') && ${fieldValue('Plan JSON')} === ${JSON.stringify(seed.typedPlan)} && ${fieldValue('精确依赖绑定 JSON')} === '[]'`,
+          'YAML editing with mounted exact source and bindings',
+        )
         assert.match(await browser.evaluate(fieldValue('agent.yaml')), /full_plan/)
 
         await browser.field('精确依赖绑定 JSON', '[{"slot_id":"missing-owner"}]')
         await browser.click('校验配置')
-        await browser.wait(`!!document.querySelector('[role="alert"]')`, 'Rust slot diagnostics')
+        await browser.wait(
+          `!!document.querySelector('[role="alert"]') && ${fieldValue('精确依赖绑定 JSON')} === ${JSON.stringify('[{"slot_id":"missing-owner"}]')}`,
+          'Rust slot diagnostics with unchanged source',
+        )
         assert.equal(
           await browser.evaluate(fieldValue('精确依赖绑定 JSON')),
           '[{"slot_id":"missing-owner"}]',
@@ -270,7 +290,7 @@ test(
         await browser.field('精确依赖绑定 JSON', '[]')
         await browser.click('校验配置')
         await browser.wait(
-          `document.body.innerText.includes('校验通过，依赖已解析')`,
+          `document.body.innerText.includes('校验通过，依赖已解析') && ${fieldValue('Plan JSON')} === ${JSON.stringify(seed.typedPlan)} && [...document.querySelectorAll('button')].some(button => button.textContent.trim() === '导出源码包' && !button.disabled)`,
           'actual WASM Full Plan validation',
         )
         await browser.call('Browser.setDownloadBehavior', {
@@ -302,12 +322,17 @@ test(
           ),
         )
         for (const [index, entry] of editorDescriptor.nodes.entries()) {
-          const id = `draft_${index}`
-          await browser.field('新节点 ID', id)
-          await browser.field('新节点类型', entry.kind)
+          const previousIds = Object.keys(
+            JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).nodes,
+          )
+          await browser.field('添加步骤', entry.kind)
           await browser.click('添加节点')
+          const id = Object.keys(
+            JSON.parse(await browser.evaluate(fieldValue('Plan JSON'))).nodes,
+          ).find((key) => !previousIds.includes(key))
+          assert.ok(id, `new ${entry.kind} node has an independent identity`)
           await browser.wait(
-            `${fieldValue('当前节点')} === ${JSON.stringify(id)}`,
+            `document.body.innerText.includes(${JSON.stringify(`节点 ${id}`)})`,
             `selected ${entry.kind} node`,
           )
           assert.deepEqual(
@@ -323,7 +348,7 @@ test(
           if (entry.kind === 'compute') {
             await browser.click('重建表达式 assignments/0/expression')
             await browser.wait(
-              `JSON.parse(${fieldValue('Plan JSON')}).nodes.${id}.assignments[0].expression.semantic_digest !== ${JSON.stringify(entry.template.assignments[0].expression.semantic_digest)}`,
+              `JSON.parse(${fieldValue('Plan JSON')}).nodes[${JSON.stringify(id)}].assignments[0].expression.semantic_digest !== ${JSON.stringify(entry.template.assignments[0].expression.semantic_digest)}`,
               'Rust expression rebuild updates the source',
             )
             assert.equal(
@@ -386,7 +411,7 @@ test(
         await browser.field('agent.yaml', supportedYaml.replace('full_plan', 'future_template'))
         await browser.click('分步表单')
         await browser.wait(
-          `!!document.querySelector('[role="alert"]')`,
+          `!!document.querySelector('[role="alert"]') && ${fieldValue('agent.yaml')} === ${JSON.stringify(supportedYaml.replace('full_plan', 'future_template'))}`,
           'unsupported YAML refuses Form fallback',
         )
         assert.match(await browser.evaluate(fieldValue('agent.yaml')), /future_template/)
@@ -413,39 +438,57 @@ test(
           schema_documents: typed.schema_documents,
         }
         await browser.field('任务类型', 'framework_graph')
-        await browser.field('Plan JSON', JSON.stringify(graph))
         await browser.click('高级 YAML')
+        await browser.wait(
+          `String(${fieldValue('agent.yaml')}).includes('framework_graph')`,
+          'framework YAML mounted after Form conversion',
+        )
+        const frameworkYaml = await browser.evaluate(fieldValue('agent.yaml'))
+        await browser.field('Plan JSON', JSON.stringify(graph))
         await browser.click('校验配置')
         await browser.wait(
-          `document.body.innerText.includes('校验通过，依赖已解析')`,
-          'actual WASM static framework validation',
+          `document.body.innerText.includes('校验通过，依赖已解析') && ${fieldValue('agent.yaml')} === ${JSON.stringify(frameworkYaml)} && ${fieldValue('Plan JSON')} === ${JSON.stringify(JSON.stringify(graph))} && !!document.querySelector('[aria-label="工作流画布"]')`,
+          'actual WASM static framework validation and mounted source',
         )
         assert.match(await browser.evaluate(fieldValue('agent.yaml')), /framework_graph/)
-        assert.match(await browser.evaluate('document.body.innerText'), /Platform 节点/)
+        assert.equal(
+          await browser.evaluate(`!!document.querySelector('[aria-label="工作流画布"]')`),
+          true,
+        )
         await browser.click('高级 YAML')
         await browser.wait(
-          `(${fieldValue('agent.yaml')}).includes('framework_graph')`,
+          `${fieldValue('agent.yaml')} === ${JSON.stringify(frameworkYaml)} && ${fieldValue('Plan JSON')} === ${JSON.stringify(JSON.stringify(graph))}`,
           'framework Form/YAML round trip',
         )
         await browser.field('Plan JSON', 'def graph(): pass')
         await browser.click('校验配置')
         await browser.wait(
-          `!!document.querySelector('[role="alert"]')`,
+          `!!document.querySelector('[role="alert"]') && ${fieldValue('Plan JSON')} === 'def graph(): pass'`,
           'Python code is not a static framework export',
         )
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), 'def graph(): pass')
 
         await browser.click('返回列表')
+        holdNextList = true
         await browser.click('刷新')
+        await eventually(() => releaseList, 'held Agent list refresh')
+        const editButton = `[...document.querySelectorAll('[data-ui~=agent-row]')].find(row => row.textContent.includes('Complete source Agent'))?.querySelector('button')`
+        assert.equal(
+          await browser.evaluate(`(${editButton})?.disabled`),
+          true,
+          'a retained row is not actionable while its list is refreshing',
+        )
+        releaseList!()
+        releaseList = undefined
         await browser.wait(
-          `document.body.innerText.includes('Complete source Agent')`,
-          'editable Agent list',
+          `(${editButton}) instanceof HTMLButtonElement && !(${editButton}).disabled`,
+          'refreshed Agent list with an enabled editor action',
         )
         await browser.evaluate(
           `[...document.querySelectorAll('[data-ui~=agent-row]')].find(row => row.textContent.includes('Complete source Agent')).querySelector('button').click()`,
         )
         await browser.wait(
-          `document.body.innerText.includes('已加载完整源码') && !!(${fieldValue('Plan JSON')})`,
+          `document.body.innerText.includes('已加载完整源码') && ${fieldValue('Plan JSON')} === ${JSON.stringify(seed.typedPlan)} && ${fieldValue('输入 Schema JSON')} === ${JSON.stringify(input.inputSchema)} && ${fieldValue('输出 Schema JSON')} === ${JSON.stringify(input.outputSchema)}`,
           'existing Agent complete source recovery',
         )
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), seed.typedPlan)
@@ -458,7 +501,7 @@ test(
         denyContent = true
         await browser.click('恢复已发布源码')
         await browser.wait(
-          `document.body.innerText.includes('当前账户无权执行此操作')`,
+          `document.body.innerText.includes('当前账户无权执行此操作') && ${fieldValue('Plan JSON')} === ${JSON.stringify('{"local":"unsaved draft"}')}`,
           'source 403 leaves current editor intact',
         )
         assert.equal(await browser.evaluate(fieldValue('Plan JSON')), '{"local":"unsaved draft"}')
@@ -474,7 +517,7 @@ test(
           `[...document.querySelectorAll('[data-ui~=agent-row]')].find(row => row.textContent.includes('Missing source Agent')).querySelector('button').click()`,
         )
         await browser.wait(
-          `document.body.textContent.includes('recompile_required')`,
+          `document.body.textContent.includes('recompile_required') && !document.querySelector('[data-ui~=editor]')`,
           'missing source rejection',
         )
         assert.equal(await browser.evaluate(`!!document.querySelector('[data-ui~=editor]')`), false)

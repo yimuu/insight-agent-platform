@@ -12,4 +12,6 @@
 - [ADR-0010：统一安装与多来源模型配置](0010-unified-installation-and-model-configuration.md)
 - [ADR-0011：Console TypeScript 构建与结构化编辑](0011-console-typescript-and-authoring-experience.md)
 
+- [ADR-0018：作者提示词模板与顺序模型工作流](0018-agent-prompt-templates.md)
+
 被替代和废弃的决策通过 Git 历史查阅，不恢复旧实现或兼容路径。接受提案前必须将架构与对应机器合同、当前 schema 和证据要求共同审查。

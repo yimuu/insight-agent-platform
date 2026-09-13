@@ -3082,3 +3082,37 @@ pub struct ChildRunLinksPage {
     pub snapshot_at: DateTime<Utc>,
     pub next_boundary: Option<(DateTime<Utc>, ResourceId)>,
 }
+
+/// Current execution authority, independent of lossy or retained event history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunExecutionState {
+    Node(NodeExecutionState),
+    Model(insight_platform_contracts::ModelTurnState),
+}
+#[derive(Debug, Clone)]
+pub struct RunExecutionDetailRecord {
+    pub run_id: ResourceId,
+    pub source_kind: insight_platform_contracts::PublicRunEventSourceKind,
+    pub source_id: ResourceId,
+    pub version: u64,
+    pub state: RunExecutionState,
+    pub node_execution_id: ResourceId,
+    pub plan_node_key: String,
+    pub node_kind: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub terminal_at: Option<DateTime<Utc>>,
+    pub input_value_id: Option<ResourceId>,
+    pub output_value_id: Option<ResourceId>,
+    pub values: Vec<RunValueMetadataRecord>,
+    pub values_truncated: bool,
+}
+
+impl RunExecutionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Node(v) => v.as_str(),
+            Self::Model(v) => v.as_str(),
+        }
+    }
+}

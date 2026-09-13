@@ -17,3 +17,5 @@ python3 tools/checks/check-crate-boundaries.py \
   "$metadata_file" \
   tools/baselines/crate-boundary-third-party-features.tsv \
   "$workspace_root"
+
+python3 tools/tests/test_crate_boundary_live_fixtures.py "$metadata_file"

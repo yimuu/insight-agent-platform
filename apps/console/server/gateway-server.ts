@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
-import type { ConsoleTransportConfigV1 } from './config.ts'
+import type { ConsoleTransportConfigV3 } from './config.ts'
 
 interface BufferedBody {
   pages: Buffer[]
@@ -19,6 +19,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs'
+import { X509Certificate } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { extname, join, normalize, resolve } from 'node:path'
@@ -130,6 +131,58 @@ class TransportFailure extends Error {
   }
 }
 
+function identityAssertion(origin: URL, cookie: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const send = origin.protocol === 'https:' ? httpsRequest : httpRequest
+    const upstream = send(
+      origin,
+      {
+        path: '/internal/token',
+        method: 'GET',
+        headers: { cookie },
+        agent: false,
+        rejectUnauthorized: true,
+        maxHeaderSize: 8192,
+      },
+      (response) => {
+        const chunks: Buffer[] = []
+        let length = 0
+        response.on('data', (chunk: Buffer) => {
+          length += chunk.length
+          if (length > 8192) upstream.destroy(new Error('oversized identity reply'))
+          else chunks.push(chunk)
+        })
+        response.on('error', () => reject(new TransportFailure(503, 'identity_unavailable')))
+        response.on('end', () => {
+          if (response.statusCode !== 200) {
+            reject(
+              new TransportFailure(
+                response.statusCode === 401 ? 401 : 503,
+                response.statusCode === 401 ? 'authentication_required' : 'identity_unavailable',
+              ),
+            )
+            return
+          }
+          try {
+            const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+            if (
+              typeof value.access_token !== 'string' ||
+              !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value.access_token)
+            )
+              throw new Error('invalid assertion')
+            resolve(value.access_token)
+          } catch {
+            reject(new TransportFailure(503, 'identity_unavailable'))
+          }
+        })
+      },
+    )
+    upstream.setTimeout(5000, () => upstream.destroy(new Error('identity timeout')))
+    upstream.on('error', () => reject(new TransportFailure(503, 'identity_unavailable')))
+    upstream.end()
+  })
+}
+
 function fail(response: ServerResponse, status: number, code: string) {
   if (response.destroyed || response.writableEnded) return
   if (response.headersSent) {
@@ -154,7 +207,7 @@ function fail(response: ServerResponse, status: number, code: string) {
 function collectBody(
   request: IncomingMessage,
   response: ServerResponse,
-  config: ConsoleTransportConfigV1,
+  config: ConsoleTransportConfigV3,
   budget: { bytes: number },
 ) {
   const pages: Buffer[] = []
@@ -239,9 +292,13 @@ function proxy(
   upstream: URL,
   requestPath: string,
   body: BufferedBody,
-  config: ConsoleTransportConfigV1,
+  config: ConsoleTransportConfigV3,
+  objectUpload = false,
 ) {
-  const headers = forwardedHeaders(request.headers)
+  const headers: IncomingHttpHeaders = objectUpload
+    ? { 'content-type': request.headers['content-type'] ?? 'application/octet-stream' }
+    : forwardedHeaders(request.headers)
+  if (!requestPath.startsWith('/_console/v1/auth/')) delete headers.cookie
   headers.host = upstream.host
   // Transfer framing belongs to this hop. The validated body bytes are otherwise unchanged.
   delete headers['content-length']
@@ -268,10 +325,22 @@ function proxy(
       // Explicitly retain system trust and hostname verification, regardless of a caller's
       // NODE_TLS_REJECT_UNAUTHORIZED setting. No transport config can disable verification.
       rejectUnauthorized: true,
+      ...(objectUpload ? { ca: config.upload_ca_pem } : {}),
     },
     (upstreamResponse) => {
       incoming = upstreamResponse
       clearTimeout(headerTimer)
+      if (objectUpload) {
+        const status = upstreamResponse.statusCode ?? 502
+        if (status >= 200 && status < 300) {
+          response.writeHead(204, { 'cache-control': 'no-store', 'content-length': 0 })
+          response.end()
+        } else {
+          fail(response, status === 403 ? 403 : 502, 'object_upload_rejected')
+        }
+        upstreamResponse.destroy()
+        return
+      }
       resetIdle()
       upstreamResponse.on('data', resetIdle)
       upstreamResponse.once('error', () => fail(response, 503, 'gateway_response_interrupted'))
@@ -301,7 +370,7 @@ function proxy(
   response.once('close', stop)
   response.once('finish', stop)
   forwarded.once('error', () => {
-    fail(response, 503, 'gateway_unavailable')
+    fail(response, 503, objectUpload ? 'object_storage_unavailable' : 'gateway_unavailable')
     stop()
   })
   forwarded.once('upgrade', (_reply, socket) => {
@@ -330,6 +399,55 @@ function proxy(
   send()
 }
 
+// This route transports the existing upload capability; it never signs or persists one.
+function objectTarget(request: IncomingMessage, config: ConsoleTransportConfigV3): URL {
+  const invalid = () => {
+    throw new TransportFailure(400, 'invalid_object_upload')
+  }
+  if (!config.upload_origin) throw new TransportFailure(503, 'object_transport_unconfigured')
+  if (request.method !== 'PUT' || request.url !== '/_console/v1/object-upload') invalid()
+  if (request.headers['sec-fetch-site'] && request.headers['sec-fetch-site'] !== 'same-origin')
+    invalid()
+  const origin = request.headers.origin
+  if (origin && new URL(origin).host !== request.headers.host) invalid()
+  const raw = request.headers['x-insight-upload-target']
+  if (typeof raw !== 'string' || raw.length > 8192 || /[\\\s]/.test(raw)) invalid()
+  // Duplicate headers must not be hidden by Node's normalized representation.
+  if (
+    request.rawHeaders.filter(
+      (part, i) => i % 2 === 0 && part.toLowerCase() === 'x-insight-upload-target',
+    ).length !== 1
+  )
+    invalid()
+  const target = new URL(raw as string)
+  if (
+    target.protocol !== 'https:' ||
+    target.origin !== config.upload_origin ||
+    target.username ||
+    target.password ||
+    target.hash ||
+    !target.pathname.startsWith(config.upload_path_prefix) ||
+    target.pathname.length <= config.upload_path_prefix.length ||
+    /%(?:2e|2f|5c|00)/i.test(target.pathname)
+  )
+    invalid()
+  const seen = new Set<string>()
+  for (const [key] of target.searchParams) {
+    if (seen.has(key.toLowerCase())) invalid()
+    seen.add(key.toLowerCase())
+  }
+  if (
+    target.searchParams.get('X-Amz-Algorithm') !== 'AWS4-HMAC-SHA256' ||
+    !target.searchParams.get('X-Amz-Credential') ||
+    !target.searchParams.get('X-Amz-Date') ||
+    !/^[1-9][0-9]*$/.test(target.searchParams.get('X-Amz-Expires') ?? '') ||
+    !/^[a-f0-9]{64}$/.test(target.searchParams.get('X-Amz-Signature') ?? '') ||
+    !target.searchParams.get('X-Amz-SignedHeaders')?.split(';').includes('host')
+  )
+    invalid()
+  return target
+}
+
 export async function startConsoleServer({
   config: input,
   bundleRoot: requestedBundleRoot = defaultBundleRoot,
@@ -338,9 +456,12 @@ export async function startConsoleServer({
   bundleRoot?: string
 }): Promise<ConsoleServer> {
   const config = checkedTransportConfig(input)
+  if (config.upload_origin && !new X509Certificate(config.upload_ca_pem).ca)
+    throw new Error('Console object transport requires a CA certificate')
   const bundleRoot = checkedBundleRoot(requestedBundleRoot)
   const runtime = new URL(config.runtime_origin)
   const management = new URL(config.management_origin)
+  const identity = config.identity_origin ? new URL(config.identity_origin) : null
   const budget = { bytes: 0, requests: 0 }
   const server = createServer(
     {
@@ -372,19 +493,124 @@ export async function startConsoleServer({
         return
       }
       const pathname = target.split('?', 1)[0]
-      if (pathname === '/readyz' || pathname === '/v1' || pathname.startsWith('/v1/')) {
-        const noun = pathname.split('/')[2]?.split(':')[0]
-        const upstream =
-          pathname === '/readyz' || ['runs', 'tasks', 'artifacts'].includes(noun)
-            ? runtime
-            : management
+      if (pathname.startsWith('/_console/v1/auth/')) {
+        if (
+          !['session', 'setup', 'login', 'logout'].some(
+            (action) => target === `/_console/v1/auth/${action}`,
+          )
+        ) {
+          fail(response, 404, 'not_found')
+          return
+        }
+        if (!identity) {
+          if (target !== '/_console/v1/auth/session' || request.method !== 'GET') {
+            fail(response, 404, 'not_found')
+            return
+          }
+          response.writeHead(200, {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+          })
+          response.end(
+            JSON.stringify({
+              schema_version: 1,
+              authentication: 'bearer',
+              setup_required: false,
+              authenticated: false,
+              display_name: null,
+              expires_at: null,
+            }),
+          )
+          return
+        }
+        collectBody(request, response, { ...config, max_request_bytes: 4096 }, budget)
+          .then((body) => {
+            if (response.destroyed) {
+              body.release()
+              return
+            }
+            proxy(request, response, identity, target, body, config)
+          })
+          .catch((error) =>
+            fail(
+              response,
+              error instanceof TransportFailure ? error.status : 503,
+              'identity_unavailable',
+            ),
+          )
+        return
+      }
+      if (pathname === '/_console/v1/object-upload') {
+        let upstream: URL
+        try {
+          upstream = objectTarget(request, config)
+        } catch (error) {
+          fail(
+            response,
+            error instanceof TransportFailure ? error.status : 400,
+            error instanceof TransportFailure ? error.code : 'invalid_object_upload',
+          )
+          return
+        }
         collectBody(request, response, config, budget)
           .then((body) => {
             if (response.destroyed) {
               body.release()
               return
             }
-            proxy(request, response, upstream, target, body, config)
+            proxy(
+              request,
+              response,
+              upstream,
+              upstream.pathname + upstream.search,
+              body,
+              config,
+              true,
+            )
+          })
+          .catch((error) =>
+            fail(
+              response,
+              error instanceof TransportFailure ? error.status : 503,
+              error instanceof TransportFailure ? error.code : 'transport_unavailable',
+            ),
+          )
+        return
+      }
+      if (pathname === '/readyz' || pathname === '/v1' || pathname.startsWith('/v1/')) {
+        const noun = pathname.split('/')[2]?.split(':')[0]
+        const upstream =
+          pathname === '/readyz' || ['runs', 'tasks', 'artifacts', 'conversations'].includes(noun)
+            ? runtime
+            : management
+        collectBody(request, response, config, budget)
+          .then(async (body) => {
+            if (response.destroyed) {
+              body.release()
+              return
+            }
+            try {
+              if (identity && pathname !== '/readyz' && !request.headers.authorization) {
+                if (!['GET', 'HEAD'].includes(request.method ?? '')) {
+                  let sameOrigin = false
+                  try {
+                    sameOrigin = new URL(request.headers.origin ?? '').host === request.headers.host
+                  } catch {
+                    /* rejected below */
+                  }
+                  if (!sameOrigin) throw new TransportFailure(403, 'origin_rejected')
+                }
+                request.headers.authorization = `Bearer ${await identityAssertion(identity, request.headers.cookie ?? '')}`
+              }
+              if (response.destroyed) {
+                body.release()
+                return
+              }
+              proxy(request, response, upstream, target, body, config)
+            } catch (error) {
+              body.release()
+              throw error
+            }
           })
           .catch((error) =>
             fail(

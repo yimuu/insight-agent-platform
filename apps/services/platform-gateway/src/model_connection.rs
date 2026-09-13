@@ -7,7 +7,7 @@ use insight_platform_contracts::{
 
 pub(super) struct PgModelConnections {
     pub repository: Arc<PgRepository>,
-    pub catalog: Option<insight_platform_contracts::ModelInstallationCatalogV1>,
+    pub catalog: Option<insight_platform_contracts::ModelInstallationCatalogV2>,
     pub egress: Arc<dyn super::model_credentials::ModelManagementEgress>,
 }
 #[async_trait]

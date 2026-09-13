@@ -251,55 +251,16 @@ pub(super) async fn verify(
     let mut foreign = read.clone();
     foreign.tenant_id = fresh(ResourceKind::Tenant);
     assert!(repository.authorize_object_read(&foreign).await.is_err());
-    let endpoint = CanonicalHttpEndpoint {
-        scheme: CapabilityEndpointScheme::Https,
-        host: "api.example.com".into(),
-        port: 443,
-        base_path: "/".into(),
-    };
     let protocol = ModelProviderWireProtocol::OpenAiResponses;
-    let catalog = ModelInstallationCatalogV1 {
-        schema_version: 1,
+    let catalog = ModelInstallationCatalogV2 {
+        schema_version: 2,
         environment: seed.environment.clone(),
         secret_provider_id: fresh(ResourceKind::SecretProvider),
         policies: built.configuration_policies(),
-        destinations: vec![ModelInstallationDestinationV1 {
-            adapter: InstalledModelAdapter {
-                qualified_name: protocol.qualified_name().into(),
-                worker_manifest_digest: support::digest("synthetic-installed-model-worker"),
-                adapter_contract_digest: protocol.adapter_contract_digest(),
-            },
-            grant: InstalledModelDestinationGrant {
-                schema_version: 1,
-                protocol,
-                endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
-                endpoint,
-                credential_purpose: MODEL_API_KEY_PURPOSE.parse().unwrap(),
-                network_policy: built
-                    .policy(ModelBootstrapPolicyRole::Network)
-                    .exact
-                    .revision
-                    .clone(),
-                tls_policy: built
-                    .policy(ModelBootstrapPolicyRole::Tls)
-                    .exact
-                    .revision
-                    .clone(),
-                trust_policy: built
-                    .policy(ModelBootstrapPolicyRole::Trust)
-                    .exact
-                    .revision
-                    .clone(),
-                data_policy: built
-                    .policy(ModelBootstrapPolicyRole::Data)
-                    .exact
-                    .revision
-                    .clone(),
-                region: "us-east".parse().unwrap(),
-                development_loopback: false,
-                development_anonymous: false,
-                trusted_root_pem: None,
-            },
+        adapters: vec![InstalledModelAdapter {
+            qualified_name: protocol.qualified_name().into(),
+            worker_manifest_digest: support::digest("synthetic-installed-model-worker"),
+            adapter_contract_digest: protocol.adapter_contract_digest(),
         }],
     };
     assert!(catalog.validate());

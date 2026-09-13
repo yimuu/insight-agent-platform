@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_text",
+    "question"
+  ],
+  "properties": {
+    "schema_text": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 16384,
+      "x-platform-max-bytes": 16384
+    },
+    "question": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 2048,
+      "x-platform-max-bytes": 2048
+    }
+  }
+}

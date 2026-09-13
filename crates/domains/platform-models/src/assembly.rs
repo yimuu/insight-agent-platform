@@ -7,9 +7,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationHistoryRole {
+    User,
+    Assistant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyBlock {
     pub phase: PromptAssemblyPhase,
+    pub history_role: Option<ConversationHistoryRole>,
     pub ordinal: u32,
     pub source_kind: String,
     pub source_id: String,
@@ -133,7 +140,19 @@ pub fn assemble_prompt_messages(
                 | PromptAssemblyPhase::AgentContract
                 | PromptAssemblyPhase::PlanNodeInstruction
         );
-        let role = if trusted_instruction {
+        if (block.phase == PromptAssemblyPhase::ConversationHistory) != block.history_role.is_some()
+        {
+            return Err(PromptAssemblyError::InvalidPhase);
+        }
+        let role = if let Some(role) = block.history_role {
+            if block.source_kind != "conversation_run_value" {
+                return Err(PromptAssemblyError::InvalidSource);
+            }
+            match role {
+                ConversationHistoryRole::User => CanonicalMessageRole::User,
+                ConversationHistoryRole::Assistant => CanonicalMessageRole::Assistant,
+            }
+        } else if trusted_instruction {
             CanonicalMessageRole::Platform
         } else {
             CanonicalMessageRole::User
@@ -318,6 +337,7 @@ mod tests {
         text: &str,
     ) -> PromptAssemblyBlock {
         PromptAssemblyBlock {
+            history_role: None,
             phase,
             ordinal,
             source_kind: "fixture".to_owned(),
@@ -390,6 +410,62 @@ mod tests {
         assert_eq!(
             assemble_prompt_messages(vec![oversized], 8_192, 2_048),
             Err(PromptAssemblyError::BlockBudgetExceeded)
+        );
+    }
+    #[test]
+    fn conversation_history_preserves_alternating_roles_before_current_input() {
+        let mut blocks = vec![
+            block(PromptAssemblyPhase::PlatformSafety, 0, "safety", "safe"),
+            block(PromptAssemblyPhase::AgentContract, 0, "agent", "contract"),
+            block(
+                PromptAssemblyPhase::PlanNodeInstruction,
+                0,
+                "node",
+                "instruction",
+            ),
+            block(
+                PromptAssemblyPhase::UserInput,
+                0,
+                "current",
+                "second question",
+            ),
+        ];
+        for (ordinal, role, text) in [
+            (0, ConversationHistoryRole::User, "first question"),
+            (1, ConversationHistoryRole::Assistant, "first answer"),
+        ] {
+            let mut history = block(
+                PromptAssemblyPhase::ConversationHistory,
+                ordinal,
+                "historical_value",
+                text,
+            );
+            history.history_role = Some(role);
+            history.source_kind = "conversation_run_value".into();
+            blocks.push(history);
+        }
+        blocks[5].classification = DataClassification::Restricted;
+        let assembled = assemble_prompt_messages(blocks.clone(), 4096, 4096).unwrap();
+        assert_eq!(assembled.classification, DataClassification::Restricted);
+        assert_eq!(
+            assembled
+                .messages
+                .iter()
+                .map(|m| m.role)
+                .collect::<Vec<_>>(),
+            vec![
+                CanonicalMessageRole::Platform,
+                CanonicalMessageRole::Platform,
+                CanonicalMessageRole::Platform,
+                CanonicalMessageRole::User,
+                CanonicalMessageRole::Assistant,
+                CanonicalMessageRole::User
+            ]
+        );
+        blocks[4].history_role = None;
+        assert_eq!(
+            assemble_prompt_messages(blocks, 4096, 4096),
+            Err(PromptAssemblyError::InvalidPhase)
         );
     }
 }

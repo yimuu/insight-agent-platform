@@ -76,7 +76,7 @@ class RemoteContextInstallationTests(unittest.TestCase):
     def helm_plan(self):
         path = self.root/'input.json'
         path.write_text(json.dumps(self.declaration('kubernetes')))
-        return self.cli('helm-plan', '--input', path, '--runtime-image', self.image, '--console-image', self.image)
+        return self.cli('helm-values', '--input', path, '--runtime-image', self.image, '--console-image', self.image)['plan']
 
     def test_three_declaration_commands_derive_optional_role_without_manual_network_patch(self):
         for topology in ['compose', 'kubernetes', 'native']:
@@ -111,13 +111,13 @@ class RemoteContextInstallationTests(unittest.TestCase):
         self.destination_file.write_text(json.dumps([grant]))
         self.cli('compose-input', 'helm-test', self.package, '--remote-context-destinations', self.destination_file, success=False)
 
-    def test_helm_real_lookup_gate_renders_selected_role_and_its_private_pvc(self):
+    def test_helm_publication_gate_renders_selected_role_and_its_private_pvc(self):
         plan = self.helm_plan()
-        fixture = helm_tests.HelmTests(methodName='test_live_job_proof_enables_exact_role_mounts_without_api_permissions')
+        fixture = helm_tests.HelmTests(methodName='test_complete_chart_gates_roles_without_workload_management_permissions')
         self.addCleanup(fixture.doCleanups)
         with mock.patch.object(helm_tests, 'owner_plan', return_value=plan):
             fixture.setUp()
-        fixture.test_live_job_proof_enables_exact_role_mounts_without_api_permissions()
+        fixture.test_complete_chart_gates_roles_without_workload_management_permissions()
 
     def test_optional_declaration_file_rejects_links_bad_pem_unknown_fields_and_duplicate_json(self):
         link = self.root/'alias.json'

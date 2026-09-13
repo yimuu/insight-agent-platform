@@ -11,6 +11,7 @@ export interface AgentFormFields {
   displayName: string
   executionKind: AgentExecutionKind
   instructions: string
+  prompt?: string
   modelAlias: string
   classification: string
   deadline: string
@@ -28,11 +29,17 @@ export function buildFormManifest(values: AgentFormFields): string {
       metadata: { name: values.name, displayName: values.displayName || undefined },
       spec: {
         execution:
-          values.executionKind === 'full_plan' || values.executionKind === 'framework_graph'
+          values.executionKind === 'workflow' ||
+          values.executionKind === 'full_plan' ||
+          values.executionKind === 'framework_graph'
             ? { kind: values.executionKind, plan: values.planPath }
             : { kind: values.executionKind },
         instructions: values.executionKind === 'deterministic' ? null : values.instructions || null,
-        model: values.executionKind === 'model_chat' ? { ref: values.modelAlias } : null,
+        prompt: values.executionKind === 'model_chat' ? values.prompt || null : null,
+        model:
+          values.executionKind === 'model_chat' || values.executionKind === 'workflow'
+            ? { ref: values.modelAlias }
+            : null,
         input: { schema: values.inputSchemaPath, classification: values.classification },
         output: { schema: values.outputSchemaPath },
         limits: values.deadline ? { deadlineSeconds: Number(values.deadline) } : null,
@@ -55,6 +62,7 @@ export function updateFormManifest(original: string, fields: AgentFormFields): s
     ['spec', 'execution', 'kind'],
     ['spec', 'execution', 'plan'],
     ['spec', 'instructions'],
+    ['spec', 'prompt'],
     ['spec', 'model', 'ref'],
     ['spec', 'input', 'schema'],
     ['spec', 'input', 'classification'],
@@ -71,7 +79,8 @@ export function updateFormManifest(original: string, fields: AgentFormFields): s
       document.setIn(path, value)
     }
   }
-  if (fields.executionKind !== 'model_chat') document.setIn(['spec', 'model'], null)
+  if (fields.executionKind !== 'model_chat' && fields.executionKind !== 'workflow')
+    document.setIn(['spec', 'model'], null)
   return document.toString({ lineWidth: 0 })
 }
 
@@ -82,6 +91,7 @@ export async function manifestFormFields(manifest: string): Promise<AgentFormFie
     metadata: { name: string; displayName?: string }
     spec: {
       instructions?: string
+      prompt?: string
       input: { classification: string }
       limits?: { deadlineSeconds: number }
       publish?: { environment: string }
@@ -92,6 +102,7 @@ export async function manifestFormFields(manifest: string): Promise<AgentFormFie
     displayName: document.metadata.displayName ?? '',
     executionKind: inspected.executionKind,
     instructions: document.spec.instructions ?? '',
+    prompt: document.spec.prompt ?? '',
     modelAlias: inspected.modelRef ?? '',
     classification: document.spec.input.classification,
     deadline: document.spec.limits ? String(document.spec.limits.deadlineSeconds) : '',
@@ -172,7 +183,11 @@ export async function readEditableSourceBundle(text: string): Promise<EditableAg
     fields.inputSchemaPath,
     fields.outputSchemaPath,
   ])
-  if (fields.executionKind === 'full_plan' || fields.executionKind === 'framework_graph')
+  if (
+    fields.executionKind === 'workflow' ||
+    fields.executionKind === 'full_plan' ||
+    fields.executionKind === 'framework_graph'
+  )
     expected.add(fields.planPath)
   if (Object.keys(files).some((path) => !expected.has(path)))
     throw new Error(
@@ -187,7 +202,9 @@ export async function readEditableSourceBundle(text: string): Promise<EditableAg
     inputSchema: source(fields.inputSchemaPath),
     outputSchema: source(fields.outputSchemaPath),
     plan:
-      fields.executionKind === 'full_plan' || fields.executionKind === 'framework_graph'
+      fields.executionKind === 'workflow' ||
+      fields.executionKind === 'full_plan' ||
+      fields.executionKind === 'framework_graph'
         ? source(fields.planPath)
         : '',
     slotBindings,

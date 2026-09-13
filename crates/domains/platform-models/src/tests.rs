@@ -254,7 +254,16 @@ fn fixture() -> Fixture {
     };
     let provider_closure = ModelProviderDeploymentClosure {
         provider_revision: provider_revision.clone(),
-        endpoint_identity_digest: sha('4'),
+        endpoint: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap(),
+        endpoint_identity_digest: insight_platform_contracts::normalize_model_base_url(
+            "https://api.example.com/v1",
+        )
+        .unwrap()
+        .canonical_digest()
+        .unwrap(),
         secret_bindings: vec![exact_secret_binding(43)],
         protocol_policy: protocol_policy.clone(),
         network_policy: policy(32, '5'),
@@ -1073,7 +1082,7 @@ fn cancel_wins_against_late_completion_and_stream_is_fenced() {
 fn live_text_delta_is_closed_and_fence_bound() {
     let fixture = fixture();
     let delta = ModelLiveTextDelta {
-        schema_version: 1,
+        schema_version: 2,
         tenant_id: fixture.command.audit.tenant_id.clone(),
         run_id: fixture.command.run_id.clone(),
         model_turn_id: fixture.command.model_turn_id.clone(),
@@ -1082,6 +1091,7 @@ fn live_text_delta_is_closed_and_fence_bound() {
         attempt_no: 1,
         lease_generation: 1,
         transport_sequence: 1,
+        text_sequence: 1,
         request_digest: crate::types::digest(&fixture.request).unwrap(),
         classification: fixture.request.classification,
         text: "bounded live text".to_owned(),

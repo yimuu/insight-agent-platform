@@ -260,6 +260,17 @@ const server = createServer(async (request, response) => {
   requestCount += 1
   const url = new URL(request.url ?? '/', `http://${host}:${port}`)
   const authorizationPresent = typeof request.headers.authorization === 'string'
+  if (url.pathname === '/_console/v1/auth/session') {
+    sendJson(response, 200, {
+      schema_version: 1,
+      authentication: 'bearer',
+      setup_required: false,
+      authenticated: false,
+      display_name: null,
+      expires_at: null,
+    })
+    return
+  }
   process.stdout.write(
     `${JSON.stringify({
       authorization_present: authorizationPresent,

@@ -29,6 +29,7 @@ test('WASM adapter preserves the Rust v2 corpus and binds the new complete sourc
   for (const fixture of corpus.cases) {
     const compiled = await compileAgentManifest({
       manifest: await text(fixture.manifest),
+      plan: fixture.plan ? await text(fixture.plan) : undefined,
       inputSchema: await text(fixture.input_schema),
       outputSchema: await text(fixture.output_schema),
       profile: corpus.profile,

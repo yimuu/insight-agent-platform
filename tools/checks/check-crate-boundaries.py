@@ -71,7 +71,8 @@ INTERNAL_ROLES = {
 
 ALLOWED_INTERNAL = {
     "openbao_adapter": {"contracts", "deployment_contracts"},
-    "installation_tooling": {"contracts", "deployment_contracts", "deployment_tooling", "artifact_broker", "registry_domain", "openbao_adapter"},
+    # ADR-0017: the explicit provisioning upgrade command owns storage DDL.
+    "installation_tooling": {"contracts", "deployment_contracts", "deployment_tooling", "artifact_broker", "registry_domain", "openbao_adapter", "storage_tooling"},
     "deployment_tooling": {"contracts", "deployment_contracts", "plan_domain", "agent_compiler", "registry_domain", "context_domain", "artifacts_domain", "mcp_host"},
     "history_maintenance": {"contracts", "deployment_contracts", "orchestrator_domain", "platform_postgres", "observability", "observability_http", "platform_worker"},
     "execution_context": {"contracts"},
@@ -114,7 +115,7 @@ ALLOWED_INTERNAL = {
     "context_worker": {"plan_domain", "artifact_rpc", "artifacts_domain", "context_domain", "contracts", "egress_rpc", "execution_context", "jobs_domain", "mcp_rpc", "observability", "observability_http", "platform_postgres", "platform_worker", "rpc_trace"},
     # The public Gateway is the control-plane composition root. It binds HTTP application ports
     # to owner adapters but does not execute user code or become durable state authority.
-    "public_gateway": {"agent_compiler", "artifacts_domain", "context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "observability_http", "orchestrator_domain", "plan_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain", "security_domain", "egress_rpc", "execution_context"},
+    "public_gateway": {"models_domain", "agent_compiler", "artifacts_domain", "context_domain", "contracts", "invocations_domain", "jobs_domain", "mcp_host", "observability", "observability_http", "orchestrator_domain", "plan_domain", "platform_api", "platform_postgres", "registry_domain", "tasks_domain", "security_domain", "egress_rpc", "execution_context"},
     "egress_core": {"capability_adapters", "context_domain", "contracts", "jobs_domain", "mcp_host", "model_adapters", "sandbox_domain", "security_domain"},
     "egress_broker": {"contracts", "egress_core", "egress_rpc", "model_adapters", "observability", "observability_http", "secret_broker", "security_rpc"},
     "egress_rpc": {"capability_adapters", "context_domain", "contracts", "egress_core", "execution_context", "mcp_host", "model_adapters", "rpc_trace", "sandbox_domain", "security_domain"},
@@ -163,7 +164,8 @@ ALLOWED_DEV_INTERNAL = {
     # implement its three leaf connector traits. These edges are test-only; the shipped Host still
     # reaches provider/MCP networks solely through the egress_rpc dependency.
     "mcp_service": {"capability_adapters", "model_adapters"},
-    "platform_postgres": {"artifact_broker", "artifact_rpc", "capability_adapters", "model_adapters", "egress_core", "egress_rpc", "mcp_runtime", "mcp_transport"},
+    # ADR-0017 fixtures exercise the actual Gateway SSE and Worker claim driver against PG.
+    "platform_postgres": {"platform_api", "public_gateway", "model_worker", "artifact_broker", "artifact_rpc", "capability_adapters", "model_adapters", "egress_core", "egress_rpc", "mcp_runtime", "mcp_transport"},
     # Cross-plane qualification targets compose real durable authority with physical execution
     # adapters. This package has no production targets or normal internal dependencies.
     # Public Agent fixtures use the owning compiler to publish complete SourceBundle/Plan proofs.
@@ -190,6 +192,8 @@ ALLOWED_DEV_INTERNAL = {
 # Test harnesses may install a tracing collector without granting production crates permission to
 # own subscriber configuration. The dependency must remain dev-only; a normal/build edge fails.
 ALLOWED_DEV_DIRECT = {
+    # Production HTTP composition for the ADR-0017 PG/live-stream fixture, never serving storage.
+    "platform_postgres": {"axum"},
     "mcp_host": {"tokio"},
     "opensandbox_client": {"axum"},
     "platform_api": {"tracing-subscriber"},

@@ -1,18 +1,18 @@
 use super::*;
 use insight_platform_api::model_configuration::*;
-use insight_platform_contracts::{ArtifactRef, ModelInstallationCatalogV1};
+use insight_platform_contracts::{ArtifactRef, ModelInstallationCatalogV2};
 use insight_platform_registry::model_configuration::*;
 
 pub(super) struct PgModelConfiguration {
     pub repository: Arc<PgRepository>,
-    pub catalog: Option<ModelInstallationCatalogV1>,
+    pub catalog: Option<ModelInstallationCatalogV2>,
 }
 impl PgModelConfiguration {
     fn installed(
         &self,
         intent: &ModelConfigurationIntent,
         digest: Option<&Sha256Digest>,
-    ) -> Result<&ModelInstallationCatalogV1, ModelConfigurationApplicationError> {
+    ) -> Result<&ModelInstallationCatalogV2, ModelConfigurationApplicationError> {
         if intent.deadline <= chrono::Utc::now() {
             return Err(ModelConfigurationApplicationError::Unavailable);
         }
@@ -28,7 +28,7 @@ impl PgModelConfiguration {
     async fn facts(
         &self,
         intent: &ModelConfigurationIntent,
-        catalog: &ModelInstallationCatalogV1,
+        catalog: &ModelInstallationCatalogV2,
         input: Option<&ModelConfigurationInputV1>,
         artifact: Option<&ArtifactRef>,
     ) -> Result<Option<ModelConfigurationSourceFacts>, ModelConfigurationApplicationError> {
@@ -112,10 +112,10 @@ impl ModelConfigurationApplication for PgModelConfiguration {
     async fn catalog(
         &self,
         intent: ModelConfigurationIntent,
-    ) -> Result<ModelConfigurationCatalogViewV1, ModelConfigurationApplicationError> {
+    ) -> Result<ModelConfigurationCatalogViewV2, ModelConfigurationApplicationError> {
         let catalog = self.installed(&intent, None)?;
         self.facts(&intent, catalog, None, None).await?;
-        ModelConfigurationCatalogViewV1::from_catalog(catalog)
+        ModelConfigurationCatalogViewV2::from_catalog(catalog)
     }
     async fn declare(
         &self,
@@ -169,7 +169,7 @@ impl ModelConfigurationApplication for PgModelConfiguration {
 fn compiler_error(error: ModelConfigurationError) -> ModelConfigurationApplicationError {
     match error {
         ModelConfigurationError::Invalid => ModelConfigurationApplicationError::Invalid,
-        ModelConfigurationError::DestinationNotInstalled => {
+        ModelConfigurationError::DestinationRejected => {
             ModelConfigurationApplicationError::NotFound
         }
         ModelConfigurationError::SourceMismatch | ModelConfigurationError::DeclarationMismatch => {

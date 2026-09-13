@@ -25,6 +25,10 @@ SSE 的成功响应给出 public sequence 高水位、retention floor 与历史�
 
 Model 与 Run/Node 终态事件的公共投影修正已通过真实 PostgreSQL 回归，见
 [实现证据](../specs/unified-installation/model-public-event-review.md#recorded-local-evidence)。事件和 Run
-序号保留原事务，公共页只提供身份、版本和时间等安全元数据；结果正文仍需原内容读取授权。
+序号保留原事务，公共页提供身份、版本和时间等安全元数据。模型终态失败可附固定安全说明：仅在事件与失败调用的租户、Run、身份和版本精确一致时显示，不将后续尝试的原因贴到历史事件。说明由平台闭合常量生成，未知或旧的通用记录不推断具体原因；不公开厂商原文、提示词或输出内容。结果正文仍需原内容读取授权。
 O 的真实公共 CLI Run 已取得完整事件及类型化结果，见[部署证据](../specs/unified-installation/deployment-review.md#o-current-delivery-evidence)。
 历史失败记录不回填，不能因旧事件缺失而重跑 provider 请求。
+
+执行详情查询直接读取当前 NodeExecution 或 ModelTurn authority，返回状态、时间和同一 Run 内的值元数据。
+节点的值按真实 NodeExecution 关联；模型输入输出取 invocation 的精确引用，不用整次 Run 结果代替。
+元数据沿用 RuntimeRead，正文继续通过独立内容接口授权；列表有界并明确标记截断，不返回模型 attempt payload。

@@ -34,6 +34,7 @@ pub enum PromptAssemblyPhase {
     RequiredSkill,
     SelectedSkill,
     ContextObservation,
+    ConversationHistory,
     UserInput,
     ModelAssistant,
     CapabilityToolResult,
@@ -76,6 +77,11 @@ impl ModelContentSource {
                     | PromptAssemblyPhase::ContextObservation
                     | PromptAssemblyPhase::UserInput
             ) && role != CanonicalMessageRole::User)
+            || (self.assembly_phase == PromptAssemblyPhase::ConversationHistory
+                && (!matches!(
+                    role,
+                    CanonicalMessageRole::User | CanonicalMessageRole::Assistant
+                ) || self.source_kind != "conversation_run_value"))
             || (self.assembly_phase == PromptAssemblyPhase::CapabilityToolResult
                 && role != CanonicalMessageRole::Tool)
             || (self.assembly_phase == PromptAssemblyPhase::ModelAssistant

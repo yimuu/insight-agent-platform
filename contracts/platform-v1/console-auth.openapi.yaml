@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: Local Console identity
+  version: 1.0.0
+paths:
+  /_console/v1/auth/session:
+    get:
+      operationId: consoleSession
+      responses:
+        '200':
+          description: Current owner setup and browser-session state; never an access token.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Session'}
+        '503': {description: Identity store unavailable}
+  /_console/v1/auth/setup:
+    post:
+      operationId: setupConsoleOwner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OwnerSetup'}
+      responses:
+        '201': {description: First owner and opaque cookie created atomically}
+        '400': {description: Invalid bounded input}
+        '403': {description: Cross-origin request rejected}
+        '409': {description: Owner already configured}
+        '429': {description: Hashing capacity exhausted}
+        '503': {description: Identity store unavailable}
+  /_console/v1/auth/login:
+    post:
+      operationId: loginConsoleOwner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Login'}
+      responses:
+        '200': {description: Opaque cookie issued}
+        '400': {description: Invalid bounded input}
+        '401': {description: Invalid credentials}
+        '403': {description: Cross-origin request rejected}
+        '429': {description: Attempt or hashing capacity exhausted}
+        '503': {description: Identity store unavailable}
+  /_console/v1/auth/logout:
+    post:
+      operationId: logoutConsoleOwner
+      responses:
+        '204': {description: Session revoked and cookie cleared}
+        '403': {description: Cross-origin request rejected}
+        '503': {description: Identity store unavailable}
+components:
+  schemas:
+    Login:
+      type: object
+      additionalProperties: false
+      required: [schema_version, email, password]
+      properties:
+        schema_version: {const: 1}
+        email: {type: string, minLength: 3, maxLength: 254, format: email}
+        password: {type: string, minLength: 12, maxLength: 256}
+    OwnerSetup:
+      type: object
+      additionalProperties: false
+      required: [schema_version, email, password, display_name]
+      properties:
+        schema_version: {const: 1}
+        email: {type: string, minLength: 3, maxLength: 254, format: email}
+        password: {type: string, minLength: 12, maxLength: 256}
+        display_name: {type: string, minLength: 1, maxLength: 128}
+    Session:
+      type: object
+      additionalProperties: false
+      required: [schema_version, authentication, setup_required, authenticated, display_name, expires_at]
+      properties:
+        schema_version: {const: 1}
+        authentication: {enum: [local_owner, bearer]}
+        setup_required: {type: boolean}
+        authenticated: {type: boolean}
+        display_name: {type: [string, 'null'], maxLength: 128}
+        expires_at: {type: [string, 'null'], format: date-time}

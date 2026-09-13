@@ -14,6 +14,91 @@ pub enum ModelProviderWireProtocol {
     AnthropicMessages,
 }
 
+/// Physical policy for destinations chosen by an authorized, frozen Provider deployment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledModelPublicEgressV1 {
+    pub schema_version: u32,
+    pub protocols: Vec<ModelProviderWireProtocol>,
+    pub credential_purpose: SecretPurpose,
+    pub network_policy: ExactVersionRef,
+    pub tls_policy: ExactVersionRef,
+    pub trust_policy: ExactVersionRef,
+    pub data_policy: ExactVersionRef,
+}
+impl InstalledModelPublicEgressV1 {
+    pub fn validate(&self) -> bool {
+        let policies = [
+            &self.network_policy,
+            &self.tls_policy,
+            &self.trust_policy,
+            &self.data_policy,
+        ];
+        self.schema_version == 1
+            && !self.protocols.is_empty()
+            && self.protocols.len() <= 2
+            && self
+                .protocols
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == self.protocols.len()
+            && self.credential_purpose.as_str() == crate::MODEL_API_KEY_PURPOSE
+            && policies
+                .iter()
+                .all(|p| p.resource_kind == ResourceKind::PolicyRevision && p.validate().is_ok())
+            && policies
+                .iter()
+                .map(|p| &p.revision_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == 4
+    }
+    pub fn destination(
+        &self,
+        protocol: ModelProviderWireProtocol,
+        endpoint: CanonicalHttpEndpoint,
+        region: DataRegion,
+    ) -> Option<InstalledModelDestinationGrant> {
+        if !self.validate()
+            || !self.protocols.contains(&protocol)
+            || endpoint.scheme != crate::CapabilityEndpointScheme::Https
+            || endpoint.validate().is_err()
+            || endpoint.host == "localhost"
+            || endpoint.host.ends_with(".localhost")
+            || endpoint.host.parse::<std::net::IpAddr>().is_ok()
+        {
+            return None;
+        }
+        Some(InstalledModelDestinationGrant {
+            schema_version: 1,
+            protocol,
+            endpoint_identity_digest: endpoint.canonical_digest().ok()?,
+            endpoint,
+            credential_purpose: self.credential_purpose.clone(),
+            network_policy: self.network_policy.clone(),
+            tls_policy: self.tls_policy.clone(),
+            trust_policy: self.trust_policy.clone(),
+            data_policy: self.data_policy.clone(),
+            region,
+            development_loopback: false,
+            development_anonymous: false,
+            trusted_root_pem: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelEgressRoutingV1 {
+    PublicHttps {
+        grant: Box<InstalledModelPublicEgressV1>,
+    },
+    Fixed {
+        destinations: Vec<InstalledModelDestinationGrant>,
+    },
+}
+
 impl ModelProviderWireProtocol {
     pub const fn qualified_name(self) -> &'static str {
         match self {

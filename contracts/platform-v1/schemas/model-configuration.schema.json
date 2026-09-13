@@ -62,6 +62,36 @@
                     "data_policy": {
                       "$ref": "#/$defs/ExactVersionRef"
                     },
+                    "endpoint": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "base_path": {
+                          "maxLength": 2048,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "host": {
+                          "maxLength": 253,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "port": {
+                          "maximum": 65535,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "scheme": {
+                          "const": "https"
+                        }
+                      },
+                      "required": [
+                        "base_path",
+                        "host",
+                        "port",
+                        "scheme"
+                      ],
+                      "type": "object"
+                    },
                     "endpoint_identity_digest": {
                       "$ref": "nominal/digest.schema.json"
                     },
@@ -93,6 +123,7 @@
                   "required": [
                     "admission_evidence",
                     "data_policy",
+                    "endpoint",
                     "endpoint_identity_digest",
                     "network_policy",
                     "protocol_policy",
@@ -375,49 +406,9 @@
       ],
       "type": "object"
     },
-    "ModelConfigurationCatalogViewV1": {
+    "ModelConfigurationCatalogViewV2": {
       "additionalProperties": false,
       "properties": {
-        "destinations": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "base_url": {
-                "maxLength": 8448,
-                "minLength": 1,
-                "type": "string"
-              },
-              "destination_digest": {
-                "$ref": "nominal/digest.schema.json"
-              },
-              "endpoint_identity_digest": {
-                "$ref": "nominal/digest.schema.json"
-              },
-              "protocol": {
-                "enum": [
-                  "open_ai_responses",
-                  "anthropic_messages"
-                ]
-              },
-              "region": {
-                "maxLength": 32,
-                "minLength": 1,
-                "type": "string"
-              }
-            },
-            "required": [
-              "base_url",
-              "destination_digest",
-              "endpoint_identity_digest",
-              "protocol",
-              "region"
-            ],
-            "type": "object"
-          },
-          "maxItems": 64,
-          "minItems": 1,
-          "type": "array"
-        },
         "environment": {
           "maxLength": 64,
           "pattern": "^[a-z0-9_-]{1,64}$",
@@ -429,8 +420,20 @@
         "maximum_classification": {
           "const": "internal"
         },
+        "protocols": {
+          "items": {
+            "enum": [
+              "open_ai_responses",
+              "anthropic_messages"
+            ]
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
         "schema_version": {
-          "const": 1
+          "const": 2
         },
         "secret_provider_id": {
           "pattern": "^spr_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -438,10 +441,10 @@
         }
       },
       "required": [
-        "destinations",
         "environment",
         "installation_digest",
         "maximum_classification",
+        "protocols",
         "schema_version",
         "secret_provider_id"
       ],
@@ -487,24 +490,64 @@
                 "credential": {
                   "$ref": "#/$defs/ExactSecretBindingRef"
                 },
-                "destination_digest": {
-                  "$ref": "nominal/digest.schema.json"
-                },
                 "display_name": {
                   "maxLength": 255,
                   "minLength": 1,
                   "type": "string",
                   "x-insight-max-utf8-bytes": 255
                 },
+                "endpoint": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "base_path": {
+                      "maxLength": 2048,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "host": {
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "port": {
+                      "maximum": 65535,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "scheme": {
+                      "const": "https"
+                    }
+                  },
+                  "required": [
+                    "base_path",
+                    "host",
+                    "port",
+                    "scheme"
+                  ],
+                  "type": "object"
+                },
+                "protocol": {
+                  "enum": [
+                    "open_ai_responses",
+                    "anthropic_messages"
+                  ]
+                },
+                "region": {
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "type": "string"
+                },
                 "schema_version": {
-                  "const": 1
+                  "const": 2
                 }
               },
               "required": [
                 "alias",
                 "credential",
-                "destination_digest",
                 "display_name",
+                "endpoint",
+                "protocol",
+                "region",
                 "schema_version"
               ],
               "type": "object"

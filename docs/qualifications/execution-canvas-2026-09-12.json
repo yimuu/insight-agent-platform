@@ -1,0 +1,37 @@
+{
+  "date": "2026-09-12",
+  "scope": "Execution canvas current state and source-specific values",
+  "runtime_image": "sha256:dce2e11f4aa741013543cefee3936f1a73c3259a5dc20f61e9f5030aba180335",
+  "console_image": "sha256:b3d367715f590a309272144d981b6f8a9b96e72f5d2873fc5d5fb2d4f3045977",
+  "existing_run": {
+    "id": "run_01a093ba-cdc7-7481-933b-2f1198b11d3d",
+    "node_execution_details": 3,
+    "model_turn_details": 1,
+    "all_current_states": "succeeded",
+    "model_input_and_output_independently_readable": true
+  },
+  "new_run": {
+    "conversation_id": "cnv_01a093d3-cf46-7852-91bf-287b33c58c48",
+    "id": "run_01a093d3-cf53-7a41-afee-238c9884169c",
+    "state": "succeeded",
+    "public_events": 11,
+    "node_completed_events": 3,
+    "model_input_value_id": "val_01a093d3-d09b-7411-84cb-4391b8411ef2",
+    "model_output_value_id": "val_01a093d3-dbc3-7833-af1f-f5ecc4f45b40",
+    "model_input_messages": 5,
+    "model_input_bytes": 6118,
+    "model_output_bytes": 768
+  },
+  "checks": {
+    "focused_frontend_tests_passed": 25,
+    "typescript_build": "passed",
+    "console_image_build": "passed",
+    "contract_generation_and_checks": "passed",
+    "postgres_execution_detail_tests": "passed",
+    "public_controller_completion_mapping_test": "passed",
+    "installation_readiness": "passed",
+    "interactive_browser_verification": "not completed: browser automation timed out"
+  },
+  "data_preserved": true,
+  "temporary_verification_resources_removed": true
+}

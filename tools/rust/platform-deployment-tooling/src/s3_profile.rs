@@ -241,7 +241,9 @@ pub fn server_arguments() -> Vec<String> {
         "-iam=false",
         "-master.volumeSizeLimitMB=64",
         "-master.telemetry=false",
-        "-volume.max=4",
+        // Artifact buckets and the filer metadata log use separate collections. Leave room
+        // for both; four volumes are consumed by the first bucket alone.
+        "-volume.max=16",
         "-s3.ip.bind=0.0.0.0",
         "-s3.port=8333",
         "-s3.port.https=0",

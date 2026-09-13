@@ -465,8 +465,10 @@ fn compile_project_with_bindings(
             resolution.execution_kind,
             agent_compiler::AgentExecutionKind::FullPlan
                 | agent_compiler::AgentExecutionKind::FrameworkGraph
-        ) && (resolution.execution_kind != agent_compiler::AgentExecutionKind::ModelChat
-            || bindings.model.is_none()
+        ) && (!matches!(
+            resolution.execution_kind,
+            AgentExecutionKind::ModelChat | AgentExecutionKind::Workflow
+        ) || bindings.model.is_none()
             || !bindings.slots.is_empty())
         {
             return Err(AgentCommandError::InvalidLocalState(
@@ -792,15 +794,19 @@ pub fn published_run_defaults(
 pub fn list_remote_agents(
     client: &PublicHttpClient,
 ) -> Result<Vec<AgentSummaryV1>, AgentCommandError> {
-    let mut cursor = None;
+    let mut cursor: Option<String> = None;
     let mut agents = Vec::new();
     loop {
-        let path = cursor.as_ref().map_or_else(
-            || "/v1/agents?page_size=50".to_owned(),
-            |cursor: &String| format!("/v1/agents?page_size=50&cursor={cursor}"),
-        );
+        let mut query = vec![("page_size".to_owned(), "50".to_owned())];
+        if let Some(cursor) = &cursor {
+            query.push(("cursor".to_owned(), cursor.clone()));
+        }
         let page = client
-            .get_body_json::<ListPageV1<AgentSummaryV1>>(&path, StatusCode::OK)?
+            .get_body_json_query::<ListPageV1<AgentSummaryV1>>(
+                "/v1/agents",
+                &query,
+                StatusCode::OK,
+            )?
             .body;
         if page.schema_version != 1 || page.items.len() > 50 {
             return Err(AgentCommandError::InvalidAuthority(
@@ -1941,6 +1947,138 @@ fn io_error(path: &Path, error: std::io::Error) -> AgentCommandError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn workflow_uses_one_exact_model_and_preserves_author_source() {
+        let directory = crate::agent_entry_tests::project();
+        let corpus = crate::workspace_assets::workspace_path(
+            "contracts/product-experience/agent-compiler/v2",
+        );
+        let cases: serde_json::Value =
+            serde_json::from_slice(&fs::read(corpus.join("corpus.json")).unwrap()).unwrap();
+        let case = cases["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| !case["bindings"]["model"].is_null())
+            .unwrap();
+        let bindings: ResolvedAgentBindings =
+            serde_json::from_value(case["bindings"].clone()).unwrap();
+        let manifest = fs::read_to_string(corpus.join("model-chat.yaml"))
+            .unwrap()
+            .replace(
+                "kind: model_chat",
+                "kind: workflow\n    plan: workflow.json",
+            );
+        fs::write(directory.path().join("agent.yaml"), manifest).unwrap();
+        fs::copy(
+            corpus.join("schema-answer.json"),
+            directory.path().join("schema-answer.json"),
+        )
+        .unwrap();
+        let output: serde_json::Value =
+            serde_json::from_slice(&fs::read(corpus.join("schema-answer.json")).unwrap()).unwrap();
+        let workflow = serde_json::json!({"version":1,"steps":[{"id":"answer","prompt":"Read {{input.message}}","output":output}],"output":{"answer":"{{nodes.answer.output.answer}}"}}).to_string();
+        fs::write(directory.path().join("workflow.json"), &workflow).unwrap();
+        let sources = capture_project_sources(directory.path(), Path::new("agent.yaml")).unwrap();
+        let resolution = sources.resolution;
+        let sources = sources.sources;
+        let profile = offline_compiler_profile(directory.path()).unwrap();
+        let compile = |bindings| {
+            compile_project_with_bindings(
+                directory.path(),
+                Path::new("agent.yaml"),
+                profile.clone(),
+                Some(bindings),
+                None,
+                sources.clone(),
+                resolution.clone(),
+            )
+        };
+        let compiled = compile(bindings.clone()).unwrap();
+        assert_eq!(
+            compiled.compiled.execution_kind,
+            AgentExecutionKind::Workflow
+        );
+        let frozen: AgentSourceBundleV1 =
+            serde_json::from_slice(&compiled.source_bundle_bytes).unwrap();
+        assert_eq!(frozen.sources.files["workflow.json"], workflow);
+        let source_map: agent_compiler::AgentSourceMapV1 =
+            serde_json::from_slice(&compiled.source_map_bytes).unwrap();
+        for (node, pointer) in [
+            ("prompt.answer", "/steps/0/prompt"),
+            ("step.answer", "/steps/0"),
+            ("result", "/output"),
+        ] {
+            assert!(source_map
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.target.ir_pointer() == format!("/nodes/{node}")
+                        && entry.source.file == "workflow.json"
+                        && entry.source.source_pointer == pointer
+                ));
+        }
+        let mut missing = bindings.clone();
+        missing.model = None;
+        assert!(matches!(
+            compile(missing),
+            Err(AgentCommandError::InvalidLocalState(_))
+        ));
+        let mut unrelated = bindings.clone();
+        let model = bindings.model.unwrap();
+        unrelated
+            .slots
+            .push(insight_platform_contracts::AgentSlotBindingInputV1 {
+                slot_id: "unrelated".into(),
+                requirement_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .parse()
+                        .unwrap(),
+                target: insight_platform_contracts::AgentSlotTargetInputV1::Model {
+                    candidates: vec![model.deployment],
+                    selection_policy: model.selection_policy,
+                },
+            });
+        assert!(matches!(
+            compile(unrelated),
+            Err(AgentCommandError::InvalidLocalState(_))
+        ));
+    }
+
+    #[test]
+    fn agent_list_sends_bounded_encoded_query_for_each_page() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for (index, query) in ["page_size=50", "page_size=50&cursor=opaque%2Bcursor%2F%3D"]
+                .iter()
+                .enumerate()
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 8192];
+                let count = stream.read(&mut request).unwrap();
+                assert!(std::str::from_utf8(&request[..count])
+                    .unwrap()
+                    .starts_with(&format!("GET /v1/agents?{query} HTTP/1.1")));
+                let body = serde_json::json!({"schema_version":1,"items":[],"next_cursor":if index==0 {Some("opaque+cursor/=")} else {None}}).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncache-control: no-store, private, max-age=0\r\ntrace-id: 11111111111111111111111111111111\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let client = PublicHttpClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".into(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(list_remote_agents(&client).unwrap().is_empty());
+        server.join().unwrap();
+    }
 
     #[test]
     fn lock_round_trips_privately_and_rejects_wrong_id_kinds() {

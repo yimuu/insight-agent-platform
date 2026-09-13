@@ -7,9 +7,9 @@
 use crate::repository::PgRepository;
 use async_trait::async_trait;
 use insight_platform_artifacts::{
-    BrokeredSchedulerSkillInstructionMaterializer, SchedulerSkillPackageLease,
-    SchedulerSkillPackageReader, SchedulerSkillPackageRequestResolver,
-    MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
+    BrokeredSchedulerSkillInstructionMaterializer, SchedulerRunValueLease, SchedulerRunValueReader,
+    SchedulerRunValueRequestResolver, SchedulerSkillPackageLease, SchedulerSkillPackageReader,
+    SchedulerSkillPackageRequestResolver, MAX_SCHEDULER_SKILL_PACKAGE_BYTES,
 };
 use insight_platform_contracts::{
     canonical_digest, canonical_json, checked_in_hard_limit_profile, CapabilityBackendBinding,
@@ -73,6 +73,7 @@ impl PostgresControllerModelPolicyLoader {
 pub struct PostgresControllerModelAdmissionProvider {
     repository: PgRepository,
     skill_materializer: Arc<BrokeredSchedulerSkillInstructionMaterializer>,
+    history_reader: Arc<dyn SchedulerRunValueReader>,
 }
 
 impl PostgresControllerModelAdmissionProvider {
@@ -80,9 +81,11 @@ impl PostgresControllerModelAdmissionProvider {
         repository: PgRepository,
         skill_resolver: Arc<dyn SchedulerSkillPackageRequestResolver>,
         skill_reader: Arc<dyn SchedulerSkillPackageReader>,
+        history_reader: Arc<dyn SchedulerRunValueReader>,
     ) -> Self {
         Self {
             repository,
+            history_reader,
             skill_materializer: Arc::new(BrokeredSchedulerSkillInstructionMaterializer::new(
                 skill_resolver,
                 skill_reader,
@@ -179,6 +182,7 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
         }
 
         let mut blocks = vec![PromptAssemblyBlock {
+            history_role: None,
             phase: PromptAssemblyPhase::PlatformSafety,
             ordinal: 0,
             source_kind: "model_safety_policy".to_owned(),
@@ -257,6 +261,7 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
                 })?;
             for section in sections {
                 blocks.push(PromptAssemblyBlock {
+                    history_role: None,
                     phase: PromptAssemblyPhase::SelectedSkill,
                     ordinal: skill_ordinal,
                     source_kind: "skill_instruction".to_owned(),
@@ -273,6 +278,57 @@ impl ControllerModelAdmissionProvider for PostgresControllerModelAdmissionProvid
                     .ok_or(DurablePlanDriverError::InvariantViolation)?;
             }
         }
+        let historical_values = self
+            .repository
+            .load_conversation_history_for_run(&request.tenant_id, &request.run_id)
+            .await
+            .map_err(map_repository_error)?;
+        for historical in historical_values {
+            let value = if let Some(value) = historical.inline.clone() {
+                value
+            } else {
+                let lease = SchedulerRunValueLease {
+                    tenant_id: request.tenant_id.clone(),
+                    run_id: request.run_id.clone(),
+                    orchestration_job_id: request.lease.orchestration_job_id.clone(),
+                    worker_process_generation_id: request
+                        .lease
+                        .worker_process_generation_id
+                        .clone(),
+                    lease_generation: request.lease.lease_generation,
+                    lease_token_digest: request.lease.lease_token_digest.clone(),
+                    run_value_id: historical.value_id.clone(),
+                    request_digest: digest_value(
+                        &serde_json::json!({"operation":"conversation.history.read", "run_id":request.run_id,"value_id":historical.value_id,"digest":historical.content_digest,"job":request.lease.orchestration_job_id,"generation":request.lease.lease_generation}),
+                    )?,
+                    maximum_bytes: historical.budget_bytes,
+                    deadline: request.deadline.min(request.lease.deadline),
+                };
+                let read = self
+                    .repository
+                    .resolve_run_value_read(lease)
+                    .await
+                    .map_err(|_| DurablePlanDriverError::FenceLost)?;
+                let bytes =
+                    self.history_reader
+                        .read_exact(read)
+                        .await
+                        .map_err(|error| match error {
+                            insight_platform_artifacts::SchedulerRunValueReadError::Unavailable => {
+                                DurablePlanDriverError::Unavailable
+                            }
+                            _ => DurablePlanDriverError::FenceLost,
+                        })?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| DurablePlanDriverError::InvariantViolation)?
+            };
+            blocks.push(historical.into_block(value).map_err(map_repository_error)?);
+        }
+        // Recheck after external reads before emitting any assembled conversation prompt.
+        self.repository
+            .load_conversation_history_for_run(&request.tenant_id, &request.run_id)
+            .await
+            .map_err(map_repository_error)?;
         let input_text = canonical_text(&request.input_value.value)?;
         blocks.push(exact_block(
             PromptAssemblyPhase::UserInput,
@@ -489,6 +545,7 @@ fn exact_block(
         .ok_or(DurablePlanDriverError::InvariantViolation)?
         .max(1);
     Ok(PromptAssemblyBlock {
+        history_role: None,
         phase,
         ordinal,
         source_kind: source_kind.to_owned(),

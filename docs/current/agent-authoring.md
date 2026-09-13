@@ -14,8 +14,31 @@ Console 不提供丢弃未完成恢复记录后隐式重发的入口。
 
 CLI 和 Console 在查询任何作者依赖前，先把同一组有界源文件交给共享 Rust 源预检，校验清单、schema 和本地可判定的 Plan 结构。预检只返回编辑诊断，不构成编译或发布证据；当前权限、exact 部署、功能闭包和 policy 仍在解析后由完整编译及 Registry 终裁。解析期间文件变化不会混入已捕获的这次编译。
 
+Console 新建对话 Agent 使用适合多行输入与长回答的有界文本字段；输入字节上限与会话提交边界一致。字段上限是结果校验条件，实际生成长度还取决于模型输出 Token 与上下文预算。调整新建默认值不会改变已发布接口或恢复的作者源；旧 Agent 的字段限制需要修改作者源并重新发布。
+
 Context 观察结果与引用的时间使用既有 `UtcTimestamp` 格式，在计算内容摘要前统一为 UTC 六位微秒。
 系统或提供方的纳秒精度不会改变输出 Schema；读取拒绝非规范时间，摘要核验仍覆盖实际输出字节。
+
+## 提示词变量与顺序工作流
+
+`model_chat` 可通过可选 `spec.prompt` 引用 `{{ input.field }}`。静态 `spec.instructions`
+保持原文，不做插值；渲染后的 prompt 作为 user 输入对象发送给模型，不把输入或模型输出
+提升为系统指令。没有 prompt 时，model_chat 继续传入完整输入对象。
+
+顺序工作流使用 `execution.kind: workflow`、`execution.plan: workflow.yaml` 和共享的
+`spec.model.ref`。作者文件包含有版本的步骤列表和最终输出映射，每步声明 prompt 和内联
+输出对象 Schema。后续步骤可通过 `{{ nodes.step_id.output.field }}` 引用此前步骤结果。
+例子见[Text2SQL 工作流](../../examples/productization/text2sql/README.md)，字段和
+限制由 [workflow owning types](../../crates/authoring/platform-agent-compiler/src/workflow.rs) 定义。
+
+首版支持嵌套对象中的必填、有界字符串，拒绝可选值、数组索引、隐式类型转换、自引用和前向
+引用。最终映射精确覆盖公开输出对象的顶层字符串字段。双花括号为保留分隔符，不支持字面
+转义；插入值不再解释为模板。编译保守计算字符、UTF-8 和 JSON 转义上界，运行时继续检查
+实际 Schema 和模型预算。模型轮次和 token 预算逐步骤生效，deadline 约束整次 Run。
+
+workflow 编译为已有 Compute、ModelLoop 和 Return，原作者文件保存在 source bundle 中。
+CLI、Console 和 Registry 使用同一编译语义。它不接受旧版 DSL，也不取代 full_plan 的分支、
+并行、工具和多模型能力。compiler semantic identity 已升级，旧身份源包不会静默回退编译。
 
 ## 完整计划与依赖
 

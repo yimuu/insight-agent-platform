@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-12",
+  "scope": "Local long conversation output, safe failure summaries and model editing after package rollout",
+  "runtime_image": "sha256:fde6a63e73f1587765771852309304c97f8e2dac753bf23e86ec1610ffb3d9bd",
+  "console_image": "sha256:6ffb1bf6e95ef965d86e9c4ca76c89df249c9c61e402d62a32ddf75167b41751",
+  "actual_installation": {
+    "name": "my-platform",
+    "schema_version": 17,
+    "preserving_data_rollout": "passed",
+    "readiness": "passed",
+    "before": { "conversations": 3, "turns": 6, "runs": 11 },
+    "after": { "conversations": 5, "turns": 8, "runs": 13 },
+    "added_records": "One unsuccessful 1024-token verification and one successful 2048-token verification; original conversations, runs and frozen deployments retained."
+  },
+  "actual_model_conversation": {
+    "status": "passed",
+    "transport": "Authenticated public HTTP and live-text SSE against production Compose services and the configured provider",
+    "agent_id": "agt_01a092f1-da1f-7872-ad49-78851077d6be",
+    "agent_deployment_id": "adep_01a09391-f7ad-77e2-b123-1ca2c7e32085",
+    "model_deployment_id": "mdep_01a09391-aa14-7e42-997b-032081f9c057",
+    "conversation_id": "cnv_01a09392-387c-7b32-8c69-39aab1d06508",
+    "run_id": "run_01a09392-388e-7250-9293-5d66c97b4723",
+    "state": "succeeded",
+    "frozen_max_output_tokens": 2048,
+    "frozen_answer_max_length": 16384,
+    "answer_characters": 511,
+    "answer_utf8_bytes": 1527,
+    "text_frames": 112,
+    "first_text_seconds": 9.974,
+    "terminal_seconds": 20.075,
+    "existing_provider_and_credential_retained": true,
+    "model_and_agent_changed_via_public_publication": true
+  },
+  "targeted_evidence": {
+    "console_typecheck_and_docker_build": "passed",
+    "console_conversation_model_publication_and_graph_tests": 35,
+    "adapter_tests": 56,
+    "answer_128_character_limit_rejects_500_characters_without_truncating": "passed",
+    "diagnostic_static_allowlist": "passed",
+    "postgres_exact_run_tenant_invocation_version_and_untrusted_message_checks": "passed",
+    "http_run_tests_including_nonempty_safe_summary": 10,
+    "cli_pagination_and_cursor_encoding": "passed",
+    "model_edit_accepts_only_manifest_change_rejects_contract_name_credential_drift": "passed",
+    "independent_contract_and_implementation_review": "passed",
+    "interactive_browser_verification": "not performed"
+  }
+}

@@ -6,7 +6,8 @@ use insight_platform_deployment_contracts::installation::{
     InstallationDatabaseRoleEvidenceV1, InstallationInputV1, InstallationTopology,
     INSTALLATION_LIMITS, INSTALLATION_MAX_BYTES,
 };
-use sqlx::{postgres::PgPoolOptions, Row as _};
+use insight_platform_storage_tooling::privileges::effective_privileges;
+use sqlx::postgres::PgPoolOptions;
 use std::{
     io::{Read as _, Write as _},
     path::Path,
@@ -16,6 +17,12 @@ const RUNTIME: &[Role] = &[Role {
     marker: "Insight development runtime DML v1",
     variable: ":'development_runtime_role'",
     password_file: "runtime-password",
+}];
+const LOCAL_IDENTITY: &[Role] = &[Role {
+    name: "insight_local_identity_dev",
+    marker: "Insight local identity DML v1",
+    variable: ":'local_identity_role'",
+    password_file: "local-identity-password",
 }];
 
 pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
@@ -54,6 +61,10 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
     let purpose: Purpose = serde_json::from_value(serde_json::Value::String(purpose.clone()))
         .map_err(|_| "installation role purpose invalid")?;
     let (roles, grants) = match purpose {
+        Purpose::LocalIdentity => (
+            LOCAL_IDENTITY,
+            insight_platform_postgres::local_identity_role_grants_sql(),
+        ),
         Purpose::Runtime => (
             RUNTIME,
             insight_platform_postgres::development_runtime_role_grants_sql(),
@@ -284,54 +295,6 @@ async fn validate_role(
         return Err("installation role has unexpected authority");
     }
     Ok(())
-}
-async fn effective_privileges(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    role: &str,
-) -> Result<serde_json::Value, &'static str> {
-    let rows=sqlx::query(r#"SELECT c.relname,a.attname,p.privilege,pg_catalog.has_column_privilege($1,c.oid,a.attnum,p.privilege) AS allowed
- FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
- JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
- CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
- WHERE n.nspname='insight_platform' AND c.relkind='r' ORDER BY c.relname,a.attnum,p.privilege"#).bind(role).fetch_all(&mut **tx).await.map_err(|_|"installation column privileges unavailable")?;
-    let mut columns = Vec::new();
-    for row in rows {
-        columns.push(serde_json::json!([
-            row.try_get::<String, _>("relname")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<String, _>("attname")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<String, _>("privilege")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<bool, _>("allowed")
-                .map_err(|_| "privilege evidence invalid")?
-        ]));
-    }
-    let rows=sqlx::query(r#"SELECT c.relname,p.privilege,pg_catalog.has_table_privilege($1,c.oid,p.privilege) AS allowed FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace CROSS JOIN (VALUES('DELETE'),('TRUNCATE'),('TRIGGER')) p(privilege) WHERE n.nspname='insight_platform' AND c.relkind='r' ORDER BY c.relname,p.privilege"#).bind(role).fetch_all(&mut **tx).await.map_err(|_|"installation table privileges unavailable")?;
-    let mut tables = Vec::new();
-    for row in rows {
-        tables.push(serde_json::json!([
-            row.try_get::<String, _>("relname")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<String, _>("privilege")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<bool, _>("allowed")
-                .map_err(|_| "privilege evidence invalid")?
-        ]));
-    }
-    let rows=sqlx::query(r#"SELECT p.oid::regprocedure::text AS signature,pg_catalog.has_function_privilege($1,p.oid,'EXECUTE') AS allowed FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='insight_platform' ORDER BY p.oid::regprocedure::text"#).bind(role).fetch_all(&mut **tx).await.map_err(|_|"installation function privileges unavailable")?;
-    let mut functions = Vec::new();
-    for row in rows {
-        functions.push(serde_json::json!([
-            row.try_get::<String, _>("signature")
-                .map_err(|_| "privilege evidence invalid")?,
-            row.try_get::<bool, _>("allowed")
-                .map_err(|_| "privilege evidence invalid")?
-        ]));
-    }
-    Ok(
-        serde_json::json!({"schema_version":1,"columns":columns,"tables":tables,"functions":functions}),
-    )
 }
 fn check_directory(path: &Path) -> Result<(), &'static str> {
     if !path.is_absolute() {

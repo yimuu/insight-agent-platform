@@ -1,5 +1,9 @@
 # ADR-0010：统一安装与多来源模型配置
 
+Deployment lifecycle update: [ADR-0012](0012-declarative-container-installation.md) supersedes the
+host-controlled Compose/Helm phases and OpenBao initialization/serving switch described below.
+Other accepted ownership and security decisions remain in force.
+
 状态：本文记录的架构子边界已联合接受（Accepted）并实现；整体验收仍有独立待验证项。
 当前实现、真实部署结果及外部/人工验收范围见[统一交付索引](../specs/unified-installation/README.md)。
 架构接受不等于每个拓扑、厂商能力或完整示例都已取得资格。

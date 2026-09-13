@@ -198,7 +198,7 @@ function cdp(url, signal) {
 }
 
 const panel = (kicker) =>
-  `[...document.querySelectorAll('article[data-ui~=panel]')].find(item => item.querySelector(':scope > [data-ui~=kicker], :scope > [data-ui~=panel__heading] [data-ui~=kicker]')?.textContent.trim() === ${literal(kicker)})`
+  `[...document.querySelectorAll('[data-ui~=panel]')].find(item => item.querySelector(':scope > [data-ui~=kicker], :scope > [data-ui~=panel__heading] [data-ui~=kicker]')?.textContent.trim() === ${literal(kicker)})`
 const metric = (label) =>
   `[...document.querySelectorAll('[data-ui~=metric]')].find(item => item.querySelector('dt')?.textContent.trim() === ${literal(label)})?.querySelector('dd')?.textContent.trim()`
 function click(label, scope = 'document') {
@@ -353,16 +353,14 @@ export async function runInstalledModelChat(options) {
     await evaluate(`document.querySelector('[data-ui~=connection-form]').requestSubmit()`)
     await waitFor(`!!document.querySelector('nav [aria-current=page]')`)
     await evaluate(
-      `(() => { const item=[...document.querySelectorAll('nav button')].find(item=>item.textContent.trim().endsWith('智能体')); if(!item || item.disabled) throw 0; item.click(); })()`,
+      `(() => { const item=[...document.querySelectorAll('nav a')].find(item=>item.textContent.trim().endsWith('智能体')); if(!item || item.disabled) throw 0; item.click(); })()`,
     )
-    await waitFor(
-      `[...document.querySelectorAll('button')].some(item => item.textContent.trim()==='创建智能体' && !item.disabled)`,
-    )
+    await waitFor(`!!document.querySelector('[data-ui~=agent-create]:not(:disabled)')`)
     // Read every bounded UI page before writing. Never treat an incomplete first page as absence.
     for (let page = 0; ; page++) {
       requireCondition(
         !(await evaluate(
-          `[...document.querySelectorAll('[data-ui~=agent-row]')].some(item => item.querySelector('div > span')?.textContent.trim()===${literal(options.agentName)})`,
+          `[...document.querySelectorAll('[data-ui~=agent-row]')].some(item => item.querySelector('[data-ui~=agent-name]')?.textContent.trim()===${literal(options.agentName)})`,
         )),
         'agent_name_already_present',
       )
@@ -375,7 +373,7 @@ export async function runInstalledModelChat(options) {
       requireCondition(page < 15, 'agent_list_exceeded_bound')
       // Wait for this specific React async handler to cross busy -> idle, even for a fast page.
       await evaluate(`new Promise((done, failed) => {
-        const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()==='创建智能体');
+        const button=document.querySelector('[data-ui~=agent-create]');
         const next=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()==='下一页');
         if(!button || !next || next.disabled) throw 0;
         let busy=false;
@@ -389,19 +387,17 @@ export async function runInstalledModelChat(options) {
       })`)
       await observe()
     }
-    await evaluate(click('创建智能体'))
+    await evaluate(`document.querySelector('[data-ui~=agent-create]').click()`)
     await stage('compile')
-    await evaluate(setField('名称', options.agentName))
-    await evaluate(setField('显示名称', options.agentName))
+    await evaluate(`document.querySelector('[data-ui~=editor] details summary').click()`)
+    await evaluate(setField('资源标识', options.agentName))
+    await evaluate(setField('智能体名称', options.agentName))
     await evaluate(setField('任务类型', 'model_chat'))
     await evaluate(click('下一步'))
     await waitFor(
       `Array.from((${field('模型')})?.options ?? []).some(item => item.value==='project/default')`,
     )
     await evaluate(setField('模型', 'project/default'))
-    await evaluate(setField('数据分类', 'internal'))
-    await evaluate(setField('超时秒数', '120'))
-    await evaluate(setField('发布环境', ''))
     await evaluate(
       setField(
         '任务指令',
@@ -410,6 +406,9 @@ export async function runInstalledModelChat(options) {
     )
     await evaluate(click('下一步'))
     await evaluate(click('下一步'))
+    await evaluate(setField('数据分类', 'internal'))
+    await evaluate(setField('超时秒数', '120'))
+    await evaluate(setField('发布环境', ''))
     await evaluate(click('校验配置', 'document.querySelector("[data-ui~=editor]")'))
     await waitFor(
       `document.body.innerText.includes(${literal(`${options.agentName} 校验通过，依赖已解析。`)})`,
@@ -419,24 +418,24 @@ export async function runInstalledModelChat(options) {
     await stage('publish')
     await evaluate(click('发布智能体', 'document.querySelector("[data-ui~=editor]")'))
     await waitFor(
-      `(() => { const row=[...document.querySelectorAll('[data-ui~=agent-row]')].find(item => item.querySelector('div > span')?.textContent.trim()===${literal(options.agentName)}); return row?.querySelector('[data-ui~=status]')?.getAttribute('data-status')==='ready'; })()`,
+      `(() => { const row=[...document.querySelectorAll('[data-ui~=agent-row]')].find(item => item.querySelector('[data-ui~=agent-name]')?.textContent.trim()===${literal(options.agentName)}); return row?.querySelector('[data-ui~=status]')?.getAttribute('data-status')==='ready'; })()`,
     )
     report.agent_id = await evaluate(
-      `[...document.querySelectorAll('[data-agent-id]')].find(node => node.querySelector('div > span')?.textContent.trim() === ${literal(options.agentName)})?.dataset.agentId`,
+      `[...document.querySelectorAll('[data-agent-id]')].find(node => node.querySelector('[data-ui~=agent-name]')?.textContent.trim() === ${literal(options.agentName)})?.dataset.agentId`,
     )
     requireCondition(resourceId('agt').test(report.agent_id), 'missing_agent_identity')
     await stage('create_run')
     await evaluate(
       click(
         '运行',
-        `[...document.querySelectorAll('[data-ui~=agent-row]')].find(item => item.querySelector('div > span')?.textContent.trim()===${literal(options.agentName)})`,
+        `[...document.querySelectorAll('[data-ui~=agent-row]')].find(item => item.querySelector('[data-ui~=agent-name]')?.textContent.trim()===${literal(options.agentName)})`,
       ),
     )
     await waitFor(
-      `[...document.querySelectorAll('button')].some(item => item.textContent.trim()==='开始运行' && !item.disabled)`,
+      `[...document.querySelectorAll('button')].some(item => item.textContent.trim()==='发送并运行' && !item.disabled)`,
     )
-    await evaluate(setField('message（必填）', expectedAnswer))
-    await evaluate(click('开始运行'))
+    await evaluate(setField('任务内容', expectedAnswer))
+    await evaluate(click('发送并运行'))
     await waitFor(`!!${panel('运行详情')}?.querySelector('[data-ui~=status]')`)
     report.run_id = await evaluate(metric('运行 ID'))
     report.agent_deployment_id = await evaluate(metric('智能体部署'))
@@ -468,7 +467,7 @@ export async function runInstalledModelChat(options) {
       report.run_state = current
       if (current === 'succeeded') {
         const resultText = await waitFor(
-          `(() => { const text=${panel('运行结果')}?.querySelector('details > pre')?.textContent; if(text && new TextEncoder().encode(text).length>16384) throw 0; return text; })()`,
+          `(() => { const text=document.querySelector('[data-ui~=run-result]')?.querySelector('details > pre')?.textContent; if(text && new TextEncoder().encode(text).length>16384) throw 0; return text; })()`,
         )
         const result = JSON.parse(resultText)
         requireCondition(

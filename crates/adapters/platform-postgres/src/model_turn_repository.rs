@@ -1656,7 +1656,7 @@ async fn update_model_turn(
     Ok(())
 }
 
-async fn load_model_turn(
+pub(crate) async fn load_model_turn(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     model_turn_id: &ResourceId,
@@ -1756,7 +1756,7 @@ fn model_turn_from_row(
     Ok(record)
 }
 
-async fn load_model_job(
+pub(crate) async fn load_model_job(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &ResourceId,
     job_id: &ResourceId,

@@ -9,11 +9,13 @@ pub const BASIC_MODEL_PLATFORM_INSTRUCTION: &str = "Follow the Agent contract an
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelSourceConfigurationV1 {
+pub struct ModelSourceConfigurationV2 {
     pub schema_version: u16,
     pub alias: ResourceAlias,
     pub display_name: String,
-    pub destination_digest: Sha256Digest,
+    pub protocol: ModelProviderWireProtocol,
+    pub endpoint: CanonicalHttpEndpoint,
+    pub region: DataRegion,
     pub credential: ExactSecretBindingRef,
 }
 
@@ -38,7 +40,7 @@ pub struct BasicModelConfigurationV1 {
     deny_unknown_fields
 )]
 pub enum ModelConfigurationInputV1 {
-    Source(ModelSourceConfigurationV1),
+    Source(ModelSourceConfigurationV2),
     Model(BasicModelConfigurationV1),
 }
 
@@ -89,6 +91,7 @@ impl ModelConfigurationDeclarationV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelProviderConfigurationBindingsV1 {
+    pub endpoint: CanonicalHttpEndpoint,
     pub endpoint_identity_digest: Sha256Digest,
     pub secret_bindings: Vec<ExactSecretBindingRef>,
     pub protocol_policy: ExactVersionRef,
@@ -136,7 +139,7 @@ pub struct CompiledModelConfigurationV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelConfigurationError {
     Invalid,
-    DestinationNotInstalled,
+    DestinationRejected,
     SourceMismatch,
     DeclarationMismatch,
 }
@@ -175,11 +178,11 @@ pub fn basic_provider_request_limits() -> ProviderRequestLimits {
     }
 }
 
-fn source_destination<'a>(
-    input: &ModelSourceConfigurationV1,
-    catalog: &'a ModelInstallationCatalogV1,
-) -> Result<&'a ModelInstallationDestinationV1, ModelConfigurationError> {
-    if input.schema_version != 1
+fn source_destination(
+    input: &ModelSourceConfigurationV2,
+    catalog: &ModelInstallationCatalogV2,
+) -> Result<ResolvedModelConfigurationDestination, ModelConfigurationError> {
+    if input.schema_version != 2
         || !valid_display_name(&input.display_name)
         || !catalog.validate()
         || input.credential.validate().is_err()
@@ -189,18 +192,13 @@ fn source_destination<'a>(
         return Err(ModelConfigurationError::Invalid);
     }
     catalog
-        .destinations
-        .iter()
-        .find(|destination| {
-            destination.canonical_digest().as_ref() == Ok(&input.destination_digest)
-        })
-        .filter(|destination| destination.grant.credential_purpose == input.credential.purpose)
-        .ok_or(ModelConfigurationError::DestinationNotInstalled)
+        .destination(input.protocol, input.endpoint.clone(), input.region.clone())
+        .ok_or(ModelConfigurationError::DestinationRejected)
 }
 
 pub fn declare_model_source(
-    input: &ModelSourceConfigurationV1,
-    catalog: &ModelInstallationCatalogV1,
+    input: &ModelSourceConfigurationV2,
+    catalog: &ModelInstallationCatalogV2,
 ) -> Result<ModelConfigurationDeclarationV1, ModelConfigurationError> {
     let destination = source_destination(input, catalog)?;
     ModelConfigurationDeclarationV1::new(json!({
@@ -214,8 +212,8 @@ pub fn declare_model_source(
 }
 
 pub fn compile_model_source(
-    input: &ModelSourceConfigurationV1,
-    catalog: &ModelInstallationCatalogV1,
+    input: &ModelSourceConfigurationV2,
+    catalog: &ModelInstallationCatalogV2,
     artifact: &ArtifactRef,
 ) -> Result<CompiledModelConfigurationV1, ModelConfigurationError> {
     let destination = source_destination(input, catalog)?;
@@ -246,6 +244,7 @@ pub fn compile_model_source(
         declaration,
         deployment: ModelConfigurationDeploymentV1::ModelProvider(
             ModelProviderConfigurationBindingsV1 {
+                endpoint: grant.endpoint.clone(),
                 endpoint_identity_digest: grant.endpoint_identity_digest.clone(),
                 secret_bindings: vec![input.credential.clone()],
                 protocol_policy: catalog.policies.protocol.clone(),
@@ -272,12 +271,12 @@ pub struct ModelConfigurationSourceFacts {
     pub provider: ModelProviderResourceSpec,
 }
 
-fn model_destination<'a>(
+fn model_destination(
     input: &BasicModelConfigurationV1,
-    catalog: &'a ModelInstallationCatalogV1,
+    catalog: &ModelInstallationCatalogV2,
     source: &ModelConfigurationSourceFacts,
     now: DateTime<Utc>,
-) -> Result<&'a ModelInstallationDestinationV1, ModelConfigurationError> {
+) -> Result<ResolvedModelConfigurationDestination, ModelConfigurationError> {
     let identity = ProviderModelIdentity {
         value: input.model.clone(),
         stability: ModelIdentityStability::ExternallyMutable,
@@ -306,27 +305,42 @@ fn model_destination<'a>(
     {
         return Err(ModelConfigurationError::Invalid);
     }
-    catalog
-        .destinations
-        .iter()
-        .find(|destination| {
-            let grant = &destination.grant;
-            destination.adapter == source.provider.installed_adapter
-                && grant.endpoint_identity_digest == source.closure.endpoint_identity_digest
-                && grant.network_policy == source.closure.network_policy
-                && grant.tls_policy == source.closure.tls_policy
-                && grant.trust_policy == source.closure.trust_policy
-                && grant.data_policy == source.closure.data_policy
-                && grant.region == source.closure.region
-                && source
-                    .closure
-                    .secret_bindings
-                    .iter()
-                    .filter(|binding| binding.purpose == grant.credential_purpose)
-                    .count()
-                    == 1
-        })
-        .ok_or(ModelConfigurationError::SourceMismatch)
+    let protocol = [
+        ModelProviderWireProtocol::OpenAiResponses,
+        ModelProviderWireProtocol::AnthropicMessages,
+    ]
+    .into_iter()
+    .find(|p| source.provider.installed_adapter.qualified_name == p.qualified_name())
+    .ok_or(ModelConfigurationError::SourceMismatch)?;
+    let destination = catalog
+        .destination(
+            protocol,
+            source.closure.endpoint.clone(),
+            source.closure.region.clone(),
+        )
+        .ok_or(ModelConfigurationError::SourceMismatch)?;
+    let grant = &destination.grant;
+    // The frozen manifest is publication evidence; semantic compatibility is name + contract.
+    // Actual execution still verifies the current worker's advertised capability and lease.
+    if destination.adapter.qualified_name != source.provider.installed_adapter.qualified_name
+        || destination.adapter.adapter_contract_digest
+            != source.provider.installed_adapter.adapter_contract_digest
+        || grant.endpoint_identity_digest != source.closure.endpoint_identity_digest
+        || grant.network_policy != source.closure.network_policy
+        || grant.tls_policy != source.closure.tls_policy
+        || grant.trust_policy != source.closure.trust_policy
+        || grant.data_policy != source.closure.data_policy
+        || source
+            .closure
+            .secret_bindings
+            .iter()
+            .filter(|binding| binding.purpose == grant.credential_purpose)
+            .count()
+            != 1
+    {
+        return Err(ModelConfigurationError::SourceMismatch);
+    }
+    Ok(destination)
 }
 
 pub fn basic_model_parameter_schema() -> Result<ClosedJsonSchema, ModelConfigurationError> {
@@ -336,7 +350,7 @@ pub fn basic_model_parameter_schema() -> Result<ClosedJsonSchema, ModelConfigura
 
 pub fn declare_basic_model(
     input: &BasicModelConfigurationV1,
-    catalog: &ModelInstallationCatalogV1,
+    catalog: &ModelInstallationCatalogV2,
     source: &ModelConfigurationSourceFacts,
     now: DateTime<Utc>,
 ) -> Result<ModelConfigurationDeclarationV1, ModelConfigurationError> {
@@ -394,7 +408,7 @@ pub fn declare_basic_model(
 
 pub fn compile_basic_model(
     input: &BasicModelConfigurationV1,
-    catalog: &ModelInstallationCatalogV1,
+    catalog: &ModelInstallationCatalogV2,
     source: &ModelConfigurationSourceFacts,
     artifact: &ArtifactRef,
     now: DateTime<Utc>,
@@ -467,43 +481,28 @@ mod tests {
             .unwrap(),
         }
     }
-    fn catalog() -> ModelInstallationCatalogV1 {
-        let endpoint =
-            normalize_model_base_url("https://api.example.com/compatible-mode/v1").unwrap();
-        ModelInstallationCatalogV1 {
-            schema_version: 1,
+    fn catalog() -> ModelInstallationCatalogV2 {
+        ModelInstallationCatalogV2 {
+            schema_version: 2,
             environment: "local".to_owned(),
             secret_provider_id: id(ResourceKind::SecretProvider, 41),
-            policies: ModelConfigurationPoliciesV1 {
+            policies: ModelConfigurationPoliciesV2 {
                 protocol: policy(1),
                 safety: policy(2),
                 budget: policy(3),
                 public_projection: policy(4),
                 selection: binding(5),
                 execution: binding(6),
+                network: policy(7),
+                tls: policy(8),
+                trust: policy(9),
+                data: policy(10),
             },
-            destinations: vec![ModelInstallationDestinationV1 {
-                adapter: InstalledModelAdapter {
-                    qualified_name: OPENAI_RESPONSES_ADAPTER_NAME.to_owned(),
-                    worker_manifest_digest: sha(30),
-                    adapter_contract_digest: ModelProviderWireProtocol::OpenAiResponses
-                        .adapter_contract_digest(),
-                },
-                grant: InstalledModelDestinationGrant {
-                    schema_version: 1,
-                    protocol: ModelProviderWireProtocol::OpenAiResponses,
-                    endpoint_identity_digest: endpoint.canonical_digest().unwrap(),
-                    endpoint,
-                    credential_purpose: MODEL_API_KEY_PURPOSE.parse().unwrap(),
-                    network_policy: policy(7),
-                    tls_policy: policy(8),
-                    trust_policy: policy(9),
-                    data_policy: policy(10),
-                    region: "cn-beijing".parse().unwrap(),
-                    development_loopback: false,
-                    development_anonymous: false,
-                    trusted_root_pem: None,
-                },
+            adapters: vec![InstalledModelAdapter {
+                qualified_name: OPENAI_RESPONSES_ADAPTER_NAME.to_owned(),
+                worker_manifest_digest: sha(30),
+                adapter_contract_digest: ModelProviderWireProtocol::OpenAiResponses
+                    .adapter_contract_digest(),
             }],
         }
     }
@@ -522,11 +521,14 @@ mod tests {
     #[test]
     fn source_and_model_compile_to_valid_owning_documents_with_exact_declarations() {
         let catalog = catalog();
-        let input = ModelSourceConfigurationV1 {
-            schema_version: 1,
+        let input = ModelSourceConfigurationV2 {
+            schema_version: 2,
             alias: "dashscope.work".parse().unwrap(),
             display_name: "Work source".to_owned(),
-            destination_digest: catalog.destinations[0].canonical_digest().unwrap(),
+            endpoint: normalize_model_base_url("https://api.example.com/compatible-mode/v1")
+                .unwrap(),
+            protocol: ModelProviderWireProtocol::OpenAiResponses,
+            region: "cn-beijing".parse().unwrap(),
             credential: ExactSecretBindingRef::build(
                 id(ResourceKind::SecretBinding, 40),
                 1,
@@ -554,6 +556,7 @@ mod tests {
             )
             .unwrap(),
             closure: ModelProviderDeploymentClosure {
+                endpoint: bindings.endpoint,
                 provider_revision: ExactVersionRef::new(
                     id(ResourceKind::ModelProviderRevision, 45),
                     sha(45),
@@ -581,6 +584,32 @@ mod tests {
             maximum_output_tokens: 1024,
             declared_at: now,
         };
+        let original_source = source.clone();
+        let mut rebuilt_catalog = catalog.clone();
+        rebuilt_catalog.adapters[0].worker_manifest_digest = sha(51);
+        assert_eq!(
+            declare_basic_model(&model, &rebuilt_catalog, &source, now).unwrap(),
+            declare_basic_model(&model, &catalog, &source, now).unwrap()
+        );
+        assert_eq!(source.deployment, original_source.deployment);
+        assert_eq!(source.closure, original_source.closure);
+        assert_eq!(source.provider, original_source.provider);
+        for changed_name in [false, true] {
+            let mut incompatible = source.clone();
+            if changed_name {
+                incompatible.provider.installed_adapter.qualified_name =
+                    "unsupported.adapter".into();
+            } else {
+                incompatible
+                    .provider
+                    .installed_adapter
+                    .adapter_contract_digest = sha(52);
+            }
+            assert!(declare_basic_model(&model, &rebuilt_catalog, &incompatible, now).is_err());
+        }
+        let mut missing_credential = source.clone();
+        missing_credential.closure.secret_bindings.clear();
+        assert!(declare_basic_model(&model, &rebuilt_catalog, &missing_credential, now).is_err());
         let declaration = declare_basic_model(&model, &catalog, &source, now).unwrap();
         let compiled =
             compile_basic_model(&model, &catalog, &source, &artifact(&declaration, 46), now)
@@ -624,10 +653,10 @@ mod tests {
             Err(ModelConfigurationError::SourceMismatch)
         );
         let mut other = input.clone();
-        other.destination_digest = sha(51);
+        other.endpoint.host = "localhost".to_owned();
         assert_eq!(
             declare_model_source(&other, &catalog),
-            Err(ModelConfigurationError::DestinationNotInstalled)
+            Err(ModelConfigurationError::DestinationRejected)
         );
     }
 }

@@ -179,7 +179,7 @@ paths:
             Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
           content:
             application/json:
-              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelConfigurationCatalogViewV1"}
+              schema: {$ref: "./schemas/model-configuration.schema.json#/$defs/ModelConfigurationCatalogViewV2"}
         "400": {$ref: "#/components/responses/PrivateApiProblem"}
         "401": {$ref: "#/components/responses/PrivateApiProblem"}
         "403": {$ref: "#/components/responses/PrivateApiProblem"}
@@ -805,6 +805,10 @@ paths:
         "413": {description: The bounded request body exceeds the route limit.}
         "500": {$ref: "#/components/responses/ApiProblem"}
         "503": {$ref: "#/components/responses/ApiProblem"}
+  "/conversations": {"get": {"operationId": "listConversations", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "runtime.read", "parameters": [{"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}}, {"name": "cursor", "in": "query", "required": false, "schema": {"$ref": "#/components/schemas/OpaqueListCursor"}}, {"name": "agent_id", "in": "query", "required": false, "schema": {"$ref": "#/components/schemas/AgentId"}}], "responses": {"200": {"description": "Authorized conversation projection.", "headers": {"Cache-Control": {"$ref": "#/components/headers/PrivateNoStore"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConversationListPageV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}}, "post": {"operationId": "createConversation", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "agent.run", "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "responses": {"201": {"description": "Authorized conversation projection.", "headers": {"Cache-Control": {"$ref": "#/components/headers/PrivateNoStore"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConversationViewV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}, "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateConversationRequestV1"}}}}}}
+  "/conversations/{id}": {"get": {"operationId": "readConversation", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "runtime.read", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/ConversationId"}}], "responses": {"200": {"description": "Authorized conversation projection.", "headers": {"Cache-Control": {"$ref": "#/components/headers/PrivateNoStore"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConversationViewV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}}}
+  "/conversations/{id}/turns": {"get": {"operationId": "listConversationTurns", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "runtime.read", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/ConversationId"}}, {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}}, {"name": "cursor", "in": "query", "required": false, "schema": {"$ref": "#/components/schemas/OpaqueListCursor"}}], "responses": {"200": {"description": "Authorized conversation projection.", "headers": {"Cache-Control": {"$ref": "#/components/headers/PrivateNoStore"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConversationTurnPageV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}}, "post": {"operationId": "sendConversationMessage", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "agent.run", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/ConversationId"}}, {"$ref": "#/components/parameters/IdempotencyKey"}, {"$ref": "#/components/parameters/IfMatch"}], "responses": {"201": {"description": "Authorized conversation projection.", "headers": {"Cache-Control": {"$ref": "#/components/headers/PrivateNoStore"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConversationTurnViewV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}, "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SendConversationRequestV1"}}}}}}
+  "/runs/{run_id}/live-text": {"get": {"operationId": "streamRunLiveText", "tags": ["Runs"], "x-insight-authentication": "oidc_or_workload_credential", "x-insight-permission": "runtime.read", "description": "Lossy current text observation with current content authorization. No Last-Event-ID or replay. Final result is independently authorized.", "parameters": [{"$ref": "#/components/parameters/RunId"}], "responses": {"200": {"description": "Bounded live SSE; event equals payload kind; no id.", "content": {"text/event-stream": {"schema": {"type": "string"}, "x-insight-json-event-data": {"$ref": "#/components/schemas/RunLiveTextFrameV1"}}}}, "400": {"$ref": "#/components/responses/ApiProblem"}, "401": {"$ref": "#/components/responses/ApiProblem"}, "403": {"$ref": "#/components/responses/ApiProblem"}, "404": {"$ref": "#/components/responses/ApiProblem"}, "409": {"$ref": "#/components/responses/ApiProblem"}, "503": {"$ref": "#/components/responses/ApiProblem"}}}}
   /runs:
     get:
       operationId: listRuns
@@ -879,6 +883,29 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/RunViewV1"}
+        "401": {$ref: "#/components/responses/ApiProblem"}
+        "403": {$ref: "#/components/responses/ApiProblem"}
+        "404": {$ref: "#/components/responses/ApiProblem"}
+        "503": {$ref: "#/components/responses/ApiProblem"}
+  /runs/{run_id}/executions/{source_kind}/{source_id}:
+    get:
+      operationId: getRunExecution
+      summary: Read current execution state and exact value metadata without content
+      x-insight-operation-kind: query
+      x-insight-permission: runtime.read
+      parameters:
+        - {$ref: "#/components/parameters/RunId"}
+        - {name: source_kind, in: path, required: true, schema: {type: string, enum: [node_execution, model_turn]}}
+        - {name: source_id, in: path, required: true, schema: {type: string, minLength: 40, maxLength: 48}}
+      responses:
+        "200":
+          description: Current authority; value bodies require their independent content permission.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/PrivateNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RunExecutionDetailV1"}
+        "400": {$ref: "#/components/responses/ApiProblem"}
         "401": {$ref: "#/components/responses/ApiProblem"}
         "403": {$ref: "#/components/responses/ApiProblem"}
         "404": {$ref: "#/components/responses/ApiProblem"}
@@ -2828,6 +2855,14 @@ components:
             schema_version: {const: 1}
             task_id: {$ref: "#/components/schemas/TaskId"}
             cleanup_job_id: {$ref: "#/components/schemas/JobId"}
+    ConversationId: {"type": "string", "pattern": "^cnv_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+    CreateConversationRequestV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "agent_id", "title"], "properties": {"schema_version": {"const": 1}, "agent_id": {"$ref": "#/components/schemas/AgentId"}, "title": {"type": "string", "minLength": 1, "maxLength": 160, "x-max-utf8-bytes": 160}}}
+    SendConversationRequestV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "message", "deadline"], "properties": {"schema_version": {"const": 1}, "message": {"type": "string", "minLength": 1, "maxLength": 16384, "x-max-utf8-bytes": 16384}, "deadline": {"$ref": "#/components/schemas/UtcTimestamp"}}}
+    ConversationViewV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "conversation_id", "agent_id", "agent_deployment", "input_field", "input_schema_digest", "title", "created_by", "version", "turn_count", "created_at", "updated_at"], "properties": {"schema_version": {"const": 1}, "conversation_id": {"$ref": "#/components/schemas/ConversationId"}, "agent_id": {"$ref": "#/components/schemas/AgentId"}, "agent_deployment": {"$ref": "./schemas/deployment-closure.schema.json#/$defs/ExactDeploymentRef"}, "input_field": {"type": "string"}, "input_schema_digest": {"$ref": "#/components/schemas/Digest"}, "title": {"type": "string"}, "created_by": {"$ref": "#/components/schemas/PlatformResourceId"}, "version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "turn_count": {"type": "integer", "minimum": 0, "maximum": 128}, "created_at": {"$ref": "#/components/schemas/UtcTimestamp"}, "updated_at": {"$ref": "#/components/schemas/UtcTimestamp"}}}
+    ConversationTurnViewV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "conversation_id", "ordinal", "created_at", "run_id", "history_through", "conversation_version"], "properties": {"schema_version": {"const": 1}, "conversation_id": {"$ref": "#/components/schemas/ConversationId"}, "ordinal": {"type": "integer", "minimum": 1, "maximum": 128}, "created_at": {"$ref": "#/components/schemas/UtcTimestamp"}, "run_id": {"$ref": "#/components/schemas/RunId"}, "history_through": {"type": "integer", "minimum": 0, "maximum": 127}, "conversation_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}}}
+    ConversationListPageV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "items", "next_cursor"], "properties": {"schema_version": {"const": 1}, "items": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/ConversationViewV1"}}, "next_cursor": {"oneOf": [{"$ref": "#/components/schemas/OpaqueListCursor"}, {"type": "null"}]}}}
+    ConversationTurnPageV1: {"type": "object", "additionalProperties": false, "required": ["schema_version", "items", "next_cursor"], "properties": {"schema_version": {"const": 1}, "items": {"type": "array", "maxItems": 50, "items": {"$ref": "#/components/schemas/ConversationTurnViewV1"}}, "next_cursor": {"oneOf": [{"$ref": "#/components/schemas/OpaqueListCursor"}, {"type": "null"}]}}}
+    RunLiveTextFrameV1: {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "kind", "partial"], "properties": {"schema_version": {"const": 1}, "run_id": {"$ref": "#/components/schemas/RunId"}, "kind": {"const": "opened"}, "partial": {"const": true}}}, {"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "kind", "model_turn_id", "attempt_no"], "properties": {"schema_version": {"const": 1}, "run_id": {"$ref": "#/components/schemas/RunId"}, "kind": {"const": "reset"}, "model_turn_id": {"$ref": "#/components/schemas/PlatformResourceId"}, "attempt_no": {"type": "integer", "minimum": 1, "maximum": 4294967295}}}, {"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "kind", "model_turn_id", "attempt_no", "text_sequence", "text"], "properties": {"schema_version": {"const": 1}, "run_id": {"$ref": "#/components/schemas/RunId"}, "kind": {"const": "text"}, "model_turn_id": {"$ref": "#/components/schemas/PlatformResourceId"}, "attempt_no": {"type": "integer", "minimum": 1, "maximum": 4294967295}, "text_sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "text": {"type": "string", "maxLength": 65536, "x-max-utf8-bytes": 65536}}}, {"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "kind", "reason"], "properties": {"schema_version": {"const": 1}, "run_id": {"$ref": "#/components/schemas/RunId"}, "kind": {"const": "gap"}, "reason": {"enum": ["late_subscription", "sequence_gap", "transport_reconnected", "slow_consumer"]}}}, {"type": "object", "additionalProperties": false, "required": ["schema_version", "run_id", "kind", "reason"], "properties": {"schema_version": {"const": 1}, "run_id": {"$ref": "#/components/schemas/RunId"}, "kind": {"const": "closed"}, "reason": {"enum": ["terminal", "cancelled", "expired", "authorization_changed", "unavailable", "duration_limit"]}}}]}
     CreateRunRequestV1:
       type: object
       additionalProperties: false
@@ -2867,6 +2902,35 @@ components:
             - {$ref: "#/components/schemas/ContextDatasetId"}
             - {type: "null"}
         deadline: {$ref: "#/components/schemas/UtcTimestamp"}
+    RunExecutionDetailV1:
+      type: object
+      additionalProperties: false
+      required: [schema_version, run_id, source_kind, source_id, version, state, node_execution_id, plan_node_key, node_kind, started_at, terminal_at, input_value_id, output_value_id, values, values_truncated]
+      properties:
+        schema_version: {const: 1}
+        run_id: {$ref: "#/components/schemas/RunId"}
+        source_kind: {type: string, enum: [node_execution, model_turn]}
+        source_id: {type: string, minLength: 40, maxLength: 48}
+        version: {type: integer, minimum: 1}
+        state: {type: string}
+        node_execution_id: {$ref: "#/components/schemas/NodeExecutionId"}
+        plan_node_key: {type: string, minLength: 1, maxLength: 128}
+        node_kind: {type: string, minLength: 1, maxLength: 64}
+        started_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        terminal_at: {oneOf: [{$ref: "#/components/schemas/UtcTimestamp"}, {type: "null"}]}
+        input_value_id: {oneOf: [{$ref: "#/components/schemas/RunValueId"}, {type: "null"}]}
+        output_value_id: {oneOf: [{$ref: "#/components/schemas/RunValueId"}, {type: "null"}]}
+        values: {type: array, maxItems: 64, items: {$ref: "#/components/schemas/RunValueMetadataV1"}}
+        values_truncated: {type: boolean}
+      oneOf:
+        - properties:
+            source_kind: {const: node_execution}
+            state: {enum: [pending, ready, running, waiting, retry_scheduled, cancelling, succeeded, failed, cancelled, timed_out]}
+            input_value_id: {type: "null"}
+            output_value_id: {type: "null"}
+        - properties:
+            source_kind: {const: model_turn}
+            state: {enum: [created, awaiting_budget, ready, in_flight, retry_scheduled, cancelling, succeeded, failed, cancelled, timed_out]}
     RunDefinitionV1:
       type: object
       additionalProperties: false
@@ -4334,6 +4398,7 @@ fn deployment_closure_schema() -> Value {
             })),
             "ModelProviderDeploymentClosure": deployment_variant_schema("model_provider", json!({
                 "provider_revision": {"$ref": "#/$defs/ExactVersionRef"},
+                "endpoint": model_configuration_schema::endpoint_schema(),
                 "endpoint_identity_digest": {"$ref": "nominal/digest.schema.json"},
                 "secret_bindings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExactSecretBindingRef"}},
                 "protocol_policy": {"$ref": "#/$defs/ExactVersionRef"},

@@ -7,6 +7,7 @@
 #![allow(async_fn_in_trait)]
 
 mod assembly;
+mod diagnostics;
 mod state;
 mod stream;
 mod types;
@@ -15,6 +16,7 @@ mod types;
 mod tests;
 
 pub use assembly::*;
+pub use diagnostics::*;
 pub use insight_platform_contracts::ClosedSchemaDocument;
 pub use insight_platform_invocations::{ExactInvocationValueRef, InvocationValueStorage};
 pub use insight_platform_jobs::JobFence;

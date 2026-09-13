@@ -63,7 +63,32 @@ pub async fn configure(
     binaries: &Path,
     verify: bool,
 ) -> Result<PreparedInstallation, InstallationError> {
+    configure_mode(input, state, output, binaries, verify, None).await
+}
+
+pub async fn configure_upgrade(
+    input: &InstallationInputV1,
+    state: &Path,
+    output: &Path,
+    binaries: &Path,
+    mode: RoleOutputMode,
+) -> Result<PreparedInstallation, InstallationError> {
+    if !matches!(mode, RoleOutputMode::Upgrade | RoleOutputMode::Rollout(_)) {
+        return Err(invalid());
+    }
+    configure_mode(input, state, output, binaries, true, Some(mode)).await
+}
+
+async fn configure_mode(
+    input: &InstallationInputV1,
+    state: &Path,
+    output: &Path,
+    binaries: &Path,
+    verify: bool,
+    upgrade: Option<RoleOutputMode>,
+) -> Result<PreparedInstallation, InstallationError> {
     let mut prepared = PreparedInstallation::open(input, state)?;
+    wait_database(&prepared).await?;
     if verify && prepared.progress().phase != InstallationPhase::Ready {
         return Err(InstallationError::Incomplete);
     }
@@ -88,7 +113,7 @@ pub async fn configure(
         prepared.identity(),
         prepared.directory(),
         &output.join("dependencies"),
-        RoleOutputMode::Verify,
+        upgrade.clone().unwrap_or(RoleOutputMode::Verify),
         ownership(input),
     )?;
     role_output::initialize_nats_data_directory(
@@ -188,9 +213,7 @@ pub async fn configure(
         .collect::<Vec<_>>();
     let builds = WorkerBuilds::read_processes(binaries, &selected)
         .map_err(|_| InstallationError::PrerequisiteUnavailable)?;
-    let model_catalog = if input.model_destinations.is_empty() {
-        None
-    } else {
+    let model_catalog = {
         let storage_inputs = storage_setup::StorageInputs {
             input,
             identity: prepared.identity(),
@@ -249,7 +272,9 @@ pub async fn configure(
         &rendered,
         prepared.directory(),
         &output.join("roles"),
-        if verify {
+        if let Some(mode) = upgrade {
+            mode
+        } else if verify {
             RoleOutputMode::Verify
         } else {
             RoleOutputMode::Provision
@@ -265,6 +290,64 @@ pub async fn configure(
     Ok(prepared)
 }
 
+/// A read-only readiness check before any schema intent is recorded. This prevents a normal
+/// PostgreSQL cold start from being mistaken for an uncertain provisioning operation.
+async fn wait_database(prepared: &PreparedInstallation) -> Result<(), InstallationError> {
+    use insight_platform_deployment_contracts::installation_provider::INSTALLATION_STARTUP_SECONDS;
+    use std::time::Duration;
+    let password = zeroize::Zeroizing::new(
+        prepared
+            .directory()
+            .read("postgres-admin-password", 32)?
+            .ok_or(InstallationError::CredentialInvalid)?,
+    );
+    use sqlx::Connection;
+    let password =
+        std::str::from_utf8(&password).map_err(|_| InstallationError::CredentialInvalid)?;
+    let config = sqlx::postgres::PgConnectOptions::new()
+        .host(&prepared.input().network.database.host)
+        .port(prepared.input().network.database.port)
+        .database(&prepared.input().network.database.database)
+        .username("insight_installation_admin")
+        .password(password)
+        .ssl_mode(sqlx::postgres::PgSslMode::Disable);
+    tokio::time::timeout(Duration::from_secs(INSTALLATION_STARTUP_SECONDS), async {
+        loop {
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                sqlx::PgConnection::connect_with(&config),
+            )
+            .await
+            {
+                Ok(Ok(mut connection)) => {
+                    sqlx::query("SELECT 1")
+                        .execute(&mut connection)
+                        .await
+                        .map_err(|_| InstallationError::PrerequisiteUnavailable)?;
+                    connection
+                        .close()
+                        .await
+                        .map_err(|_| InstallationError::PrerequisiteUnavailable)?;
+                    return Ok(());
+                }
+                Ok(Err(error))
+                    if error
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .is_some_and(|code| {
+                            matches!(code.as_ref(), "28P01" | "28000" | "3D000")
+                        }) =>
+                {
+                    return Err(InstallationError::CredentialInvalid)
+                }
+                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| InstallationError::PrerequisiteUnavailable)?
+}
+
 fn provider_data(
     prepared: &PreparedInstallation,
     output: &Path,
@@ -277,7 +360,7 @@ fn provider_data(
             prepared.identity(),
             prepared.directory(),
             &output.join(name),
-            mode,
+            mode.clone(),
             ownership(prepared.input()),
             kind,
         )?;
@@ -288,7 +371,7 @@ fn provider_data(
             prepared.identity(),
             prepared.directory(),
             &output.join("postgres-data"),
-            mode,
+            mode.clone(),
             ownership(prepared.input()),
             D::Postgres,
         )?;

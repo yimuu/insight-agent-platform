@@ -1,3 +1,4 @@
+import { WorkflowCanvas, nodeLabel } from './WorkflowCanvas'
 import sharedStyles from '../../shared/ui/Primitives.module.css'
 import { classNames } from '../../shared/ui/class-names.ts'
 import localStyles from './Agents.module.css'
@@ -31,7 +32,7 @@ export function PlanEditor({
   disabled: boolean
 }) {
   const [selected, setSelected] = useState('')
-  const [newId, setNewId] = useState('')
+  const [newId, setNewId] = useState(`node-${crypto.randomUUID().slice(0, 8)}`)
   const [newKind, setNewKind] = useState(descriptor.nodes[0].kind)
   const [error, setError] = useState('')
   const [building, setBuilding] = useState(false)
@@ -145,43 +146,25 @@ export function PlanEditor({
   }
   return (
     <details data-ui="nested-panel" className={cx('nested-panel')} open>
-      <summary>Platform 节点编辑器</summary>
-      <p className={cx('body-copy')}>
-        编辑器直接修改同一份源码。节点模板是未完成的草稿，完整类型、端口、表达式及控制流由共享编译器校验。
-      </p>
-      <div className={cx('actions')} data-editor-view>
+      <summary>工作流</summary>
+      <WorkflowCanvas
+        nodes={nodes}
+        entry={String(plan.entry_node_id ?? '')}
+        selected={id}
+        onSelect={setSelected}
+      />
+      <div className={cx('workflow-toolbar')} data-editor-view>
         <label>
-          <span>当前节点</span>
-          <select
-            value={id ?? ''}
-            disabled={disabled}
-            onChange={(event) => setSelected(event.target.value)}
-          >
-            {nodeIds.map((key) => (
-              <option value={key} key={key}>
-                {key} · {object(nodes[key]) ? String(nodes[key].kind) : 'invalid node'}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>新节点 ID</span>
-          <input
-            value={newId}
-            maxLength={128}
-            onChange={(event) => setNewId(event.target.value)}
-            disabled={disabled}
-          />
-        </label>
-        <label>
-          <span>新节点类型</span>
+          <span>添加步骤</span>
           <select
             value={newKind}
             onChange={(event) => setNewKind(event.target.value)}
             disabled={disabled}
           >
             {descriptor.nodes.map((node) => (
-              <option key={node.kind}>{node.kind}</option>
+              <option key={node.kind} value={node.kind}>
+                {nodeLabel(node.kind)}
+              </option>
             ))}
           </select>
         </label>
@@ -204,7 +187,7 @@ export function PlanEditor({
               },
             })
             setSelected(newId)
-            setNewId('')
+            setNewId(`node-${crypto.randomUUID().slice(0, 8)}`)
           }}
         >
           添加节点
@@ -227,18 +210,21 @@ export function PlanEditor({
           ))}
         </select>
       </label>
-      {id && template && (
-        <SchemaTree
-          key={id}
-          node={draftFields(descriptor, template, value)}
-          value={value}
-          onChange={(next) => update({ ...plan, nodes: { ...nodes, [id]: next } })}
-          label={`节点 ${id}`}
-          path={pointer('/nodes', id)}
-          disabled={disabled}
-          suggestions={suggestions}
-        />
-      )}
+      <details open>
+        <summary>节点配置 · {object(value) ? nodeLabel(String(value.kind)) : id}</summary>
+        {id && template && (
+          <SchemaTree
+            key={id}
+            node={draftFields(descriptor, template, value)}
+            value={value}
+            onChange={(next) => update({ ...plan, nodes: { ...nodes, [id]: next } })}
+            label={`节点 ${id}`}
+            path={pointer('/nodes', id)}
+            disabled={disabled}
+            suggestions={suggestions}
+          />
+        )}
+      </details>
       {ports.length > 0 && (
         <details>
           <summary>复用精确端口引用</summary>
@@ -336,7 +322,7 @@ export function PlanEditor({
         ))}
       </details>
       {locations.length > 0 && (
-        <details open>
+        <details>
           <summary>编译源码位置： {id}</summary>
           <ul>
             {locations.map((location, index) => (

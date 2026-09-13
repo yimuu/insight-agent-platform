@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from native_runtime import (NativeFailure, ProcessGroup, absolute, checked_file, clean_environment,
                             decode_json, freeze, lock, private_directory, process_environment,
                             read_file, signals, verify_artifact)
-from provider_lifecycle import (LifecycleFailure, composition_snapshot, ensure_provider, owner_result)
+from provider_lifecycle import (LifecycleFailure, composition_snapshot)
 from public_trust import PublicTrustFailure, deliver as deliver_trust, ready_identity, remember_ready
 
 
@@ -90,7 +90,6 @@ class NativeInstallation:
         self.plan = None
         self.document = None
         self.composition = None
-        self.provider_deadline = None
         self.serving_deadline = None
         # Docker is an operator tool. Its selected local context remains available; this
         # environment never reaches installer commands or serving children.
@@ -154,19 +153,17 @@ class NativeInstallation:
         return self.group.run(arguments, self.docker_environment, capture=True, timeout=self.budget(180))
 
     def budget(self, maximum):
-        for deadline, failure in ((self.provider_deadline, "provider-lifecycle-timeout"),
-                                  (self.serving_deadline, "serving-startup-timeout")):
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise NativeFailure(failure)
-                maximum = min(maximum, remaining)
+        if self.serving_deadline is not None:
+            remaining = self.serving_deadline - time.monotonic()
+            if remaining <= 0:
+                raise NativeFailure("serving-startup-timeout")
+            maximum = min(maximum, remaining)
         return maximum
 
     def snapshot(self):
         return composition_snapshot(self.composition, self.docker)
 
-    def owner_command(self, operation, *, provider_field=None, process=None):
+    def owner_command(self, operation, *, process=None):
         self.artifact(self.owner)
         arguments = [str(self.owner), operation, "--input", str(self.input_file)]
         if process is not None:
@@ -187,10 +184,8 @@ class NativeInstallation:
                                 "AWS_PROFILE": "default", "AWS_CONFIG_FILE": "/dev/null", "AWS_EC2_METADATA_DISABLED": "true",
                                 "SSL_CERT_FILE": str(self.state / "ca.pem"), "SSL_CERT_DIR": "/etc/ssl/certs"})
         with lock(self.directory, ".installation-lock"):
-            result = self.group.run(arguments, environment, capture=True, checked=provider_field is None,
-                                    timeout=self.budget(300 if operation in ("provision", "verify") else 150))
-        if provider_field:
-            return owner_result(result, self.plan["input_digest"], provider_field)
+            result = self.group.run(arguments, environment, capture=True,
+                                    timeout=self.budget(300 if operation in ("provision", "verify") else 200))
         if operation in ("provision", "verify"):
             remember_ready(self.directory, result, input_digest=self.plan["input_digest"])
         return result
@@ -198,18 +193,6 @@ class NativeInstallation:
     def start_dependency(self, service):
         self.snapshot()  # Recheck project ownership immediately before each mutation.
         self.docker([*self.compose, "up", "--detach", "--no-deps", service])
-
-    def stop_initializer(self, service, identity):
-        current = self.snapshot().get(service)
-        if current is None or current.identity != identity:
-            raise NativeFailure("initializer-identity-changed")
-        self.docker(["docker", "stop", "--time", "10", identity])
-        stopped = decode_json(self.docker(["docker", "inspect", "--format",
-            '{"identity":{{json .Id}},"running":{{json .State.Running}},"exit_code":{{json .State.ExitCode}}}', identity]))
-        if (set(stopped) != {"identity", "running", "exit_code"} or stopped["identity"] != identity
-                or stopped["running"] is not False or type(stopped["exit_code"]) is not int
-                or stopped["exit_code"] != 0):
-            raise NativeFailure("initializer-did-not-stop-cleanly")
 
     def start(self):
         initial = self.snapshot()
@@ -219,16 +202,8 @@ class NativeInstallation:
         for service in ("postgres", "nats", "s3"):
             self.start_dependency(service)
         self.docker([*self.compose, "up", "--wait", "--wait-timeout", "90", "--no-deps", "postgres"])
-        self.provider_deadline = time.monotonic() + 180
-        try:
-            ensure_provider(input_digest=self.plan["input_digest"],
-                            request_start=lambda: self.owner_command("provider-start", provider_field="mode"),
-                            observe=lambda: self.owner_command("provider-observe", provider_field="phase"),
-                            container=lambda service: self.snapshot().get(service),
-                            start=self.start_dependency, stop=self.stop_initializer,
-                            pause=lambda seconds: self.group.pump(self.budget(seconds)))
-        finally:
-            self.provider_deadline = None
+        self.start_dependency("openbao")
+        self.owner_command("bootstrap")
         self.owner_command("provision")
         self.serving_deadline = time.monotonic() + 120
         try:

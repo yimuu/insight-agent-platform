@@ -1,0 +1,226 @@
+{
+  "checks": [
+    "isolated_cluster_matching_client",
+    "installed_public_ca_linux_openssl3_exact_dns_and_rejections",
+    "readonly_public_trust_delivery_preserves_session",
+    "single_helm_install_ready_without_host_orchestration",
+    "repeated_helm_install_preserves_identity",
+    "readonly_verify_preserves_identity_workloads_volumes",
+    "controller_new_pod_ready_same_identity_and_configuration",
+    "explicit_session_renewal_private_file"
+  ],
+  "cleaned": true,
+  "cluster": "insight-installation-7432ba898ad3",
+  "images": {
+    "console": {
+      "config_digest": "sha256:c8f119c49cf5b63084714de3d2d3206be422af57fabba079a6211426b5f57e5a",
+      "image_digest": "sha256:0c030b3bf9039e07a8a74955e646df9224027805fc687cde3f08d327e07ffd7b",
+      "manifest_digest": "sha256:b5ba6f24a593fce9783ea6e6f118f68507c62d4b5fe736b3901ba159e9f105b0",
+      "platform": "linux/arm64",
+      "reference": "insight-platform-console@sha256:0c030b3bf9039e07a8a74955e646df9224027805fc687cde3f08d327e07ffd7b"
+    },
+    "nats": {
+      "config_digest": "sha256:dcadf8f23b60edaaafbe901db7773e2c07947f269c475d8d33d3b46a18b0a7f9",
+      "image_digest": "sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927",
+      "manifest_digest": "sha256:e3998ee69d4f40928019753acacce3275c038d209748de6587f6a21de0667fa1",
+      "platform": "linux/arm64",
+      "reference": "nats@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927"
+    },
+    "openbao": {
+      "config_digest": "sha256:b392065d2eb7da3f143c0325f96d688542ff1185327941de16c4b4ada4ec3737",
+      "image_digest": "sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0",
+      "manifest_digest": "sha256:87d5175e379a5e554bd28eb08b0f9dfcd90e3e24f79e314107caf7c3c1c0f5fd",
+      "platform": "linux/arm64",
+      "reference": "ghcr.io/openbao/openbao@sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0"
+    },
+    "postgres": {
+      "config_digest": "sha256:7e7dbab8d3b431a20793a6d99cb5a6bc84e44914309917f1bf5589a7568cdefd",
+      "image_digest": "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+      "manifest_digest": "sha256:7ae1143a9f249af815f056751a122a86d7e44ddce0926f2b227e3d5c434444f4",
+      "platform": "linux/arm64",
+      "reference": "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"
+    },
+    "runtime": {
+      "config_digest": "sha256:58b0c46c082713c7c132e84d9ca17522bc3811b9979a3fa05d453c6c038071f0",
+      "image_digest": "sha256:c276d4738a5862ab015879ad3729e9cca72544b7aa62b2251eed262b40a15e55",
+      "manifest_digest": "sha256:f3a0c7536d7faba583cfb54deedad305ee44f386ef0c20f131c4f89b5ed351e2",
+      "platform": "linux/arm64",
+      "reference": "insight-runtime@sha256:c276d4738a5862ab015879ad3729e9cca72544b7aa62b2251eed262b40a15e55"
+    },
+    "s3": {
+      "config_digest": "sha256:b51a34205765120d75ce300cade9f83d93fa30b1bff0ae4832f650bafb956033",
+      "image_digest": "sha256:08d516132314207d10c8e37cbffc1f32b147d870169688734cc61c6231625b62",
+      "manifest_digest": "sha256:cc476c229cb2b7c86401070ed791ec6c5c1f3193b37db5a13f510e770a15dc6c",
+      "platform": "linux/arm64",
+      "reference": "chrislusf/seaweedfs@sha256:08d516132314207d10c8e37cbffc1f32b147d870169688734cc61c6231625b62"
+    }
+  },
+  "installation": {
+    "deployments": {
+      "artifact-data": {
+        "generation": 1,
+        "spec_digest": "af1aa9be17910b03832f7d988e8588a488f5b8a1865a4ab3da9ac2ccb0c41ae3",
+        "uid": "cef54580-902a-4639-970c-b31dacae12b3"
+      },
+      "artifact-gateway": {
+        "generation": 1,
+        "spec_digest": "77bc9597fd57ab734836800334dcfd371ffd223f3f324590b82103aaba6098ab",
+        "uid": "f3f2296c-95c9-4582-af2c-0accbda6d072"
+      },
+      "artifact-maintenance": {
+        "generation": 1,
+        "spec_digest": "a107de10200596151091e398b62765a5a0fcfac52ec77b6c756c60d27a02fd26",
+        "uid": "620a4494-295b-48b5-a766-f3b4f2370531"
+      },
+      "capability-native": {
+        "generation": 1,
+        "spec_digest": "ef9792223b61822e435192e51e284b49cc0ed096fbe972f945ca557f446e7e30",
+        "uid": "e6cbd2ef-2ba4-468b-afbd-baf6781afacc"
+      },
+      "console": {
+        "generation": 1,
+        "spec_digest": "6aef08890d126a569a4e5286336a173410f037a327414ecb54d7c7d5f7e6dc18",
+        "uid": "cb706382-a92e-48dc-822e-7225cbd680ef"
+      },
+      "context-dataset": {
+        "generation": 1,
+        "spec_digest": "bd50e757b8bd1fd05000deaf547b2b817c26e930da682272fce25b23a109c6c5",
+        "uid": "a6c043c1-0a66-4ff8-a25c-e401c587e6bd"
+      },
+      "context-native": {
+        "generation": 1,
+        "spec_digest": "388bd21b6428ff8213ae38061bf1697604c980358438586372d4b54171da4d41",
+        "uid": "6f4f5e40-ec77-4890-8cbe-d46cec7259ed"
+      },
+      "egress-broker": {
+        "generation": 1,
+        "spec_digest": "ab2c765e7a9e16213e5786a83d5a7f97d6c692bef4b8eb943eebeb359b0b0512",
+        "uid": "c3d0b3f8-9e83-4b50-91ee-eb857f8ea45e"
+      },
+      "gateway-management": {
+        "generation": 1,
+        "spec_digest": "2e99c160a18f530cb35874c54a3d933e32abb49e3676eb1d57726185c9d00666",
+        "uid": "b14aefd0-1123-4d33-be00-7f80ea0ff8c1"
+      },
+      "gateway-runtime": {
+        "generation": 1,
+        "spec_digest": "fd19e361d8484c3ef9f935381b1b07ba462e22f372fb36670bf6e1e9d34be6cc",
+        "uid": "faf3bc79-69e4-420e-a8c9-a66fb1ddb7e5"
+      },
+      "history-maintenance": {
+        "generation": 1,
+        "spec_digest": "3ef73791f6f349cd0d5f30943778ab526982e9d3de33cec137d8291cc2fde4df",
+        "uid": "a6a5e619-1a51-418f-8231-94dd6c307baa"
+      },
+      "model-worker": {
+        "generation": 1,
+        "spec_digest": "c6fc86f4898f7f24a29d6bdd4094b846f9624e8a1429342d1a67460ec615506b",
+        "uid": "5b998cb0-8432-43cb-90f8-2323175768bd"
+      },
+      "nats": {
+        "generation": 1,
+        "spec_digest": "3acc8d591011d8e2a63273811760829cf299be20870189118e6af717370a132d",
+        "uid": "a9174beb-3d75-401e-9992-540acc48dc74"
+      },
+      "openbao": {
+        "generation": 1,
+        "spec_digest": "4411939626f0c6b438f4109663e64abec925c072dfc7893f3ce3dfd492c34672",
+        "uid": "cd09dac1-8d3d-4d33-a969-1b4c69f35b13"
+      },
+      "orchestration": {
+        "generation": 1,
+        "spec_digest": "a53dad75c92006d047bd8b65d1abe7830efcf5f7403539ff2aebd0882c51ba1f",
+        "uid": "9eca366d-4e67-4b8d-be27-2d4f7ef9b43e"
+      },
+      "outbox": {
+        "generation": 1,
+        "spec_digest": "5f3c686a4d8a917002bd96e8600f54584d9210c7bc3218d5db1c99ad65ed4062",
+        "uid": "b2fbdc9e-6346-4c11-94c6-5deaf62c17f8"
+      },
+      "postgres": {
+        "generation": 1,
+        "spec_digest": "69790c9ccc3f3d509e462abb2da62ed383fc183a8a1a516d9c232c94861d3f26",
+        "uid": "561bbcce-6b12-49ef-87d1-8f6464935b16"
+      },
+      "registry-validation": {
+        "generation": 1,
+        "spec_digest": "4f22af4e769f2412f5184c653d8e9cad363d54d86e7d8015232c463376e39f40",
+        "uid": "0350bab8-9a1c-4aa8-b9fc-e544839a0dfa"
+      },
+      "s3": {
+        "generation": 1,
+        "spec_digest": "238faaefb7516cf0b48a0657024cc1a526ff25837eaade6901b07a6c6e6eab21",
+        "uid": "b32720a1-7888-4973-ba4f-8e1b8612dda8"
+      },
+      "security-authority": {
+        "generation": 1,
+        "spec_digest": "af991595db8ee241500756007a9e255a8af2c6640b2cfe7398246dc492d93525",
+        "uid": "2fa4a2da-40bc-476a-a19d-1ecb7b66f7c2"
+      }
+    },
+    "identity_digest": "sha256:845471128cc91e6caa9d0cc152a97f99aa052fe6baf0acd78bf1186b14a31398",
+    "pvcs": {
+      "dependency-nats": "3e29d26c-23cf-4f69-b548-98f745e182e6",
+      "dependency-openbao": "cae2faad-360d-4635-ad3c-8cc356a41979",
+      "dependency-postgres": "26d3928a-d04b-4ace-9797-04bcd4960941",
+      "dependency-s3": "47b19162-67e2-4f56-a433-a6bb3e705f34",
+      "installation-gates": "cc9b29bd-c161-49b3-b49d-6fbab2f4a3ae",
+      "installation-private": "98bf3e08-a0a1-4880-8f22-7182be043516",
+      "nats-data": "809df700-28ab-40e7-b1c6-0150398c1ae6",
+      "openbao-data": "9469c0ac-9095-4715-aa1e-d0f732504c36",
+      "postgres-data": "174e52f7-d0e1-448f-9f48-ad0599bac3c7",
+      "role-artifact-data": "53a26712-6a93-4fea-b883-7e4782c25714",
+      "role-artifact-gateway": "35cf8b4f-a176-4f62-a981-214dbcd39c80",
+      "role-artifact-maintenance": "e24b61bf-56c4-4497-98e3-933b37f3854e",
+      "role-capability-native": "80dc58f1-6f71-41df-9930-9f2c33b6b4bc",
+      "role-console": "26625fed-fd2d-4fc4-bc2f-b269325fd98c",
+      "role-context-dataset": "95c80ccf-f10d-479d-867b-6b7254123b8f",
+      "role-context-native": "7c178ad5-8c17-49c3-80a0-8dd3449a87e0",
+      "role-egress-broker": "02f1228b-625b-4a51-98c2-e7ee5943c6c2",
+      "role-gateway-management": "174aad11-2205-4512-83f9-937567fea1c3",
+      "role-gateway-runtime": "844619c9-8ae6-4007-a6cd-3b46e31e607a",
+      "role-history-maintenance": "3d6101ac-2e97-47ec-843c-5c462dc7e2eb",
+      "role-model-worker": "9322ff86-aed3-4452-ab9e-956a87e65892",
+      "role-orchestration": "2475e486-63d1-4a87-8250-98baa076dc73",
+      "role-outbox": "bc308328-a7f8-41fe-84b0-5dc116a29312",
+      "role-registry-validation": "0d4a9238-63fb-4a1f-a68f-cf53244f79f5",
+      "role-security-authority": "688fa262-e5af-4330-abcc-3d692101f943",
+      "s3-data": "950ebcac-7780-4d74-8634-fc8944ab75e2"
+    },
+    "role_file_digests": {
+      "artifact-data": "387c885bf55e42955893145aa45e6b356bf15b7f6e22f1a0c5b75fe2b4691c41",
+      "artifact-gateway": "7c6f1e9989b19aaaca8984e04a25f545ed7610482cbad7d60385bfd2dd7f770b",
+      "artifact-maintenance": "7fcdb6b6fc60eaa119ff5e9a119bf7c33ca7c4f1f643cf839b3eab1d10b01cc7",
+      "capability-native": "1c1543f3c60ff76e69c7617b2d081f73169e0878408d456ac45d4d7c65ef82d8",
+      "console": "33e8ee6260551fbf90017d694c46ab6ee8faa1563af8f049fc76b7747c366067",
+      "context-dataset": "6660c2c1c0f5aaa7511a9c9a9ca58efd8155f969cf924d9d5bdcf27f490ca7ad",
+      "context-native": "099a511f6a57daef0e1ee11be2d8f052ed70e532741f169c81d49e6ebabb5eff",
+      "egress-broker": "0923e52dfe35eeb136f793198cba5f6d13268b9ad9bf7952314d0eb75342ea12",
+      "gateway-management": "f577be911ec4e5cbb9ca91163773188012f1a23154c862e831957311ae7c036e",
+      "gateway-runtime": "4552a268b366ca7af201b87b8169b5b64f625422bc7e9ae47eaa3a8207217d4d",
+      "history-maintenance": "816841c9bc83640afede405249dd64fc09d3b8563dd34d5c21f1b2588b8b982e",
+      "model-worker": "7a96e27b0795f30cb08b35e578e352e8baf3a900144b0a1b5041911f0d845dc8",
+      "orchestration": "524a4aecb65574c06944e926c9612f07efb37bda03b8eb089de3651b6e57909a",
+      "outbox": "662aa19ce732941efadb1d3e668d79dfc2227e567f3c3c60809272b617f3a897",
+      "registry-validation": "7bc0829aeb3629e00743db8386b215915bd7045ed8bf057325ea36a114f449ee",
+      "security-authority": "5f87007d985909fc910e3891d126ec0a47667f0273d0760b15d87f4bfd2ac20c"
+    }
+  },
+  "kubectl_version": "v1.35.8",
+  "namespace": "installation-7432ba898ad3",
+  "node_image": "kindest/node@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
+  "platform": "linux/arm64",
+  "restart": {
+    "new_pod_uid": "316c1e62-b21f-4b61-ab23-a74f56f0994f",
+    "old_pod_uid": "1aae1b0a-5d00-46f8-b21b-7cc5b1c95a4f"
+  },
+  "result": "PASS",
+  "schema_version": 1,
+  "stage": "actual declarative Helm session",
+  "tls": {
+    "exact_dns_verified": true,
+    "openssl": "OpenSSL 3.0.20",
+    "unknown_ca_rejected": true,
+    "wrong_san_rejected": true
+  }
+}

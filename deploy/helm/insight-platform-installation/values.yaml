@@ -1,12 +1,5 @@
-# Produced by tools/install/platform_helm.py from the shared Rust owner.
+# Configuration preparation produces plan from the shared Rust installation owner.
+# Set node to the target development node's kubernetes.io/hostname label.
 plan: {}
-phase: prepare
-owner: ""
-namespaceUID: ""
 node: ""
 storageClass: ""
-operation: ""
-prepared: {}
-ready: {}
-providerStarted: {}
-providerReady: {}
